@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -443,4 +445,153 @@ func TestEligibilityProofPendingWarnerRateLimitsAcrossCalls(t *testing.T) {
 	if !warner.lastAt.Equal(afterInterval) {
 		t.Fatalf("warner did not fire again once the interval elapsed: lastAt=%v", warner.lastAt)
 	}
+}
+
+// TestReadyzAcceptsContainedDeadAcrossRuleAndConsumer runs the rule and its
+// consumer as one chain (XM-INV-DEAD-CONTAINMENT). The rule lives in
+// postgresstore (evaluateSourceStreamHealth); the judgment lives here
+// (validateSourceRuntimeReadiness); nothing in the compiler makes them agree.
+// A test that hand-wrote the Reasons it expected would prove only that this
+// file agrees with itself, so the Reasons come from
+// postgresstore.EvaluateSourceStreamHealth and go into the validator
+// untouched.
+func TestReadyzAcceptsContainedDeadAcrossRuleAndConsumer(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	policy := postgresstore.SourceFreshnessPolicy{
+		EconomicHeartbeatMaxAge: 5 * time.Minute, EconomicWatermarkMaxAge: 15 * time.Minute,
+		IdentitiesMaxAge: 15 * time.Minute, Now: now,
+	}
+	buildEvaluatedReport := func(mutate func(*postgresstore.SourceStreamHealth)) postgresstore.SourceHealthReport {
+		report := postgresstore.SourceHealthReport{Ready: true}
+		for _, source := range []struct {
+			id         string
+			sourceType domain.SourceType
+		}{{"sub2", domain.SourceSub2API}, {"new", domain.SourceNewAPI}} {
+			for _, stream := range []string{"payments", "identities", "usage", "credits", "balances"} {
+				item := postgresstore.SourceStreamHealth{
+					SourceInstanceID: source.id, SourceType: source.sourceType, SourceEnabled: true,
+					StreamID: stream, ApprovedRuntimeVersion: "0.1.179", ObservedRuntimeVersion: "0.1.179",
+					ProjectionStatus: "healthy", LastAcceptedAt: now.Add(-30 * time.Second),
+					EconomicWatermarkAt: now.Add(-time.Minute),
+					DeadEvents:          1, ContainedDeadEvents: 1,
+				}
+				mutate(&item)
+				postgresstore.EvaluateSourceStreamHealth(&item, policy)
+				report.Items = append(report.Items, item)
+			}
+		}
+		report.Ready = true
+		for _, item := range report.Items {
+			report.Ready = report.Ready && item.Ready
+		}
+		return report
+	}
+
+	t.Run("every stream contained is ready and accepted", func(t *testing.T) {
+		report := buildEvaluatedReport(func(*postgresstore.SourceStreamHealth) {})
+		if !report.Ready || len(report.Items[0].Reasons) != 1 || report.Items[0].Reasons[0] != "EVENTS_DEAD_CONTAINED" {
+			t.Fatalf("the rule did not produce the shape under test: ready=%t reasons=%v", report.Ready, report.Items[0].Reasons)
+		}
+		if err := validateSourceRuntimeReadiness(report); err != nil {
+			t.Fatalf("readyz rejected a fully contained report: %v", err)
+		}
+	})
+
+	t.Run("contained dead beside pending events is still accepted", func(t *testing.T) {
+		report := buildEvaluatedReport(func(item *postgresstore.SourceStreamHealth) {
+			item.PendingEvents = 1
+		})
+		if report.Ready {
+			t.Fatal("pending events must still make a stream not ready")
+		}
+		if err := validateSourceRuntimeReadiness(report); err != nil {
+			t.Fatalf("readyz rejected the pending-plus-contained combination: %v", err)
+		}
+	})
+
+	// The honesty gate (B4). This branch exists solely to catch "ready despite
+	// dead events", so a report that claims containment without saying so must
+	// not slip through it. The Reasons are hand-cleared here on purpose: this
+	// is the one case where the rule and the report are deliberately made to
+	// disagree, which is exactly what the gate is for.
+	t.Run("ready with contained dead but no reason naming it is rejected", func(t *testing.T) {
+		report := buildEvaluatedReport(func(*postgresstore.SourceStreamHealth) {})
+		report.Items[0].Reasons = nil
+		err := validateSourceRuntimeReadiness(report)
+		if err == nil || err.Error() != "ready source stream has inconsistent health evidence" {
+			t.Fatalf("err=%v want the inconsistent-evidence rejection", err)
+		}
+	})
+
+	t.Run("an uncontained dead event beside a contained one is still fatal", func(t *testing.T) {
+		report := buildEvaluatedReport(func(item *postgresstore.SourceStreamHealth) {
+			if item.SourceInstanceID == "sub2" && item.StreamID == "payments" {
+				item.DeadEvents = 2
+			}
+		})
+		if report.Ready {
+			t.Fatal("an uncontained dead event must still make the report not ready")
+		}
+		if err := validateSourceRuntimeReadiness(report); !errors.Is(err, errSourceStreamDeadEvents) {
+			t.Fatalf("err=%v want errSourceStreamDeadEvents", err)
+		}
+	})
+
+	// XM-INV-DEAD-CONTAINMENT B5. This one assertion is the only thing that
+	// catches inverting validateSourceIngestRuntimeReadiness's subtraction:
+	// with {Dead:2,DeadContained:1} the inverted predicate is still true and
+	// still returns the same sentinel, so readiness_test.go's table cannot
+	// see it. The reverse is also true -- a predicate too generous
+	// ("something is contained, so everything is") passes here and fails
+	// there. Two tests, one half each.
+	t.Run("a single contained ingest dead event does not fail readiness", func(t *testing.T) {
+		health := postgresstore.SourceIngestHealth{Dead: 1, DeadContained: 1}
+		if err := validateSourceIngestRuntimeReadiness(health, now); err != nil {
+			t.Fatalf("a contained ingest dead event kept /readyz at 503: %v", err)
+		}
+	})
+
+	// The allowed-reason sets are derived, not restated. Equality in both
+	// directions: one-way containment would pass for a set that quietly
+	// gained an extra tolerance.
+	t.Run("the allowed reason sets are derived from the rule", func(t *testing.T) {
+		nonFatal := postgresstore.NonFatalStreamHealthReasons()
+		if len(readySourceStreamAllowedReasons) != len(nonFatal) {
+			t.Fatalf("ready allowed=%v want exactly %v", readySourceStreamAllowedReasons, nonFatal)
+		}
+		for reason := range nonFatal {
+			if !readySourceStreamAllowedReasons[reason] {
+				t.Fatalf("ready allowed=%v want exactly %v", readySourceStreamAllowedReasons, nonFatal)
+			}
+		}
+		if len(notReadySourceStreamAllowedReasons) != len(nonFatal)+1 || !notReadySourceStreamAllowedReasons["EVENTS_PENDING"] {
+			t.Fatalf("not-ready allowed=%v want %v plus EVENTS_PENDING", notReadySourceStreamAllowedReasons, nonFatal)
+		}
+		for reason := range nonFatal {
+			if !notReadySourceStreamAllowedReasons[reason] {
+				t.Fatalf("not-ready allowed=%v want %v plus EVENTS_PENDING", notReadySourceStreamAllowedReasons, nonFatal)
+			}
+		}
+	})
+
+	// And the whole probe: ready, degraded, named.
+	t.Run("the probe reports ready with the contained condition named", func(t *testing.T) {
+		probe := healthyReadinessProbe(now)
+		probe.sourceHealth = func(context.Context) (postgresstore.SourceReadinessHealth, error) {
+			return postgresstore.SourceReadinessHealth{
+				Ingest: postgresstore.SourceIngestHealth{Dead: 1, DeadContained: 1},
+				Report: buildEvaluatedReport(func(*postgresstore.SourceStreamHealth) {}),
+			}, nil
+		}
+		outcome, err := probe.evaluate(context.Background())
+		if err != nil {
+			t.Fatalf("a fully contained deployment was taken out of rotation: %v", err)
+		}
+		if len(outcome.Degraded) != 1 || outcome.Degraded[0] != readinessDegradedSourceIngestDeadContained {
+			t.Fatalf("degraded=%v want [%s]", outcome.Degraded, readinessDegradedSourceIngestDeadContained)
+		}
+		if probe.containedDead.lastAt.IsZero() {
+			t.Fatal("the contained-dead warning was never reached, so an unrepaired event leaves no trace at all")
+		}
+	})
 }

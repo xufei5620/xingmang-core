@@ -15,6 +15,52 @@ import (
 
 var eligibilityUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
+// eligibilityFreezeBlockingEventStatuses is the set of source_ingest_events
+// processing_status values that hold an eligibility freeze open
+// (XM-INV-DEAD-CONTAINMENT). One element today, and that is the whole point
+// of it being a named list rather than a literal inside the guard's SQL: L3
+// (XM-INV-CYCLE-WAIT) widens it to the not-yet-processed set once a waiting
+// state exists to give those events an exit, and it must widen in exactly
+// one place.
+var eligibilityFreezeBlockingEventStatuses = []string{"dead"}
+
+var eligibilityFreezeBlockingEventStatusSQL = renderEligibilityFreezeBlockingEventStatusSQL(eligibilityFreezeBlockingEventStatuses)
+
+// eligibilityFreezeDeadEventGuardQuery asks whether the freeze named by $1 is
+// still the only thing containing a blocking source event on source $2. It is
+// a package-level string rather than an inline literal so the EXPLAIN test can
+// plan this exact text: a test that retyped the query would be checking a copy,
+// and a copy of a query stops testing the original the moment either moves.
+// See ResolveEligibilityFreeze for what the predicate is for and why it is
+// narrowed by source.
+var eligibilityFreezeDeadEventGuardQuery = `
+	SELECT EXISTS(
+		SELECT 1
+		FROM eligibility_freezes ef
+		JOIN source_ingest_events sie ON sie.payload_hash=ef.source_revision_hash
+		WHERE ef.id=$1
+		  AND ef.status='open'
+		  AND ef.source_revision_hash IS NOT NULL
+		  AND sie.source_instance_id=$2
+		  AND sie.processing_status=ANY(` + eligibilityFreezeBlockingEventStatusSQL + `)
+	)`
+
+var eligibilityFreezeBlockingEventStatusPattern = regexp.MustCompile(`^[a-z][a-z_]{0,30}$`)
+
+func renderEligibilityFreezeBlockingEventStatusSQL(statuses []string) string {
+	if len(statuses) == 0 {
+		panic("eligibility freeze blocking event status list must not be empty")
+	}
+	quoted := make([]string, len(statuses))
+	for i, status := range statuses {
+		if !eligibilityFreezeBlockingEventStatusPattern.MatchString(status) {
+			panic("eligibility freeze blocking event status must match ^[a-z][a-z_]*$: " + status)
+		}
+		quoted[i] = "'" + status + "'"
+	}
+	return "ARRAY[" + strings.Join(quoted, ",") + "]"
+}
+
 var eligibilityFreezeReasons = map[string]struct{}{
 	"UNKNOWN_NEGATIVE_BALANCE": {}, "LATE_FINALIZED_EVENT": {},
 	"AMBIGUOUS_EVENT_ORDER": {}, "EVENT_PAYLOAD_DRIFT": {},
@@ -278,6 +324,46 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		// below also detects (its first EXISTS clause matches this exact
 		// row), just short-circuited before running that heavier query.
 		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
+	}
+	// XM-INV-DEAD-CONTAINMENT: a freeze that is still the only thing
+	// containing a dead source event may not be resolved. Until this slice
+	// the ordering held by accident -- a dead event made every stream
+	// not-ready, so assertSourceFreshTx above rejected the resolution with
+	// ErrEligibilitySourceStale before this point was ever reached.
+	// Containment removes that accident on purpose, which means the rule
+	// now has to be stated. Without it one "tidy up the freeze queue"
+	// resolution re-opens the very blast radius this slice closes: the
+	// event goes back to being uncontained, and the whole source instance
+	// becomes unavailable to every account again.
+	//
+	// Scope, and a deliberate deviation from the dispatch note (which said
+	// "until the event is processed"): this guard blocks on dead only. Its
+	// job is to stop a resolution from turning a contained dead event into
+	// an uncontained one, and only 'dead' can do that. Blocking on
+	// queued/failed/processing as well would create freezes with no exit --
+	// a requeued event that lands in waiting_dependency or parked_identity
+	// never becomes processed, and the freeze could never be resolved
+	// again. A dead event has two keys instead: requeue it successfully, or
+	// acknowledge it as unreplayable; both write processing_status. L3
+	// (XM-INV-CYCLE-WAIT) is where the wider "not yet processed" set
+	// belongs, together with the waiting state that gives it an exit -- and
+	// this is the one place it will have to widen, hence the status set
+	// living in eligibilityFreezeBlockingEventStatuses.
+	//
+	// Narrowed by source_instance_id, which the freeze lookup above already
+	// resolved. That is what puts the lookup on
+	// source_ingest_events_readiness_active_idx: without it the predicate
+	// has no leading index column, and a sequential scan here would take a
+	// relation-level SIREAD predicate lock (this transaction is
+	// SERIALIZABLE) against the two repair tools, which are SERIALIZABLE
+	// writers of the same table.
+	var deadEventUnrepaired bool
+	if err = tx.QueryRow(ctx, eligibilityFreezeDeadEventGuardQuery, in.FreezeID, sourceID).
+		Scan(&deadEventUnrepaired); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if deadEventUnrepaired {
+		return EligibilityFreeze{}, domain.ErrEligibilityDeadEventUnrepaired
 	}
 	var unsafeRefund, projectionJob bool
 	if err = tx.QueryRow(ctx, `

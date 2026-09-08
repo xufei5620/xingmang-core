@@ -53,7 +53,8 @@ func TestEligibilityResolutionSentinelsWrapGenericOnesAndStayDistinct(t *testing
 	if !errors.Is(ErrEligibilitySourceStale, ErrSourceUnavailable) {
 		t.Fatal("ErrEligibilitySourceStale no longer satisfies errors.Is(err, ErrSourceUnavailable)")
 	}
-	invalidStateSpecific := []error{ErrEligibilityProjectionPending, ErrEligibilityRefundExposed, ErrEligibilityEvaluationUnmatched}
+	invalidStateSpecific := []error{ErrEligibilityProjectionPending, ErrEligibilityRefundExposed,
+		ErrEligibilityEvaluationUnmatched, ErrEligibilityDeadEventUnrepaired}
 	for _, specific := range invalidStateSpecific {
 		if !errors.Is(specific, ErrInvalidState) {
 			t.Fatalf("%v no longer satisfies errors.Is(err, ErrInvalidState)", specific)

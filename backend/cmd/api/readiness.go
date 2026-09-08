@@ -46,6 +46,19 @@ const (
 	readinessCheckSourceStreams     = "source_streams"
 )
 
+// readinessDegradedSourceIngestDeadContained is the one name /readyz can
+// publish on a 200 (XM-INV-DEAD-CONTAINMENT). It is not a check -- nothing
+// failed -- it is the standing statement that dead events exist and are
+// contained by open eligibility freezes, so the deployment keeps serving
+// every other account while somebody repairs them. It obeys the same
+// closed-vocabulary rules as the check names above, and it is the alert key
+// operators bind to; see the readiness table in docs/PRODUCTION-RUNBOOK.md.
+//
+// It exists because the alternative -- a plain 200 -- would make this slice
+// trade one failure mode for a worse one: a dead event nobody can see is a
+// dead event nobody repairs.
+const readinessDegradedSourceIngestDeadContained = "source_ingest_dead_events_contained"
+
 // The readinessSummary* constants are the one operator-facing sentence that
 // accompanies each check name in the response body. Same rules, plus
 // httpapi.readinessSummaryPattern's tighter character set (lowercase letters,
@@ -93,59 +106,70 @@ type readinessProbe struct {
 	sourceHealth      func(context.Context) (postgresstore.SourceReadinessHealth, error)
 	eligibilityHealth func(context.Context) (postgresstore.EligibilityProjectionHealth, error)
 	proofPending      *eligibilityProofPendingWarner
-	now               func() time.Time
+	// containedDead (XM-INV-DEAD-CONTAINMENT) holds the rate limit for the
+	// contained-dead Warn line, for the same reason proofPending does: the
+	// production healthcheck probes /readyz every ten seconds.
+	containedDead *containedDeadWarner
+	now           func() time.Time
 }
 
-func (p readinessProbe) evaluate(ctx context.Context) error {
+func (p readinessProbe) evaluate(ctx context.Context) (httpapi.ReadinessOutcome, error) {
 	if pingErr := p.pingDatabase(ctx); pingErr != nil {
-		return httpapi.NotReady(readinessCheckDatabase, readinessSummaryDatabase, pingErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckDatabase, readinessSummaryDatabase, pingErr)
 	}
 	currentSettings, settingsErr := p.loadSettings(ctx)
 	if settingsErr != nil {
-		return httpapi.NotReady(readinessCheckAdminSettings, readinessSummaryAdminSettings, settingsErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckAdminSettings, readinessSummaryAdminSettings, settingsErr)
 	}
 	if issuerErr := validateIssuerReadiness(currentSettings); issuerErr != nil {
-		return httpapi.NotReady(readinessCheckInvoiceIssuer, readinessSummaryInvoiceIssuer, issuerErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckInvoiceIssuer, readinessSummaryInvoiceIssuer, issuerErr)
 	}
 	if clamErr := p.pingClamAV(ctx); clamErr != nil {
-		return httpapi.NotReady(readinessCheckClamAVDaemon, readinessSummaryClamAVDaemon, clamErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckClamAVDaemon, readinessSummaryClamAVDaemon, clamErr)
 	}
 	if signatureErr := p.clamAVSignatures(p.now()); signatureErr != nil {
-		return httpapi.NotReady(readinessCheckClamAVSignatures, readinessSummaryClamAVSignatures, signatureErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckClamAVSignatures, readinessSummaryClamAVSignatures, signatureErr)
 	}
 	if pdfScannerErr := p.pingPDFScanner(ctx); pdfScannerErr != nil {
-		return httpapi.NotReady(readinessCheckPDFScanner, readinessSummaryPDFScanner, pdfScannerErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckPDFScanner, readinessSummaryPDFScanner, pdfScannerErr)
 	}
 	sourceHealth, healthErr := p.sourceHealth(ctx)
 	if healthErr != nil {
-		return httpapi.NotReady(readinessCheckSourceHealthQuery, readinessSummarySourceHealthQuery, healthErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckSourceHealthQuery, readinessSummarySourceHealthQuery, healthErr)
 	}
 	if ingestErr := validateSourceIngestRuntimeReadiness(sourceHealth.Ingest, p.now()); ingestErr != nil {
 		if errors.Is(ingestErr, errSourceIngestDeadEvents) {
-			return httpapi.NotReady(readinessCheckSourceIngestDead, readinessSummarySourceIngestDead, ingestErr)
+			return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckSourceIngestDead, readinessSummarySourceIngestDead, ingestErr)
 		}
-		return httpapi.NotReady(readinessCheckSourceIngest, readinessSummarySourceIngest, ingestErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckSourceIngest, readinessSummarySourceIngest, ingestErr)
 	}
 	eligibilityHealth, healthErr := p.eligibilityHealth(ctx)
 	if healthErr != nil {
-		return httpapi.NotReady(readinessCheckEligibilityQuery, readinessSummaryEligibilityQuery, healthErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckEligibilityQuery, readinessSummaryEligibilityQuery, healthErr)
 	}
 	readinessNow := p.now()
 	p.proofPending.warnIfStale(eligibilityHealth, readinessNow)
 	if readinessErr := eligibilityProjectionReady(eligibilityHealth, readinessNow); readinessErr != nil {
 		switch {
 		case errors.Is(readinessErr, errEligibilityProjectionDead):
-			return httpapi.NotReady(readinessCheckEligibilityDead, eligibilityProjectionDeadReason, readinessErr)
+			return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckEligibilityDead, eligibilityProjectionDeadReason, readinessErr)
 		case errors.Is(readinessErr, errEligibilityProjectionStuck):
-			return httpapi.NotReady(readinessCheckEligibilityStuck, eligibilityProjectionStuckReason, readinessErr)
+			return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckEligibilityStuck, eligibilityProjectionStuckReason, readinessErr)
 		}
-		return httpapi.NotReady(readinessCheckEligibility, readinessSummaryEligibility, readinessErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckEligibility, readinessSummaryEligibility, readinessErr)
 	}
 	if readinessErr := validateSourceRuntimeReadiness(sourceHealth.Report); readinessErr != nil {
 		if errors.Is(readinessErr, errSourceStreamDeadEvents) {
-			return httpapi.NotReady(readinessCheckSourceStreamDead, readinessSummarySourceStreamDead, readinessErr)
+			return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckSourceStreamDead, readinessSummarySourceStreamDead, readinessErr)
 		}
-		return httpapi.NotReady(readinessCheckSourceStreams, readinessSummarySourceStreams, readinessErr)
+		return httpapi.ReadinessOutcome{}, httpapi.NotReady(readinessCheckSourceStreams, readinessSummarySourceStreams, readinessErr)
 	}
-	return nil
+	// XM-INV-DEAD-CONTAINMENT: ready, but say so honestly. Contained dead
+	// events no longer keep the deployment out of rotation; they do keep a
+	// name in the body and a rate-limited Warn in the log until repaired.
+	p.containedDead.warnIfPresent(sourceHealth.Ingest, readinessNow)
+	if sourceHealth.Ingest.DeadContained > 0 {
+		return httpapi.ReadinessOutcome{Degraded: []string{readinessDegradedSourceIngestDeadContained}}, nil
+	}
+	return httpapi.ReadinessOutcome{}, nil
 }

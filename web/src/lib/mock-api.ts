@@ -810,6 +810,7 @@ export const mockInvoiceApi: InvoiceApiClient = {
             stream === "identities" ? undefined : 900,
           pendingEvents: 0,
           deadEvents: 0,
+          containedDeadEvents: 0,
           waitingDependencies: 0,
           ready: true,
           reasons: [],

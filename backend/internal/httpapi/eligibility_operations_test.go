@@ -111,6 +111,11 @@ func TestHandleDomainErrorMapsEligibilityResolutionSentinels(t *testing.T) {
 		{"projection job pending", domain.ErrEligibilityProjectionPending, http.StatusConflict, "ELIGIBILITY_PROJECTION_PENDING"},
 		{"refund exposure", domain.ErrEligibilityRefundExposed, http.StatusConflict, "ELIGIBILITY_REFUND_EXPOSED"},
 		{"balance evaluation unmatched", domain.ErrEligibilityEvaluationUnmatched, http.StatusConflict, "ELIGIBILITY_EVALUATION_UNMATCHED"},
+		// XM-INV-DEAD-CONTAINMENT. It wraps ErrInvalidState like the three
+		// above, so it has to be matched before the generic case below or the
+		// operator gets a bare CONFLICT and no way to tell which repair the
+		// freeze is waiting on.
+		{"dead event still unrepaired", domain.ErrEligibilityDeadEventUnrepaired, http.StatusConflict, "ELIGIBILITY_DEAD_EVENT_UNREPAIRED"},
 		{"version conflict stays generic", domain.ErrVersionConflict, http.StatusConflict, "CONFLICT"},
 		{"plain invalid state stays generic", domain.ErrInvalidState, http.StatusConflict, "CONFLICT"},
 		{"plain source unavailable stays generic", domain.ErrSourceUnavailable, http.StatusServiceUnavailable, "SOURCE_SYNC_UNAVAILABLE"},

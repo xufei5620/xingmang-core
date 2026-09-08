@@ -273,7 +273,9 @@ func TestNotReadyStillServesHealthAndProtectedAdminConfiguration(t *testing.T) {
 	server, err := NewWithConfig(service, Config{
 		AuthMode: "mock", AdminIPAllowlist: []string{"203.0.113.8/32"},
 		AdminSettings: adminsettings.NewService(repo, httpSettingsBox{}),
-		Readiness:     func(context.Context) error { return errors.New("issuer not configured") },
+		Readiness: func(context.Context) (ReadinessOutcome, error) {
+			return ReadinessOutcome{}, errors.New("issuer not configured")
+		},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

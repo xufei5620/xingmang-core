@@ -379,4 +379,12 @@ var (
 	ErrEligibilityProjectionPending   = fmt.Errorf("%w: an eligibility projection job is still pending for this account", ErrInvalidState)
 	ErrEligibilityRefundExposed       = fmt.Errorf("%w: the account has open refund exposure", ErrInvalidState)
 	ErrEligibilityEvaluationUnmatched = fmt.Errorf("%w: the latest balance evaluation is not a matched or safe outcome", ErrInvalidState)
+	// ErrEligibilityDeadEventUnrepaired (XM-INV-DEAD-CONTAINMENT) reports
+	// that this freeze is still the only thing containing a dead source
+	// event, so resolving it would hand the whole source instance's outage
+	// back to every other account. The wording names both exits on purpose:
+	// the operator reading the 409 has to choose between replaying the event
+	// and writing it off, and those are different decisions with different
+	// ledger consequences.
+	ErrEligibilityDeadEventUnrepaired = fmt.Errorf("%w: a dead source event still correlates to this freeze; requeue or acknowledge it first", ErrInvalidState)
 )

@@ -228,6 +228,9 @@ type BackendSourceHealth = {
     economic_watermark_maximum_age_seconds?: number;
     pending_events: number;
     dead_events: number;
+    // XM-INV-DEAD-CONTAINMENT. Optional: a server predating that slice omits
+    // the field entirely, and the screen must render zero rather than NaN.
+    contained_dead_events?: number;
     waiting_dependencies: number;
     ready: boolean;
     reasons: string[];
@@ -1767,6 +1770,7 @@ function mapSourceHealth(
       item.economic_watermark_maximum_age_seconds ?? 0,
       item.pending_events,
       item.dead_events,
+      item.contained_dead_events ?? 0,
       item.waiting_dependencies,
     ];
     if (
@@ -1842,6 +1846,7 @@ function mapSourceHealth(
         item.economic_watermark_maximum_age_seconds,
       pendingEvents: item.pending_events,
       deadEvents: item.dead_events,
+      containedDeadEvents: item.contained_dead_events ?? 0,
       waitingDependencies: item.waiting_dependencies,
       ready: item.ready,
       reasons: item.reasons,

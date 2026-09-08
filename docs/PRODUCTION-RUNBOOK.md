@@ -2080,18 +2080,65 @@ immediately whenever the failing check changes. Recovery logs
 | `clamav_signatures` | Signature database older than `CLAMAV_MAX_SIGNATURE_AGE` | freshclam |
 | `pdf_scanner` | Sidecar socket unreachable | `pdf-scanner` container, capability token |
 | `source_health_query` | The source-health query itself failed | database load, statement timeouts |
-| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` | `invoice-eligibility-repair --kind=ingest-requeue-dead`, dead-event paragraph below |
-| `source_ingest` | Ingest backlog too old or inconsistent | `deploy/check-pending-spools.sh`, source agents |
+| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` that **no open eligibility freeze accounts for** | `invoice-eligibility-repair --kind=ingest-requeue-dead`, dead-event paragraph below |
+| `source_ingest` | Ingest backlog too old or inconsistent (also: a health report whose contained-dead count contradicts its dead count) | `deploy/check-pending-spools.sh`, source agents |
 | `eligibility_health_query` | The projection-health query failed | database load, lock contention |
 | `eligibility_projection_dead_jobs` | `eligibility_projection_jobs.status='dead'` | `invoice-eligibility-repair --kind=projection-requeue-dead`, next paragraph |
 | `eligibility_projection_stuck` | Projection queue not draining for 15 minutes | eligibility-projection worker |
-| `source_stream_dead_events` | A required stream reports dead events | source agent for that stream |
+| `source_stream_dead_events` | A required stream reports dead events **that no open eligibility freeze accounts for** | source agent for that stream |
 | `source_streams` | Any other stream health problem | the log line carries the exact text |
 
 The three dead-event checks are the ones that never clear by themselves. Note
 that `source_ingest_dead_events` and `eligibility_projection_dead_jobs` are
 different tables needing different repairs despite both reading as "dead";
 telling them apart was the reason for this slice.
+
+### Contained dead events: a 200 that still needs an operator
+
+XM-INV-DEAD-CONTAINMENT changed what the two source dead-event checks count. A
+dead ingest event whose `payload_hash` matches the `source_revision_hash` of an
+**open** `eligibility_freezes` row is *contained*: exactly one account is
+stopped by it, and the deployment stays in rotation for everyone else. Only
+dead events that nothing accounts for still fail readiness.
+
+Contained dead events are not silent. `/readyz` returns 200 with a `degraded`
+array in the body, and the api log carries a rate-limited (5 minute) Warn:
+
+| `degraded` (200 body, not a `check`) | What it means | What to do |
+| --- | --- | --- |
+| `source_ingest_dead_events_contained` | One or more dead ingest events exist and every one of them is held by an open eligibility freeze. Log line: `msg="source ingestion has contained dead events" contained_dead=<n> dead=<n>` | Repair them, on the ordinary schedule rather than as an outage. **Read the warning below first.** |
+
+Alert on this key. Nothing else will page: the container healthcheck is green,
+the funding lots of every other account are actionable, and the affected
+account's own freeze is the only remaining signal.
+
+**Do not run `--kind=ingest-requeue-dead` on a contained dead event as a first
+move.** Requeueing puts the event back to `queued`, which counts as
+`EVENTS_PENDING` — fatal for the stream, with no containment and no grace — for
+up to eight attempts at five-minute intervals. That is roughly forty minutes in
+which the *entire source instance* is unavailable to every account and `/readyz`
+is a hard 503 on `source_ingest_dead_events`' sibling check. The containment
+this slice provides does not cover the pending window; that is L4's scope.
+
+The sequence that does not self-inflict an outage:
+
+1. Dry-run `--kind=ingest-requeue-dead --event=<uuid>` and read `ReplayBlocked`.
+2. If `ReplayBlocked=false` the event genuinely can replay. Schedule the
+   `--apply` for a low-traffic window and expect the pending outage above.
+3. If `ReplayBlocked=true` the event cannot replay; use
+   `--kind=ingest-acknowledge-unreplayable`, which writes it to `processed`
+   with `UNREPLAYABLE_BINDING` and does not open the pending window at all.
+4. Only then resolve the account's freeze. Until the event leaves `dead`, the
+   admin API refuses with `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED` — see
+   `docs/ELIGIBILITY-OPERATIONS.md`.
+
+One further consequence to expect while a dead `balance_checkpoint` is
+contained: that account's eligibility projection parks on
+`BALANCE_PROOF_PENDING` rather than writing a carry-forward proof over the
+missing balance. This is deliberate (the proof is immutable and would lock the
+real checkpoint out permanently) and it does not affect readiness — the
+`eligibility_projection_stuck` check excludes proof-pending jobs. It clears
+when step 2 or 3 completes.
 
 **A source event reaching the dead grade** now writes its own error-level line
 at the moment of the transition, so it is visible to an error-level log watch

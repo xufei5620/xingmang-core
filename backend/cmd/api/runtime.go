@@ -427,6 +427,10 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	// (eligibilityProofPendingWarnInterval) only works if state persists
 	// across calls instead of being reset per-request.
 	eligibilityProofPendingWarnings := &eligibilityProofPendingWarner{}
+	// Same lifetime, same reason (XM-INV-DEAD-CONTAINMENT): the
+	// contained-dead Warn rate limit only works if its state outlives a
+	// single /readyz request.
+	containedDeadWarnings := &containedDeadWarner{}
 	// XM-INV-READYZ-DETAIL: this is the only place the probe's dependencies
 	// are bound to the real ones. The check sequence itself moved to
 	// readinessProbe.evaluate (readiness.go), unchanged in order and in
@@ -443,6 +447,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		sourceHealth:      appService.SourceReadinessHealth,
 		eligibilityHealth: store.EligibilityProjectionHealth,
 		proofPending:      eligibilityProofPendingWarnings,
+		containedDead:     containedDeadWarnings,
 		now:               func() time.Time { return time.Now().UTC() },
 	}
 	api, err := httpapi.NewWithConfig(appService, httpapi.Config{
@@ -671,16 +676,74 @@ func (w *eligibilityProofPendingWarner) warnIfStale(health postgresstore.Eligibi
 		"oldest_proof_pending_age", now.Sub(health.OldestProofPending).Round(time.Second).String())
 }
 
+// containedDeadWarnInterval rate-limits the contained-dead Warn line. Same
+// value and same reason as eligibilityProofPendingWarnInterval: /readyz is
+// probed every ten seconds in production.
+//
+// Warn, not Error, and this is a decision rather than a preference
+// (XM-INV-DEAD-CONTAINMENT A4). Production monitoring counts lines with the
+// ` ERROR ` prefix as generic failures, and a contained dead event can
+// legitimately stand for days while an operator decides between replay and
+// write-off. At Error level that would be ~288 alerting lines a day -- the
+// same "one account's dead event becomes everybody's incident" this slice
+// exists to end, merely moved from /readyz to the alert channel.
+const containedDeadWarnInterval = 5 * time.Minute
+
+// shouldWarnContainedDead is containedDeadWarner's decision as a pure
+// function, so the rate limit's boundary is table-testable without the mutex
+// or slog -- exactly like shouldWarnProofPending above.
+func shouldWarnContainedDead(health postgresstore.SourceIngestHealth, now, lastWarnedAt time.Time) bool {
+	if health.DeadContained <= 0 {
+		return false
+	}
+	return lastWarnedAt.IsZero() || now.Sub(lastWarnedAt) >= containedDeadWarnInterval
+}
+
+// containedDeadWarner holds the one piece of state that rate limit needs
+// across readiness evaluations. One instance for the process lifetime (see
+// buildProductionRuntime); the mutex guards concurrent /readyz requests.
+type containedDeadWarner struct {
+	mu     sync.Mutex
+	lastAt time.Time
+}
+
+func (w *containedDeadWarner) warnIfPresent(health postgresstore.SourceIngestHealth, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !shouldWarnContainedDead(health, now, w.lastAt) {
+		return
+	}
+	w.lastAt = now
+	slog.Warn("source ingestion has contained dead events",
+		"contained_dead", health.DeadContained, "dead", health.Dead)
+}
+
 // readySourceStreamAllowedReasons and notReadySourceStreamAllowedReasons are
 // the exact non-fatal reason combinations validateSourceRuntimeReadiness
 // tolerates for, respectively, a Ready and a not-Ready required source
 // stream -- everything else is treated as a genuine problem and fails
 // /readyz. XM-INV-AGENT-RESTART-GRACE part A added ECONOMIC_RESCAN_ACTIVE
-// alongside the pre-existing EVENTS_PENDING tolerance.
+// alongside the pre-existing EVENTS_PENDING tolerance;
+// XM-INV-DEAD-CONTAINMENT added EVENTS_DEAD_CONTAINED.
+//
+// They are derived from postgresstore.NonFatalStreamHealthReasons rather
+// than spelled out again. Both sets used to be literals, which made this
+// gate a copy of a rule that lives in another package: when the rule gains a
+// reason and the copy does not, nothing fails -- the gate simply keeps
+// answering the old question, and a stream postgresstore considers healthy
+// is rejected here as "inconsistent health evidence". EVENTS_PENDING stays
+// spelled out because it is genuinely this layer's own tolerance:
+// postgresstore treats it as fatal (the five-stream gate must), and only
+// readyz forgives it.
 var (
-	readySourceStreamAllowedReasons    = map[string]bool{"ECONOMIC_RESCAN_ACTIVE": true}
-	notReadySourceStreamAllowedReasons = map[string]bool{"EVENTS_PENDING": true, "ECONOMIC_RESCAN_ACTIVE": true}
+	readySourceStreamAllowedReasons    = postgresstore.NonFatalStreamHealthReasons()
+	notReadySourceStreamAllowedReasons = withPendingEventsTolerated(postgresstore.NonFatalStreamHealthReasons())
 )
+
+func withPendingEventsTolerated(reasons map[string]bool) map[string]bool {
+	reasons["EVENTS_PENDING"] = true
+	return reasons
+}
 
 // errSourceStreamDeadEvents/errSourceIngestDeadEvents are the two terminal
 // dead-event gates, promoted from inline errors.New to sentinels with their
@@ -759,10 +822,21 @@ func validateSourceRuntimeReadiness(report postgresstore.SourceHealthReport) err
 			// non-fatal ECONOMIC_RESCAN_ACTIVE reason (an active, bounded
 			// rescan downgraded from ECONOMIC_WATERMARK_STALE -- see
 			// evaluateSourceStreamHealth), and nothing else.
-			if item.PendingEvents != 0 || item.DeadEvents != 0 || !reasonsWithinSet(item.Reasons, readySourceStreamAllowedReasons) {
+			//
+			// XM-INV-DEAD-CONTAINMENT: Ready may also carry dead events, but
+			// only ones a freeze already answers for, and only while the
+			// report says so out loud. The whole purpose of this branch is
+			// to catch "Ready despite dead events", so a report claiming
+			// containment without the reason that names it -- or with a
+			// contained count that its own dead count cannot support -- is
+			// exactly the shape that must not pass silently.
+			containedDeadIsCoherent := item.ContainedDeadEvents >= 0 && item.ContainedDeadEvents <= item.DeadEvents &&
+				(item.ContainedDeadEvents == 0 || containsReason(item.Reasons, "EVENTS_DEAD_CONTAINED"))
+			if item.PendingEvents != 0 || item.DeadEvents-item.ContainedDeadEvents != 0 || !containedDeadIsCoherent ||
+				!reasonsWithinSet(item.Reasons, readySourceStreamAllowedReasons) {
 				return errors.New("ready source stream has inconsistent health evidence")
 			}
-		case item.DeadEvents != 0:
+		case item.DeadEvents-item.ContainedDeadEvents != 0:
 			return errSourceStreamDeadEvents
 		case item.PendingEvents <= 0 || !containsReason(item.Reasons, "EVENTS_PENDING") ||
 			!reasonsWithinSet(item.Reasons, notReadySourceStreamAllowedReasons):
@@ -796,7 +870,16 @@ func validateSourceIngestRuntimeReadiness(health postgresstore.SourceIngestHealt
 	if now.IsZero() {
 		return errors.New("source ingestion readiness clock is unavailable")
 	}
-	if health.Dead > 0 {
+	// XM-INV-DEAD-CONTAINMENT: this single line is what pinned /readyz at 503
+	// for thirty hours on 2026-09-07 while the three dead events involved
+	// already had open freezes containing them. Contained dead events are
+	// subtracted; the remainder still fails closed, and a report whose
+	// contained count its dead count cannot support is rejected outright
+	// rather than allowed to subtract its way past the gate.
+	if health.DeadContained < 0 || health.DeadContained > health.Dead {
+		return errors.New("source ingestion dead-event evidence is inconsistent")
+	}
+	if health.Dead-health.DeadContained > 0 {
 		return errSourceIngestDeadEvents
 	}
 	if health.Pending == 0 {

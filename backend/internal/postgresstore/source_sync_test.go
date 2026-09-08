@@ -158,7 +158,12 @@ func TestSourceHealthQueryJoinsScanCyclesThroughTheActivePartialIndex(t *testing
 
 func TestSourceReadinessQueryIsBoundedToActivePartialIndex(t *testing.T) {
 	query := strings.Join(strings.Fields(sourceReadinessHealthQuery), " ")
-	activePredicate := "processing_status IN ('queued','failed','processing','dead')"
+	// The alias appeared with XM-INV-DEAD-CONTAINMENT, which qualified the
+	// classified subquery's columns so the containment predicate could
+	// correlate against sie.payload_hash. What this guard is about is
+	// unchanged: the subquery's FROM must stay bounded to the statuses the
+	// partial index covers.
+	activePredicate := "sie.processing_status IN ('queued','failed','processing','dead')"
 	if !strings.Contains(query, "WHERE "+activePredicate) {
 		t.Fatalf("readiness query lost its active-only predicate: %s", query)
 	}
@@ -223,5 +228,154 @@ func TestSourceReadinessQueryIsBoundedToActivePartialIndex(t *testing.T) {
 		if !strings.Contains(ddl, catalogContract) {
 			t.Fatalf("readiness migration lost catalog assertion %q: %s", catalogContract, ddl)
 		}
+	}
+}
+
+// TestContainedDeadIsNonFatalWhileUncontainedDeadStaysFatal is the pure
+// (no database) rule for XM-INV-DEAD-CONTAINMENT. Before this slice every
+// case below with DeadEvents>0 produced Ready=false and Reasons==
+// ["EVENTS_DEAD"], so none of these is a positive assertion that the old
+// implementation would have satisfied anyway.
+//
+// The mixed case matters more than the two pure ones: "some dead events are
+// contained" must not be allowed to read as "the dead events are handled".
+func TestContainedDeadIsNonFatalWhileUncontainedDeadStaysFatal(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	policy := SourceFreshnessPolicy{
+		EconomicHeartbeatMaxAge: 5 * time.Minute, EconomicWatermarkMaxAge: 15 * time.Minute,
+		IdentitiesMaxAge: 15 * time.Minute, Now: now,
+	}
+	newHealthyItem := func() SourceStreamHealth {
+		return SourceStreamHealth{
+			SourceEnabled: true, StreamID: "usage", ApprovedRuntimeVersion: "0.1.179",
+			ObservedRuntimeVersion: "0.1.179", ProjectionStatus: "healthy",
+			LastAcceptedAt: now.Add(-30 * time.Second), EconomicWatermarkAt: now.Add(-time.Minute),
+		}
+	}
+
+	for name, fixture := range map[string]struct {
+		pending, dead, contained int64
+		wantReady                bool
+		wantReasons              []string
+	}{
+		"one dead event, contained, leaves the stream ready": {
+			dead: 1, contained: 1, wantReady: true, wantReasons: []string{"EVENTS_DEAD_CONTAINED"},
+		},
+		"one dead event nobody owns is still fatal": {
+			dead: 1, wantReady: false, wantReasons: []string{"EVENTS_DEAD"},
+		},
+		"a partly contained stream reports both and stays fatal": {
+			dead: 2, contained: 1, wantReady: false,
+			wantReasons: []string{"EVENTS_DEAD", "EVENTS_DEAD_CONTAINED"},
+		},
+		"no dead events at all reports nothing": {
+			wantReady: true, wantReasons: []string{},
+		},
+		"pending events remain fatal alongside containment": {
+			pending: 1, dead: 1, contained: 1, wantReady: false,
+			wantReasons: []string{"EVENTS_PENDING", "EVENTS_DEAD_CONTAINED"},
+		},
+		// A report claiming more contained than dead contradicts itself. The
+		// bare subtraction would give a negative remainder, report neither
+		// reason, and hand back Ready=true -- a real dead event passing the
+		// gate because two surfaces disagreed about a column.
+		"a self-contradicting report never subtracts its way to ready": {
+			dead: 1, contained: 2, wantReady: false, wantReasons: []string{"EVENTS_DEAD", "EVENTS_DEAD_CONTAINED"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := newHealthyItem()
+			item.PendingEvents, item.DeadEvents, item.ContainedDeadEvents = fixture.pending, fixture.dead, fixture.contained
+			evaluateSourceStreamHealth(&item, policy)
+			if item.Ready != fixture.wantReady {
+				t.Fatalf("ready=%t want %t (reasons=%v)", item.Ready, fixture.wantReady, item.Reasons)
+			}
+			if len(item.Reasons) != len(fixture.wantReasons) {
+				t.Fatalf("reasons=%v want %v", item.Reasons, fixture.wantReasons)
+			}
+			for i, want := range fixture.wantReasons {
+				if item.Reasons[i] != want {
+					t.Fatalf("reasons=%v want %v", item.Reasons, fixture.wantReasons)
+				}
+			}
+		})
+	}
+}
+
+// TestNonFatalStreamHealthReasonsIsTheOneListAndHandsOutCopies pins the set
+// itself. cmd/api derives its two allowed-reason maps from this function
+// instead of restating the strings, which only helps if the function really
+// is the single list and really does hand out something a caller cannot use
+// to edit it.
+func TestNonFatalStreamHealthReasonsIsTheOneListAndHandsOutCopies(t *testing.T) {
+	want := map[string]bool{"ECONOMIC_RESCAN_ACTIVE": true, "EVENTS_DEAD_CONTAINED": true}
+	got := NonFatalStreamHealthReasons()
+	if len(got) != len(want) {
+		t.Fatalf("non-fatal reasons=%v want %v", got, want)
+	}
+	for reason := range want {
+		if !got[reason] {
+			t.Fatalf("non-fatal reasons=%v want %v", got, want)
+		}
+	}
+	got["EVENTS_DEAD"] = true
+	delete(got, "EVENTS_DEAD_CONTAINED")
+	again := NonFatalStreamHealthReasons()
+	if again["EVENTS_DEAD"] || !again["EVENTS_DEAD_CONTAINED"] {
+		t.Fatalf("a caller edited the package's own non-fatal set through the returned map: %v", again)
+	}
+	if !nonFatalStreamHealthReasons[eventsDeadContainedReason] || nonFatalStreamHealthReasons["EVENTS_DEAD"] {
+		t.Fatalf("the internal set was mutated through the returned copy: %v", nonFatalStreamHealthReasons)
+	}
+}
+
+// TestEveryDeadEventCountIsRenderedFromOneDefinition is a discovery guard,
+// not a list. The proposal for this slice defended "a fifth health surface
+// forgets the containment predicate" by asserting each of the four known
+// surfaces individually -- but a checker whose coverage is a hand-written
+// list of the things it checks is green by construction for anything not on
+// the list, which is precisely how a gate stops covering what it was written
+// to cover.
+//
+// So instead: read this package's own non-test sources and require that no
+// dead-event FILTER is spelled out by hand anywhere. The two rendering
+// functions are the only place that pairing may appear. There is no
+// exemption list, because the survey found none needed -- the four surfaces
+// are the only FILTERs, and the two repair tools use bare WHERE clauses.
+func TestEveryDeadEventCountIsRenderedFromOneDefinition(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		body, readErr := os.ReadFile(name)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		scanned++
+		source := string(body)
+		for _, line := range strings.Split(source, "\n") {
+			if !strings.Contains(line, "FILTER (WHERE") || !strings.Contains(line, "processing_status='dead'") {
+				continue
+			}
+			// The renderers themselves are the definition; everything else
+			// must call them.
+			if name == "source_sync.go" && strings.Contains(line, `" FILTER (WHERE " + alias`) {
+				continue
+			}
+			t.Fatalf("%s spells a dead-event FILTER by hand instead of rendering it from "+
+				"sourceDeadEventCountColumnsSQL/sourceDeadEventFlagColumnsSQL, so it cannot "+
+				"see containment:\n\t%s", name, strings.TrimSpace(line))
+		}
+	}
+	// Without this the whole test is vacuous if the directory walk ever
+	// stops finding files.
+	if scanned < 10 {
+		t.Fatalf("only %d non-test sources scanned; the discovery guard is not actually looking at this package", scanned)
 	}
 }

@@ -833,17 +833,28 @@ func tryPublishEconomicScanCyclesTx(ctx context.Context, tx pgx.Tx, sourceID, st
 		// A failed/dead event with no matching freeze (pure transient
 		// exhaustion, retry budget not proven unrecoverable) still holds the
 		// cycle.
+		//
+		// XM-INV-DEAD-CONTAINMENT: the freeze correlation is now rendered
+		// from postgresstore's single definition (source_sync.go's
+		// sourceEventContainedByOpenFreezeSQL) rather than spelled out here,
+		// so this judgment and the four stream-health surfaces are physically
+		// one rule. It also had to stop being a LEFT JOIN: two open freezes
+		// can share a payload_hash (0009's unique index separates them by
+		// reason, and EVENT_PAYLOAD_DRIFT plus EVENT_DEAD legitimately
+		// coexist), which duplicated the event row and inflated the manifest
+		// and checkpoint counts below -- enough to trip
+		// invalidBalanceSnapshot and freeze the whole source with SOURCE_GAP
+		// over a cycle that was in fact complete.
 		err = tx.QueryRow(ctx, `
 			SELECT count(*) FILTER (
 					WHERE sie.processing_status NOT IN ('processed','parked_identity')
-						AND NOT (sie.processing_status IN ('failed','dead') AND ef.id IS NOT NULL)
+						AND NOT (sie.processing_status IN ('failed','dead') AND `+sourceEventContainedByOpenFreezeSQL("sie")+`)
 				),
 				count(*) FILTER (WHERE sie.entity_type='cutover_manifest'),
 				count(*) FILTER (WHERE sie.entity_type='balance_checkpoint')
 			FROM source_economic_scan_cycle_events m
 			JOIN source_ingest_events sie ON sie.source_instance_id=m.source_instance_id
 				AND sie.stream_id=m.stream_id AND sie.event_id=m.event_id
-			LEFT JOIN eligibility_freezes ef ON ef.source_revision_hash=sie.payload_hash AND ef.status='open'
 			WHERE m.source_instance_id=$1 AND m.stream_id=$2 AND m.scan_cycle_id=$3::uuid`,
 			sourceID, streamID, item.id).Scan(&incomplete, &manifestRecords, &checkpointRecords)
 		if err != nil {
@@ -3674,6 +3685,11 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		asOf, watermark, observed                      time.Time
 		snapshotRows, sequence                         int64
 		negative, baselineMember, hasRealCheckpoint    bool
+		// hasStrandedCheckpoint (XM-INV-DEAD-CONTAINMENT A2) marks a cycle
+		// that carries a balance_checkpoint event for this account which is
+		// failed or dead behind an open freeze. See the query below and the
+		// pending return in the merge loop.
+		hasStrandedCheckpoint bool
 	}
 	// XM-INV-PROOF-CONTENTION 4: set-based evaluation, replacing what used to
 	// be up to two queries issued per entry of `visibilities` (each ~42ms on
@@ -3756,7 +3772,42 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 				 AND mapped.payload_hash=checkpoint.source_revision_hash
 				WHERE checkpoint.external_account_id=$1
 				  AND mapped.scan_cycle_id=cycle.scan_cycle_id
-			) AS has_real_checkpoint
+			) AS has_real_checkpoint,
+			-- XM-INV-DEAD-CONTAINMENT A2. Before this slice a dead
+			-- balance_checkpoint held its whole scan cycle unpublished, so
+			-- this loop never saw the cycle at all. Containment publishes the
+			-- cycle, and the projection worker runs every two seconds -- so
+			-- it would reach here long before an operator could requeue the
+			-- event, write an immutable carry-forward proof asserting "no
+			-- checkpoint arrived in this cycle", and migration 0014's
+			-- reject_real_checkpoint_after_carry_forward trigger would then
+			-- refuse the real checkpoint forever. A replayable balance fact
+			-- would be lost permanently as a side effect of a containment
+			-- decision made about a different concern.
+			--
+			-- So: if this cycle carries a stranded checkpoint for this
+			-- account, the proof waits (errBalanceCarryForwardProofPending)
+			-- instead of being written. The wait has two keys and both end
+			-- it: requeue the event to processed, or acknowledge it as
+			-- unreplayable. Both flip this flag false.
+			EXISTS (
+				SELECT 1
+				FROM source_economic_scan_cycle_events mapped
+				JOIN source_ingest_events sie
+				  ON sie.source_instance_id=mapped.source_instance_id
+				 AND sie.stream_id=mapped.stream_id
+				 AND sie.event_id=mapped.event_id
+				JOIN eligibility_freezes ef
+				  ON ef.status='open'
+				 AND ef.source_revision_hash IS NOT NULL
+				 AND ef.source_revision_hash=sie.payload_hash
+				 AND ef.external_account_id=$1
+				WHERE mapped.source_instance_id=cycle.source_instance_id
+				  AND mapped.stream_id='balances'
+				  AND mapped.scan_cycle_id=cycle.scan_cycle_id
+				  AND sie.entity_type='balance_checkpoint'
+				  AND sie.processing_status IN ('failed','dead')
+			) AS has_stranded_checkpoint
 		FROM source_economic_scan_cycles cycle
 		JOIN source_ingest_batches batch
 		  ON batch.source_instance_id=cycle.source_instance_id
@@ -3786,7 +3837,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		if err = carryRows.Scan(&item.cycleID, &item.batchID, &item.snapshotID, &item.snapshotRows,
 			&item.asOf, &item.watermark, &item.cursor, &item.sequence, &item.revision,
 			&item.observed, &item.priorID, &item.balance, &item.negative, &item.baselineMember,
-			&item.priorDeficit, &item.hasRealCheckpoint); err != nil {
+			&item.priorDeficit, &item.hasRealCheckpoint, &item.hasStrandedCheckpoint); err != nil {
 			carryRows.Close()
 			return err
 		}
@@ -3826,6 +3877,14 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		coveredVisibility = item.asOf
 		if item.hasRealCheckpoint {
 			continue
+		}
+		// XM-INV-DEAD-CONTAINMENT A2: wait rather than commit an immutable
+		// "no checkpoint here" proof over a checkpoint that is stranded but
+		// still replayable. !hasRealCheckpoint is already established above
+		// and matters: a cycle whose real checkpoint did land must not be
+		// held by some other stranded event of the same account.
+		if item.hasStrandedCheckpoint {
+			return errBalanceCarryForwardProofPending
 		}
 		proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
 		proofID := randomUUID()

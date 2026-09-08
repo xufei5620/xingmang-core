@@ -53,8 +53,9 @@ func healthyReadinessProbe(now time.Time) readinessProbe {
 		eligibilityHealth: func(context.Context) (postgresstore.EligibilityProjectionHealth, error) {
 			return postgresstore.EligibilityProjectionHealth{}, nil
 		},
-		proofPending: &eligibilityProofPendingWarner{},
-		now:          func() time.Time { return now },
+		proofPending:  &eligibilityProofPendingWarner{},
+		containedDead: &containedDeadWarner{},
+		now:           func() time.Time { return now },
 	}
 }
 
@@ -72,7 +73,7 @@ func healthyReadinessProbe(now time.Time) readinessProbe {
 func TestReadinessProbeNamesTheCheckThatFailed(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 
-	if err := healthyReadinessProbe(now).evaluate(context.Background()); err != nil {
+	if _, err := healthyReadinessProbe(now).evaluate(context.Background()); err != nil {
 		t.Fatalf("control: the healthy fixture must be ready, else every case below is vacuous: %v", err)
 	}
 
@@ -156,6 +157,10 @@ func TestReadinessProbeNamesTheCheckThatFailed(t *testing.T) {
 				p.sourceHealth = func(context.Context) (postgresstore.SourceReadinessHealth, error) {
 					health := healthySourceReadiness()
 					health.Ingest.Dead = 1
+					// Written out rather than left at the zero value: this
+					// case only means "an uncontained dead event" because
+					// nothing contains it (XM-INV-DEAD-CONTAINMENT).
+					health.Ingest.DeadContained = 0
 					return health, nil
 				}
 			},
@@ -213,6 +218,57 @@ func TestReadinessProbeNamesTheCheckThatFailed(t *testing.T) {
 					health.Report.Ready = false
 					health.Report.Items[0].Ready = false
 					health.Report.Items[0].DeadEvents = 1
+					health.Report.Items[0].ContainedDeadEvents = 0
+					health.Report.Items[0].Reasons = []string{"EVENTS_DEAD"}
+					return health, nil
+				}
+			},
+			wantCheck:   "source_stream_dead_events",
+			wantSummary: "a required source stream has dead events requiring operator repair",
+			wantCause:   "required source stream contains dead events",
+		},
+		// XM-INV-DEAD-CONTAINMENT. These two are not regression proofs -- both
+		// were red before the slice for the same reason they are red after it.
+		// They guard the opposite direction: over-correcting containment so
+		// that *any* contained dead event excuses the rest. The ingest one in
+		// particular is the case that the "{Dead:1,DeadContained:1} is
+		// tolerated" assertion in main_test.go cannot see, and vice versa;
+		// neither test can be dropped in favour of the other.
+		"partly contained ingest dead events still fail closed": {
+			break_: func(p *readinessProbe) {
+				p.sourceHealth = func(context.Context) (postgresstore.SourceReadinessHealth, error) {
+					health := healthySourceReadiness()
+					health.Ingest.Dead = 2
+					health.Ingest.DeadContained = 1
+					return health, nil
+				}
+			},
+			wantCheck:   "source_ingest_dead_events",
+			wantSummary: "source ingestion has dead events requiring operator repair",
+			wantCause:   "source ingestion contains dead events",
+		},
+		"an ingest report claiming more contained than dead is rejected": {
+			break_: func(p *readinessProbe) {
+				p.sourceHealth = func(context.Context) (postgresstore.SourceReadinessHealth, error) {
+					health := healthySourceReadiness()
+					health.Ingest.Dead = 1
+					health.Ingest.DeadContained = 2
+					return health, nil
+				}
+			},
+			wantCheck:   "source_ingest",
+			wantSummary: "source ingestion is not processing its backlog",
+			wantCause:   "source ingestion dead-event evidence is inconsistent",
+		},
+		"an uncontained stream dead event beside a contained one still fails closed": {
+			break_: func(p *readinessProbe) {
+				p.sourceHealth = func(context.Context) (postgresstore.SourceReadinessHealth, error) {
+					health := healthySourceReadiness()
+					health.Report.Ready = false
+					health.Report.Items[0].Ready = false
+					health.Report.Items[0].DeadEvents = 2
+					health.Report.Items[0].ContainedDeadEvents = 1
+					health.Report.Items[0].Reasons = []string{"EVENTS_DEAD", "EVENTS_DEAD_CONTAINED"}
 					return health, nil
 				}
 			},
@@ -236,7 +292,7 @@ func TestReadinessProbeNamesTheCheckThatFailed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			probe := healthyReadinessProbe(now)
 			fixture.break_(&probe)
-			err := probe.evaluate(context.Background())
+			_, err := probe.evaluate(context.Background())
 			if err == nil {
 				t.Fatal("a broken dependency was reported ready")
 			}
@@ -361,7 +417,8 @@ func TestReadinessProbePublishedStringsCarryNothingIdentifying(t *testing.T) {
 		probe := healthyReadinessProbe(now)
 		breaker(&probe)
 		var named *httpapi.ReadinessCheckError
-		if !errors.As(probe.evaluate(context.Background()), &named) {
+		_, probeErr := probe.evaluate(context.Background())
+		if !errors.As(probeErr, &named) {
 			t.Fatal("readiness failure was not classified")
 		}
 		if strings.ContainsAny(named.Check, forbidden) || strings.ContainsAny(named.Summary, forbidden) {
@@ -389,7 +446,8 @@ func TestReadinessProbeShortCircuitsOnTheFirstFailure(t *testing.T) {
 		return postgresstore.EligibilityProjectionHealth{Dead: 4}, nil
 	}
 	var named *httpapi.ReadinessCheckError
-	if !errors.As(probe.evaluate(context.Background()), &named) {
+	_, probeErr := probe.evaluate(context.Background())
+	if !errors.As(probeErr, &named) {
 		t.Fatal("readiness failure was not classified")
 	}
 	if named.Check != readinessCheckClamAVDaemon {
@@ -412,10 +470,46 @@ func TestReadinessProbeStillWarnsAboutProofPendingJobs(t *testing.T) {
 			ProofPending: 2, OldestProofPending: now.Add(-3 * time.Hour),
 		}, nil
 	}
-	if err := probe.evaluate(context.Background()); err != nil {
+	if _, err := probe.evaluate(context.Background()); err != nil {
 		t.Fatalf("balance-proof-pending jobs must not make the API not-ready: %v", err)
 	}
 	if probe.proofPending.lastAt.IsZero() {
 		t.Fatal("warnIfStale was not reached from the extracted probe")
+	}
+}
+
+// TestShouldWarnContainedDeadRateLimits pins the boundary of the
+// contained-dead Warn (XM-INV-DEAD-CONTAINMENT). The /readyz probe fires
+// every ten seconds in production, so an unlimited line would write ~2,600
+// entries a day about one unrepaired event -- which is the "one account's
+// problem becomes everybody's noise" shape this slice exists to end, merely
+// moved from the endpoint to the log.
+func TestShouldWarnContainedDeadRateLimits(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	for name, fixture := range map[string]struct {
+		health       postgresstore.SourceIngestHealth
+		lastWarnedAt time.Time
+		want         bool
+	}{
+		"nothing contained says nothing": {
+			health: postgresstore.SourceIngestHealth{Dead: 1}, want: false,
+		},
+		"the first contained dead event warns": {
+			health: postgresstore.SourceIngestHealth{Dead: 1, DeadContained: 1}, want: true,
+		},
+		"one second inside the interval stays quiet": {
+			health:       postgresstore.SourceIngestHealth{Dead: 1, DeadContained: 1},
+			lastWarnedAt: now.Add(-containedDeadWarnInterval + time.Second), want: false,
+		},
+		"exactly at the interval warns again": {
+			health:       postgresstore.SourceIngestHealth{Dead: 1, DeadContained: 1},
+			lastWarnedAt: now.Add(-containedDeadWarnInterval), want: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := shouldWarnContainedDead(fixture.health, now, fixture.lastWarnedAt); got != fixture.want {
+				t.Fatalf("shouldWarnContainedDead=%t want %t", got, fixture.want)
+			}
+		})
 	}
 }

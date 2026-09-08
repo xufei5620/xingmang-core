@@ -18,7 +18,7 @@ import (
 
 // readinessServer builds a server whose /readyz verdict is exactly what
 // readiness returns, with its log captured.
-func readinessServer(t *testing.T, readiness func(context.Context) error) (*Server, *bytes.Buffer) {
+func readinessServer(t *testing.T, readiness func(context.Context) (ReadinessOutcome, error)) (*Server, *bytes.Buffer) {
 	t.Helper()
 	logs := &bytes.Buffer{}
 	now := time.Now().UTC()
@@ -53,8 +53,8 @@ func getReadyz(t *testing.T, server *Server) (int, string) {
 // and what must never be published -- must appear in the log and only there.
 func TestReadyzPublishesTheCheckNameAndLogsTheRealCause(t *testing.T) {
 	cause := errors.New("dial tcp 10.0.0.7:5432: connect: connection refused")
-	server, logs := readinessServer(t, func(context.Context) error {
-		return NotReady("database", "the invoice database is unreachable", cause)
+	server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+		return ReadinessOutcome{}, NotReady("database", "the invoice database is unreachable", cause)
 	})
 
 	status, body := getReadyz(t, server)
@@ -133,7 +133,9 @@ func TestReadyzRefusesToPublishStringsOutsideTheAllowedShape(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			server, logs := readinessServer(t, func(context.Context) error { return fixture.err })
+			server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+				return ReadinessOutcome{}, fixture.err
+			})
 			status, body := getReadyz(t, server)
 			if status != http.StatusServiceUnavailable {
 				t.Fatalf("status=%d body=%s", status, body)
@@ -186,7 +188,9 @@ func TestReadinessFailureFieldsAlwaysNamesSomethingForTheLog(t *testing.T) {
 // in one of them means the failure path changed rather than the endpoint
 // being broken outright.
 func TestReadyzReadyResponseIsUnchanged(t *testing.T) {
-	server, logs := readinessServer(t, func(context.Context) error { return nil })
+	server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+		return ReadinessOutcome{}, nil
+	})
 	status, body := getReadyz(t, server)
 	if status != http.StatusOK || strings.TrimSpace(body) != `{"status":"ready"}` {
 		t.Fatalf("status=%d body=%s", status, body)
@@ -236,8 +240,8 @@ func TestReadinessOutcomeLogRateLimitsPerCheck(t *testing.T) {
 // TestReadyzLogsOncePerEpisodeNotOncePerProbe wires the rate limit through
 // the real handler, since that is where the 10-second probe actually lands.
 func TestReadyzLogsOncePerEpisodeNotOncePerProbe(t *testing.T) {
-	server, logs := readinessServer(t, func(context.Context) error {
-		return NotReady("source_ingest_dead_events",
+	server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+		return ReadinessOutcome{}, NotReady("source_ingest_dead_events",
 			"source ingestion has dead events requiring operator repair",
 			errors.New("source ingestion contains dead events"))
 	})
@@ -249,4 +253,75 @@ func TestReadyzLogsOncePerEpisodeNotOncePerProbe(t *testing.T) {
 	if got := strings.Count(logs.String(), "readiness check failed"); got != 1 {
 		t.Fatalf("30 probes inside the interval wrote %d log lines, want 1", got)
 	}
+}
+
+// TestReadyzPublishesDegradedNamesOnlyThroughTheSameGuard is the endpoint
+// half of XM-INV-DEAD-CONTAINMENT. Turning a 503 into a 200 is only defensible
+// if the 200 still says what is wrong, so a ready-but-degraded evaluation has
+// to reach the body -- and it has to reach it through the same closed
+// vocabulary a failing check's name does, because /readyz is unauthenticated
+// and internet-facing either way.
+//
+// The three cases are asserted together on purpose. The third one ("no
+// degraded key at all") is an absence, and an absence is worth nothing on its
+// own: a handler that never wrote the key under any circumstances would pass
+// it. The first case is what proves the key can appear, and the second proves
+// the guard -- not silence -- is what suppresses it.
+func TestReadyzPublishesDegradedNamesOnlyThroughTheSameGuard(t *testing.T) {
+	t.Run("a contained condition is named on the 200", func(t *testing.T) {
+		server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+			return ReadinessOutcome{Degraded: []string{"source_ingest_dead_events_contained"}}, nil
+		})
+		status, body := getReadyz(t, server)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, body)
+		}
+		var decoded struct {
+			Status   string   `json:"status"`
+			Degraded []string `json:"degraded"`
+		}
+		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Status != "ready" || len(decoded.Degraded) != 1 ||
+			decoded.Degraded[0] != "source_ingest_dead_events_contained" {
+			t.Fatalf("degraded body=%s", body)
+		}
+		if logs.Len() != 0 {
+			t.Fatalf("a degraded-but-ready probe must not log per probe; it runs every 10s: %s", logs.String())
+		}
+	})
+
+	t.Run("a name that fails the pattern is dropped, not published", func(t *testing.T) {
+		server, logs := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+			return ReadinessOutcome{Degraded: []string{"dial tcp 10.0.0.7:5432"}}, nil
+		})
+		status, body := getReadyz(t, server)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, body)
+		}
+		if strings.Contains(body, "degraded") || strings.Contains(body, "10.0.0.7") {
+			t.Fatalf("a rejected degraded name reached the public body: %s", body)
+		}
+		if !strings.Contains(logs.String(), "rejected_check_name") {
+			t.Fatalf("a rejected degraded name must be findable in the log: %s", logs.String())
+		}
+	})
+
+	t.Run("nothing degraded publishes no key at all", func(t *testing.T) {
+		server, _ := readinessServer(t, func(context.Context) (ReadinessOutcome, error) {
+			return ReadinessOutcome{}, nil
+		})
+		status, body := getReadyz(t, server)
+		if status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", status, body)
+		}
+		decoded := map[string]any{}
+		if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := decoded["degraded"]; present {
+			t.Fatalf("a healthy probe published a degraded key: %s", body)
+		}
+	})
 }

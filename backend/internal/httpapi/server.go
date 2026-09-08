@@ -52,7 +52,7 @@ type Server struct {
 	platformLogin      *PlatformLogin
 	operations         OperationsService
 	sourceMode         string
-	readiness          func(context.Context) error
+	readiness          func(context.Context) (ReadinessOutcome, error)
 	readinessLog       readinessOutcomeLog
 	smtpTestSender     mailer.Sender
 	smtpTestRecipient  string
@@ -74,7 +74,7 @@ type Config struct {
 	ProductionAuth    *ProductionAuth
 	PlatformLogin     *PlatformLogin
 	SourceMode        string
-	Readiness         func(context.Context) error
+	Readiness         func(context.Context) (ReadinessOutcome, error)
 	SMTPTestSender    mailer.Sender
 	SMTPTestRecipient string
 	PublicOrigin      string
@@ -174,18 +174,30 @@ func (s *Server) routes() {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "source_mode": s.sourceMode, "auth_mode": s.authMode})
 	})
 	s.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"status": "ready"}
 		if s.readiness != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			if err := s.readiness(ctx); err != nil {
+			outcome, err := s.readiness(ctx)
+			if err != nil {
 				s.writeNotReady(w, err)
 				return
 			}
 			if s.readinessLog.record("", time.Now().UTC()) {
 				s.logger.Info("readiness recovered")
 			}
+			// XM-INV-DEAD-CONTAINMENT: a ready-but-degraded evaluation is
+			// still a 200 -- the service can serve -- but the body says so.
+			if degraded, rejected := outcome.publishableDegraded(); len(degraded) > 0 || rejected {
+				if rejected {
+					s.logger.Error("readiness check failed", "check", readinessRejectedCheck)
+				}
+				if len(degraded) > 0 {
+					body["degraded"] = degraded
+				}
+			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+		writeJSON(w, http.StatusOK, body)
 	})
 	s.mux.Handle("GET /api/v1/user/funding-lots", s.require("user", http.HandlerFunc(s.listLots)))
 	s.mux.Handle("GET /api/v1/user/invoice-policy", s.require("user", http.HandlerFunc(s.getInvoicePolicy)))
@@ -1256,6 +1268,8 @@ func handleDomainError(w http.ResponseWriter, err error) {
 		writeError(w, 409, "ELIGIBILITY_REFUND_EXPOSED", "the account has open refund exposure")
 	case errors.Is(err, domain.ErrEligibilityEvaluationUnmatched):
 		writeError(w, 409, "ELIGIBILITY_EVALUATION_UNMATCHED", "the latest balance evaluation is not a matched or safe outcome")
+	case errors.Is(err, domain.ErrEligibilityDeadEventUnrepaired):
+		writeError(w, 409, "ELIGIBILITY_DEAD_EVENT_UNREPAIRED", "a dead source event still correlates to this freeze; requeue or acknowledge it first")
 	case errors.Is(err, domain.ErrSourceUnavailable):
 		writeError(w, http.StatusServiceUnavailable, "SOURCE_SYNC_UNAVAILABLE", "source synchronization is stale or still processing")
 	case errors.Is(err, domain.ErrConflict), errors.Is(err, domain.ErrVersionConflict), errors.Is(err, domain.ErrInvalidState):

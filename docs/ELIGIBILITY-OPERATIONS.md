@@ -762,3 +762,79 @@ Afterwards, resolve the account's freeze through the normal admin path once
 its projection queue is empty and its *latest* finalized balance evidence
 evaluates `matched`. That gate reads only the latest evidence item, so a
 permanently missing older checkpoint does not block reopening the account.
+
+### Repair before unfreeze is now a rule, not an ordering accident
+
+XM-INV-DEAD-CONTAINMENT added an explicit precondition to
+`POST /api/v1/admin/eligibility-freezes/{id}/resolve`:
+
+> While any `source_ingest_events` row on the freeze's own source instance is
+> `processing_status='dead'` and carries the freeze's `source_revision_hash` as
+> its `payload_hash`, the freeze cannot be resolved. The API answers
+> `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED` with the message *"a dead source
+> event still correlates to this freeze; requeue or acknowledge it first"*.
+
+This used to hold by accident. A dead event made every stream not-ready, so the
+five-stream freshness gate rejected the resolution first, with
+`503 ELIGIBILITY_SOURCE_STALE`. Containment removes that side effect on purpose
+— which is exactly why the rule now has to be stated: an open freeze is the
+only thing keeping a dead event from taking the whole source instance away from
+every other account again, and one tidy-up resolution would undo it.
+
+The guard is deliberately narrow. It matches on `source_revision_hash` alone,
+**not** on `freeze_reason` — an `EVENT_PAYLOAD_DRIFT` freeze and an
+`EVENT_DEAD` freeze can both be open for one payload, and resolving either one
+equally removes containment. And it blocks only on `dead`, not on every
+not-yet-processed status: a requeued event that lands in `waiting_dependency`
+or `parked_identity` may never become `processed`, and a freeze that could
+never be resolved again is a worse failure than the one being prevented. A dead
+event always has two exits, both of which end the refusal:
+
+- `invoice-eligibility-repair --kind=ingest-requeue-dead` — the event replays
+  and reaches `processed`. **Read the warning in
+  `docs/PRODUCTION-RUNBOOK.md` first: requeueing opens an
+  `EVENTS_PENDING` window of up to ~40 minutes during which the entire source
+  instance is unavailable to every account.**
+- `invoice-eligibility-repair --kind=ingest-acknowledge-unreplayable` — the
+  event is written off as `processed` / `UNREPLAYABLE_BINDING`, with no pending
+  window. It refuses events that could still replay.
+
+**One door does not pass through this guard.**
+`invoice-eligibility-repair --kind=preanchor-usage` resolves the freezes it
+repairs inside its own transaction, in the same transaction that requeues the
+event — so the event is on its way back to `processed` by the time the freeze
+closes, and the ordering is safe. It is a different entry point, not an
+exemption: anything else that resolves freezes programmatically has to
+establish the same ordering for itself.
+
+### A contained `balance_checkpoint` parks the account's projection
+
+While a dead `balance_checkpoint` event is contained by an open freeze, that
+account's eligibility projection job stops with
+`last_error_code='BALANCE_PROOF_PENDING'` instead of writing a carry-forward
+proof for the cycle the checkpoint belongs to.
+
+This is intended. Containment lets the balances scan cycle publish, and the
+projection worker runs every two seconds — so without the wait it would write
+an immutable "the balance did not change in this cycle" proof within seconds,
+and migration 0014's `reject_real_checkpoint_after_carry_forward` trigger would
+then refuse the real checkpoint permanently. A replayable balance fact would be
+lost as a side effect of a decision about something else.
+
+What an operator sees, and what to do:
+
+- `/readyz` is unaffected: the `eligibility_projection_stuck` check excludes
+  proof-pending jobs by construction. After an hour the api log carries
+  `msg="invoice eligibility projection has balance-proof-pending jobs waiting a
+  long time"`.
+- The parked job also means `ResolveEligibilityFreeze` returns
+  `409 ELIGIBILITY_PROJECTION_PENDING` for that account. This is a second gate,
+  not a deadlock: repair the event (either exit above), the wait ends, the
+  proof is written, the job completes, and the freeze becomes resolvable.
+
+Note that the two "contained" judgments differ on purpose. Stream health asks
+only whether *some* open freeze holds the payload — deliberately account-blind,
+because the question is whether anyone is accountable at all. The carry-forward
+wait asks whether *this account* has one, because the proof it is about to
+write is per account and per cycle. Both are pinned by tests; changing either
+without the other will turn one of them red.

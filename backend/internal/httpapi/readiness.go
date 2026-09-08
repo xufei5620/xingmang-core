@@ -53,6 +53,37 @@ func NotReady(check, summary string, err error) error {
 	return &ReadinessCheckError{Check: check, Summary: summary, Err: err}
 }
 
+// ReadinessOutcome carries what a *successful* readiness evaluation still
+// wants to say (XM-INV-DEAD-CONTAINMENT). Degraded names conditions that are
+// contained -- real, bounded, and already owned by somebody -- so the service
+// stays in rotation while the condition stays visible and alertable. Turning
+// a 503 into a 200 is only honest if the 200 still says what happened.
+//
+// The names go through readinessCheckNamePattern exactly like a failing
+// check's, for the same reason: /readyz is unauthenticated and
+// internet-facing, so nothing published on it may be able to spell a host, a
+// path or an id. An empty Degraded publishes no key at all rather than an
+// empty array, so "nothing is degraded" is an assertable absence rather than
+// a shape a reader has to interpret.
+type ReadinessOutcome struct {
+	Degraded []string
+}
+
+// publishableDegraded filters an outcome's names through the same guard a
+// failing check's name passes. A name that fails is dropped rather than
+// published, and the caller logs it under readinessRejectedCheck: a bug worth
+// finding, but never a leak.
+func (o ReadinessOutcome) publishableDegraded() (names []string, rejected bool) {
+	for _, name := range o.Degraded {
+		if !readinessCheckNamePattern.MatchString(name) {
+			rejected = true
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, rejected
+}
+
 // readinessCheckNamePattern and readinessSummaryPattern are the fail-closed
 // guard on everything /readyz publishes. They are deliberately far narrower
 // than "not obviously secret": no digits, no dot, colon, slash, at-sign or

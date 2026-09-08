@@ -5760,6 +5760,7 @@ const sourceReasonLabels: Record<string, string> = {
   PROJECTION_BLOCKED: "上游投影已安全阻断",
   EVENTS_PENDING: "仍有待处理事件",
   EVENTS_DEAD: "存在死信事件",
+  EVENTS_DEAD_CONTAINED: "存在死信事件（已由账号冻结兜住，不影响同来源其他客户）",
   SCAN_CYCLE_INCOMPLETE: "完整扫描周期尚未完成",
   ECONOMIC_WATERMARK_NEVER_PUBLISHED: "经济账本尚未发布首个完整水位",
   ECONOMIC_WATERMARK_STALE: "经济账本水位尚未追平",
@@ -6046,6 +6047,9 @@ function SourceHealthPage() {
                     <td>
                       <strong>
                         待处理 {item.pendingEvents} / 死信 {item.deadEvents}
+                        {item.containedDeadEvents > 0
+                          ? `（已兜住 ${item.containedDeadEvents}）`
+                          : ""}
                       </strong>
                       <small>依赖等待 {item.waitingDependencies}（不阻断其他用户）</small>
                     </td>
@@ -6053,7 +6057,14 @@ function SourceHealthPage() {
                       <span className={`badge ${item.ready ? "badge-green" : "badge-red"}`}>
                         {item.ready ? "正常" : "已阻断"}
                       </span>
-                      {!item.ready ? (
+                      {/* XM-INV-DEAD-CONTAINMENT: a contained dead event
+                          leaves the stream ready, so the old `!item.ready`
+                          condition would have hidden EVENTS_DEAD_CONTAINED
+                          entirely -- the label would exist and never render,
+                          and any assertion about it would pass vacuously.
+                          Making the freeze visible is part of the deal for
+                          no longer taking the deployment out of rotation. */}
+                      {!item.ready || item.containedDeadEvents > 0 ? (
                         <small>
                           {item.reasons
                             .map(

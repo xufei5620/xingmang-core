@@ -187,36 +187,74 @@ LEFT JOIN pg_catalog.pg_namespace tbl_ns ON tbl_ns.oid=tbl.relnamespace
 WHERE idx_ns.nspname='public' AND idx.relname='${INDEX_NAME}'" >"$output"
 }
 
+# emit_readiness_query is a hand-maintained copy of
+# backend/internal/postgresstore/source_sync.go's sourceReadinessHealthQuery.
+# A copy of a query is a gate that can quietly stop testing the thing it
+# names: this copy had already fallen behind by three separate changes (the
+# `classified` subquery and its busy_within_grace column, the scan-cycle join,
+# and the cutover-manifest subquery), so every green run of this script was
+# proving an index path for a query the service no longer runs.
+#
+# Re-synchronised on 2026-09-08 for XM-INV-DEAD-CONTAINMENT, which adds the
+# dead_contained flag. Two rules for whoever touches sourceReadinessHealthQuery
+# next:
+#
+#   1. Update this copy in the same commit, or this script goes back to
+#      proving nothing.
+#   2. This script is not the real gate. The real one is
+#      TestSourceReadinessHealthIgnoresParkedBacklogAndUsesPartialIndex (and,
+#      for this slice, TestContainedDeadFilterKeepsReadinessOnTheActivePartialIndex)
+#      in backend/internal/postgresstore/source_readiness_integration_test.go,
+#      which EXPLAINs the live query text and therefore cannot drift at all.
+#      This script exists to check the *production* planner against production
+#      statistics, which no test can do.
+#
+# Differences from the Go source that are intentional and not drift: the
+# `public.` schema qualifications, and the absence of Go's string
+# concatenation (the transient-requeue marker array and the contained-dead
+# predicate are rendered here literally).
 emit_readiness_query() {
   cat <<'SQL'
 WITH active_event_health AS MATERIALIZED (
   SELECT source_instance_id,stream_id,
-    count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')) AS pending_events,
-    count(*) FILTER (WHERE processing_status='dead') AS dead_events,
-    COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing')),'epoch'::timestamptz) AS oldest_pending
-  FROM public.source_ingest_events
-  WHERE processing_status IN ('queued','failed','processing','dead')
+    count(*) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace) AS pending_events,
+    count(*) FILTER (WHERE is_dead) AS dead_events,
+    count(*) FILTER (WHERE dead_contained) AS dead_events_contained,
+    COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace),'epoch'::timestamptz) AS oldest_pending
+  FROM (
+    SELECT sie.source_instance_id,sie.stream_id,sie.processing_status,sie.created_at,
+      sie.processing_status='dead' AS is_dead,
+      sie.processing_status='dead' AND EXISTS (SELECT 1 FROM public.eligibility_freezes ef WHERE ef.status='open' AND ef.source_revision_hash IS NOT NULL AND ef.source_revision_hash=sie.payload_hash) AS dead_contained,
+      COALESCE(sie.processing_status='queued' AND COALESCE(sie.processing_error,'')=ANY(ARRAY['ACCOUNT_LOCK_BUSY','SERIALIZATION_BUSY'])
+       AND sie.updated_at>=now()-interval '10 minutes',false) AS busy_within_grace
+    FROM public.source_ingest_events sie
+    WHERE sie.processing_status IN ('queued','failed','processing','dead')
+  ) classified
   GROUP BY source_instance_id,stream_id
 ), ingest_health AS (
   SELECT COALESCE(sum(pending_events),0)::bigint AS pending_events,
     COALESCE(sum(dead_events),0)::bigint AS dead_events,
+    COALESCE(sum(dead_events_contained),0)::bigint AS dead_events_contained,
     COALESCE(min(oldest_pending) FILTER (WHERE pending_events>0),'epoch'::timestamptz) AS oldest_pending
   FROM active_event_health
 )
 SELECT si.id,si.source_type,si.name,si.enabled,required.stream_id,
-  COALESCE(sis.sequence,0),si.runtime_version,
+  COALESCE(sis.sequence,0),si.runtime_version,COALESCE((SELECT scm.source_runtime_version FROM public.source_cutover_manifests scm WHERE scm.source_instance_id=si.id ORDER BY scm.cutover_at DESC LIMIT 1),''),
   COALESCE(sis.source_runtime_version,''),COALESCE(sis.source_agent_version,''),COALESCE(sis.projection_status,'unknown'),
   COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
   COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
   COALESCE(sew.watermark_at,'epoch'::timestamptz),
-  COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),
-  ingest.pending_events,ingest.dead_events,ingest.oldest_pending
+  COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),COALESCE(aeh.dead_events_contained,0),
+  ingest.pending_events,ingest.dead_events,ingest.dead_events_contained,ingest.oldest_pending,
+  COALESCE(sesc.updated_at,'epoch'::timestamptz)
 FROM public.source_instances si
 CROSS JOIN (VALUES ('payments'::text),('identities'::text),('usage'::text),('credits'::text),('balances'::text)) required(stream_id)
 LEFT JOIN public.source_ingest_state sis ON sis.source_instance_id=si.id AND sis.stream_id=required.stream_id
 LEFT JOIN public.source_economic_stream_watermarks sew ON sew.source_instance_id=si.id AND sew.stream_kind=required.stream_id
 LEFT JOIN active_event_health aeh ON aeh.source_instance_id=si.id AND aeh.stream_id=required.stream_id
 CROSS JOIN ingest_health ingest
+LEFT JOIN public.source_economic_scan_cycles sesc ON sesc.source_instance_id=si.id AND sesc.stream_id=required.stream_id
+  AND sesc.cycle_status IN ('receiving','processing')
 ORDER BY si.source_type,si.id,required.stream_id
 SQL
 }

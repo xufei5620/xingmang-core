@@ -433,7 +433,11 @@ Every accepted batch persists source runtime/agent versions, projection health
 and receiver time. A signed empty batch is the heartbeat for a static source;
 a duplicate replay does not refresh freshness. The receiver rejects a runtime
 version that differs from the approved `source_instances` value. Both streams
-must be fresh and have no queued/dead event before submit or final manual issue.
+must be fresh and have no queued event, and no dead event that an open
+eligibility freeze does not already account for, before submit or final manual
+issue. A dead event held by an open freeze (matched on
+`eligibility_freezes.source_revision_hash` = the event's `payload_hash`) stops
+that one account and no others -- XM-INV-DEAD-CONTAINMENT.
 
 An identity/payment may precede the invoice user's first central-OIDC login.
 That event enters `waiting_dependency` under a source-scoped keyed HMAC, does

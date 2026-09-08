@@ -478,6 +478,11 @@ export interface SourceStreamHealth {
   economicWatermarkMaximumAgeSeconds?: number;
   pendingEvents: number;
   deadEvents: number;
+  // XM-INV-DEAD-CONTAINMENT: the subset of deadEvents already answered for by
+  // an open eligibility freeze. deadEvents stays the honest total, so the
+  // difference is what still has nobody accountable for it -- and it is the
+  // difference, not the total, that makes the stream not ready.
+  containedDeadEvents: number;
   waitingDependencies: number;
   ready: boolean;
   reasons: string[];

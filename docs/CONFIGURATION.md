@@ -557,10 +557,15 @@ five-minute maximum clock skew, and two poll intervals (12 minutes under the
 reviewed defaults), so a nominally healthy quiet stream cannot be configured
 to fail readiness by construction. All durations remain bounded between their
 documented launcher limits.
-`projection_status=blocked`, an unapproved runtime version, queued/dead source
-events or a missed heartbeat fails readiness, user submission and final manual
-issue confirmation. Recoverable OIDC/account dependency waits remain visible
-to administrators but do not block unrelated users or global readiness.
+`projection_status=blocked`, an unapproved runtime version, queued source
+events, dead source events that no open eligibility freeze accounts for, or a
+missed heartbeat fails readiness, user submission and final manual issue
+confirmation. Recoverable OIDC/account dependency waits remain visible to
+administrators but do not block unrelated users or global readiness. A dead
+event that an open freeze does account for is reported on a 200 `/readyz` as
+`degraded: ["source_ingest_dead_events_contained"]` and stops only the account
+that owns it (XM-INV-DEAD-CONTAINMENT; see the runbook for the alert key and
+the repair order).
 
 The library also contains a separately tested Admin API fallback connector. It
 requires an Admin Key secret file and an immutable exact origin, and it has only

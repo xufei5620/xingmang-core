@@ -80,8 +80,15 @@ const (
 const sourceEventDeadThreshold = 8
 
 type SourceIngestHealth struct {
-	Pending       int64
-	Dead          int64
+	Pending int64
+	Dead    int64
+	// DeadContained (XM-INV-DEAD-CONTAINMENT) is the subset of Dead already
+	// answered for by an open eligibility freeze. Dead remains the total, so
+	// nothing is hidden from an operator reading the number; readiness
+	// subtracts (see validateSourceIngestRuntimeReadiness) because a dead
+	// event whose account is already frozen has an owner and a repair path,
+	// while an uncontained one does not.
+	DeadContained int64
 	Waiting       int64
 	OldestPending time.Time
 }
@@ -137,9 +144,19 @@ type SourceStreamHealth struct {
 	EconomicWatermarkMaximumAgeSeconds int64     `json:"economic_watermark_maximum_age_seconds,omitempty"`
 	PendingEvents                      int64     `json:"pending_events"`
 	DeadEvents                         int64     `json:"dead_events"`
-	WaitingDependencies                int64     `json:"waiting_dependencies"`
-	Ready                              bool      `json:"ready"`
-	Reasons                            []string  `json:"reasons"`
+	// ContainedDeadEvents (XM-INV-DEAD-CONTAINMENT) is the subset of
+	// DeadEvents already answered for by an open eligibility freeze -- the
+	// account that owns the event is frozen, so the damage is bounded to
+	// that one account and the stream does not have to be taken away from
+	// everybody else. DeadEvents stays the honest total; the difference is
+	// what still has nobody accountable for it and therefore still makes the
+	// stream not-ready. See sourceEventContainedByOpenFreezeSQL for the one
+	// definition of "contained" and evaluateSourceStreamHealth for how the
+	// two counts turn into reasons.
+	ContainedDeadEvents int64    `json:"contained_dead_events"`
+	WaitingDependencies int64    `json:"waiting_dependencies"`
+	Ready               bool     `json:"ready"`
+	Reasons             []string `json:"reasons"`
 }
 
 type SourceHealthReport struct {
@@ -1105,11 +1122,11 @@ func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC strin
 func (s *Store) SourceIngestHealth(ctx context.Context) (SourceIngestHealth, error) {
 	var out SourceIngestHealth
 	err := s.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')),
-			count(*) FILTER (WHERE processing_status='dead'),
-			count(*) FILTER (WHERE processing_status IN ('waiting_dependency','parked_identity')),
-			COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing')),'epoch'::timestamptz)
-		FROM source_ingest_events`).Scan(&out.Pending, &out.Dead, &out.Waiting, &out.OldestPending)
+		SELECT count(*) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),
+			`+sourceDeadEventCountColumnsSQL("count(*)", "sie")+`,
+			count(*) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity')),
+			COALESCE(min(sie.created_at) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),'epoch'::timestamptz)
+		FROM source_ingest_events sie`).Scan(&out.Pending, &out.Dead, &out.DeadContained, &out.Waiting, &out.OldestPending)
 	if out.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 		out.OldestPending = time.Time{}
 	}
@@ -1134,9 +1151,124 @@ func maximumHeartbeatAgeForStream(policy SourceFreshnessPolicy, streamID string)
 // stream.Ready directly and never goes through that readyz-only layer.
 const economicRescanActiveReason = "ECONOMIC_RESCAN_ACTIVE"
 
+// eventsDeadContainedReason (XM-INV-DEAD-CONTAINMENT) reports dead events
+// that are already answered for by an open eligibility freeze. It is
+// non-fatal for the same reason ECONOMIC_RESCAN_ACTIVE is: the condition is
+// real and worth showing, but it does not justify taking the stream away
+// from every other account on the source. On 2026-09-07 three dead events
+// belonging to one account held nineteen funding lots and six users at
+// source_unavailable for thirty hours, because EVENTS_DEAD was the only
+// verdict this function could reach.
+//
+// It is deliberately additive rather than a replacement: a stream with one
+// contained and one uncontained dead event reports both reasons and stays
+// not-ready.
+const eventsDeadContainedReason = "EVENTS_DEAD_CONTAINED"
+
 // nonFatalStreamHealthReasons lists reasons that are surfaced for visibility
-// but never make item.Ready false on their own.
-var nonFatalStreamHealthReasons = map[string]bool{economicRescanActiveReason: true}
+// but never make item.Ready false on their own. cmd/api/runtime.go's
+// readySourceStreamAllowedReasons / notReadySourceStreamAllowedReasons are
+// derived from this map through NonFatalStreamHealthReasons rather than
+// spelling the same strings a second time: the readyz layer's judgment is a
+// consumer of this rule, and a copy of a rule drifts silently -- it does not
+// fail, it just keeps answering yesterday's question.
+var nonFatalStreamHealthReasons = map[string]bool{
+	economicRescanActiveReason: true,
+	eventsDeadContainedReason:  true,
+}
+
+// NonFatalStreamHealthReasons returns a copy of the non-fatal reason set for
+// consumers outside this package. A copy, not the map itself: a caller that
+// builds its own derived set (cmd/api does exactly that, adding
+// EVENTS_PENDING) must not be able to reach in and change what this package
+// considers non-fatal.
+func NonFatalStreamHealthReasons() map[string]bool {
+	out := make(map[string]bool, len(nonFatalStreamHealthReasons))
+	for reason, nonFatal := range nonFatalStreamHealthReasons {
+		out[reason] = nonFatal
+	}
+	return out
+}
+
+// sourceEventAliasPattern bounds what may be interpolated as a row alias into
+// the rendered dead-event predicates below. The aliases are compile-time
+// constants at every call site, so anything else is a programming error worth
+// stopping the process for rather than quietly escaping into a query.
+var sourceEventAliasPattern = regexp.MustCompile(`^[a-z][a-z_]{0,15}$`)
+
+// sourceEventContainedByOpenFreezeSQL is the single definition of "this
+// source_ingest_events row is already answered for by an open eligibility
+// freeze" (XM-INV-DEAD-CONTAINMENT). Five queries consult it -- the four
+// health surfaces below plus tryPublishEconomicScanCyclesTx's cycle
+// completeness check in consumption.go -- and they must agree exactly: a
+// stream that calls an event contained while the cycle publisher calls it
+// outstanding (or the reverse) is two answers to one question.
+//
+// What it deliberately does NOT match on:
+//
+//   - freeze_reason. MarkSourceEventFailed can produce EVENT_DEAD via the
+//     account hint while an EVENT_PAYLOAD_DRIFT freeze for the same payload
+//     already exists (the unique index in migration 0009 separates open
+//     freezes by reason, so both can be open at once). Either freeze equally
+//     means "this account is stopped over this payload", and
+//     tryPublishEconomicScanCyclesTx has never distinguished them.
+//   - external_account_id. The correlation runs through the payload's own
+//     content hash, which carries the external_user_id inside the encrypted
+//     body, so a freeze on another account with the same payload_hash would
+//     require a byte-identical payload for a different user. That is
+//     structurally unreachable rather than merely unlikely -- but it is a
+//     property of the hash, not of this predicate, so it is pinned by an
+//     explicit negative test rather than by a comment alone.
+//   - source_instance_id / stream_id. Same reason. The unfreeze guard in
+//     eligibility_operations.go does narrow by source, and deliberately so:
+//     see the note there.
+func sourceEventContainedByOpenFreezeSQL(alias string) string {
+	if !sourceEventAliasPattern.MatchString(alias) {
+		panic("source ingest event alias must match ^[a-z][a-z_]*$: " + alias)
+	}
+	// source_revision_hash IS NOT NULL is not redundant with the equality
+	// below (NULL = hash is NULL, not true): migration 0032's partial index
+	// carries that predicate, and a query that omits it cannot match the
+	// index.
+	return "EXISTS (SELECT 1 FROM eligibility_freezes ef" +
+		" WHERE ef.status='open' AND ef.source_revision_hash IS NOT NULL" +
+		" AND ef.source_revision_hash=" + alias + ".payload_hash)"
+}
+
+// sourceDeadEventCountColumnsSQL renders the (dead, contained dead) column
+// pair for an aggregate health query. countExpr is the caller's own counting
+// expression because the surfaces differ: the LEFT JOIN shapes must count a
+// join column (count(sie.event_id)) so a source with no events counts zero
+// rather than one, while the plain scan over source_ingest_events counts
+// rows.
+//
+// processing_status='dead' is written to the left of the correlated
+// subquery on purpose. The right-hand EXISTS is then evaluated only for dead
+// rows -- typically none to a handful -- instead of for every active event,
+// which during the 2026-09-07 backfill would have meant 6,842 freeze lookups
+// on a healthcheck that runs every ten seconds.
+func sourceDeadEventCountColumnsSQL(countExpr, alias string) string {
+	if !sourceEventAliasPattern.MatchString(alias) {
+		panic("source ingest event alias must match ^[a-z][a-z_]*$: " + alias)
+	}
+	return countExpr + " FILTER (WHERE " + alias + ".processing_status='dead')," +
+		countExpr + " FILTER (WHERE " + alias + ".processing_status='dead' AND " +
+		sourceEventContainedByOpenFreezeSQL(alias) + ")"
+}
+
+// sourceDeadEventFlagColumnsSQL renders the same judgment as two boolean
+// projection columns, for the readiness query's `classified` subquery. That
+// subquery is what keeps the whole readiness path on
+// source_ingest_events_readiness_active_idx (its WHERE bounds the rows to the
+// partial index's status set), so the flags are computed inside it and the
+// outer aggregate only FILTERs on the booleans.
+func sourceDeadEventFlagColumnsSQL(alias string) string {
+	if !sourceEventAliasPattern.MatchString(alias) {
+		panic("source ingest event alias must match ^[a-z][a-z_]*$: " + alias)
+	}
+	return alias + ".processing_status='dead' AS is_dead," +
+		alias + ".processing_status='dead' AND " + sourceEventContainedByOpenFreezeSQL(alias) + " AS dead_contained"
+}
 
 // economicRescanActivityWithinWindow reports whether ActiveRescanUpdatedAt
 // proves a genuinely still-progressing scan cycle, per the bounded activity
@@ -1150,6 +1282,15 @@ func economicRescanActivityWithinWindow(activeAt time.Time, policy SourceFreshne
 	}
 	age := policy.Now.Sub(activeAt)
 	return age >= 0 && age <= policy.EconomicRescanActivityMaxAge && !activeAt.After(policy.Now.Add(5*time.Minute))
+}
+
+// EvaluateSourceStreamHealth exposes the stream-health rule to callers
+// outside this package. It exists so cmd/api can test the rule and its own
+// consumer (validateSourceRuntimeReadiness) as one chain: those are two
+// pieces of code, and a test that hand-writes the Reasons it expects proves
+// only that the consumer agrees with the test author.
+func EvaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshnessPolicy) {
+	evaluateSourceStreamHealth(item, policy)
 }
 
 func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshnessPolicy) {
@@ -1187,8 +1328,26 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 	if item.PendingEvents > 0 {
 		item.Reasons = append(item.Reasons, "EVENTS_PENDING")
 	}
-	if item.DeadEvents > 0 {
+	// XM-INV-DEAD-CONTAINMENT: only dead events nobody is answering for make
+	// the stream fatal. Ready's own computation below is deliberately
+	// untouched -- the five-stream gate in application/service.go,
+	// assertSourceFreshTx and ResolveEligibilityFreeze all read
+	// item.Ready directly, so narrowing the reason here is what narrows the
+	// blast radius everywhere without any of those three learning a new
+	// concept.
+	uncontainedDead := item.DeadEvents - item.ContainedDeadEvents
+	if item.ContainedDeadEvents < 0 || item.ContainedDeadEvents > item.DeadEvents {
+		// A report that contradicts itself (a surface that lost the contained
+		// column while another kept it, or a positional Scan that slipped)
+		// must not be able to subtract its way past the gate. Treat every
+		// dead event as uncontained and let the fatal reason stand.
+		uncontainedDead = item.DeadEvents
+	}
+	if uncontainedDead > 0 {
 		item.Reasons = append(item.Reasons, "EVENTS_DEAD")
+	}
+	if item.ContainedDeadEvents > 0 {
+		item.Reasons = append(item.Reasons, eventsDeadContainedReason)
 	}
 	item.Ready = true
 	for _, reason := range item.Reasons {
@@ -1294,23 +1453,31 @@ var sourceReadinessHealthQuery = `
 	WITH active_event_health AS MATERIALIZED (
 		SELECT source_instance_id,stream_id,
 			count(*) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace) AS pending_events,
-			count(*) FILTER (WHERE processing_status='dead') AS dead_events,
+			count(*) FILTER (WHERE is_dead) AS dead_events,
+			count(*) FILTER (WHERE dead_contained) AS dead_events_contained,
 			COALESCE(min(created_at) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace),'epoch'::timestamptz) AS oldest_pending
 		FROM (
-			SELECT source_instance_id,stream_id,processing_status,created_at,
+			SELECT sie.source_instance_id,sie.stream_id,sie.processing_status,sie.created_at,
+				-- XM-INV-DEAD-CONTAINMENT: rendered from the same definition
+				-- the other three health surfaces and the cycle publisher
+				-- use, and computed here (inside the status-bounded
+				-- subquery) so the correlated freeze lookup stays on dead
+				-- rows and the whole query stays on the active partial index.
+				` + sourceDeadEventFlagColumnsSQL("sie") + `,
 				-- COALESCE on both sides: processing_error is NULL for an ordinary
 				-- queued event, and NULL = 'ACCOUNT_LOCK_BUSY' is NULL, not false --
 				-- a bare NOT NULL in the FILTER above would silently drop every
 				-- plain pending event from the count.
-				COALESCE(processing_status='queued' AND COALESCE(processing_error,'')=ANY(` + transientRequeueMarkerSQL + `)
-				 AND updated_at>=now()-interval '` + accountLockBusyReadinessGrace + `',false) AS busy_within_grace
-			FROM source_ingest_events
-			WHERE processing_status IN ('queued','failed','processing','dead')
+				COALESCE(sie.processing_status='queued' AND COALESCE(sie.processing_error,'')=ANY(` + transientRequeueMarkerSQL + `)
+				 AND sie.updated_at>=now()-interval '` + accountLockBusyReadinessGrace + `',false) AS busy_within_grace
+			FROM source_ingest_events sie
+			WHERE sie.processing_status IN ('queued','failed','processing','dead')
 		) classified
 		GROUP BY source_instance_id,stream_id
 	), ingest_health AS (
 		SELECT COALESCE(sum(pending_events),0)::bigint AS pending_events,
 			COALESCE(sum(dead_events),0)::bigint AS dead_events,
+			COALESCE(sum(dead_events_contained),0)::bigint AS dead_events_contained,
 			COALESCE(min(oldest_pending) FILTER (WHERE pending_events>0),'epoch'::timestamptz) AS oldest_pending
 		FROM active_event_health
 	)
@@ -1320,8 +1487,8 @@ var sourceReadinessHealthQuery = `
 		COALESCE(sis.last_accepted_at,'epoch'::timestamptz),
 		COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
 		COALESCE(sew.watermark_at,'epoch'::timestamptz),
-		COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),
-		ingest.pending_events,ingest.dead_events,ingest.oldest_pending,
+		COALESCE(aeh.pending_events,0),COALESCE(aeh.dead_events,0),COALESCE(aeh.dead_events_contained,0),
+		ingest.pending_events,ingest.dead_events,ingest.dead_events_contained,ingest.oldest_pending,
 		COALESCE(sesc.updated_at,'epoch'::timestamptz)
 	FROM source_instances si
 	CROSS JOIN (VALUES ('payments'::text),('identities'::text),('usage'::text),('credits'::text),('balances'::text)) required(stream_id)
@@ -1358,8 +1525,8 @@ func (s *Store) SourceReadinessHealth(ctx context.Context, policy SourceFreshnes
 			&item.SourceEnabled, &item.StreamID, &item.Sequence,
 			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
-			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents,
-			&ingest.Pending, &ingest.Dead, &ingest.OldestPending, &item.ActiveRescanUpdatedAt); err != nil {
+			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.ContainedDeadEvents,
+			&ingest.Pending, &ingest.Dead, &ingest.DeadContained, &ingest.OldestPending, &item.ActiveRescanUpdatedAt); err != nil {
 			return SourceReadinessHealth{}, err
 		}
 		if item.LastAcceptedAt.Equal(time.Unix(0, 0).UTC()) {
@@ -1411,7 +1578,7 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 			COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
 			COALESCE(sew.watermark_at,'epoch'::timestamptz),
 			count(sie.event_id) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),
-			count(sie.event_id) FILTER (WHERE sie.processing_status='dead'),
+			`+sourceDeadEventCountColumnsSQL("count(sie.event_id)", "sie")+`,
 			count(sie.event_id) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity')),
 			COALESCE(max(sesc.updated_at),'epoch'::timestamptz)
 		FROM source_instances si
@@ -1440,8 +1607,8 @@ func (s *Store) SourceHealth(ctx context.Context, policy SourceFreshnessPolicy) 
 			&item.SourceEnabled, &item.StreamID, &item.Sequence,
 			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
-			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies,
-			&item.ActiveRescanUpdatedAt); err != nil {
+			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.ContainedDeadEvents,
+			&item.WaitingDependencies, &item.ActiveRescanUpdatedAt); err != nil {
 			return SourceHealthReport{}, err
 		}
 		if item.LastAcceptedAt.Equal(time.Unix(0, 0).UTC()) {
@@ -1493,7 +1660,7 @@ func assertSourceFreshTx(ctx context.Context, tx pgx.Tx, sourceInstanceID string
 				COALESCE(sis.last_nonempty_batch_at,'epoch'::timestamptz),
 				COALESCE(sew.watermark_at,'epoch'::timestamptz),
 				count(sie.event_id) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),
-				count(sie.event_id) FILTER (WHERE sie.processing_status='dead'),
+				`+sourceDeadEventCountColumnsSQL("count(sie.event_id)", "sie")+`,
 				count(sie.event_id) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity'))
 			FROM source_instances si
 			LEFT JOIN source_ingest_state sis ON sis.source_instance_id=si.id AND sis.stream_id=$2
@@ -1506,7 +1673,8 @@ func assertSourceFreshTx(ctx context.Context, tx pgx.Tx, sourceInstanceID string
 			&item.SourceType, &item.SourceName, &item.SourceEnabled, &item.Sequence,
 			&item.ApprovedRuntimeVersion, &item.CutoverRuntimeVersion, &item.ObservedRuntimeVersion,
 			&item.ObservedAgentVersion, &item.ProjectionStatus, &item.LastAcceptedAt,
-			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents, &item.WaitingDependencies)
+			&item.LastNonemptyBatchAt, &item.EconomicWatermarkAt, &item.PendingEvents, &item.DeadEvents,
+			&item.ContainedDeadEvents, &item.WaitingDependencies)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return domain.ErrNotFound
 		}
