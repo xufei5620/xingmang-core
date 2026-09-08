@@ -553,6 +553,89 @@ func supersedeStaleActiveScanCycleTx(ctx context.Context, tx pgx.Tx, in SourceBa
 
 const sourceEventLease = 10 * time.Minute
 
+// claimBindingSelect is XM-INV-CLAIM-BINDING: the lateral that decides which
+// source_ingest_batches row a claim carries -- and therefore which
+// (event_id, batch_id, scan_cycle_id) triple verifyFactBatchContextTx is
+// later handed.
+//
+// It used to be sie.first_batch_id, unconditionally: the batch an event
+// arrived in, frozen forever. That is wrong once the agent restarts.
+// supersedeStaleActiveScanCycleTx marks the abandoned cycle 'blocked', and
+// any event that had not finished is pinned to a binding the verifier now
+// refuses -- permanently, because first_batch_id never moves. Meanwhile the
+// agent's own rescan re-delivers the identical event (ids are deterministic:
+// agents/sourceagent/batch.go's deterministicUUID over
+// source/entity/external id/operation/payload hash), and CommitSourceBatch
+// writes a fresh mapping row under the new, healthy cycle while deliberately
+// leaving the existing ingest row alone. The valid binding is therefore
+// already on file; nothing was looking at it. Production 2026-09-08: two
+// dead usage events each carried a 'blocked' binding on their first batch and
+// a 'published' one on a later batch.
+//
+// So: prefer the event's newest *currently valid* economic binding -- the
+// agent's latest statement about this event -- and fall back to
+// first_batch_id when there is none.
+//
+// This is not a relaxation of verifyFactBatchContextTx, which is untouched.
+// It hands that function a triple that is *true*: the mapping row is real,
+// written by CommitSourceBatch inside the transaction that verified the
+// batch's hash chain and signing key. The conditions below are exactly the
+// ones the verifier itself applies (schema_version='3.0', mapping
+// payload_hash equal to the event's, cycle status in its accepted set), so
+// the preferred branch can only ever pick a binding the verifier would
+// accept.
+//
+// The fallback is deliberate rather than a strict refusal to claim. An event
+// whose only bindings are unusable keeps today's behavior exactly: it is
+// claimed, the verifier refuses it, and after eight attempts it becomes
+// 'dead' -- which readiness reports as "contains dead events" and
+// invoice-eligibility-repair --kind=ingest-requeue-dead explains per row.
+// Declining to claim it instead would leave it 'queued' forever, counted in
+// SourceIngestHealth.Pending against a created_at hours old, so /readyz would
+// fail with the generic "processing is unhealthy" and no pointer to the
+// event -- a named failure traded for an unnamed one. See the handoff.
+//
+// Side effects of preferring a later batch all point at "more correct": the
+// fact records the source_sequence and scan_ceiling_at of the scan that
+// actually observed it, not of a scan that was abandoned.
+const claimBindingSelect = `
+	JOIN LATERAL (
+		SELECT chosen.sequence,chosen.batch_id,chosen.schema_version,chosen.signing_key_id,
+			chosen.stream_watermark_at,chosen.source_cursor,chosen.scan_ceiling_at,
+			chosen.scan_ceiling_cursor,chosen.scan_cycle_id,chosen.scan_complete
+		FROM (
+			-- Both arms are parenthesized: PostgreSQL rejects a bare
+			-- ORDER BY/LIMIT inside one arm of a UNION.
+			(
+				SELECT b.sequence,b.batch_id,b.schema_version,b.signing_key_id,
+					b.stream_watermark_at,b.source_cursor,b.scan_ceiling_at,
+					b.scan_ceiling_cursor,b.scan_cycle_id,b.scan_complete,1 AS preference
+				FROM source_economic_scan_cycle_events m
+				JOIN source_ingest_batches b ON b.source_instance_id=m.source_instance_id
+					AND b.stream_id=m.stream_id AND b.batch_id=m.batch_id
+				JOIN source_economic_scan_cycles c ON c.source_instance_id=m.source_instance_id
+					AND c.stream_id=m.stream_id AND c.scan_cycle_id=m.scan_cycle_id
+				WHERE m.source_instance_id=sie.source_instance_id AND m.stream_id=sie.stream_id
+					AND m.event_id=sie.event_id AND m.payload_hash=sie.payload_hash
+					AND b.schema_version='3.0'
+					AND c.cycle_status IN ('receiving','processing','published')
+				ORDER BY b.sequence DESC
+				LIMIT 1
+			)
+			UNION ALL
+			(
+				SELECT fb.sequence,fb.batch_id,fb.schema_version,fb.signing_key_id,
+					fb.stream_watermark_at,fb.source_cursor,fb.scan_ceiling_at,
+					fb.scan_ceiling_cursor,fb.scan_cycle_id,fb.scan_complete,2 AS preference
+				FROM source_ingest_batches fb
+				WHERE fb.source_instance_id=sie.source_instance_id AND fb.stream_id=sie.stream_id
+					AND fb.batch_id=sie.first_batch_id
+			)
+		) chosen
+		ORDER BY chosen.preference
+		LIMIT 1
+	) sib ON TRUE`
+
 func (s *Store) ClaimUnprocessedSourceEvents(ctx context.Context, limit int, now time.Time) ([]SourceEventClaim, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 25
@@ -572,9 +655,8 @@ func (s *Store) ClaimUnprocessedSourceEvents(ctx context.Context, limit int, now
 			COALESCE(sib.stream_watermark_at,'epoch'::timestamptz),COALESCE(sib.source_cursor,''),
 			COALESCE(sib.scan_ceiling_at,'epoch'::timestamptz),COALESCE(sib.scan_ceiling_cursor,''),
 			COALESCE(sib.scan_cycle_id::text,''),sib.scan_complete,COALESCE(sie.catchup_key_hmac,'')
-		FROM source_ingest_events sie JOIN source_instances si ON si.id=sie.source_instance_id
-		JOIN source_ingest_batches sib ON sib.source_instance_id=sie.source_instance_id
-			AND sib.stream_id=sie.stream_id AND sib.batch_id=sie.first_batch_id
+		FROM source_ingest_events sie JOIN source_instances si ON si.id=sie.source_instance_id` +
+		claimBindingSelect + `
 		WHERE (
 			(sie.processing_status IN ('queued','failed') AND sie.attempt_count < 8 AND sie.next_attempt_at <= $1)
 			OR (sie.processing_status='waiting_dependency' AND sie.next_attempt_at <= $1)
