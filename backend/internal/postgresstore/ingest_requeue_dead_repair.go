@@ -127,12 +127,14 @@ var ingestReplayableCycleStatuses = map[string]bool{"receiving": true, "processi
 // An event can be mapped to several cycles, and only one of them is the one
 // a replay actually travels through -- see ReplayBinding. That distinction is
 // not cosmetic: on 2026-09-08 a production dry run listed a 'published' cycle
-// beside a 'blocked' one for the same event, and only the blocked one was on
-// the replay path -- the published mapping's batch carried a scan ceiling
-// hours past the event's frozen observed_at, so claimBindingSelect's time
-// predicate (XM-INV-BINDING-SKEW) excludes it and the claim falls back to
-// first_batch_id. Reporting the list without saying which entry governs
-// invites exactly the wrong conclusion.
+// beside a 'blocked' one for the same event, and reading the healthy sibling
+// as the verdict would have been wrong twice over. The blocked one is not the
+// replay path either -- claimBindingSelect ranks the published mapping above
+// it -- but that published mapping's batch carries a scan ceiling hours past
+// the event's frozen observed_at, so on a usage stream it is refused by
+// validateFactMetadata (XM-INV-BINDING-SKEW) rather than by the cycle status
+// an operator would have been reading. Reporting the list without saying which
+// entry governs invites exactly the wrong conclusion.
 type IngestRequeueDeadScanCycle struct {
 	ScanCycleID string
 	CycleStatus string
@@ -467,15 +469,20 @@ func (s *Store) repairIngestRequeueDeadEvent(ctx context.Context, candidate Inge
 //
 //   - ClaimUnprocessedSourceEvents resolves the binding with
 //     claimBindingSelect -- the event's newest economic binding that is still
-//     usable, falling back to sie.first_batch_id when it has none -- and puts
-//     that batch's batch_id, scan_cycle_id, schema_version and scan_ceiling_at
-//     on the claim, alongside the event's own frozen observed_at;
+//     usable, preferring one whose scan ceiling the event's own observation
+//     can carry, and falling back to sie.first_batch_id when it has no valid
+//     binding at all -- and puts that batch's batch_id, scan_cycle_id,
+//     schema_version and scan_ceiling_at on the claim, alongside the event's
+//     own frozen observed_at;
 //   - the application layer passes BatchID/ScanCycleID straight through to
 //     ObserveUsageEvent/ObserveBalanceCheckpoint/..., with the batch's
 //     scan_ceiling_at as the fact's StreamWatermarkAt;
 //   - validateFactMetadata (consumption.go) runs first and refuses the fact
 //     outright when that watermark runs more than factClockSkewTolerance past
-//     the event's observed_at -- before the verifier is reached at all;
+//     the event's observed_at -- before the verifier is reached at all. On
+//     'usage', 'credits' and 'balances' only: 'payments' is written by
+//     ObserveFundingLot, which applies no clock rule to a fact
+//     (factClockSkewStreams);
 //   - verifyFactBatchContextTx then looks the mapping up by the exact
 //     (event_id, batch_id, scan_cycle_id) triple, requires the batch to be
 //     schema_version='3.0', requires m.payload_hash to equal the event's own
@@ -546,12 +553,23 @@ func ingestRequeueDeadReplayBindingTx(ctx context.Context, tx pgx.Tx, row *Inges
 		row.ReplayBlocked = true
 		row.ReplayBlockedReason = "replay scan cycle " + row.ReplayScanCycleID + " is '" + *cycleStatus +
 			"'; verifyFactBatchContextTx accepts only receiving/processing/published, so every attempt would be refused"
+	case !factClockSkewStreams[row.StreamID]:
+		// XM-INV-BINDING-SKEW: 'payments' stops here. ObserveFundingLot never
+		// calls validateFactMetadata -- it verifies the batch context and the
+		// trust anchors and nothing about the fact's clock -- so the two cases
+		// below would predict a refusal that stream cannot produce. Naming a
+		// function that is not on the path would be worse than saying nothing:
+		// an operator would read a falsifiable reason, and
+		// ingest-acknowledge-unreplayable, which re-derives its verdict here,
+		// would let them write off a payment or refund the runtime would have
+		// accepted -- a loss in the over-invoicing direction. The set is
+		// discovered, not asserted; see factClockSkewStreams.
 	case replayCeilingAt == nil:
 		row.ReplayBlocked = true
 		row.ReplayBlockedReason = "replay batch " + batchID + " is schema_version='3.0' but carries no scan_ceiling_at; " +
 			"the claim would hand the fact 'epoch' as its stream_watermark_at and validateFactMetadata would reject it " +
 			"with \"" + factMetadataTimeInvalidMessage + "\", so every attempt would be refused"
-	case replayCeilingAt.After(observedAt.Add(factClockSkewTolerance)):
+	case factWatermarkOutsideClockSkew(observedAt, *replayCeilingAt):
 		// XM-INV-BINDING-SKEW, the case that is not about the verifier.
 		// Everything above predicts verifyFactBatchContextTx; this one
 		// predicts validateFactMetadata, which runs before it and, on failure,
@@ -562,19 +580,28 @@ func ingestRequeueDeadReplayBindingTx(ctx context.Context, tx pgx.Tx, row *Inges
 		// re-derives its verdict from this same function -- then refused to
 		// write the events off. Two tools, each pointing at the other.
 		//
-		// After claimBindingSelect's own time predicate, arm 1 can never
-		// produce a binding this case would catch (the predicate is that same
-		// comparison), so it can only ever fire on the first_batch_id
-		// fallback. Today's agent makes even that unreachable: every v3
-		// connector stamps a record's observed_at at page-emission time while
-		// the batch's scan_ceiling_at is the cycle horizon fixed at cycle
-		// start, so ceiling <= observed on a first delivery. Nothing in this
-		// system enforces that -- sourceingest/receiver.go bounds observed_at,
-		// source_captured_at and scan_ceiling_at only from above and relates
-		// none of them to each other, and the batch-level CHECK ties the
-		// ceiling to source_captured_at rather than to any record's
-		// observation. The case is here so this tool's verdict rests on this
-		// code instead of on an agent's current habit.
+		// The comparison is factWatermarkOutsideClockSkew itself, the same
+		// function validateFactMetadata calls, rather than a restatement of
+		// it. That is not tidiness: while the two were separate expressions,
+		// widening this one alone by ninety seconds, or turning its `>` into
+		// `>=`, left every test in this package green -- and either drift
+		// recreates the deadlock this case exists to end.
+		//
+		// Reachable on either claim preference. claimBindingSelect ranks a
+		// binding this case would catch below one it would not, so it is
+		// chosen only when the event has no in-tolerance valid binding at all
+		// -- the 2026-09-07 shape (first batch in a blocked cycle, the only
+		// re-delivery two hours late) among them -- or through the
+		// first_batch_id fallback, where today's agent makes it unlikely:
+		// every v3 connector stamps a record's observed_at at page-emission
+		// time while the batch's scan_ceiling_at is the cycle horizon fixed at
+		// cycle start, so ceiling <= observed on a first delivery. Nothing in
+		// this system enforces that -- sourceingest/receiver.go bounds
+		// observed_at, source_captured_at and scan_ceiling_at only from above
+		// and relates none of them to each other, and the batch-level CHECK
+		// ties the ceiling to source_captured_at rather than to any record's
+		// observation -- so the case stands on this code rather than on an
+		// agent's current habit.
 		row.ReplayBlocked = true
 		row.ReplayBlockedReason = "replay batch " + batchID + " has scan_ceiling_at " +
 			replayCeilingAt.UTC().Format(time.RFC3339Nano) + ", more than " + factClockSkewTolerance.String() +

@@ -1012,12 +1012,14 @@ func TestIngestRequeueDeadApplyRequiresOperatorAndValidFilters(t *testing.T) {
 // ingest-acknowledge-unreplayable refused to write it off because a "usable"
 // binding existed. Six customers could not invoice for 25 hours.
 //
-// The verdict here comes from the pre-existing blocked-cycle case, not from
-// the new clock-skew one: with the claim's time predicate in place the late
-// binding is excluded, the claim falls back to first_batch_id, and that
-// binding's cycle is 'blocked'. The new case is reached only by the shape in
-// TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance below,
-// which is why both tests exist.
+// The verdict comes from the new clock-skew case. The claim ranks that late
+// binding below an in-tolerance one but does not exclude it, and here there is
+// no in-tolerance one -- the first batch's cycle is 'blocked' -- so the late
+// binding is still what a replay would carry, and the honest reason is the
+// rule that would actually refuse it rather than the blocked cycle of a batch
+// no replay would use. Ranking rather than excluding is what keeps
+// 'payments', whose writer applies no fact clock rule, on the binding RC104
+// gives it: see TestIngestRequeueDeadKeepsAPaymentsRescueTheRuntimeAccepts.
 // TestIngestRequeueDeadRequeuesAnEventRescuedByALaterValidBinding is this
 // test's control arm: its successor ceiling is one minute past the
 // observation, well inside the tolerance, and it must stay green -- so the
@@ -1070,25 +1072,47 @@ func TestIngestRequeueDeadBlocksAnEventWhoseOnlyLaterBindingIsTooLate(t *testing
 	if dryRun.TotalBlockedSkipped != 1 || dryRun.TotalRequeued != 0 {
 		t.Fatalf("totals blocked=%d requeued=%d, want 1/0", dryRun.TotalBlockedSkipped, dryRun.TotalRequeued)
 	}
-	if found.ReplayBatchID != firstBatchID || found.ReplayScanCycleID != blockedCycleID ||
-		found.ReplayCycleStatus != "blocked" {
-		t.Fatalf("replay binding=%s/%s/%s, want the first batch %s in the blocked cycle %s; the late successor "+
-			"batch %s must not be selected", found.ReplayBatchID, found.ReplayScanCycleID, found.ReplayCycleStatus,
-			firstBatchID, blockedCycleID, successorBatchID)
+	if found.ReplayBatchID != successorBatchID || found.ReplayScanCycleID != successorCycleID ||
+		found.ReplayCycleStatus != "published" {
+		t.Fatalf("replay binding=%s/%s/%s, want the late successor batch %s in the published cycle %s; the first "+
+			"batch %s sits in the blocked cycle %s and is only the fallback when no valid binding exists at all",
+			found.ReplayBatchID, found.ReplayScanCycleID, found.ReplayCycleStatus,
+			successorBatchID, successorCycleID, firstBatchID, blockedCycleID)
 	}
-	wantReason := "replay scan cycle " + blockedCycleID + " is 'blocked'; verifyFactBatchContextTx accepts only " +
-		"receiving/processing/published, so every attempt would be refused"
+	// The reason names the rule that would actually refuse this replay. The
+	// blocked first batch is real but is not what a replay would carry, so
+	// reporting it would send an operator to look at the wrong cycle.
+	successorCeiling := batchCeilingForTest(t, fixture, "usage", successorBatchID)
+	wantReason := "replay batch " + successorBatchID + " has scan_ceiling_at " +
+		successorCeiling.UTC().Format(time.RFC3339Nano) + ", more than " + factClockSkewTolerance.String() +
+		" after the event's observed_at " + observed.UTC().Format(time.RFC3339Nano) +
+		"; validateFactMetadata would reject the fact with \"" + factMetadataTimeInvalidMessage +
+		"\" before verifyFactBatchContextTx is reached, so every attempt would be refused"
 	if found.ReplayBlockedReason != wantReason {
-		t.Fatalf("reason=%q, want %q: this shape is caught by the blocked-cycle case, and a blocked cycle must "+
-			"keep its own reason rather than being reported as clock skew", found.ReplayBlockedReason, wantReason)
+		t.Fatalf("reason=%q,\nwant %q", found.ReplayBlockedReason, wantReason)
 	}
-	// Both mappings are still reported as evidence, and exactly the blocked
-	// one is marked as the binding that governs.
+	// The prediction is true, and it is attributable: the fact validator
+	// really does refuse this pair with that exact message, while the
+	// untouched verifier would have accepted the very same binding.
+	if err = validateFactMetadata(fixture.sourceID, "dead-requeue", eventID, found.PayloadHash,
+		"usage:1", testHash("dead-requeue-manifest"), testHash("dead-requeue-config"),
+		"SUB2_BALANCE_1E8", observed.Add(-time.Hour), observed, successorCeiling, 2); err == nil ||
+		err.Error() != factMetadataTimeInvalidMessage {
+		t.Fatalf("validateFactMetadata(observed=%s, watermark=%s) returned %v, want %q",
+			observed, successorCeiling, err, factMetadataTimeInvalidMessage)
+	}
+	if err = fixture.store.ValidateEconomicFactContext(fixture.ctx, fixture.sourceID, "usage",
+		eventID, successorBatchID, successorCycleID, found.PayloadHash, successorCeiling); err != nil {
+		t.Fatalf("verifyFactBatchContextTx refuses the late binding on its own terms (%v); this shape no longer "+
+			"isolates the clock rule", err)
+	}
+	// Both mappings are still reported as evidence, and exactly the one a
+	// replay would carry is marked as the binding that governs.
 	if len(found.ScanCycles) != 2 {
 		t.Fatalf("scan cycles=%+v, want both mappings reported", found.ScanCycles)
 	}
 	for _, cycle := range found.ScanCycles {
-		if wantBinding := cycle.ScanCycleID == blockedCycleID; cycle.ReplayBinding != wantBinding {
+		if wantBinding := cycle.ScanCycleID == successorCycleID; cycle.ReplayBinding != wantBinding {
 			t.Fatalf("cycle %s ReplayBinding=%t, want %t", cycle.ScanCycleID, cycle.ReplayBinding, wantBinding)
 		}
 	}
@@ -1118,18 +1142,21 @@ func TestIngestRequeueDeadBlocksAnEventWhoseOnlyLaterBindingIsTooLate(t *testing
 }
 
 // TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance is
-// XM-INV-BINDING-SKEW T4b, and the only shape that reaches the repair's new
-// clock-skew case. Once claimBindingSelect filters arm 1 by time, arm 1 can
-// never hand this function a skewed binding -- the filter is that same
-// comparison -- so the case can only fire on the first_batch_id fallback, with
-// that batch's own cycle in an otherwise acceptable status. T4a above does not
-// reach it (its fallback lands in a 'blocked' cycle and the pre-existing case
-// answers first), so without this test the new branch would be dead code whose
-// deletion nothing notices.
+// XM-INV-BINDING-SKEW T4b: the repair's clock-skew case reached through the
+// event's own first and only binding, where no ranking took place at all. T4a
+// above reaches the same case through a late re-delivery; this one proves the
+// verdict does not depend on there having been a choice, and it is the row
+// that stays meaningful if the ranking ever changes again.
 //
-// The two rows are a discriminating pair: identical but for the gap between
+// The four rows are a discriminating set: identical but for the gap between
 // the event's observed_at and its own batch's scan ceiling. The +1m row must
-// stay replayable, or the case is not a clock rule but a blanket refusal.
+// stay replayable, or the case is not a clock rule but a blanket refusal. The
+// two boundary rows are computed from factClockSkewTolerance rather than
+// written out, and they straddle it by one microsecond -- the smallest gap
+// PostgreSQL's timestamptz can represent, so neither row can be rounded onto
+// the other's side. They are what makes a tool that widened its own tolerance,
+// or turned its `>` into a `>=`, fail here; the +1m/+2h pair alone is far too
+// far from the boundary to notice either.
 //
 // Nothing in the schema forbids the +2h row: the only batch-level time rule is
 // scan_ceiling_at <= source_captured_at + 5 minutes, and the fixture moves
@@ -1145,6 +1172,8 @@ func TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance(t *test
 		wantBlocked   bool
 	}{
 		{"a first binding inside the tolerance stays replayable", time.Minute, false},
+		{"a first binding exactly one tolerance ahead is still carried", factClockSkewTolerance, false},
+		{"one microsecond further is not", factClockSkewTolerance + time.Microsecond, true},
 		{"a first binding beyond the tolerance does not", 2 * time.Hour, true},
 	} {
 		tc := tc
@@ -1278,5 +1307,121 @@ func TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance(t *test
 				t.Fatalf("forced result=%+v, want requeued but still flagged", forced.Events)
 			}
 		})
+	}
+}
+
+// TestIngestRequeueDeadKeepsAPaymentsRescueTheRuntimeAccepts is the negative
+// half of XM-INV-BINDING-SKEW, and the reason the claim ranks bindings by the
+// clock instead of filtering on it.
+//
+// The shape is T4a's exactly -- first batch superseded to 'blocked', the only
+// re-delivery two hours late in a cycle that published -- moved to the
+// 'payments' stream. The difference is what the runtime does with it.
+// ObserveFundingLot applies no clock rule to a fact at all
+// (factClockSkewStreams): it verifies the batch context and the trust anchors
+// and nothing about the watermark against the observation. So this binding is
+// one the runtime really would accept, RC104 really does rescue this event
+// today, and both repair tools have to keep saying so.
+//
+// Had the clock become a filter, the claim would have dropped this event onto
+// its 'blocked' first batch, ingest-requeue-dead would have reported
+// ReplayBlocked=true for a reason payments does not have, and
+// ingest-acknowledge-unreplayable would have flipped from refusing the
+// write-off to allowing it. An operator following the dry run would then
+// permanently discard a payment or refund the system could still have
+// applied -- and a lost refund over-states what the customer paid, which is
+// the over-invoicing direction. That is the 2026-09-07 failure re-run on
+// another stream, so it gets a test rather than a line in a commit message.
+func TestIngestRequeueDeadKeepsAPaymentsRescueTheRuntimeAccepts(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "payments")
+	const eventID = "88000000-0000-4000-8000-0000000000f1"
+	const blockedCycleID = "89000000-0000-4000-8000-0000000000f1"
+	const successorCycleID = "89000000-0000-4000-8000-0000000000f2"
+	observed := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	event := newDeadIngestEvent(eventID, "payment_order")
+	event.ObservedAt = observed
+
+	fixture.chain.commit(t, fixture.store, fixture.ctx, fixture.sourceID, "payments",
+		blockedCycleID, observed, []SourceBatchEvent{event})
+	firstBatchID := fixture.batchIDForSequence(t, "payments", 1)
+	fixture.killEvent(t, "payments", eventID, 20*time.Hour)
+	fixture.freezeOverEvent(t, eventID, "payment_order")
+	fixture.commitSupersedingCycleAt(t, "payments", successorCycleID,
+		observed.Add(2*time.Hour), []SourceBatchEvent{event})
+	successorBatchID := fixture.batchIDForSequence(t, "payments", 2)
+
+	if status := fixture.cycleStatus(t, "payments", blockedCycleID); status != "blocked" {
+		t.Fatalf("first cycle status=%q, want blocked", status)
+	}
+	if status := fixture.cycleStatus(t, "payments", successorCycleID); status != "published" {
+		t.Fatalf("successor cycle status=%q, want published", status)
+	}
+	before := fixture.readIngestEvent(t, "payments", eventID)
+
+	dryRun, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{EventID: eventID},
+		AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dryRun.Events) != 1 {
+		t.Fatalf("events=%+v, want one", dryRun.Events)
+	}
+	found := dryRun.Events[0]
+	if found.ReplayBatchID != successorBatchID || found.ReplayScanCycleID != successorCycleID ||
+		found.ReplayCycleStatus != "published" {
+		t.Fatalf("replay binding=%s/%s/%s, want the late successor %s/%s/published; a payments event dropped "+
+			"back onto its blocked first batch %s is RC104's rescue undone by a rule this stream does not have",
+			found.ReplayBatchID, found.ReplayScanCycleID, found.ReplayCycleStatus,
+			successorBatchID, successorCycleID, firstBatchID)
+	}
+	if found.ReplayBlocked || !found.Requeued {
+		t.Fatalf("ReplayBlocked=%t Requeued=%t reason=%q, want false/true: the payments writer applies no clock "+
+			"rule, so this replay is one the runtime would accept", found.ReplayBlocked, found.Requeued,
+			found.ReplayBlockedReason)
+	}
+	if dryRun.TotalRequeued != 1 || dryRun.TotalBlockedSkipped != 0 {
+		t.Fatalf("totals requeued=%d blocked=%d, want 1/0", dryRun.TotalRequeued, dryRun.TotalBlockedSkipped)
+	}
+
+	// The tool's verdict is true, checked against the runtime rather than
+	// asserted: this is the whole fact-context check ObserveFundingLot runs
+	// for a payments fact, and it accepts the binding.
+	successorCeiling := batchCeilingForTest(t, fixture, "payments", successorBatchID)
+	if err = fixture.store.ValidateEconomicFactContext(fixture.ctx, fixture.sourceID, "payments",
+		eventID, successorBatchID, successorCycleID, found.PayloadHash, successorCeiling); err != nil {
+		t.Fatalf("the runtime's own fact-context check refuses the binding the tool called replayable: %v", err)
+	}
+	// ...and the gap really is one that would have blocked a usage event, so
+	// this test is about the stream and not about a fixture that happens to
+	// sit inside the tolerance.
+	if !factWatermarkOutsideClockSkew(observed, successorCeiling) {
+		t.Fatalf("successor ceiling %s is within the tolerance of the observation %s; this fixture does not "+
+			"reproduce the shape that strands a usage event", successorCeiling, observed)
+	}
+
+	// The write-off tool must keep refusing: a replayable event has a repair,
+	// not a write-off.
+	if _, err = fixture.store.AcknowledgeUnreplayableIngestEvent(fixture.ctx,
+		IngestAcknowledgeUnreplayableInput{EventID: eventID},
+		AuditActor{Type: "admin", ID: deadIngestOperator}); err == nil ||
+		!strings.Contains(err.Error(), "ingest-requeue-dead") {
+		t.Fatalf("acknowledge error=%v, want the usable-replay-binding guard; letting this through discards a "+
+			"payment the runtime could still apply", err)
+	}
+	if after := fixture.readIngestEvent(t, "payments", eventID); after != before {
+		t.Fatal("a dry run modified the event")
+	}
+
+	// The other half of "the rule is reached": the real claim, not just the
+	// tool's copy of its SQL, hands the late binding over.
+	fixture.reviveForClaim(t, "payments", eventID, 3)
+	claim := fixture.claimFor(t, eventID)
+	if claim.BatchID != successorBatchID || claim.ScanCycleID != successorCycleID {
+		t.Fatalf("claim binding=%s/%s, want the late successor %s/%s", claim.BatchID, claim.ScanCycleID,
+			successorBatchID, successorCycleID)
+	}
+	if !claim.ObservedAt.Equal(observed) {
+		t.Fatalf("claim.ObservedAt=%s, want the frozen first observation %s", claim.ObservedAt, observed)
 	}
 }

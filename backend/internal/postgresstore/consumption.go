@@ -322,8 +322,8 @@ func validHash(value string) bool { return hexHashPattern.MatchString(strings.Tr
 // separately: validateFactMetadata below; the three fact tables' DDL CHECKs
 // (migrations/0009_consumption_eligibility_ledger.sql -- source_usage_events,
 // source_credit_events, balance_reconciliation_checkpoints); and, from this
-// slice on, claimBindingSelect (source_sync.go), which must not hand the claim
-// a binding this rule will then refuse. The Go rule and the SQL fragment are
+// slice on, claimBindingSelect (source_sync.go), which ranks a binding this
+// rule would refuse below one it would carry. The Go rule and the SQL fragment are
 // both rendered from this constant. The DDL copies cannot be -- a migration is
 // a frozen file -- so TestFactClockSkewToleranceMatchesEveryFactTableCheckConstraint
 // reads them back with pg_get_constraintdef and fails if they drift. Same
@@ -372,6 +372,53 @@ func renderFactClockSkewToleranceSQL(tolerance time.Duration) string {
 // them.
 const factMetadataTimeInvalidMessage = "source fact event time/watermark is invalid"
 
+// factWatermarkOutsideClockSkew is the comparison itself, and the only place
+// it is written in Go. factClockSkewTolerance pins the *value*; this pins the
+// *shape* -- which side the tolerance is added to, and that a watermark
+// exactly one tolerance ahead is still carried while one microsecond further
+// is not.
+//
+// Two callers, and they must agree or the 2026-09-07 deadlock returns:
+// validateFactMetadata below, which is the runtime's verdict, and
+// ingestRequeueDeadReplayBindingTx (ingest_requeue_dead_repair.go), whose
+// entire contract is to predict that verdict before an operator spends a
+// retry ladder finding it out. When those two were separate expressions,
+// widening only the tool's by ninety seconds -- or flipping its `>` to `>=`
+// -- left every test in this package green: the tool would call an event
+// replayable that the runtime refuses, or unreplayable one it would accept,
+// and in the second direction an operator writes off a recoverable fact.
+// Sharing one function is what makes "the tool's rule is the runtime's rule"
+// structural instead of a claim in a comment. The third statement of this
+// rule is the SQL in claimBindingSelect, which cannot call a Go function; it
+// embeds factClockSkewToleranceSQL and its direction is pinned by
+// TestFactClockSkewToleranceIsTheOnlyIntervalLiteralOnTheClaimPath.
+func factWatermarkOutsideClockSkew(observedAt, watermarkAt time.Time) bool {
+	return watermarkAt.After(observedAt.Add(factClockSkewTolerance))
+}
+
+// factClockSkewStreams names the economic streams whose fact writer actually
+// applies factWatermarkOutsideClockSkew, and it is deliberately not all four.
+// ObserveUsageEvent, ObserveCreditEvent and ObserveBalanceCheckpoint each open
+// with validateFactMetadata; ObserveFundingLot ('payments') does not and never
+// has -- it verifies the batch context and the trust anchors and nothing about
+// the fact's clock.
+//
+// This set exists for one caller: the repair tool's clock-skew verdict, which
+// quotes validateFactMetadata by name. Told about a payments event, that
+// verdict would be a falsifiable lie -- the named function is not on that
+// stream's path -- and an operator acting on it would write off a refund the
+// runtime would have accepted, which over-states what the customer paid and
+// over-invoices. The claim path needs no such set: XM-INV-BINDING-SKEW makes
+// the clock a *preference* between bindings rather than a filter, so a stream
+// with no clock rule keeps whatever binding it would have had.
+//
+// Hand-listed sets rot. TestFactClockSkewStreamsMatchesTheWritersThatApplyIt
+// discovers the truth instead of restating it: for every economic stream it
+// calls that stream's real writer with a watermark past the tolerance and
+// reads back whether the rule fired, so adding the rule to payments -- or
+// dropping it from credits -- fails here until this map is corrected.
+var factClockSkewStreams = map[string]bool{"usage": true, "credits": true, "balances": true}
+
 func validateFactMetadata(sourceID, externalUserID, eventID, revision, cursor, manifestHash, configurationHash, unitCode string, eventAt, observedAt, watermarkAt time.Time, sequence int64) error {
 	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(externalUserID) == "" ||
 		strings.TrimSpace(eventID) == "" || len(eventID) > 256 || sequence <= 0 ||
@@ -380,7 +427,7 @@ func validateFactMetadata(sourceID, externalUserID, eventID, revision, cursor, m
 		return errors.New("complete v3 source fact metadata is required")
 	}
 	if eventAt.IsZero() || observedAt.IsZero() || watermarkAt.IsZero() || eventAt.After(watermarkAt) ||
-		watermarkAt.After(observedAt.Add(factClockSkewTolerance)) {
+		factWatermarkOutsideClockSkew(observedAt, watermarkAt) {
 		return errors.New(factMetadataTimeInvalidMessage)
 	}
 	return nil

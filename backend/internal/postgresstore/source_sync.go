@@ -609,18 +609,32 @@ const sourceEventLease = 10 * time.Minute
 // event's, cycle status in its accepted set), so the preferred branch can
 // only ever pick a binding the verifier would accept.
 //
-// The fourth condition -- factClockSkewTolerance on b.scan_ceiling_at against
-// sie.observed_at -- is deliberately NOT the verifier's. It is
-// validateFactMetadata's (consumption.go), which runs *earlier* than the
-// verifier and refuses the fact outright, so a binding that fails it never
-// reaches verifyFactBatchContextTx at all. Without it the preference above is
-// a trap: an event parked for hours and then woken picks a re-delivery whose
-// ceiling its own frozen observed_at can never carry, and burns all eight
-// attempts on a rule the verifier is never reached to apply. Production
-// 2026-09-07: a customer binding woke usage events first observed at
-// 07:08:33; the newest binding's ceiling was 09:28:14, two hours fifteen
-// later, and every attempt returned "source fact event time/watermark is
-// invalid" until the events were dead and the whole source latched.
+// XM-INV-BINDING-SKEW adds a rank on top of that, not a fourth condition.
+// factClockSkewTolerance on b.scan_ceiling_at against sie.observed_at is
+// deliberately NOT the verifier's rule: it is validateFactMetadata's
+// (consumption.go), which runs *earlier* than the verifier and refuses the
+// fact outright, so a binding that fails it never reaches
+// verifyFactBatchContextTx at all. Without it "newest valid" is a trap: an
+// event parked for hours and then woken picks a re-delivery whose ceiling its
+// own frozen observed_at can never carry, and burns all eight attempts on a
+// rule the verifier is never reached to apply. Production 2026-09-07: a
+// customer binding woke usage events first observed at 07:08:33; the newest
+// binding's ceiling was 09:28:14, two hours fifteen later, and every attempt
+// returned "source fact event time/watermark is invalid" until the events
+// were dead and the whole source latched.
+//
+// It is a rank rather than a filter because this lateral serves all four
+// economic streams and only three of them have that rule -- ObserveFundingLot
+// ('payments') applies no clock rule to a fact at all (factClockSkewStreams,
+// consumption.go). As a filter it would have excluded a payments binding for
+// a reason payments does not have, dropping the event back to a 'blocked'
+// first batch that the verifier then refuses: a fact RC104 rescues today,
+// killed by a rule that does not apply to it, on the stream where the refund
+// half means the loss over-states what a customer paid. As a rank, a stream
+// with no clock rule simply keeps the binding it would have had, because
+// preference 2 is exactly RC104's arm. Ranking rather than naming the streams
+// in SQL also keeps the "which streams have the rule" fact in one place
+// instead of two.
 //
 // The fallback is deliberate rather than a strict refusal to claim. An event
 // whose only bindings are unusable keeps today's behavior exactly: it is
@@ -635,7 +649,15 @@ const sourceEventLease = 10 * time.Minute
 // Side effects of preferring a later batch all point at "more correct": the
 // fact records the source_sequence and scan_ceiling_at of the scan that
 // actually observed it, not of a scan that was abandoned.
-// Not a const: the time predicate below is rendered from
+//
+// The one behavior the rank changes for a stream without the clock rule: when
+// an event has both an in-tolerance and a newer out-of-tolerance valid
+// binding, the in-tolerance one now wins. Both are bindings the verifier
+// accepts and the fact lands either way; the fact then records the scan whose
+// ceiling its own observation can carry, which is the more defensible of the
+// two readings.
+//
+// Not a const: the time comparison below is rendered from
 // factClockSkewToleranceSQL so the five minutes stays stated in exactly one
 // place. Both callers already concatenate this fragment at runtime
 // (ClaimUnprocessedSourceEvents below and ingestRequeueDeadReplayBindingTx in
@@ -651,7 +673,36 @@ var claimBindingSelect = `
 			(
 				SELECT b.sequence,b.batch_id,b.schema_version,b.signing_key_id,
 					b.stream_watermark_at,b.source_cursor,b.scan_ceiling_at,
-					b.scan_ceiling_cursor,b.scan_cycle_id,b.scan_complete,1 AS preference
+					b.scan_ceiling_cursor,b.scan_cycle_id,b.scan_complete,
+					-- XM-INV-BINDING-SKEW: rank a binding whose ceiling this
+					-- event's own observation can carry above one it cannot.
+					-- The claim hands scan_ceiling_at over as the fact's
+					-- stream_watermark_at (application/source_processor.go:
+					-- every Observe* call site passes
+					-- StreamWatermarkAt: claim.ScanCeilingAt) against the
+					-- event's observed_at, which source_ingest_events freezes
+					-- at first delivery and never rewrites on a re-delivery.
+					-- validateFactMetadata refuses that pair past
+					-- factClockSkewTolerance, before verifyFactBatchContextTx
+					-- is ever reached, so a preference-2 binding is one the
+					-- runtime would spend all eight attempts refusing --
+					-- on the three streams that have that rule. Production
+					-- 2026-09-07: observed 07:08:33, newest binding's ceiling
+					-- 09:28:14, eight refusals of "source fact event
+					-- time/watermark is invalid".
+					--
+					-- Ranked rather than filtered so 'payments', whose writer
+					-- applies no clock rule (factClockSkewStreams,
+					-- consumption.go), keeps the binding RC104 gives it
+					-- instead of being dropped onto a blocked first batch by
+					-- a rule it does not have.
+					--
+					-- If XM-INV-OBSERVED-AT-PER-BINDING (L2) lands, this
+					-- comparison and the outer query must move to
+					-- COALESCE(m.observed_at,sie.observed_at) together: left
+					-- as is, it would rank down the very re-delivery L2 exists
+					-- to make usable.
+					CASE WHEN b.scan_ceiling_at<=sie.observed_at+` + factClockSkewToleranceSQL + ` THEN 1 ELSE 2 END AS preference
 				FROM source_economic_scan_cycle_events m
 				JOIN source_ingest_batches b ON b.source_instance_id=m.source_instance_id
 					AND b.stream_id=m.stream_id AND b.batch_id=m.batch_id
@@ -661,36 +712,14 @@ var claimBindingSelect = `
 					AND m.event_id=sie.event_id AND m.payload_hash=sie.payload_hash
 					AND b.schema_version='3.0'
 					AND c.cycle_status IN ('receiving','processing','published')
-					-- XM-INV-BINDING-SKEW: and a batch whose ceiling this
-					-- event's own observation can actually carry. The claim
-					-- hands scan_ceiling_at over as the fact's
-					-- stream_watermark_at (application/source_processor.go:
-					-- every Observe* call site passes
-					-- StreamWatermarkAt: claim.ScanCeilingAt) against the
-					-- event's observed_at, which source_ingest_events freezes
-					-- at first delivery and never rewrites on a re-delivery.
-					-- validateFactMetadata refuses that pair past
-					-- factClockSkewTolerance, before verifyFactBatchContextTx
-					-- is ever reached, so a binding this predicate excludes is
-					-- one the runtime would spend all eight attempts refusing.
-					-- Production 2026-09-07: observed 07:08:33, newest
-					-- binding's ceiling 09:28:14, eight refusals of "source
-					-- fact event time/watermark is invalid".
-					--
-					-- If XM-INV-OBSERVED-AT-PER-BINDING (L2) lands, this
-					-- predicate and the outer query must move to
-					-- COALESCE(m.observed_at,sie.observed_at) together: left
-					-- as is, it would exclude the very re-delivery L2 exists
-					-- to make usable.
-					AND b.scan_ceiling_at<=sie.observed_at+` + factClockSkewToleranceSQL + `
-				ORDER BY b.sequence DESC
+				ORDER BY preference,b.sequence DESC
 				LIMIT 1
 			)
 			UNION ALL
 			(
 				SELECT fb.sequence,fb.batch_id,fb.schema_version,fb.signing_key_id,
 					fb.stream_watermark_at,fb.source_cursor,fb.scan_ceiling_at,
-					fb.scan_ceiling_cursor,fb.scan_cycle_id,fb.scan_complete,2 AS preference
+					fb.scan_ceiling_cursor,fb.scan_cycle_id,fb.scan_complete,3 AS preference
 				FROM source_ingest_batches fb
 				WHERE fb.source_instance_id=sie.source_instance_id AND fb.stream_id=sie.stream_id
 					AND fb.batch_id=sie.first_batch_id
@@ -719,8 +748,8 @@ func (s *Store) ClaimUnprocessedSourceEvents(ctx context.Context, limit int, now
 			COALESCE(sib.stream_watermark_at,'epoch'::timestamptz),COALESCE(sib.source_cursor,''),
 			COALESCE(sib.scan_ceiling_at,'epoch'::timestamptz),COALESCE(sib.scan_ceiling_cursor,''),
 			COALESCE(sib.scan_cycle_id::text,''),sib.scan_complete,COALESCE(sie.catchup_key_hmac,'')
-		FROM source_ingest_events sie JOIN source_instances si ON si.id=sie.source_instance_id` +
-		claimBindingSelect + `
+		FROM source_ingest_events sie JOIN source_instances si ON si.id=sie.source_instance_id`+
+		claimBindingSelect+`
 		WHERE (
 			(sie.processing_status IN ('queued','failed') AND sie.attempt_count < $3 AND sie.next_attempt_at <= $1)
 			OR (sie.processing_status='waiting_dependency' AND sie.next_attempt_at <= $1)

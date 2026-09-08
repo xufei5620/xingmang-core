@@ -538,14 +538,35 @@ clears the lease and the stale `processing_error`, and writes one
 per event, so one row's conflict never blocks another row in the same run.
 
 **It refuses, by default, to requeue an event whose replay cannot succeed.**
-A replay is verified by `verifyFactBatchContextTx` against one exact
-`(event_id, batch_id, scan_cycle_id)` triple: the one reached through the
-event's own `first_batch_id`, because that is the batch
-`ClaimUnprocessedSourceEvents` joins. The tool resolves that same triple, calls
-it the **replay binding**, and prints it on its own line. If that cycle is not
-`receiving`/`processing`/`published`, or the binding is missing, the fact is
-refused on arrival and the requeue can only burn eight attempts and die again
--- so the event is listed as `REQUEUED false (replay blocked)` with a
+A replay is verified against one exact `(event_id, batch_id, scan_cycle_id)`
+triple -- the one `ClaimUnprocessedSourceEvents` would resolve. Since
+XM-INV-CLAIM-BINDING that is no longer `first_batch_id`: the claim takes the
+event's newest economic binding whose cycle is
+`receiving`/`processing`/`published`, and since XM-INV-BINDING-SKEW it prefers,
+among those, one whose batch `scan_ceiling_at` is within five minutes
+(`factClockSkewTolerance`) of the event's own `observed_at`. Only when the
+event has no valid binding at all does it fall back to `first_batch_id`. The
+tool resolves that same triple by embedding the claim's own SQL, calls it the
+**replay binding**, and prints it on its own line.
+
+Four things make a replay hopeless, and the tool reports each with the name of
+the function that would refuse it:
+
+- the binding carries no scan-cycle mapping (`verifyFactBatchContextTx`,
+  `ErrForbidden`);
+- its `payload_hash` does not match the event's (`verifyFactBatchContextTx`,
+  `ErrConflict`);
+- its cycle is not `receiving`/`processing`/`published` -- usually `blocked`
+  (`verifyFactBatchContextTx`);
+- its batch `scan_ceiling_at` runs more than five minutes past the event's
+  `observed_at`, so `validateFactMetadata` refuses the fact with
+  `source fact event time/watermark is invalid` *before* the verifier is
+  reached at all. That reason quotes the message verbatim, so it can be
+  grepped against the projection log. It applies on `usage`, `credits` and
+  `balances`; a `payments` event is written by `ObserveFundingLot`, which
+  applies no clock rule to a fact, and is never reported this way.
+
+Such an event is listed as `REQUEUED false (replay blocked)` with a
 `NOT REQUEUED:` line naming the reason, and counted under
 `not requeued (replay blocked)` rather than `total requeued`.
 `--include-blocked-cycles` overrides that; it is for deliberately reproducing
@@ -624,7 +645,10 @@ safe and idempotent.
 A `blocked` replay binding is almost always a superseded cycle: an agent
 restart abandoned an in-flight scan, `supersedeStaleActiveScanCycleTx` marked
 the abandoned cycle `blocked`, and any of its events that had not finished are
-now pinned to it forever, because `first_batch_id` never moves.
+pinned to it for as long as they have no other binding that is valid in both
+status and time. (Before XM-INV-CLAIM-BINDING they were pinned to it forever,
+because `first_batch_id` never moves. That is no longer the rule; the paragraph
+above says what the rule is.)
 
 There is no supported repair for that state, and none should be invented:
 
@@ -652,18 +676,37 @@ There is no supported repair for that state, and none should be invented:
   binding at all is genuinely stuck.
 
   **"Currently valid" includes time.** Since XM-INV-BINDING-SKEW the claim
-  only accepts a re-delivery whose batch `scan_ceiling_at` is within
+  prefers a re-delivery whose batch `scan_ceiling_at` is within
   `factClockSkewTolerance` (5 minutes) of the event's `observed_at`. That
-  column is frozen at the event's *first* delivery and never rewritten, and
-  `validateFactMetadata` rejects a wider gap outright -- before the fact-context
-  verifier is even reached -- so a binding outside the window is not a rescue,
-  it is eight guaranteed refusals. Until XM-INV-OBSERVED-AT-PER-BINDING (L2)
-  lets a re-delivery carry its own observation, this recovery works for a
-  prompt agent restart and **not** for an event parked for hours: a rescan that
-  arrives more than five minutes after the event was first observed does not
-  rescue it. For those, `ingest-requeue-dead` now reports
-  `ReplayBlocked=true` naming `validateFactMetadata`, and the write-off below
-  is the available disposition. See `docs/handoffs/XM-INV-DEAD-REQUEUE.md`,
+  column is frozen at the event's *first* delivery and never rewritten, and on
+  `usage`/`credits`/`balances` `validateFactMetadata` rejects a wider gap
+  outright -- before the fact-context verifier is even reached -- so a late
+  binding is not a rescue there, it is eight guaranteed refusals. Until
+  XM-INV-OBSERVED-AT-PER-BINDING (L2) lets a re-delivery carry its own
+  observation, this recovery works for a prompt agent restart and **not** for
+  an event parked for hours: a rescan that arrives more than five minutes after
+  the event was first observed does not rescue a usage, credit or balance
+  event. For those, `ingest-requeue-dead` reports `ReplayBlocked=true` naming
+  `validateFactMetadata`.
+
+  It is a preference and not a filter, which matters on `payments`:
+  `ObserveFundingLot` applies no clock rule to a fact, so a late re-delivery
+  really does rescue a payment or refund, and the claim still selects it when
+  the event has nothing better. A `payments` event is never reported as
+  clock-skew blocked.
+
+  **Before writing one of those off, read the entity type.** A missing `usage`
+  fact under-states what the customer consumed -- conservative, it cannot
+  over-invoice. A missing `credits`, refund or `balances` fact runs the other
+  way: it over-states what the customer paid for, which is the over-invoicing
+  direction, and needs the owner's sign-off rather than an operator's judgement
+  (design `XM-INV-STRANDED-EVENTS-DESIGN.md` §L3-A7). And an event blocked
+  *only* by clock skew is exactly the class L2 exists to make replayable again:
+  acknowledging it sets `processing_status='processed'` and no later rescan
+  will ever pick it up, so a write-off today irreversibly discards a fact L2
+  would have recovered. Prefer waiting for L2 unless `/readyz` is latched and
+  the event is holding customers out. See
+  `docs/handoffs/XM-INV-DEAD-REQUEUE.md`,
   `docs/handoffs/XM-INV-CLAIM-BINDING.md` and
   `docs/handoffs/XM-INV-STRANDED-EVENTS-DESIGN.md`.
 

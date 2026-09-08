@@ -28,9 +28,10 @@ const ingestUnreplayableAuditAction = "source_ingest_event.unreplayable_acknowle
 // IngestAcknowledgeUnreplayableInput drives AcknowledgeUnreplayableIngestEvent
 // (XM-INV-DEAD-REQUEUE follow-up): the terminal disposition for a dead
 // source_ingest_events row whose fact can never be replayed, because it holds
-// no binding verifyFactBatchContextTx would accept and -- for a balance
-// checkpoint -- can never acquire one (agent event ids fold the payload hash
-// in, so any later scan produces a different event entirely).
+// no binding the runtime would accept -- neither verifyFactBatchContextTx's
+// rule nor, since XM-INV-BINDING-SKEW, validateFactMetadata's clock rule --
+// and, for a balance checkpoint, can never acquire one (agent event ids fold
+// the payload hash in, so any later scan produces a different event entirely).
 //
 // Such a row would otherwise stay 'dead' forever, and
 // validateSourceIngestRuntimeReadiness fails on Dead>0, so /readyz would stay
