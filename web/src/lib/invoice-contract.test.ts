@@ -219,7 +219,20 @@ describe("immutable invoice eligibility policy contract", () => {
     ).toThrow("系统开票生效策略无效");
   });
 
-  it("accepts closed-set noninvoiceable reasons and rejects unknown ones", () => {
+  // Renamed and rewritten by XM-INV-LOT-REASON-CONTRACT. This test used to end
+  // with `expect(() => mapLot({...lot, reason_code: "UNKNOWN"})).toThrow(...)`,
+  // which pinned exactly the behaviour that took the user's invoice page down:
+  // any reason_code outside the bundle's hand-copied list threw, and one such
+  // lot rejected the whole orders response. That assertion is intentionally
+  // reversed below, not deleted -- the closed set was a real decision once, and
+  // this is the record of it being overturned for the second time (the first
+  // was freeze_reason, after migration 0016; see
+  // http-api.eligibility-freeze-reason-tolerance.test.ts).
+  //
+  // What replaces it is not "no validation". A well-formed but unknown code is
+  // accepted and flagged degraded; a malformed one is still rejected; and an
+  // unknown status still cannot carry invoiceable money.
+  it("renders unknown-but-well-formed noninvoiceable reasons instead of rejecting the response", () => {
     const lot: BackendFundingLot = {
       id: "50000000-0000-4000-8000-000000000001",
       source: "sub2api",
@@ -242,10 +255,23 @@ describe("immutable invoice eligibility policy contract", () => {
       availableMinor: 0,
       reasonCode: "SUBSCRIPTION_USAGE_UNSUPPORTED",
       description: "订阅消费暂缺可核验关联证据（不可开票）",
+      eligibilityDegraded: false,
     });
-    expect(() => mapLot({ ...lot, reason_code: "UNKNOWN" } as unknown as BackendFundingLot)).toThrow(
-      "充值记录包含无效的资金账本状态",
-    );
+
+    const unknown = mapLot({
+      ...lot,
+      reason_code: "UNKNOWN",
+    } as unknown as BackendFundingLot);
+    expect(unknown.reasonCode).toBe("UNKNOWN");
+    expect(unknown.eligibilityDegraded).toBe(true);
+    expect(unknown.availableMinor).toBe(0);
+    expect(unknown.description).toBe("账本状态待确认（UNKNOWN）");
+
+    // Malformed codes are still refused -- the check became a shape check, not
+    // an absent one.
+    expect(() =>
+      mapLot({ ...lot, reason_code: "not upper case" } as unknown as BackendFundingLot),
+    ).toThrow("充值记录包含无效的资金账本状态");
   });
 });
 

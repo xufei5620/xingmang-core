@@ -11,7 +11,9 @@ import type {
   EligibilityFreeze,
   EligibilityFreezeFilters,
   EligibilityProjectionHealth,
+  EligibilityStatusWire,
   FundingOrder,
+  LotReasonCodeWire,
   InvoicePolicy,
   InvoiceProfile,
   InvoiceSystemSettings,
@@ -35,6 +37,14 @@ import {
   type InvoiceApiClient,
 } from "./api-contract";
 import { isUnobservedTimestamp } from "./format";
+import {
+  lotEligibilityStatuses,
+  lotReasonCodes,
+  summaryReasonMaxCount,
+  summaryReasons,
+  summaryStatuses,
+  type LotReasonCodeWire as LotReasonCodeWireExact,
+} from "./eligibility-wire.generated";
 
 type RequestRole = "user" | "admin";
 
@@ -126,7 +136,7 @@ type BackendEligibilitySummary = {
   source_type: "sub2api" | "newapi";
   source_name: string;
   binding_status: "pending" | "verified" | "frozen" | "revoked";
-  status: "active" | "syncing" | "frozen" | "missing" | "source_unavailable";
+  status: EligibilityStatusWire;
   currency: string;
   available_minor: number;
   consumed_minor: number;
@@ -148,7 +158,7 @@ type BackendEligibilityFreeze = {
   scope: "account" | "funding_lot";
   freeze_reason: string;
   status: "open" | "resolved";
-  eligibility_status: "active" | "syncing" | "frozen" | "missing" | "source_unavailable";
+  eligibility_status: EligibilityStatusWire;
   opened_at: string;
   resolved_at?: string;
   version: number;
@@ -290,20 +300,11 @@ export type BackendFundingLot = {
   issued_minor: number;
   available_minor: number;
   eligibility_kind: "wallet" | "subscription" | "legacy" | "noncash";
-  eligibility_status:
-    | "active"
-    | "syncing"
-    | "frozen"
-    | "missing"
-    | "source_unavailable";
-  reason_code?:
-    | "SOURCE_REFUND"
-    | "LEDGER_SYNCING"
-    | "LEDGER_FROZEN"
-    | "SOURCE_NOT_READY"
-    | "BEFORE_ELIGIBILITY_START"
-    | "NO_POST_START_CONSUMPTION"
-    | "SUBSCRIPTION_USAGE_UNSUPPORTED";
+  // Widened with `(string & {})` on purpose -- see EligibilityStatusWire in
+  // ../types. A server that has shipped a value this bundle predates must be
+  // representable, because that is a routine deployment state, not a bug.
+  eligibility_status: EligibilityStatusWire;
+  reason_code?: LotReasonCodeWire;
   verification: "pending" | "verified" | "frozen";
   refund_frozen: boolean;
 };
@@ -511,14 +512,13 @@ function requireSafeMinor(value: number, field: string) {
   return value;
 }
 
-const eligibilitySummaryReasons = [
-  "BINDING_NOT_VERIFIED",
-  "ACCOUNT_FROZEN",
-  "PROJECTION_PENDING",
-  "SOURCE_NOT_READY",
-  "NO_CONSUMED_CASH",
-  "READY",
-] as const;
+// XM-INV-LOT-REASON-CONTRACT: these four lists used to be hand-copied here.
+// They are now generated from contracts/invoice-eligibility-wire.v1.json, which
+// Go probes pin against the real emitters. They are still only the *known* set:
+// see enumCodePattern below for what happens to a value that is not in them.
+const knownSummaryReasons: readonly string[] = summaryReasons;
+const knownSummaryStatuses: readonly string[] = summaryStatuses;
+const knownLotReasonCodes: readonly string[] = lotReasonCodes;
 
 // The known, labeled freeze reasons -- used to validate the `reason` filter
 // query param (an operator can only ask to filter by a reason this UI
@@ -553,13 +553,29 @@ const eligibilityFreezeReasons = [
 // over one unrecognized row.
 const freezeReasonPattern = /^[A-Z][A-Z0-9_]{0,62}$/;
 
-const eligibilityStatuses = [
-  "active",
-  "syncing",
-  "frozen",
-  "missing",
-  "source_unavailable",
-] as const;
+// The same tolerance, now applied to the two enums that took the user's invoice
+// page down. `freezeReasonPattern` was introduced after migration 0016 added
+// two freeze reasons this client had never heard of and one such row blanked
+// the whole "资格冻结" list. The verdict then was: a response-side enum check
+// should assert the SHAPE of a code, not membership of a list this bundle
+// happens to have been compiled with. eligibility_status and reason_code kept
+// their closed lists anyway, and XM-INV-ELIG-AUTO-RECONCILE then did exactly
+// the same thing to them -- a fourth persisted status, three stale copies, and
+// the entire 开票中心 refusing to render for the affected accounts.
+//
+// Loosening these is not "checking less". A status this client does not
+// recognise still cannot show money as invoiceable: availableMinor() derives
+// the expected amount from canInvoice, which requires the literal "active", so
+// any unknown status forces expectedAvailable to 0 and a server claiming
+// otherwise still fails INCONSISTENT_ELIGIBILITY_RESPONSE. What is given up is
+// only the ability to reject a *name* we have not seen -- which was never a
+// safety property, just a bet that the frontend would always deploy first.
+const enumCodePattern = /^[A-Z][A-Z0-9_]{0,62}$/;
+const statusCodePattern = /^[a-z][a-z0-9_]{0,62}$/;
+
+function wellFormedEnumCode(value: unknown, pattern: RegExp) {
+  return typeof value === "string" && pattern.test(value);
+}
 
 // CR-0009 (XM-INV-CR0009-LEDGER-VIEW), plus "settling"
 // (XM-INV-LEDGER-SETTLING-STATE) -- see docs/ELIGIBILITY-OPERATIONS.md's
@@ -691,17 +707,17 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
     !["pending", "verified", "frozen", "revoked"].includes(
       value.binding_status,
     ) ||
-    !eligibilityStatuses.includes(value.status) ||
+    !wellFormedEnumCode(value.status, statusCodePattern) ||
     value.currency !== "CNY" ||
     !Array.isArray(value.reasons) ||
     value.reasons.length === 0 ||
-    value.reasons.length > eligibilitySummaryReasons.length ||
-    !value.reasons.every(
-      (reason) =>
-        typeof reason === "string" &&
-        eligibilitySummaryReasons.includes(
-          reason as (typeof eligibilitySummaryReasons)[number],
-        ),
+    // The cap comes from the contract (the most reasons the backend's own
+    // decision function can produce at once), not from the length of the known
+    // list. Using the list's length made the cap grow every time the list did,
+    // which is the same as having no cap.
+    value.reasons.length > summaryReasonMaxCount ||
+    !value.reasons.every((reason) =>
+      wellFormedEnumCode(reason, enumCodePattern),
     ) ||
     new Set(value.reasons).size !== value.reasons.length
   ) {
@@ -709,6 +725,11 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
   }
+  const degraded =
+    !knownSummaryStatuses.includes(value.status) ||
+    !value.reasons.every((reason: string) =>
+      knownSummaryReasons.includes(reason),
+    );
   const availableMinor = requireSafeMinor(value.available_minor, "可开票金额");
   const consumedMinor = requireSafeMinor(value.consumed_minor, "已消费现金金额");
   const unconsumedMinor = requireSafeMinor(
@@ -719,6 +740,11 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
   const issuedMinor = requireSafeMinor(value.issued_minor, "已开票金额");
   const reasons = value.reasons as UserEligibilitySummary["reasons"];
   const ready = reasons.includes("READY");
+  // These invariants are the reason the enum check above could be loosened
+  // without loosening anything that matters. READY is the only reason that may
+  // accompany a positive amount, and it may only appear alone, on a literally
+  // "active" and verified row -- so an unrecognised status can never disclose
+  // invoiceable money, no matter what the server says about it.
   if (
     reservedMinor + issuedMinor > consumedMinor ||
     availableMinor > consumedMinor ||
@@ -752,6 +778,7 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
     ),
     noncash: mapServiceUnitSummary(value.noncash, value.source_type),
     reasons,
+    eligibilityDegraded: degraded,
   } satisfies UserEligibilitySummary;
 }
 
@@ -801,7 +828,12 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     typeof value.freeze_reason !== "string" ||
     !freezeReasonPattern.test(value.freeze_reason) ||
     !["open", "resolved"].includes(value.status) ||
-    !eligibilityStatuses.includes(value.eligibility_status) ||
+    // Same tolerance the freeze_reason on this very row already gets. This one
+    // has not fired in production only because there happen to be zero open
+    // freezes on the two accounts holding the new status right now -- it is
+    // green because of an external fact, not because it is correct, and the
+    // first freeze opened on such an account would blank the admin list.
+    !wellFormedEnumCode(value.eligibility_status, statusCodePattern) ||
     !validTimestamp(value.opened_at) ||
     !Number.isSafeInteger(value.version) ||
     value.version <= 0 ||
@@ -1213,36 +1245,67 @@ function availableMinor(lot: BackendFundingLot) {
   return lot.available_minor;
 }
 
+// Chinese copy for every reason code the backend can put on a lot. Keyed on the
+// EXACT generated union, so `npm run typecheck` fails if the contract gains a
+// code and nobody writes the sentence a user will read. Before this slice only
+// three of the eight had any wording at all; the rest leaned on App.tsx's
+// status-derived fallback, which meant a lot with an unfamiliar status AND an
+// unfamiliar reason had nothing to show at either level.
+const lotReasonDescriptions: Record<LotReasonCodeWireExact, string> = {
+  SOURCE_NOT_READY: "来源同步流尚未全部就绪（暂不可开票）",
+  SOURCE_REFUND: "该笔充值存在退款，账本已冻结（不可开票）",
+  BEFORE_ELIGIBILITY_START: "开票生效日前充值（不可开票）",
+  SUBSCRIPTION_USAGE_UNSUPPORTED: "订阅消费暂缺可核验关联证据（不可开票）",
+  NO_POST_START_CONSUMPTION: "尚无开票生效日后的真实消费（暂不可开票）",
+  LEDGER_SYNCING: "账本正在追平历史事件（暂不可开票）",
+  // XM-INV-ELIG-AUTO-RECONCILE. The wording has to carry one specific fact:
+  // this clears itself. The accounts sitting in this state have been in it
+  // since early September, and if the copy reads like a freeze they will open
+  // a support ticket for something no human action can speed up.
+  LEDGER_PENDING_RECONCILIATION: "账本对账中，暂不可开票（完成后自动恢复）",
+  LEDGER_FROZEN: "账本已冻结或资格账本未建立（暂不可开票）",
+};
+
+// The fallback quotes the raw code on purpose. Someone reading a screenshot of
+// this needs to be able to say which value the backend actually sent.
+// Exported so the per-value copy probe can assert every contract code resolves
+// to real Chinese rather than to this fallback.
+export function lotReasonDescription(reasonCode: string) {
+  return (
+    (lotReasonDescriptions as Record<string, string>)[reasonCode] ??
+    `账本状态待确认（${reasonCode}）`
+  );
+}
+
 export function mapLot(lot: BackendFundingLot): FundingOrder {
   if (
-    ![
-      "active",
-      "syncing",
-      "frozen",
-      "missing",
-      "source_unavailable",
-    ].includes(
-      lot.eligibility_status,
-    ) ||
+    !wellFormedEnumCode(lot.eligibility_status, statusCodePattern) ||
     (lot.reason_code !== undefined &&
-      ![
-        "SOURCE_REFUND",
-        "LEDGER_SYNCING",
-        "LEDGER_FROZEN",
-        "SOURCE_NOT_READY",
-        "BEFORE_ELIGIBILITY_START",
-        "NO_POST_START_CONSUMPTION",
-        "SUBSCRIPTION_USAGE_UNSUPPORTED",
-      ].includes(lot.reason_code)) ||
-    (lot.eligibility_status === "source_unavailable" &&
-      lot.reason_code !== "SOURCE_NOT_READY")
+      !wellFormedEnumCode(lot.reason_code, enumCodePattern))
   ) {
     throw new InvoiceApiError("充值记录包含无效的资金账本状态。", {
       code: "INVALID_ELIGIBILITY_STATUS",
     });
   }
+  // eligibility_status=source_unavailable MUST pair with SOURCE_NOT_READY --
+  // the backend's reason chain puts freshness ahead of every other reason for
+  // exactly this reason, and user_dto_test.go pins it there. Keeping it as a
+  // hard client-side throw was how RC58 turned a backend ordering bug into a
+  // blank page, so it is now a degradation: the pairing is still wrong, the lot
+  // still cannot be selected, and the Go test is where that goes red.
+  const pairingViolated =
+    lot.eligibility_status === "source_unavailable" &&
+    lot.reason_code !== "SOURCE_NOT_READY";
+  const degraded =
+    pairingViolated ||
+    !lotEligibilityStatuses.includes(
+      lot.eligibility_status as (typeof lotEligibilityStatuses)[number],
+    ) ||
+    (lot.reason_code !== undefined &&
+      !knownLotReasonCodes.includes(lot.reason_code));
   const available = availableMinor(lot);
   return {
+    eligibilityDegraded: degraded,
     id: lot.id,
     source: lot.source,
     sourceInstanceId: lot.source_instance_id,
@@ -1262,12 +1325,8 @@ export function mapLot(lot: BackendFundingLot): FundingOrder {
     refundFrozen: lot.refund_frozen,
     paymentMethod: "支付凭证已核验",
     description:
-      lot.reason_code === "BEFORE_ELIGIBILITY_START"
-        ? "开票生效日前充值（不可开票）"
-        : lot.reason_code === "SUBSCRIPTION_USAGE_UNSUPPORTED"
-        ? "订阅消费暂缺可核验关联证据（不可开票）"
-        : lot.reason_code === "NO_POST_START_CONSUMPTION"
-        ? "尚无开票生效日后的真实消费（暂不可开票）"
+      lot.reason_code !== undefined
+        ? lotReasonDescription(lot.reason_code)
         : lot.eligibility_kind === "subscription"
         ? "订阅套餐支付"
         : "钱包充值（按已消费现金开票）",

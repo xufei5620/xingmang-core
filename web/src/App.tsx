@@ -65,6 +65,11 @@ import { dateTime, dateTimeShanghai, maskTaxId, money } from "./lib/format";
 import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
 import { sourceName } from "./lib/source-labels";
 import {
+  eligibilityReasonLabel,
+  eligibilityStatusLabel,
+} from "./lib/eligibility-labels";
+import { applyUserDataResults } from "./lib/user-data-load";
+import {
   accountIdentityLabel,
   appendEmbeddedParams,
   parseEmbeddedPlatform,
@@ -379,37 +384,51 @@ function DataProvider({ children }: { children: ReactNode }) {
         setRequestsNextCursor(requestPage.nextCursor);
         setSummary(summarizeRequests(nextRequests, 0));
       } else {
-        const [
-          nextOrders,
-          nextProfiles,
-          nextSourceAccounts,
-          nextEligibilitySummaries,
-          requestPage,
-        ] =
-          await Promise.all([
+        // Five independent reads, settled independently. Promise.all here was
+        // the amplifier that turned one unrecognised enum value into a
+        // whole-page outage: getOrders() rejecting meant setSourceAccounts()
+        // below never ran, sourceAccounts stayed at its initial [], and the
+        // "已关联的平台账号" panel re-rendered as the "关联平台账号" onboarding
+        // wizard. Users with verified bindings were told to go and bind again
+        // -- worse than showing them nothing, because it invites them to
+        // "fix" an account that was never broken.
+        //
+        // Each request now keeps its own last-good value and reports its own
+        // failure. A failing request must never blank a panel it does not own.
+        const [orders, profiles, sourceAccounts, summaries, requests] =
+          await Promise.allSettled([
             invoiceApi.getOrders(),
             invoiceApi.getProfiles(),
             invoiceApi.getSourceAccounts(),
             invoiceApi.getUserEligibilitySummary(),
             invoiceApi.getUserRequestPage(),
           ]);
-        const nextRequests = requestPage.items;
         if (version !== refreshVersion.current) return;
-        setOrders(nextOrders);
-        setProfiles(nextProfiles);
-        setSourceAccounts(nextSourceAccounts);
-        setEligibilitySummaries(nextEligibilitySummaries);
-        setRequests(nextRequests);
-        setRequestsNextCursor(requestPage.nextCursor);
-        setSummary(
-          summarizeRequests(
-            nextRequests,
-            nextEligibilitySummaries.reduce(
-              (total, item) => total + item.availableMinor,
-              0,
-            ),
-          ),
+        // Which panels survive a partial failure is decided (and tested) in
+        // lib/user-data-load.ts, not here.
+        applyUserDataResults(
+          {
+            orders,
+            profiles,
+            sourceAccounts,
+            eligibilitySummaries: summaries,
+            requests,
+          },
+          {
+            setOrders,
+            setProfiles,
+            setSourceAccounts,
+            setEligibilitySummaries,
+            setRequests: (page) => {
+              setRequests(page.items);
+              setRequestsNextCursor(page.nextCursor);
+            },
+            setSummary: (page, availableMinor) =>
+              setSummary(summarizeRequests(page.items, availableMinor)),
+            setLoadError,
+          },
         );
+        return;
       }
       setLoadError(null);
     } catch (error) {
@@ -967,28 +986,9 @@ function SourceAccountStatus() {
   );
 }
 
-const eligibilityReasonLabels: Record<
-  UserEligibilitySummary["reasons"][number],
-  string
-> = {
-  BINDING_NOT_VERIFIED: "平台账号尚未完成可信绑定",
-  ACCOUNT_FROZEN: "资金资格已安全冻结",
-  PROJECTION_PENDING: "资金账本正在重新计算",
-  SOURCE_NOT_READY: "来源五条同步流尚未全部就绪",
-  NO_CONSUMED_CASH: "当前没有已消费的现金金额",
-  READY: "可提交开票申请",
-};
-
-const eligibilityStatusLabels: Record<
-  UserEligibilitySummary["status"],
-  string
-> = {
-  active: "资格正常",
-  syncing: "账本同步中",
-  frozen: "资格已冻结",
-  missing: "资格账本未建立",
-  source_unavailable: "来源同步不可用",
-};
+// The eligibility label tables and their fallback accessors now live in
+// lib/eligibility-labels.ts (XM-INV-LOT-REASON-CONTRACT) so the Chinese copy
+// can be asserted directly by tests rather than only through rendering.
 
 function formatServiceUnits(value: UserEligibilitySummary["noncash"]) {
   const grouped = value.serviceUnits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -1037,7 +1037,7 @@ function EligibilitySummaryPanel({
                   <strong>{item.sourceLabel}</strong>
                 </div>
                 <Badge tone={eligibilitySummaryReady(item) ? "green" : "amber"}>
-                  {eligibilityStatusLabels[item.status]}
+                  {eligibilityStatusLabel(item.status)}
                 </Badge>
               </div>
               <div className="eligibility-money-grid">
@@ -1074,7 +1074,7 @@ function EligibilitySummaryPanel({
               </div>
               <div className="eligibility-reasons" aria-label="资格状态原因">
                 {item.reasons.map((reason) => (
-                  <span key={reason}>{eligibilityReasonLabels[reason]}</span>
+                  <span key={reason}>{eligibilityReasonLabel(reason)}</span>
                 ))}
               </div>
             </article>
@@ -1385,6 +1385,16 @@ function OrdersPage() {
                         {order.eligibilityStatus === "source_unavailable" && (
                           <Badge tone="red">来源同步不可用</Badge>
                         )}
+                        {order.eligibilityStatus ===
+                          "not_invoiceable_pending_reconciliation" && (
+                          // amber, not red: this is a wait, not an alarm. It
+                          // clears itself, and the admin ledger view already
+                          // tones the same state this way.
+                          <Badge tone="amber">对账中暂不可开票</Badge>
+                        )}
+                        {order.eligibilityDegraded && (
+                          <Badge tone="amber">账本状态待确认</Badge>
+                        )}
                       </div>
                       <div className="order-meta">
                         <span>{order.tradeNo}</span>
@@ -1411,6 +1421,9 @@ function OrdersPage() {
                               ? "历史基线与新事件正在追平"
                               : order.eligibilityStatus === "source_unavailable"
                                 ? "来源五条同步流尚未全部就绪"
+                              : order.eligibilityStatus ===
+                                  "not_invoiceable_pending_reconciliation"
+                                ? "来源账本正在自动对账，完成后会自动恢复"
                               : order.eligibilityStatus !== "active"
                                 ? "来源账本正在对账处理"
                                 : !orderSourceReady(order)
@@ -3298,7 +3311,7 @@ function EligibilityFreezesPage() {
                     <td>{item.scope === "account" ? "整个平台账号" : "单笔资金批次"}</td>
                     <td>
                       <Badge tone={item.eligibilityStatus === "active" ? "green" : "amber"}>
-                        {eligibilityStatusLabels[item.eligibilityStatus]}
+                        {eligibilityStatusLabel(item.eligibilityStatus)}
                       </Badge>
                     </td>
                     <td>
@@ -3494,7 +3507,7 @@ function EligibilityFreezeDrawer({
               </div>
               <div>
                 <dt>资格状态</dt>
-                <dd>{eligibilityStatusLabels[item.eligibilityStatus]}</dd>
+                <dd>{eligibilityStatusLabel(item.eligibilityStatus)}</dd>
               </div>
             </dl>
           </section>

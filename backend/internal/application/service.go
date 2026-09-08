@@ -1243,6 +1243,56 @@ type UserEligibilitySummary struct {
 	Reasons           []string           `json:"reasons"`
 }
 
+// userEligibilitySummaryReasons decides the reason codes (and the disclosed
+// available amount) for one eligibility summary row. It is deliberately a pure
+// function of the row plus one boolean: the only way to pin "which reason codes
+// can this endpoint actually emit" without a database is to be able to call the
+// decision itself, and a probe that instead hand-lists the expected codes is
+// just a second copy of the list that goes stale in silence.
+// See XM-INV-LOT-REASON-CONTRACT and contracts/invoice-eligibility-wire.v1.json.
+//
+// The branch ORDER here is load-bearing and unchanged from when it was inline:
+// every reason that applies is reported, and `blocked` zeroes the disclosed
+// amount, so NO_CONSUMED_CASH can only ever appear on an otherwise-clear row.
+func userEligibilitySummaryReasons(item postgresstore.EligibilitySummary, sourceReady bool) ([]string, int64) {
+	reasons := []string{}
+	blocked := false
+	if item.BindingStatus != "verified" {
+		reasons = append(reasons, "BINDING_NOT_VERIFIED")
+		blocked = true
+	}
+	if item.HasOpenFreeze || item.EligibilityStatus == "frozen" {
+		reasons = append(reasons, "ACCOUNT_FROZEN")
+		blocked = true
+	}
+	if item.EligibilityStatus == "not_invoiceable_pending_reconciliation" {
+		// XM-INV-ELIG-AUTO-RECONCILE: distinct from ACCOUNT_FROZEN -- no
+		// admin queue entry exists for this account, and it clears
+		// itself automatically once the ledger reconciles.
+		reasons = append(reasons, "PENDING_RECONCILIATION")
+		blocked = true
+	}
+	if item.ProjectionPending || item.EligibilityStatus == "syncing" {
+		reasons = append(reasons, "PROJECTION_PENDING")
+		blocked = true
+	}
+	if !sourceReady {
+		reasons = append(reasons, "SOURCE_NOT_READY")
+		blocked = true
+	}
+	available := item.AvailableMinor
+	if blocked {
+		available = 0
+	}
+	if !blocked && available == 0 {
+		reasons = append(reasons, "NO_CONSUMED_CASH")
+	}
+	if len(reasons) == 0 {
+		reasons = append(reasons, "READY")
+	}
+	return reasons, available
+}
+
 func (s *Service) ListUserEligibilitySummaries(ctx context.Context, principalID string, platform domain.SourceType) ([]UserEligibilitySummary, error) {
 	base, err := s.store.ListEligibilitySummaries(ctx, strings.TrimSpace(principalID), platform)
 	if err != nil {
@@ -1263,41 +1313,8 @@ func (s *Service) ListUserEligibilitySummaries(ctx context.Context, principalID 
 	}
 	out := make([]UserEligibilitySummary, 0, len(base))
 	for _, item := range base {
-		reasons := []string{}
-		blocked := false
-		if item.BindingStatus != "verified" {
-			reasons = append(reasons, "BINDING_NOT_VERIFIED")
-			blocked = true
-		}
-		if item.HasOpenFreeze || item.EligibilityStatus == "frozen" {
-			reasons = append(reasons, "ACCOUNT_FROZEN")
-			blocked = true
-		}
-		if item.EligibilityStatus == "not_invoiceable_pending_reconciliation" {
-			// XM-INV-ELIG-AUTO-RECONCILE: distinct from ACCOUNT_FROZEN -- no
-			// admin queue entry exists for this account, and it clears
-			// itself automatically once the ledger reconciles.
-			reasons = append(reasons, "PENDING_RECONCILIATION")
-			blocked = true
-		}
-		if item.ProjectionPending || item.EligibilityStatus == "syncing" {
-			reasons = append(reasons, "PROJECTION_PENDING")
-			blocked = true
-		}
-		if seen[item.SourceInstanceID] != 5 || !ready[item.SourceInstanceID] {
-			reasons = append(reasons, "SOURCE_NOT_READY")
-			blocked = true
-		}
-		available := item.AvailableMinor
-		if blocked {
-			available = 0
-		}
-		if !blocked && available == 0 {
-			reasons = append(reasons, "NO_CONSUMED_CASH")
-		}
-		if len(reasons) == 0 {
-			reasons = append(reasons, "READY")
-		}
+		sourceReady := seen[item.SourceInstanceID] == 5 && ready[item.SourceInstanceID]
+		reasons, available := userEligibilitySummaryReasons(item, sourceReady)
 		out = append(out, UserEligibilitySummary{SourceInstanceID: item.SourceInstanceID, SourceType: item.SourceType, SourceName: item.SourceName,
 			BindingStatus: item.BindingStatus, EligibilityStatus: item.EligibilityStatus, Currency: "CNY", AvailableMinor: available,
 			ConsumedMinor: item.ConsumedMinor, UnconsumedMinor: item.UnconsumedMinor, ReservedMinor: item.ReservedMinor, IssuedMinor: item.IssuedMinor,
