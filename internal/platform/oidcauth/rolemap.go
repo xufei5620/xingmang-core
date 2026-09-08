@@ -36,6 +36,10 @@ var platformScopePrefixes = []string{
 	// XM-LOGIN：staff.manage 管理本地登录账号（创建、改角色、启停、重置
 	// 密码）。同上一条理由——它不该以 Realm 角色的形式出现。
 	"staff.",
+	// XM-EXT-PUBLISHING：publishing.publish 决定「谁能以公司的名义对外说话」。
+	// Realm 里出现一个 publishing.publish 角色，等于把这个决定挪出平台数据库的
+	// 管辖（ADR-016 / CR-0001 §5）——与 credential./staff. 同一条理由。
+	"publishing.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -234,6 +238,19 @@ func DefaultRoleScopeMap() map[string][]string {
 			"sms.read",
 			"sms.reveal",
 			"sms.manage",
+			// XM-EXT-PUBLISHING（2026-09-08）：内容发布的读与编辑。
+			//
+			// 与卡片/接码同一条理由：不给就等于这个功能对唯一能用它的人也是
+			// 403。publishing.manage 写的是草稿、素材与渠道**登记**（凭据只经
+			// CredentialRef，明文另由 credential.manage 管），一件都发不出去。
+			//
+			// **publishing.publish 刻意不在这里**——理由与 fund.withdraw /
+			// sms.purchase 完全相同：把「对外不可逆」的动作从日常操作角色里
+			// 拿出来。发布本身是 L3（两票且审批人≠提交人），但审批拦的是
+			// 「这一篇发不发」，权限拦的是「谁能提起这件事」；给 admin 等于
+			// 把第一道闸拆掉，只剩审批一道。见下面的 content-publisher。
+			"publishing.read",
+			"publishing.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
@@ -284,6 +301,17 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 数量上限 200，一次手滑就是两百个号；而买到的号不可退。
 		// 独立角色让「谁能花这笔钱」是一次显式授予。
 		"sms-operator": {"sms.purchase"},
+		// XM-EXT-PUBLISHING（2026-09-08）：对外发布。与 fund-operator /
+		// sms-operator 同一条设计意图——把「对外不可逆」从日常操作角色里拿出来。
+		//
+		// 它不花钱，但它比那两个更公开：发出去的内容即便删除也已经被抓取、
+		// 被截图。**「谁能以公司的名义说话」是一次显式的组织授予**，不该由
+		// 「他是管理员」顺带获得。
+		//
+		// 顺带包含 publishing.read：不给的话，持发布权的人看不到自己要发的
+		// 草稿与渠道，必须同时被授予 admin 才用得起来——那正是这次拆分想
+		// 避免的。读的泄漏面（草稿正文 + 渠道引用）本来就窄于发布权本身。
+		"content-publisher": {"publishing.read", "publishing.publish"},
 	}
 }
 

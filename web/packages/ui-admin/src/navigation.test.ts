@@ -275,26 +275,31 @@ describe("查表与状态标签", () => {
     expect(stageHintOf("/dashboard")).toBeUndefined();
     expect(stageHintOf("/actions")).toBeUndefined();
     // 2026-09-07 三页建成（XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0）之后，
-    // 「版本与发布」也不再挂标签了；仍挂标签的换成扩展能力段的「内容发布」——
-    // 那一页按 ADMIN-IA §5.4 与实施计划 §2.5 是**刻意只做只读蓝图**，不是缺口。
+    // 「版本与发布」也不再挂标签了。
     expect(stageHintOf("/changes")).toBeUndefined();
     expect(stageHintOf("/design")).toBeUndefined();
     expect(stageHintOf("/finance")).toBeUndefined();
-    expect(stageHintOf("/ext/publishing")).toBe("未建·后置");
+    // 2026-09-08：「内容发布」也建成了（XM-EXT-PUBLISHING，裁定变更见
+    // ADMIN-IA §5.4.1），于是它同样不再挂阶段标签。仍挂标签的换成扩展能力段
+    // 剩下的三页——那三页按 §5.4 原裁定**刻意只做只读蓝图**，不是缺口。
+    expect(stageHintOf("/ext/publishing")).toBeUndefined();
+    expect(stageHintOf("/ext/app")).toBe("未建·后置");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0 + 治理段 0 + 扩展能力 4。
+    // 全局段 0 + 治理段 0 + 扩展能力 3。
     //
     // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
-    // **剩下的四条不是缺口**——扩展能力段按 ADMIN-IA §5.4 与实施计划 §2.5
-    // 是刻意的只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里
-    // 表达的是「后端未接且不打算接」，与治理段那三页当初的含义不是一回事。
+    // 2026-09-08「内容发布」退出蓝图态（XM-EXT-PUBLISHING）——产品负责人推翻了
+    // §5.4 在**这一页**上的适用，见 ADMIN-IA §5.4.1；另外三页的原裁定原样有效。
+    //
+    // **剩下的三条不是缺口**——它们按 §5.4 与实施计划 §2.5 是刻意的只读蓝图
+    // （不预留后端、不做写入、不做执行），built:false 在这里表达的是「后端未接
+    // 且不打算接」，与治理段那三页当初的含义不是一回事。
     expect(paths).toEqual([
       "/ext/app",
       "/ext/integration",
-      "/ext/publishing",
       "/ext/ai",
     ]);
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
@@ -320,6 +325,9 @@ describe("查表与状态标签", () => {
       "/changes",
       "/design",
       "/settings",
+      // 2026-09-08：扩展能力段唯一建成的一页（XM-EXT-PUBLISHING）。它排在
+      // "/settings" 之后，因为扩展能力是第四个分组，声明顺序在治理段之后。
+      "/ext/publishing",
     ]);
   });
 });

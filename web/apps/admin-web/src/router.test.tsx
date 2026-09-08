@@ -1745,10 +1745,13 @@ describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () =
     expect(publishing.getAttribute("href")).toBe("/ext/publishing");
     // 2026-09-07 起 F-B 一条不剩：跨平台财务 / 版本与发布 / 界面规范三页建成
     // （XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0），操作与审批更早在
-    // XM-ACTIONS0 毕业。现在挂标签的只剩扩展能力段那四条「后置」——按
-    // ADMIN-IA §5.4 它们是刻意的只读蓝图，不是待补的缺口
+    // XM-ACTIONS0 毕业。2026-09-08「内容发布」也建成了（XM-EXT-PUBLISHING，
+    // 裁定变更见 ADMIN-IA §5.4.1），于是它不再挂标签——现在挂标签的只剩扩展
+    // 能力段其余三条「后置」，按 §5.4 原裁定它们是刻意的只读蓝图，不是缺口
     expect(within(nav).queryAllByText("未建·F-B").length).toBe(0);
-    expect(within(nav).getAllByText("未建·后置").length).toBe(4);
+    expect(within(nav).getAllByText("未建·后置").length).toBe(3);
+    // 内容发布已建成，侧栏上不该再挂「未建」
+    expect(publishing.textContent).not.toMatch(/未建/);
     const changes = within(nav).getByRole("link", { name: /版本与发布/ });
     expect(changes.getAttribute("href")).toBe("/changes");
     const actions = within(nav).getByRole("link", { name: /操作与审批/ });
@@ -2517,10 +2520,13 @@ describe("未实装页的诚实占位与门禁", () => {
   // XM-ACTIONS0 把操作目录/执行记录接上真实数据后，/actions 不再是占位页，
   // 断言挪到下面的「操作与审批」独立 describe 块（门禁本身仍然存在并被断言）。
 
-  it("扩展能力四页标注「仅预览、不保存、不发布、不执行」", async () => {
-    renderRoute("/ext/publishing");
+  it("扩展能力仍是蓝图的三页标注「仅预览、不保存、不发布、不执行」", async () => {
+    // 样本从 /ext/publishing 换成 /ext/integration：内容发布 2026-09-08 建成
+    // （XM-EXT-PUBLISHING），它已经不走 PlaceholderPage，拿它测这条横幅会测成
+    // 那一页的实现。剩下三页按 ADMIN-IA §5.4 仍是刻意的只读蓝图。
+    renderRoute("/ext/integration");
     expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
-    expect(screen.getByRole("heading", { name: "内容发布", level: 2 })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "接口与自动化", level: 2 })).not.toBeNull();
   });
 
   it("子页签进 ?sub=，可分享可恢复", async () => {

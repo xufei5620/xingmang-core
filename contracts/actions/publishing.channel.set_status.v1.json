@@ -1,0 +1,36 @@
+{
+  "id": "publishing.channel.set_status",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "publishing.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "IDEMPOTENT_BY_CHANNEL_ID_STATUS",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "channel_id": {
+      "type": "string",
+      "required": true
+    },
+    "status": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "ACTIVE",
+        "PAUSED",
+        "RETIRED"
+      ]
+    }
+  },
+  "notes": "启停/退役渠道。刻意留在 L1：危险方向是单向的（PAUSED/RETIRED 都让发布直接被拒），把「暂停一个出事的渠道」压进审批队列等于在最需要立刻停手时加一道等。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

@@ -1,0 +1,48 @@
+{
+  "id": "publishing.asset.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "publishing.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "UPSERT_BY_ENVIRONMENT_NAME",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "asset_id": {
+      "type": "string",
+      "required": false
+    },
+    "name": {
+      "type": "string",
+      "required": true
+    },
+    "kind": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "image",
+        "video",
+        "link"
+      ]
+    },
+    "uri": {
+      "type": "string",
+      "required": true
+    },
+    "note": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "素材是引用不是上传（平台没有对象存储）。uri 强制 https：素材地址会随对外内容一起公开。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

@@ -16,6 +16,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
+	"github.com/xufei5620/xingmang-platform/internal/platform/publishing"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
@@ -68,6 +69,16 @@ type Deps struct {
 	// 「生效中 / 未开始 / 已过期」三态的用例会在边界上间歇性变红——那种红
 	// 比不红更难查。把时刻做成可注入的，是让这三态能被确定性地钉住。
 	SilenceNow func() time.Time
+	// Publishing / PublishingDeliver 是「内容发布」页的只读 Query
+	// （XM-EXT-PUBLISHING）。为 nil 时整组 /publishing/* 端点不挂载——与
+	// RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	//
+	// 写入仍只走 publishing.* Action（宪法 2 条），不在这里开第二条写路径。
+	// PublishingDeliver 单独一个字段是因为它回答的不是「库里有什么」而是
+	// 「此刻能不能真的发出去」——那个答案来自 Service 的投递器表，不是仓储。
+	// 它为 nil 时渠道列表一律按**不能发**渲染（fail closed）。
+	Publishing        PublishingQuerier
+	PublishingDeliver PublishingDelivery
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
 	SavedViews SavedViewLister
@@ -356,6 +367,27 @@ func NewRouter(d Deps) http.Handler {
 			// 仍走 Action（alerts.silence.manage），不在这里开第二条写路径。
 			api.With(RequireScope(alerts.ScopeRead)).
 				Get("/alerts/silences", ListSilencesHandler(d.Silences, d.SilenceNow))
+			// 内容发布（XM-EXT-PUBLISHING）。五个只读端点共用
+			// publishing.read：草稿正文、素材地址、渠道登记（**只回显
+			// CredentialRef，不是明文**）与发布记录属于同一份内容资产，
+			// 拆成多个读 scope 只会多出几个会漏授的授权面。
+			//
+			// 写路径不在这里——草稿/素材/渠道/发布全部是 Action，走
+			// POST /api/v1/actions/{id}/versions/{v}/execute，权限与风险
+			// 等级由内核裁决（发布是 L3，会落审批单）。
+			if d.Publishing != nil {
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/drafts", ListPublishingDraftsHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/drafts/{draftID}", GetPublishingDraftHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/assets", ListPublishingAssetsHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/channels",
+						ListPublishingChannelsHandler(d.Publishing, d.PublishingDeliver))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/records", ListPublishingRecordsHandler(d.Publishing))
+			}
 			if d.Cards != nil {
 				interval := d.CardSyncInterval
 				if interval <= 0 {

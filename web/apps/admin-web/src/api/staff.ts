@@ -222,6 +222,9 @@ export const STAFF_ROLE_CATALOG: readonly { value: string; label: string }[] = [
   // XM-0030：L4 审批的特权票持有人。默认没有人持有它，L4 的单会一直停在
   // 待审批直到过期——那是刻意的 fail closed，授出去是一次显式的组织决定。
   { value: "approval-l4", label: "高风险审批人（L4 特权票）" },
+  // XM-EXT-PUBLISHING：谁能提起「对外发布」。管理员默认只有读与编辑
+  // （publishing.read / publishing.manage），发布权要单独授予。
+  { value: "content-publisher", label: "内容发布人（对外发布）" },
 ];
 
 const ROLE_LABELS: ReadonlyMap<string, string> = new Map(
