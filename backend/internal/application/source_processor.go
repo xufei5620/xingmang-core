@@ -56,6 +56,27 @@ func logProjectionFailure(logger *slog.Logger, claim postgresstore.SourceEventCl
 		"event_id", claim.EventID, "error", cause)
 }
 
+// serializationBusyRetry mirrors the account-lock busy delay. A serialization
+// conflict means the competing transaction is already finishing, so a short
+// wait is the right response; the value stays well inside
+// accountLockBusyReadinessGrace so a conflict that does not clear still fails
+// readiness instead of retrying invisibly forever.
+const serializationBusyRetry = 15 * time.Second
+
+// logTransientRequeue records a claim rescheduled without spending its attempt
+// budget. It is deliberately a different message from logProjectionFailure:
+// on 2026-09-07 a fatal failure and an ordinary retry were indistinguishable in
+// the log, and a requeue that never spends budget must not be able to loop
+// silently.
+func logTransientRequeue(logger *slog.Logger, claim postgresstore.SourceEventClaim, marker string, cause error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Warn("source event requeued without spending attempt budget",
+		"source_instance_id", claim.SourceInstanceID, "stream_id", claim.StreamID,
+		"event_id", claim.EventID, "marker", marker, "error", cause)
+}
+
 type sourceDependencyWait struct {
 	Kind    string
 	KeyHMAC string
@@ -150,8 +171,28 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 				// reschedule shortly without spending any of the event's
 				// real attempt/retry budget (mirrors the existing
 				// waiting_dependency attempt_count credit-back below).
-				if err = p.Service.store.MarkSourceEventBusy(ctx, claim, now().Add(15*time.Second)); err != nil {
+				if err = p.Service.store.MarkSourceEventBusy(ctx, claim,
+					postgresstore.TransientRequeueAccountLockBusy, now().Add(15*time.Second)); err != nil {
 					recordIsolated("mark source event busy", err)
+				} else {
+					processed++
+				}
+				continue
+			}
+			if postgresstore.IsTransientSerializationFailure(processErr) {
+				// XM-INV-SER-BUSY: a 40001/40P01 means a concurrent transaction
+				// won the race for the same scan-cycle row -- routine contention
+				// between this loop's FOR UPDATE and the observers' FOR SHARE,
+				// and the database's own instruction to retry. Treat it exactly
+				// like the account-lock case: reschedule shortly and credit the
+				// attempt back, so contention can never spend the budget that
+				// exists to catch genuinely unprocessable events. The bounded
+				// readiness grace still turns readiness off if the conflict does
+				// not clear, so this defers the alarm rather than silencing it.
+				logTransientRequeue(p.logger(), claim, postgresstore.TransientRequeueSerializationBusy, processErr)
+				if err = p.Service.store.MarkSourceEventBusy(ctx, claim,
+					postgresstore.TransientRequeueSerializationBusy, now().Add(serializationBusyRetry)); err != nil {
+					recordIsolated("mark source event serialization busy", err)
 				} else {
 					processed++
 				}

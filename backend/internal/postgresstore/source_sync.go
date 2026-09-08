@@ -895,9 +895,12 @@ func (s *Store) MarkSourceEventWaitingDependency(ctx context.Context, claim Sour
 // so unlike MarkSourceEventFailed this credits the attempt back (mirrors
 // MarkSourceEventWaitingDependency's attempt_count-1) instead of spending
 // it, and reuses the existing 'queued' status rather than adding a new one.
-func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim, next time.Time) error {
+func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim, marker string, next time.Time) error {
 	if next.IsZero() {
 		return errors.New("invalid source event busy reschedule")
+	}
+	if !isTransientRequeueMarker(marker) {
+		return fmt.Errorf("unknown transient requeue marker %q", marker)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -906,12 +909,12 @@ func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim,
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	command, err := tx.Exec(ctx, `
 		UPDATE source_ingest_events SET processing_status='queued',
-			attempt_count=greatest(attempt_count-1,0),processing_error='ACCOUNT_LOCK_BUSY',
+			attempt_count=greatest(attempt_count-1,0),processing_error=$6,
 			dependency_kind=NULL,dependency_key_hmac=NULL,next_attempt_at=$1,
 			lease_token=NULL,lease_expires_at=NULL,updated_at=now()
 		WHERE source_instance_id=$2 AND stream_id=$3 AND event_id=$4
 			AND processing_status='processing' AND lease_token=$5`,
-		next, claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken)
+		next, claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken, marker)
 	if err != nil {
 		return err
 	}
@@ -1084,7 +1087,83 @@ func evaluateSourceStreamHealth(item *SourceStreamHealth, policy SourceFreshness
 // only stops a short, expected wait from masquerading as an outage.
 const accountLockBusyReadinessGrace = "10 minutes"
 
-const sourceReadinessHealthQuery = `
+// Transient requeue markers. A claim that hits one of these is rescheduled
+// shortly *without* spending its attempt budget, so contention alone can never
+// drive an event to the dead threshold. They are listed once, here, because two
+// places need the same set and must not drift: MarkSourceEventBusy writes one of
+// them, and sourceReadinessHealthQuery's busy_within_grace predicate reads them
+// back. The previous shape pinned the literal 'ACCOUNT_LOCK_BUSY' separately in
+// each place; adding a second marker that way is exactly how a grace silently
+// stops covering half of what it was written to cover.
+const (
+	TransientRequeueAccountLockBusy = "ACCOUNT_LOCK_BUSY"
+	// XM-INV-SER-BUSY: PostgreSQL serialization_failure (40001) and
+	// deadlock_detected (40P01). Both mean "this transaction lost a race and is
+	// expected to be retried", which is the contract the busy path already
+	// implements -- not the processing failure MarkSourceEventFailed records.
+	// Before this marker existed a 40001 fell into the generic PROJECTION_FAILED
+	// branch, spent one of eight attempts every five minutes, and killed the
+	// event for good: that is what took the balances and usage streams down at
+	// 08:32 on 2026-09-07 and held every funding lot unavailable for 20 hours.
+	TransientRequeueSerializationBusy = "SERIALIZATION_BUSY"
+)
+
+var transientRequeueMarkers = []string{
+	TransientRequeueAccountLockBusy,
+	TransientRequeueSerializationBusy,
+}
+
+// transientRequeueMarkerSQL renders transientRequeueMarkers as a SQL array
+// literal for the readiness grace. Rendering it from the same slice the writer
+// validates against is what makes the two physically one definition rather than
+// two copies that merely agree today.
+var transientRequeueMarkerSQL = renderTransientRequeueMarkerSQL(transientRequeueMarkers)
+
+var transientRequeueMarkerPattern = regexp.MustCompile(`^[A-Z][A-Z_]{0,62}$`)
+
+func renderTransientRequeueMarkerSQL(markers []string) string {
+	if len(markers) == 0 {
+		panic("transient requeue marker list must not be empty")
+	}
+	quoted := make([]string, len(markers))
+	for i, marker := range markers {
+		// The markers are compile-time constants, so a value that could change
+		// the shape of the query is a programming error: stop the process
+		// rather than quietly escape it into place.
+		if !transientRequeueMarkerPattern.MatchString(marker) {
+			panic("transient requeue marker must match ^[A-Z][A-Z_]*$: " + marker)
+		}
+		quoted[i] = "'" + marker + "'"
+	}
+	return "ARRAY[" + strings.Join(quoted, ",") + "]"
+}
+
+// IsTransientSerializationFailure reports whether err is a PostgreSQL
+// serialization_failure (40001) or deadlock_detected (40P01). Both are the
+// database telling the caller "you lost a race, run it again" -- a retry
+// contract, not a defect in the event being processed. The projection loop
+// had no branch for them, so every such conflict was recorded as a generic
+// PROJECTION_FAILED and burned one of the event's eight attempts; on
+// 2026-09-07 seventeen conflicts inside two hours exhausted three events and
+// dead-lettered them permanently.
+func IsTransientSerializationFailure(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "40001" || pgErr.Code == "40P01"
+}
+
+func isTransientRequeueMarker(marker string) bool {
+	for _, candidate := range transientRequeueMarkers {
+		if candidate == marker {
+			return true
+		}
+	}
+	return false
+}
+
+var sourceReadinessHealthQuery = `
 	WITH active_event_health AS MATERIALIZED (
 		SELECT source_instance_id,stream_id,
 			count(*) FILTER (WHERE processing_status IN ('queued','failed','processing') AND NOT busy_within_grace) AS pending_events,
@@ -1096,7 +1175,7 @@ const sourceReadinessHealthQuery = `
 				-- queued event, and NULL = 'ACCOUNT_LOCK_BUSY' is NULL, not false --
 				-- a bare NOT NULL in the FILTER above would silently drop every
 				-- plain pending event from the count.
-				COALESCE(processing_status='queued' AND COALESCE(processing_error,'')='ACCOUNT_LOCK_BUSY'
+				COALESCE(processing_status='queued' AND COALESCE(processing_error,'')=ANY(` + transientRequeueMarkerSQL + `)
 				 AND updated_at>=now()-interval '` + accountLockBusyReadinessGrace + `',false) AS busy_within_grace
 			FROM source_ingest_events
 			WHERE processing_status IN ('queued','failed','processing','dead')
