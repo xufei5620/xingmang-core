@@ -257,6 +257,7 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 | M8 | `readinessSummaryDatabase` 里塞进主机名 `db1` | 无标识符守卫 + `.../database_ping`（逐字文案） | `.../clamav_daemon`、名字唯一性 | ✅ 全对 |
 | M10 | `readinessCheckNamePattern` 放宽成 `^.{1,500}$` | `.../check_name_carrying_a_host` | dsn 用例、未分类、happy path | ✅ 目标红、对照绿 |
 | M11 | `readinessCheckNamePattern` 放宽成 `^.{0,500}$`（接受空串） | `.../empty_check_name` | —— | ✅ 红 |
+| M12 | 判死日志里 `claim.Attempt` 改成 `claim.Attempt+1` | 判死接线集成测试（`attempt=8` 对账断言） | —— | ✅ 红在 `attempt=9` |
 
 **两次头一版变异给的是假信号，重做了，记在这里免得后人踩：**
 
