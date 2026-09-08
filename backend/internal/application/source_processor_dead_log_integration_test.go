@@ -146,6 +146,14 @@ func TestSourceProjectionWorkerLogsAnErrorOnlyWhenTheEventActuallyDies(t *testin
 	if !strings.Contains(died, "event_id="+eventID) {
 		t.Fatalf("the dead line does not identify the event: %s", died)
 	}
+	// claim.Attempt is the pre-claim attempt_count plus one, incremented in
+	// lockstep with the row's own attempt_count during the claim. Asserting
+	// it against the attempt_count read back from the database above is what
+	// proves the number in the log line is the real attempt number rather
+	// than something that merely looks plausible.
+	if !strings.Contains(died, "attempt=8") {
+		t.Fatalf("the dead line's attempt does not match the row's attempt_count=%d: %s", attempts, died)
+	}
 	// The retry line is still written on this attempt too (it is logged
 	// before the mark, when the grade is not yet known). That is intended:
 	// the two lines are a pair, and the Error one is the new signal.
