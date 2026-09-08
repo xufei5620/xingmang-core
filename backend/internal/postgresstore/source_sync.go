@@ -1198,13 +1198,32 @@ var sourceEventAliasPattern = regexp.MustCompile(`^[a-z][a-z_]{0,15}$`)
 
 // sourceEventContainedByOpenFreezeSQL is the single definition of "this
 // source_ingest_events row is already answered for by an open eligibility
-// freeze" (XM-INV-DEAD-CONTAINMENT). Five queries consult it -- the four
-// health surfaces below plus tryPublishEconomicScanCyclesTx's cycle
-// completeness check in consumption.go -- and they must agree exactly: a
-// stream that calls an event contained while the cycle publisher calls it
-// outstanding (or the reverse) is two answers to one question.
+// freeze" (XM-INV-DEAD-CONTAINMENT). Every query that asks the question
+// renders it from here, and they must agree exactly: a stream that calls an
+// event contained while the cycle publisher calls it outstanding (or the
+// reverse) is two answers to one question. Today's callers:
 //
-// What it deliberately does NOT match on:
+//   - the four health surfaces below (SourceIngestHealth,
+//     sourceReadinessHealthQuery, SourceHealth, assertSourceFreshTx);
+//   - tryPublishEconomicScanCyclesTx's cycle-completeness filter and
+//     ensureBalanceCarryForwardProofTx's stranded-checkpoint wait, both in
+//     consumption.go;
+//   - the unfreeze guard in eligibility_operations.go;
+//   - ingestRequeueDeadCandidates' --account filter in
+//     ingest_requeue_dead_repair.go.
+//
+// The last four narrow the question further -- to one account, or to one
+// freeze -- which is what extraFreezePredicates is for. The narrowing is then
+// visibly one extra line instead of a retyped copy of the core, and
+// TestEveryDeadEventCountIsRenderedFromOneDefinition is the discovery guard
+// that keeps it that way.
+//
+// One deliberate non-caller: ingestRequeueDeadOpenFreezesTx lists the open
+// freezes matching a payload hash supplied as a bind parameter. It correlates
+// a value to a column rather than two columns to each other, so it falls
+// outside this predicate's shape by construction rather than by exemption.
+//
+// What the core deliberately does NOT match on:
 //
 //   - freeze_reason. MarkSourceEventFailed can produce EVENT_DEAD via the
 //     account hint while an EVENT_PAYLOAD_DRIFT freeze for the same payload
@@ -1222,7 +1241,12 @@ var sourceEventAliasPattern = regexp.MustCompile(`^[a-z][a-z_]{0,15}$`)
 //   - source_instance_id / stream_id. Same reason. The unfreeze guard in
 //     eligibility_operations.go does narrow by source, and deliberately so:
 //     see the note there.
-func sourceEventContainedByOpenFreezeSQL(alias string) string {
+//
+// extraFreezePredicates are appended inside the EXISTS, so they constrain the
+// freeze, not the event. They are SQL fragments written at compile time by
+// this package (never user input), and each one is required to name the ef
+// alias so a caller cannot silently widen the predicate to some other table.
+func sourceEventContainedByOpenFreezeSQL(alias string, extraFreezePredicates ...string) string {
 	if !sourceEventAliasPattern.MatchString(alias) {
 		panic("source ingest event alias must match ^[a-z][a-z_]*$: " + alias)
 	}
@@ -1230,9 +1254,16 @@ func sourceEventContainedByOpenFreezeSQL(alias string) string {
 	// below (NULL = hash is NULL, not true): migration 0032's partial index
 	// carries that predicate, and a query that omits it cannot match the
 	// index.
-	return "EXISTS (SELECT 1 FROM eligibility_freezes ef" +
+	out := "EXISTS (SELECT 1 FROM eligibility_freezes ef" +
 		" WHERE ef.status='open' AND ef.source_revision_hash IS NOT NULL" +
-		" AND ef.source_revision_hash=" + alias + ".payload_hash)"
+		" AND ef.source_revision_hash=" + alias + ".payload_hash"
+	for _, predicate := range extraFreezePredicates {
+		if !strings.Contains(predicate, "ef.") {
+			panic("containment narrowing must constrain the ef alias: " + predicate)
+		}
+		out += " AND " + predicate
+	}
+	return out + ")"
 }
 
 // sourceDeadEventCountColumnsSQL renders the (dead, contained dead) column

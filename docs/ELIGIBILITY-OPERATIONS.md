@@ -799,13 +799,40 @@ event always has two exits, both of which end the refusal:
   event is written off as `processed` / `UNREPLAYABLE_BINDING`, with no pending
   window. It refuses events that could still replay.
 
-**One door does not pass through this guard.**
-`invoice-eligibility-repair --kind=preanchor-usage` resolves the freezes it
-repairs inside its own transaction, in the same transaction that requeues the
-event — so the event is on its way back to `processed` by the time the freeze
-closes, and the ordering is safe. It is a different entry point, not an
-exemption: anything else that resolves freezes programmatically has to
-establish the same ordering for itself.
+**Every door passes through this guard — there is no exemption list.** Five
+pieces of code write `eligibility_freezes.status='resolved'`, and all five ask
+the same question first:
+
+| Door | What it resolves | What a refusal does |
+| --- | --- | --- |
+| the admin freeze queue (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`) | one freeze | `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED` |
+| `invoice-eligibility-repair --kind=preanchor-usage` | `SOURCE_GAP` on usage/credit plus the correlated `EVENT_DEAD` freezes | aborts the run, nothing written |
+| `invoice-eligibility-repair --kind=anchor-balance` | `SOURCE_GAP` on `balance_checkpoint` / `balance_carry_forward_proof` | aborts the run, nothing written |
+| `invoice-eligibility-repair --kind=balance-blip` | `UNKNOWN_NEGATIVE_BALANCE` | aborts the run, nothing written |
+| `invoice-eligibility-repair --kind=queue-narrow` | `UNKNOWN_NEGATIVE_BALANCE`, `USAGE_EXCEEDS_LEDGER`, lot-less `LATE_FINALIZED_EVENT` | that one account is reported in the run's error list; every other account still repairs |
+
+Three of the four repair tools resolve freezes that carry a
+`source_revision_hash` and never read `source_ingest_events` at all, so without
+this guard a routine migration run un-contained a dead event with no error and
+no symptom — until the source instance went unavailable to everyone again, or,
+for a `balance_checkpoint`, until a real balance fact had been permanently
+refused (see the next section). `queue-narrow` is the widest: one run resolves
+every matching freeze on every candidate account.
+
+`preanchor-usage` is the one door that already established the ordering by
+itself, since it requeues the correlated events in the same transaction. It
+still asks, and it has to: it only requeues dead/failed `usage_event` /
+`credit_event` rows, so a correlated dead event of any other entity type is one
+it cannot repair and must not resolve around. Its requeue now runs ahead of its
+resolutions so the guard sees the repaired events.
+
+An earlier version of this section named one exemption and asserted the other
+doors were safe. That survey was done by reading, and it missed three tools.
+What keeps this list honest is not the table above but
+`TestEveryFreezeResolutionPassesTheDeadEventGuard`, which reads every Go source
+under `backend/` and fails on any declaration that resolves a freeze without
+calling the shared guard. A sixth door is allowed to exist; it is not allowed
+to skip the question.
 
 ### A contained `balance_checkpoint` parks the account's projection
 
@@ -838,3 +865,14 @@ because the question is whether anyone is accountable at all. The carry-forward
 wait asks whether *this account* has one, because the proof it is about to
 write is per account and per cycle. Both are pinned by tests; changing either
 without the other will turn one of them red.
+
+There is a third case, and it is the one that made this a data-loss risk rather
+than an inconvenience: a stranded checkpoint that **no** open freeze answers
+for. Nothing then says whose checkpoint it is, and assuming it is not this
+account's is the assumption that loses the fact — so the proof waits for every
+account on that source until the event is repaired. This costs nothing that is
+not already lost: an uncontained dead event holds the whole source instance
+fatal anyway. Reaching this state requires a freeze to have been resolved out
+from under a still-dead event, which every door above now refuses; the wait is
+the second line, not the first. A freeze belonging to a *different* account is
+still not this account's problem, and still does not hold its proof.

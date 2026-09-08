@@ -322,8 +322,8 @@ func (s *Store) RepairBalanceBlipEligibility(ctx context.Context, in BalanceBlip
 					}
 				}
 				if freezeID != "" {
-					if resolveErr := applyBalanceBlipFreezeResolution(ctx, tx, freezeID, resolutionVersion,
-						objectType, in, actor); resolveErr != nil {
+					if resolveErr := applyBalanceBlipFreezeResolution(ctx, tx, freezeID, c.sourceInstanceID,
+						resolutionVersion, objectType, in, actor); resolveErr != nil {
 						return BalanceBlipRepairResult{}, resolveErr
 					}
 				}
@@ -427,8 +427,16 @@ func (s *Store) RepairBalanceBlipEligibility(ctx context.Context, in BalanceBlip
 // writes, mirroring the sibling repairs' own pattern exactly (including
 // re-asserting the freeze's full original predicate in the UPDATE's own
 // WHERE clause, aborting the whole repair run on any mismatch).
-func applyBalanceBlipFreezeResolution(ctx context.Context, tx pgx.Tx, freezeID string, resolutionVersion int64,
+//
+// XM-INV-DEAD-CONTAINMENT: sourceInstanceID is on this signature only so this
+// door can ask assertNoBlockingDeadEventForFreezeTx like every other one. An
+// UNKNOWN_NEGATIVE_BALANCE freeze carries the balance evidence's own
+// source_revision_hash, so it too can be the freeze containing a dead event.
+func applyBalanceBlipFreezeResolution(ctx context.Context, tx pgx.Tx, freezeID, sourceInstanceID string, resolutionVersion int64,
 	triggerObjectType string, in BalanceBlipRepairInput, actor AuditActor) error {
+	if err := assertNoBlockingDeadEventForFreezeTx(ctx, tx, freezeID, sourceInstanceID); err != nil {
+		return err
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE eligibility_freezes SET status='resolved',resolved_at=now(),resolved_by=$1::uuid,
 			resolution_evidence_hash=$2,resolution_evidence_ciphertext=$3,

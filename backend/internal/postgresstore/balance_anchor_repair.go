@@ -279,7 +279,20 @@ func resetSourceGapCheckpointEvaluation(ctx context.Context, tx pgx.Tx, external
 // writes, mirroring applyPreAnchorFreezeResolution's own pattern exactly
 // (including re-asserting the freeze's full original predicate in the
 // UPDATE's own WHERE clause, aborting the whole repair run on any mismatch).
+//
+// XM-INV-DEAD-CONTAINMENT: like every other door that resolves a freeze, this
+// one asks assertNoBlockingDeadEventForFreezeTx first. A SOURCE_GAP freeze on
+// a balance_checkpoint carries the checkpoint's own source_revision_hash, so
+// it can be exactly the freeze containing a dead balance event -- and
+// resolving it would both re-open the source-wide outage and release the
+// carry-forward proof wait over a still-replayable balance fact. Refusing
+// aborts the whole run with nothing written, the same contract this tool
+// already has for a predicate mismatch; the operator's exit is to requeue or
+// acknowledge the event and run again.
 func applyBalanceAnchorFreezeResolution(ctx context.Context, tx pgx.Tx, freeze balanceAnchorFreezeCandidate, in BalanceAnchorRepairInput, actor AuditActor) error {
+	if err := assertNoBlockingDeadEventForFreezeTx(ctx, tx, freeze.id, freeze.sourceInstanceID); err != nil {
+		return err
+	}
 	var before struct {
 		resolutionVersion int64
 	}

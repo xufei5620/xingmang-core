@@ -329,53 +329,9 @@ func TestNonFatalStreamHealthReasonsIsTheOneListAndHandsOutCopies(t *testing.T) 
 	}
 }
 
-// TestEveryDeadEventCountIsRenderedFromOneDefinition is a discovery guard,
-// not a list. The proposal for this slice defended "a fifth health surface
-// forgets the containment predicate" by asserting each of the four known
-// surfaces individually -- but a checker whose coverage is a hand-written
-// list of the things it checks is green by construction for anything not on
-// the list, which is precisely how a gate stops covering what it was written
-// to cover.
-//
-// So instead: read this package's own non-test sources and require that no
-// dead-event FILTER is spelled out by hand anywhere. The two rendering
-// functions are the only place that pairing may appear. There is no
-// exemption list, because the survey found none needed -- the four surfaces
-// are the only FILTERs, and the two repair tools use bare WHERE clauses.
-func TestEveryDeadEventCountIsRenderedFromOneDefinition(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	scanned := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		body, readErr := os.ReadFile(name)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		scanned++
-		source := string(body)
-		for _, line := range strings.Split(source, "\n") {
-			if !strings.Contains(line, "FILTER (WHERE") || !strings.Contains(line, "processing_status='dead'") {
-				continue
-			}
-			// The renderers themselves are the definition; everything else
-			// must call them.
-			if name == "source_sync.go" && strings.Contains(line, `" FILTER (WHERE " + alias`) {
-				continue
-			}
-			t.Fatalf("%s spells a dead-event FILTER by hand instead of rendering it from "+
-				"sourceDeadEventCountColumnsSQL/sourceDeadEventFlagColumnsSQL, so it cannot "+
-				"see containment:\n\t%s", name, strings.TrimSpace(line))
-		}
-	}
-	// Without this the whole test is vacuous if the directory walk ever
-	// stops finding files.
-	if scanned < 10 {
-		t.Fatalf("only %d non-test sources scanned; the discovery guard is not actually looking at this package", scanned)
-	}
-}
+// The dead-event rendering guard that used to live here now lives in
+// containment_discovery_test.go, alongside the two other discovery rules this
+// slice needed. It was a per-line strings.Contains pair, and a code review
+// broke it three ways without turning it red (a FILTER split over two lines,
+// spaces around the `=`, and `IN ('dead')`); the replacement matches on
+// whitespace-normalised declaration text and self-tests its own matcher.

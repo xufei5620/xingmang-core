@@ -215,28 +215,18 @@ func (s *Store) RepairPreAnchorUsageEligibility(ctx context.Context, in PreAncho
 	}
 
 	result := PreAnchorUsageRepairResult{Applied: in.Apply}
-	for _, freeze := range gapFreezes {
-		if in.Apply {
-			if resolveErr := applyPreAnchorFreezeResolution(ctx, tx, freeze, in, actor); resolveErr != nil {
-				return PreAnchorUsageRepairResult{}, resolveErr
-			}
-		}
-		ensureAccount(freeze.externalAccountID).SourceGapFreezesResolved++
-		result.TotalSourceGapFreezesResolved++
-	}
-	for _, freeze := range deadFreezes {
-		if in.Apply {
-			if resolveErr := applyPreAnchorFreezeResolution(ctx, tx, freeze, in, actor); resolveErr != nil {
-				return PreAnchorUsageRepairResult{}, resolveErr
-			}
-		}
-		row := ensureAccount(freeze.externalAccountID)
-		if row.SourceInstanceID == "" {
-			row.SourceInstanceID = accountSource[freeze.externalAccountID]
-		}
-		row.EventDeadFreezesResolved++
-		result.TotalEventDeadFreezesResolved++
-	}
+	// XM-INV-DEAD-CONTAINMENT: the requeue runs first, ahead of both
+	// resolution loops. This tool always did both halves in one transaction,
+	// so the order was previously immaterial -- nothing outside the
+	// transaction could observe an intermediate state. It matters now because
+	// applyPreAnchorFreezeResolution asks assertNoBlockingDeadEventForFreezeTx
+	// like every other door that resolves a freeze, and that guard reads the
+	// event's status inside this same transaction. Requeuing first is not a
+	// way of slipping past the guard: it is the ordering the guard exists to
+	// require -- repair the event, then release the freeze that was
+	// containing it. A correlated event this tool does not requeue (anything
+	// that is not a dead/failed usage_event/credit_event) still stops the run,
+	// which is the correct answer rather than an inconvenience.
 	for _, candidate := range ingestCandidates {
 		accountID := revisionToAccount[candidate.payloadHash]
 		if in.Apply {
@@ -262,6 +252,28 @@ func (s *Store) RepairPreAnchorUsageEligibility(ctx context.Context, in PreAncho
 		}
 		ensureAccount(accountID).EventsRequeued++
 		result.TotalEventsRequeued++
+	}
+	for _, freeze := range gapFreezes {
+		if in.Apply {
+			if resolveErr := applyPreAnchorFreezeResolution(ctx, tx, freeze, in, actor); resolveErr != nil {
+				return PreAnchorUsageRepairResult{}, resolveErr
+			}
+		}
+		ensureAccount(freeze.externalAccountID).SourceGapFreezesResolved++
+		result.TotalSourceGapFreezesResolved++
+	}
+	for _, freeze := range deadFreezes {
+		if in.Apply {
+			if resolveErr := applyPreAnchorFreezeResolution(ctx, tx, freeze, in, actor); resolveErr != nil {
+				return PreAnchorUsageRepairResult{}, resolveErr
+			}
+		}
+		row := ensureAccount(freeze.externalAccountID)
+		if row.SourceInstanceID == "" {
+			row.SourceInstanceID = accountSource[freeze.externalAccountID]
+		}
+		row.EventDeadFreezesResolved++
+		result.TotalEventDeadFreezesResolved++
 	}
 
 	if in.Apply {
@@ -350,7 +362,19 @@ func scanPreAnchorFreezeCandidates(rows pgx.Rows) ([]preAnchorFreezeCandidate, e
 // SELECT and UPDATE, impossible within this single serializable transaction
 // today, but checked unconditionally rather than assumed) and aborts the
 // whole repair run.
+//
+// XM-INV-DEAD-CONTAINMENT: this door is the one that always did establish the
+// right ordering by itself, since it requeues the correlated events in the
+// same transaction. It still asks assertNoBlockingDeadEventForFreezeTx, for
+// two reasons: a survey-by-reading is what left three other doors unguarded
+// for a whole slice, and "this one is safe because of something it does
+// elsewhere in the function" is exactly the kind of claim that stops being
+// true without anything going red. The requeue now runs before both
+// resolution loops so this call sees the repaired events.
 func applyPreAnchorFreezeResolution(ctx context.Context, tx pgx.Tx, freeze preAnchorFreezeCandidate, in PreAnchorUsageRepairInput, actor AuditActor) error {
+	if err := assertNoBlockingDeadEventForFreezeTx(ctx, tx, freeze.id, freeze.sourceInstanceID); err != nil {
+		return err
+	}
 	var before struct {
 		freezeReason, triggerObjectType string
 		resolutionVersion               int64

@@ -3790,6 +3790,28 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 			-- instead of being written. The wait has two keys and both end
 			-- it: requeue the event to processed, or acknowledge it as
 			-- unreplayable. Both flip this flag false.
+			--
+			-- Two ways a stranded checkpoint counts as this account's, both
+			-- rendered from sourceEventContainedByOpenFreezeSQL so they cannot
+			-- drift from what the health surfaces call containment:
+			--
+			--   1. an open freeze on THIS account contains it -- the ordinary
+			--      case, and the reason the account-blind health predicate is
+			--      narrowed here;
+			--   2. no open freeze contains it at all. Nothing then says whose
+			--      checkpoint it is, so assuming it is not this account's is
+			--      the assumption that loses a balance fact forever. An
+			--      uncontained dead event also holds the whole source fatal
+			--      already, so waiting costs nothing that is not already lost.
+			--      Reachable only when a freeze was resolved out from under a
+			--      still-dead event, which every resolution path now refuses
+			--      (assertNoBlockingDeadEventForFreezeTx) -- this branch is
+			--      what makes that refusal a defence in depth rather than the
+			--      only thing standing between a repair run and the data loss.
+			--
+			-- A freeze belonging to a DIFFERENT account still does not hold
+			-- this account's proof: that is case 1 being false and case 2
+			-- being false together, and it is pinned by its own test arm.
 			EXISTS (
 				SELECT 1
 				FROM source_economic_scan_cycle_events mapped
@@ -3797,16 +3819,13 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 				  ON sie.source_instance_id=mapped.source_instance_id
 				 AND sie.stream_id=mapped.stream_id
 				 AND sie.event_id=mapped.event_id
-				JOIN eligibility_freezes ef
-				  ON ef.status='open'
-				 AND ef.source_revision_hash IS NOT NULL
-				 AND ef.source_revision_hash=sie.payload_hash
-				 AND ef.external_account_id=$1
 				WHERE mapped.source_instance_id=cycle.source_instance_id
 				  AND mapped.stream_id='balances'
 				  AND mapped.scan_cycle_id=cycle.scan_cycle_id
 				  AND sie.entity_type='balance_checkpoint'
 				  AND sie.processing_status IN ('failed','dead')
+				  AND (`+sourceEventContainedByOpenFreezeSQL("sie", "ef.external_account_id=$1")+`
+				       OR NOT `+sourceEventContainedByOpenFreezeSQL("sie")+`)
 			) AS has_stranded_checkpoint
 		FROM source_economic_scan_cycles cycle
 		JOIN source_ingest_batches batch

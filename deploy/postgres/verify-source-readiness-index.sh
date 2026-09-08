@@ -196,18 +196,24 @@ WHERE idx_ns.nspname='public' AND idx.relname='${INDEX_NAME}'" >"$output"
 # proving an index path for a query the service no longer runs.
 #
 # Re-synchronised on 2026-09-08 for XM-INV-DEAD-CONTAINMENT, which adds the
-# dead_contained flag. Two rules for whoever touches sourceReadinessHealthQuery
-# next:
+# dead_contained flag -- and then pinned, because re-synchronising a copy by
+# hand fixes the symptom and leaves the mechanism. A freshly-synced copy is
+# more dangerous than a visibly stale one: it is trusted, and the next edit
+# re-orphans it silently.
 #
-#   1. Update this copy in the same commit, or this script goes back to
-#      proving nothing.
-#   2. This script is not the real gate. The real one is
-#      TestSourceReadinessHealthIgnoresParkedBacklogAndUsesPartialIndex (and,
-#      for this slice, TestContainedDeadFilterKeepsReadinessOnTheActivePartialIndex)
-#      in backend/internal/postgresstore/source_readiness_integration_test.go,
-#      which EXPLAINs the live query text and therefore cannot drift at all.
-#      This script exists to check the *production* planner against production
-#      statistics, which no test can do.
+# TestVerifyScriptPlansTheQueryTheServiceActuallyRuns
+# (backend/internal/postgresstore/verify_script_query_sync_test.go) now reads
+# the heredoc below, normalises it, and requires it to equal
+# sourceReadinessHealthQuery. Editing either one without the other fails in the
+# same commit that causes the drift, and prints the first divergence. Do not
+# reformat the markers `emit_readiness_query() {` / `  cat <<'SQL'` / the
+# closing `SQL` line: the pin locates the copy by them.
+#
+# This script is still not the only gate. TestSourceReadinessHealthIgnoresParked\
+# BacklogAndUsesPartialIndex and TestContainedDeadFilterKeepsReadinessOnThe\
+# ActivePartialIndex, in source_readiness_integration_test.go, EXPLAIN the live
+# query text. This script exists to check the *production* planner against
+# production statistics, which no test can do.
 #
 # Differences from the Go source that are intentional and not drift: the
 # `public.` schema qualifications, and the absence of Go's string

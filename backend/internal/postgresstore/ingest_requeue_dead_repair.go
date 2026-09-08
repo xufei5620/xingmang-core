@@ -330,15 +330,19 @@ func (s *Store) ingestRequeueDeadCandidates(ctx context.Context, in IngestRequeu
 	// promise to short-circuit OR, so a literal ''::uuid cast in the unused
 	// branch can still be evaluated and raise. NULLIF('','') is NULL, and
 	// NULL::uuid is always safe.
+	// The --account filter asks the containment question narrowed to one
+	// account, so it renders it from sourceEventContainedByOpenFreezeSQL
+	// rather than retyping it (XM-INV-DEAD-CONTAINMENT). Retyped, it would
+	// have quietly disagreed with the health surfaces about
+	// source_revision_hash IS NOT NULL -- harmless here, but "harmless" is
+	// how a second definition always starts.
 	rows, err := s.pool.Query(ctx, `
 		SELECT sie.source_instance_id::text,sie.stream_id,sie.event_id::text
 		FROM source_ingest_events sie
 		WHERE sie.processing_status='dead'
 			AND (NULLIF($1::text,'') IS NULL OR sie.event_id=NULLIF($1::text,'')::uuid)
-			AND (NULLIF($2::text,'') IS NULL OR EXISTS (
-				SELECT 1 FROM eligibility_freezes ef
-				WHERE ef.status='open' AND ef.external_account_id=NULLIF($2::text,'')::uuid
-					AND ef.source_revision_hash=sie.payload_hash))
+			AND (NULLIF($2::text,'') IS NULL OR `+
+		sourceEventContainedByOpenFreezeSQL("sie", "ef.external_account_id=NULLIF($2::text,'')::uuid")+`)
 		ORDER BY 1,2,3`, eventID, accountID)
 	if err != nil {
 		return nil, err

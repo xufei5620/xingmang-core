@@ -31,19 +31,75 @@ var eligibilityFreezeBlockingEventStatusSQL = renderEligibilityFreezeBlockingEve
 // a package-level string rather than an inline literal so the EXPLAIN test can
 // plan this exact text: a test that retyped the query would be checking a copy,
 // and a copy of a query stops testing the original the moment either moves.
-// See ResolveEligibilityFreeze for what the predicate is for and why it is
-// narrowed by source.
+// See assertNoBlockingDeadEventForFreezeTx for what the predicate is for and
+// why it is narrowed by source.
+//
+// The containment core is rendered from sourceEventContainedByOpenFreezeSQL
+// rather than retyped, with ef.id=$1 as its narrowing: this guard and the
+// health surfaces have to be answering literally the same question, because
+// the guard exists only to stop a resolution from changing that answer. The
+// query drives from source_ingest_events on purpose -- source_instance_id
+// plus the blocking status set is exactly the leading column and the partial
+// predicate of source_ingest_events_readiness_active_idx.
 var eligibilityFreezeDeadEventGuardQuery = `
 	SELECT EXISTS(
 		SELECT 1
-		FROM eligibility_freezes ef
-		JOIN source_ingest_events sie ON sie.payload_hash=ef.source_revision_hash
-		WHERE ef.id=$1
-		  AND ef.status='open'
-		  AND ef.source_revision_hash IS NOT NULL
-		  AND sie.source_instance_id=$2
+		FROM source_ingest_events sie
+		WHERE sie.source_instance_id=$2
 		  AND sie.processing_status=ANY(` + eligibilityFreezeBlockingEventStatusSQL + `)
+		  AND ` + sourceEventContainedByOpenFreezeSQL("sie", "ef.id=$1") + `
 	)`
+
+// assertNoBlockingDeadEventForFreezeTx refuses to let a freeze that is still
+// the only thing containing a dead source event be resolved
+// (XM-INV-DEAD-CONTAINMENT). Every code path that writes
+// eligibility_freezes.status='resolved' calls it -- the admin resolution
+// endpoint and all four repair tools -- and
+// TestEveryFreezeResolutionPassesTheDeadEventGuard is the discovery guard that
+// keeps a sixth door from being added without one.
+//
+// Why it has to be stated at all: until this slice the ordering held by
+// accident, because a dead event made every stream not-ready and
+// assertSourceFreshTx rejected the resolution with ErrEligibilitySourceStale
+// long before any of this ran. Containment removes that accident on purpose.
+// Without the rule, one "tidy up the freeze queue" run re-opens the exact
+// blast radius the slice closes: the event goes back to being uncontained and
+// the whole source instance becomes unavailable to every account again. Worse
+// for a balance_checkpoint: the same resolution also releases
+// ensureBalanceCarryForwardProofTx's wait, and the projection worker (every
+// two seconds) then writes an immutable "the balance did not change in this
+// cycle" proof over a still-replayable fact, after which migration 0014's
+// reject_real_checkpoint_after_carry_forward refuses the real checkpoint
+// forever.
+//
+// Scope, and a deliberate deviation from the dispatch note (which said "until
+// the event is processed"): this blocks on dead only. Its job is to stop a
+// resolution turning a contained dead event into an uncontained one, and only
+// 'dead' can do that. Blocking on queued/failed/processing as well would
+// create freezes with no exit -- a requeued event that lands in
+// waiting_dependency or parked_identity never becomes processed, and the
+// freeze could never be resolved again. A dead event has two keys instead:
+// requeue it successfully, or acknowledge it as unreplayable; both write
+// processing_status. L3 (XM-INV-CYCLE-WAIT) is where the wider "not yet
+// processed" set belongs, together with the waiting state that gives it an
+// exit, and eligibilityFreezeBlockingEventStatuses is the one place it widens.
+//
+// Narrowed by source_instance_id, which every caller has already resolved.
+// That is what puts the lookup on source_ingest_events_readiness_active_idx:
+// without it the predicate has no leading index column, and a sequential scan
+// here would take a relation-level SIREAD predicate lock (all five callers run
+// SERIALIZABLE) against the repair tools that write the same table.
+func assertNoBlockingDeadEventForFreezeTx(ctx context.Context, tx pgx.Tx, freezeID, sourceInstanceID string) error {
+	var blocked bool
+	if err := tx.QueryRow(ctx, eligibilityFreezeDeadEventGuardQuery, freezeID, sourceInstanceID).
+		Scan(&blocked); err != nil {
+		return err
+	}
+	if blocked {
+		return domain.ErrEligibilityDeadEventUnrepaired
+	}
+	return nil
+}
 
 var eligibilityFreezeBlockingEventStatusPattern = regexp.MustCompile(`^[a-z][a-z_]{0,30}$`)
 
@@ -325,45 +381,11 @@ func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibil
 		// row), just short-circuited before running that heavier query.
 		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
 	}
-	// XM-INV-DEAD-CONTAINMENT: a freeze that is still the only thing
-	// containing a dead source event may not be resolved. Until this slice
-	// the ordering held by accident -- a dead event made every stream
-	// not-ready, so assertSourceFreshTx above rejected the resolution with
-	// ErrEligibilitySourceStale before this point was ever reached.
-	// Containment removes that accident on purpose, which means the rule
-	// now has to be stated. Without it one "tidy up the freeze queue"
-	// resolution re-opens the very blast radius this slice closes: the
-	// event goes back to being uncontained, and the whole source instance
-	// becomes unavailable to every account again.
-	//
-	// Scope, and a deliberate deviation from the dispatch note (which said
-	// "until the event is processed"): this guard blocks on dead only. Its
-	// job is to stop a resolution from turning a contained dead event into
-	// an uncontained one, and only 'dead' can do that. Blocking on
-	// queued/failed/processing as well would create freezes with no exit --
-	// a requeued event that lands in waiting_dependency or parked_identity
-	// never becomes processed, and the freeze could never be resolved
-	// again. A dead event has two keys instead: requeue it successfully, or
-	// acknowledge it as unreplayable; both write processing_status. L3
-	// (XM-INV-CYCLE-WAIT) is where the wider "not yet processed" set
-	// belongs, together with the waiting state that gives it an exit -- and
-	// this is the one place it will have to widen, hence the status set
-	// living in eligibilityFreezeBlockingEventStatuses.
-	//
-	// Narrowed by source_instance_id, which the freeze lookup above already
-	// resolved. That is what puts the lookup on
-	// source_ingest_events_readiness_active_idx: without it the predicate
-	// has no leading index column, and a sequential scan here would take a
-	// relation-level SIREAD predicate lock (this transaction is
-	// SERIALIZABLE) against the two repair tools, which are SERIALIZABLE
-	// writers of the same table.
-	var deadEventUnrepaired bool
-	if err = tx.QueryRow(ctx, eligibilityFreezeDeadEventGuardQuery, in.FreezeID, sourceID).
-		Scan(&deadEventUnrepaired); err != nil {
+	// The guard is placed here, after the idempotent-replay short circuit
+	// above, so a replayed resolution of an already-resolved freeze still
+	// returns the same freeze rather than a 409.
+	if err = assertNoBlockingDeadEventForFreezeTx(ctx, tx, in.FreezeID, sourceID); err != nil {
 		return EligibilityFreeze{}, err
-	}
-	if deadEventUnrepaired {
-		return EligibilityFreeze{}, domain.ErrEligibilityDeadEventUnrepaired
 	}
 	var unsafeRefund, projectionJob bool
 	if err = tx.QueryRow(ctx, `

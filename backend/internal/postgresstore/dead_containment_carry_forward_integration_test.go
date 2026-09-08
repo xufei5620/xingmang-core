@@ -3,6 +3,7 @@ package postgresstore
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -49,6 +50,16 @@ func carryForwardProofCount(t *testing.T, fixture carryForwardFixture) int64 {
 // hash the two are correlated by.
 func strandCarryForwardCheckpoint(t *testing.T, fixture carryForwardFixture, accountID string) string {
 	t.Helper()
+	return strandCarryForwardCheckpointAs(t, fixture, accountID, "EVENT_DEAD")
+}
+
+// strandCarryForwardCheckpointAs is the same thing with the freeze reason
+// chosen by the caller. Containment is deliberately reason-blind, so the
+// reason changes nothing about the wait itself -- but it decides which repair
+// tool selects the freeze, which is how the repair-tool arm below reproduces
+// the real route to the data loss rather than a hand-made one.
+func strandCarryForwardCheckpointAs(t *testing.T, fixture carryForwardFixture, accountID, reason string) string {
+	t.Helper()
 	var payloadHash string
 	if err := fixture.store.pool.QueryRow(fixture.ctx, `
 		UPDATE source_ingest_events SET processing_status='dead',processing_error='PROJECTION_FAILED',
@@ -60,8 +71,8 @@ func strandCarryForwardCheckpoint(t *testing.T, fixture carryForwardFixture, acc
 	if _, err := fixture.store.pool.Exec(fixture.ctx, `
 		INSERT INTO eligibility_freezes(id,external_account_id,freeze_reason,trigger_object_type,
 			trigger_object_id,source_revision_hash,status)
-		VALUES($1,$2,'EVENT_DEAD','balance_checkpoint','stranded-checkpoint',$3,'open')`,
-		randomUUID(), accountID, payloadHash); err != nil {
+		VALUES($1,$2,$4,'balance_checkpoint','stranded-checkpoint',$3,'open')`,
+		randomUUID(), accountID, payloadHash, reason); err != nil {
 		t.Fatal(err)
 	}
 	// The wait must be explained by the stranded checkpoint, not by an
@@ -137,6 +148,97 @@ func TestStrandedCheckpointHoldsTheCarryForwardProofInsteadOfFakingIt(t *testing
 		}
 		if proofs := carryForwardProofCount(t, fixture); proofs != 1 {
 			t.Fatalf("proofs=%d want 1 once the stranded checkpoint was resolved", proofs)
+		}
+	})
+
+	// The arm that was missing, and the one a code review used to walk the
+	// whole data loss end to end.
+	//
+	// The wait's account correlation runs through the open freeze, because
+	// source_ingest_events carries no account column. That made the freeze
+	// load-bearing in a way nothing tested: resolve it while the event is
+	// still dead and the wait evaporates, the projection worker writes the
+	// immutable "balance unchanged" proof within two seconds, and migration
+	// 0014's trigger refuses the real checkpoint forever.
+	//
+	// Two independent things now stop that, and this arm is the second one.
+	// The first is that every path which resolves a freeze refuses while its
+	// event is dead (see TestEveryRepairToolRefusesToUncontainADeadEvent).
+	// The second is here: a stranded checkpoint that no open freeze answers
+	// for is treated as possibly this account's, because nothing is left to
+	// say whose it is, and guessing "not mine" is the guess that loses the
+	// fact. The raw UPDATE below deliberately goes around every guarded door
+	// to reach that state at all.
+	t.Run("a freeze resolved out from under a still-dead checkpoint still holds the proof", func(t *testing.T) {
+		fixture := seedCarryForwardFixture(t, "", "20")
+		payloadHash := strandCarryForwardCheckpoint(t, fixture, fixture.accountID)
+		if _, err := fixture.store.pool.Exec(fixture.ctx, `
+			UPDATE eligibility_freezes SET status='resolved',resolved_at=now(),resolved_by=$2::uuid,
+				resolution_evidence_hash=repeat('d',64),resolution_note_hash=repeat('e',64),
+				resolution_evidence_ciphertext=decode(repeat('11',16),'hex'),
+				resolution_note_ciphertext=decode(repeat('22',16),'hex'),
+				resolution_version=resolution_version+1,updated_at=now()
+			WHERE source_revision_hash=$1 AND status='open'`, payloadHash, randomUUID()); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCarryForwardProof(t, fixture); !errors.Is(err, errBalanceCarryForwardProofPending) {
+			t.Fatalf("err=%v want errBalanceCarryForwardProofPending -- resolving the freeze "+
+				"released the wait and an immutable \"no checkpoint here\" proof was written "+
+				"over a still-dead, still-replayable balance fact", err)
+		}
+		if proofs := carryForwardProofCount(t, fixture); proofs != 0 {
+			t.Fatalf("proofs=%d want 0 while the checkpoint is still dead", proofs)
+		}
+		// Still not a latch without a key: writing the event off ends the
+		// wait whether or not any freeze remains.
+		if _, err := fixture.store.pool.Exec(fixture.ctx, `
+			UPDATE source_ingest_events SET processing_status='processed',processing_error='UNREPLAYABLE_BINDING',
+				processed_at=now(),updated_at=now()
+			WHERE source_instance_id=$1 AND stream_id='balances' AND event_id=$2::uuid`,
+			fixture.sourceID, carryForwardStrandedEventID); err != nil {
+			t.Fatal(err)
+		}
+		if err := runCarryForwardProof(t, fixture); err != nil {
+			t.Fatalf("the wait has no exit once the freeze is gone: %v", err)
+		}
+		if proofs := carryForwardProofCount(t, fixture); proofs != 1 {
+			t.Fatalf("proofs=%d want 1", proofs)
+		}
+	})
+
+	// The same walk again, through a door an operator actually uses. A
+	// queue-narrow migration run resolves every open UNKNOWN_NEGATIVE_BALANCE
+	// freeze on every candidate account in one pass, with no idea a dead event
+	// might be hanging from one of them -- and, before the guard, no reason to
+	// look.
+	t.Run("a repair run refuses instead of releasing the wait", func(t *testing.T) {
+		fixture := seedCarryForwardFixture(t, "", "20")
+		strandCarryForwardCheckpointAs(t, fixture, fixture.accountID, "UNKNOWN_NEGATIVE_BALANCE")
+
+		in := queueNarrowFixedResolution(t)
+		in.Apply = true
+		result, err := fixture.store.RepairQueueNarrowEligibility(fixture.ctx, in,
+			AuditActor{Type: "admin", ID: in.OperatorID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 1 ||
+			!strings.Contains(result.Errors[0].Message, "a dead source event still correlates to this freeze") {
+			t.Fatalf("errors=%+v, want one refusal naming the dead event", result.Errors)
+		}
+		var status string
+		if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT status FROM eligibility_freezes
+			WHERE external_account_id=$1`, fixture.accountID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "open" {
+			t.Fatalf("freeze status=%s after a refused repair run, want open", status)
+		}
+		if err = runCarryForwardProof(t, fixture); !errors.Is(err, errBalanceCarryForwardProofPending) {
+			t.Fatalf("err=%v want errBalanceCarryForwardProofPending", err)
+		}
+		if proofs := carryForwardProofCount(t, fixture); proofs != 0 {
+			t.Fatalf("proofs=%d want 0", proofs)
 		}
 	})
 

@@ -272,7 +272,7 @@ func (s *Store) repairQueueNarrowAccount(ctx context.Context, accountID string, 
 			row.LateFactFreezesResolved++
 		}
 		if in.Apply {
-			if err = applyQueueNarrowFreezeResolution(ctx, tx, f, in, actor); err != nil {
+			if err = applyQueueNarrowFreezeResolution(ctx, tx, f, sourceInstanceID, in, actor); err != nil {
 				return QueueNarrowRepairAccount{}, err
 			}
 		}
@@ -407,7 +407,21 @@ func (s *Store) repairQueueNarrowAccount(ctx context.Context, accountID string, 
 // the same category predicate -- in the UPDATE's own WHERE clause, aborting
 // this account's transaction on any mismatch rather than silently skipping
 // it).
-func applyQueueNarrowFreezeResolution(ctx context.Context, tx pgx.Tx, freeze queueNarrowFreezeRow, in QueueNarrowRepairInput, actor AuditActor) error {
+//
+// XM-INV-DEAD-CONTAINMENT: this is the broadest door of the four -- one run
+// resolves every open UNKNOWN_NEGATIVE_BALANCE / USAGE_EXCEEDS_LEDGER /
+// LATE_FINALIZED_EVENT freeze on every candidate account -- so it asks
+// assertNoBlockingDeadEventForFreezeTx like the others. freezeEligibilityTx
+// writes source_revision_hash for all three of those reasons, and the
+// containment predicate is deliberately reason-blind, so any of them can be
+// the freeze holding a dead event contained. The refusal aborts this
+// account's transaction (the run's per-account error contract), leaving every
+// other account repairable.
+func applyQueueNarrowFreezeResolution(ctx context.Context, tx pgx.Tx, freeze queueNarrowFreezeRow,
+	sourceInstanceID string, in QueueNarrowRepairInput, actor AuditActor) error {
+	if err := assertNoBlockingDeadEventForFreezeTx(ctx, tx, freeze.id, sourceInstanceID); err != nil {
+		return err
+	}
 	command, err := tx.Exec(ctx, `
 		UPDATE eligibility_freezes ef SET status='resolved',resolved_at=now(),resolved_by=$1::uuid,
 			resolution_evidence_hash=$2,resolution_evidence_ciphertext=$3,
