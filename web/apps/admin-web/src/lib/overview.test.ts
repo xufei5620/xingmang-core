@@ -144,6 +144,18 @@ describe("需要处理的事", () => {
     // 旧措辞不能残留：同一个数在三个页面上有三种叫法，人会以为看的是三个量
     expect(items[0]!.detail).not.toContain("命中");
   });
+
+  // XM-WORKBENCH-TRUTH 评审回合三：只响了一轮时不说「评估 1 轮」是对的，但那个
+  // 守卫以前把 trigger_count 也一起吞了——「触发 5 次」与「评估 1 轮」是两个事实。
+  it("trigger_count 在场时哪怕只评估了一轮也要带出来，不被轮数守卫吞掉", () => {
+    const withTriggers = { ...alert({ fire_count: 1 }), trigger_count: 5 } as AlertItem;
+    const [item] = toWorkItems([withTriggers], "sub2api", platformOfMetricKey);
+    expect(item!.detail).toContain("触发 5 次");
+    expect(item!.detail).toContain("评估 1 轮");
+    // 对照：字段显式为 null 时仍走「只响一轮不啰嗦」那一支
+    const nulled = { ...alert({ fire_count: 1 }), trigger_count: null } as AlertItem;
+    expect(toWorkItems([nulled], "sub2api", platformOfMetricKey)[0]!.detail).not.toContain("评估");
+  });
 });
 
 describe("概览这一栏的条数上限", () => {

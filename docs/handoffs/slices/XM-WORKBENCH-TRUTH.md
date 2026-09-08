@@ -11,6 +11,9 @@
   - 第二轮（处理评审的三条阻塞级问题）：开始 2026-09-08T17:02Z，结束
     2026-09-08T17:31Z（约 29 分钟。见文末「评审回合二」；含 23 次变异验证——
     15 条旧的全部重跑 + 8 条新的）。
+  - 第三轮（复审的七条 minor，逐条修）：开始 2026-09-08T17:44Z，结束
+    2026-09-08T17:58Z（约 14 分钟。见文末「评审回合三」；含 5 项变异验证，
+    一次性同时施加、按测试文件归因，还原后全量复跑）。
 
 ## 一句话结论
 
@@ -56,7 +59,9 @@ Sub2API 眼下六条指标多为 fresh、只有渠道余额是 uninitialized、�
   私有自由文本，解析它等于在前端复刻一份后端事实）。
 - **uninitialized**：区分「这个平台还没有任何指标在采」（服务器）与「有指标在采，
   但『X』从未采到值」（Sub2API 的渠道余额）。**这个区分不需要任何新后端字段**，
-  从有没有指标行就能得出。
+  从有没有指标行就能得出。第三轮起「一条指标都没有」那句的主语是
+  `describeWhy` 的参数：平台行传「这个平台」，开票行传「开票的只读数据通道」
+  ——开票不是平台，同一格的 `scopeNote` 正说着它是只读数据对接。
 - **不说「不适用」。** 见下面「依赖的后端字段」第 5 条。
 
 ### 3. 开票系统那一行由数据算出来（`workbench.ts`）
@@ -107,9 +112,9 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 |---|---|---|
 | `api/alerts.ts` 字段注释 | 「被去重合并掉的命中次数（含首次）」 | 如实说明 + 出处 |
 | `lib/workbench.ts` 待办右列 | `触发 N 次` | `describeFireCount().combined` |
-| `pages/AlertsPage.tsx` 列头 / 悬停 / caption | 「次数」 | `FIRE_COUNT_HEADER` / `FIRE_COUNT_MEANING` |
-| `components/PlatformAlertsPanel.tsx` 列头 / 悬停 / caption | 「次数」 | 同上 |
-| `lib/overview.ts` 平台概览副行 | `命中 N 次` | `describeFireCount().combined` |
+| `pages/AlertsPage.tsx` 列头 / 悬停 / caption / 格子 | 「次数」 | `FIRE_COUNT_HEADER` / `FIRE_COUNT_MEANING`；格子只放 `describeFireCount().figure`（纯数字，`trigger_count` 在场时「M / N」），整句退到悬停 |
+| `components/PlatformAlertsPanel.tsx` 列头 / 悬停 / caption / 格子 | 「次数」 | 同上 |
+| `lib/overview.ts` 平台概览副行 | `命中 N 次` | `describeFireCount().combined`；守卫是 `fire_count > 1 \|\| trigger_count != null`，只响一轮时不啰嗦，但不吞掉「触发 N 次」 |
 
 新增 `ALERT_EVALUATE_INTERVAL_SECONDS = 60`，被 labels.reconcile 从 Go 源码抽出来
 逐值对账；并断言 `TouchAlert` 里确有 `fire_count = fire_count + 1`——后端哪天把它
@@ -122,7 +127,11 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 ### 6. 纳入中文对照门禁（`labels.reconcile.test.ts`）
 
 - `ENUM_INVENTORY["ops.State"]` 从 `labelled-elsewhere` 升成 **`reconciled`**，
-  并补上真正的差集断言（五个状态都有中文 + 前端优先级清单不多不少）。
+  并补上真正的差集断言（五个状态都有中文 + 前端优先级清单不多不少）。第三轮
+  又把前端**两份手写的 TS 联合类型**（`api/ops.ts` 的 `OpsFreshnessState`、
+  `ui-admin/freshness.ts` 的 `FreshnessState`）用新抽取器 `tsUnionValues` 纳入同
+  一条差集断言——它们只被 typecheck 用、不露到界面上，此前往里加一个后端不存在的
+  "melted" 全量照样全绿。
 - 新增「告警计数」一组，把「评估 N 轮」这句新文案钉在两处后端事实上。
 - 新增两条**跨文件扫描**（第二轮重写过，见文末「评审回合二」）：
   - **措辞**：`web/apps/admin-web/src` 与 `web/packages/ui-admin/src` 下**全部**
@@ -172,6 +181,17 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 | M21b | 让 `api/alerts.ts` 不再需要「取值」豁免（把 `` `评估 ${alert.fire_count} 轮` `` 改成先取局部变量），但豁免仍留在清单里 | 「每一条今天都还需要」——这是「豁免清单只减不增」三条规矩里最容易写成恒真的第三条 | ✅ |
 | M5b | 排序里去掉稳定并列判据 `\|\| a.index - b.index` | 「条数相同时保持取数顺序」 | ✅ |
 
+**第三轮新增（针对复审的七条 minor；五项变异一次性同时施加、按测试文件归因，
+还原后六个相关文件 389 条复跑全绿、全量 2191 条全绿）：**
+
+| # | 变异 | 变红的用例 | 已还原 |
+|---|---|---|---|
+| M22 | `describeWhy` 无视 `subject` 参数，写死「这个平台」 | workbench「『一条指标都没有』的那句话不把开票叫成平台」 | ✅ |
+| M23 | `AlertsPage` 的格子改回 `counts.rounds`（整句） | AlertsPage DOM 2 条（纯数字 / 「M / N」） | ✅ |
+| M24 | `PlatformAlertsPanel` 的格子改回 `counts.rounds` | PlatformAlertsPanel DOM「格子是纯数字」 | ✅ |
+| M25 | `overview.ts` 守卫改回 `a.fire_count > 1` | overview「trigger_count 在场时哪怕只评估了一轮也要带出来」 | ✅ |
+| M26 | 给 `OpsFreshnessState` 与 `FreshnessState` 各加一个 `"melted"`（真源码） | labels.reconcile 2 条：「两份手写的 TS 联合类型不多不少」+ 合成源码那条的对照组 | ✅ |
+
 测试内部另有三条**合成源码**变异（不改实现、只换输入，写在
 `labels.reconcile.test.ts` 里长期运行）：对调 Go 函数体的两个分支、给 Go 常量块加
 第六个状态、把 `f.State =` 改名让抽取器抓空。第二轮又加了两组同类的**合成文件**
@@ -199,10 +219,12 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm --filter admin-web run typecheck` | ✅（第二轮复跑） |
-| `pnpm --filter admin-web run test` | ✅ 143 文件 / **2183** 用例（第二轮复跑） |
-| `pnpm --filter ui-admin run test` | ✅ 17 文件 / 262 用例（第一轮；第二轮未动该包的任何源码，只是把它纳入了措辞扫描的**范围**） |
-| `pnpm --filter ui-storybook run build` | ✅（第一轮；第二轮只改了两个 `.test.ts`，没有组件变更） |
+| `pnpm --filter admin-web run typecheck` | ✅（第三轮复跑：17:53:40Z–17:53:46Z，6 秒） |
+| `pnpm --filter admin-web run test` | ✅ 143 文件 / **2191** 用例（第三轮复跑：17:53:47Z–17:54:09Z，22 秒） |
+| `pnpm --filter ui-admin run test` | ✅ 17 文件 / 262 用例（第三轮复跑：17:54:09Z–17:54:12Z，3 秒；三轮都没动该包源码） |
+| `bash scripts/check-governance.sh` | ✅（第三轮：17:54:29Z–17:54:34Z，5 秒） |
+| `gitleaks detect --source . --no-git --redact` | 11 条 generic-api-key，**全部在本片未触碰的文件里**（`connectors/…`、`internal/platform/…` 的测试、`web/…/metrics.test.ts`、`platform.test.ts`、storybook 静态产物），是既有的指标键字面量误报；本片改动的 11 个文件里 0 条 |
+| `pnpm --filter ui-storybook run build` | ✅（第一轮；第二、三轮没有组件变更） |
 
 （全部带 `--config.verify-deps-before-run=false`：本 worktree 的 `node_modules` 是
 指向 `wt-XM-I18N` 的 junction。）
@@ -211,8 +233,10 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 
 - `lib/workbench.test.ts` 「触发 7 次」→「评估 7 轮」
 - `lib/overview.test.ts` 「命中 37 次」→「评估 37 轮」
-- `router.test.tsx` 告警列表那条：`getByText("6")` → `getByText("评估 6 轮")`
-  （裸数字既读不出口径，也会跟表里别的 6 撞上）
+- `router.test.tsx` 告警列表那条：`getByText("6")` → 第二轮改成
+  `getByText("评估 6 轮")`，第三轮再改成 `getByTitle(/^评估 6 轮。/)`——格子回到
+  纯数字（数字列），口径由表头与悬停整句承担；「跟表里别的 6 撞上」的顾虑改由
+  `pages/AlertsPage.test.tsx` 按表头定位列再看格子来解决，不再用 getByText 去撞
 - `router.test.tsx` 「取满 20 条但没有下一页」：等的从逐条那句改成合并行标题
 
 ## risks
@@ -242,6 +266,16 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
    这是有意的（见 M21b）——处置是把豁免删掉，那正是这张清单唯一允许的方向。
 8. 所有关于生产现状的数字（288、669、2922）都转引自
    `PLATFORM-ALERT-STORM-2026-09-08.md`，不是本次观测。
+9. **「取值」扫描只认模板串。** `RAW_FIRE_COUNT_RENDER` 的正则匹配的是
+   `` ${x.fire_count} ``；JSX 正文里直接写 `{alert.fire_count}` 它抓不到。第三轮
+   把格子数字化时没有开这个口子（数字也从 `describeFireCount().figure` 取），但
+   门禁本身没有堵上这种写法，见 follow_up 7。
+10. **`trigger_count` 到位后格子里的「M / N」要靠悬停才分得清哪个是触发、哪个是
+    评估。** 表头只写「评估轮次」。这是「数字列里只放数字」与「两个数是不同的
+    事实」之间的取舍——字段今天还不存在，等它落地时再决定要不要拆成两列。
+11. **`tsUnionValues` 也是文本启发式。** 它认的是 `type X = … ;` 这一句，要求声明
+    以分号结束、成员是双引号字面量；写法变了会抓空。配了数量下界（`>= 5`）与
+    改名抓空的变异用例，与 risks 2 是同一类债。
 
 ## follow_ups
 
@@ -266,6 +300,35 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
    「递归走遍 web 源码 + 剥注释 + 一组模式 + 只减不增的豁免清单 + 判据反向验证」
    的骨架。下一个要盯全站文案的门禁（见 follow_up 4）不该再抄一份走目录的代码，
    否则「闸的范围要发现不要手列」这条教训会在门禁自己身上再犯一次。
+7. **「取值」扫描补上 JSX 正文这一种写法**（`{alert.fire_count}` /
+   `{a.fire_count}`），并配同样的合成文件反向验证。今天没有人这么写，但门禁的
+   承诺是「只经 describeFireCount 一处出场」，它眼下只兑现了模板串那一半。
+
+## 评审回合三：七条 minor 逐条
+
+| # | 问题 | 处置 |
+|---|---|---|
+| 1 | `describeWhy` 的「一条指标都没有」写死主语「这个平台」，开票行也显示这句 | 加 `subject` 参数；平台行传「这个平台」，开票行传「开票的只读数据通道」。测试断言开票行整句相等且不含「平台」，平台行仍含「这个平台」（M22） |
+| 2 | 两处注释把旧兜底写成 `?? UNKNOWN_STATE_RANK`，事实是 `?? 0` | 改回 `?? 0`（Edit 逐处，全角标点保留） |
+| 3 | `if (never.length === 0) return {};` 是死分支 | 删掉，留注释说明为何不可达（own 非空时 worst 必是 own 里某一条的 freshness，worstFreshness 只在 own 为空时才兜底 UNINITIALIZED） |
+| 4 | 两张表的计数列 `numeric: true` 但格子里是整句「评估 N 轮」 | `describeFireCount` 多返回一个 `figure`（纯数字；`trigger_count` 在场时「M / N」），两张表的格子只放它，悬停改成 `combined + FIRE_COUNT_MEANING`。**没有新增第二个 `fire_count` 出场点**。DOM 断言按表头定位列、格子文本 `toBe("3")` 且 `/^\d+$/`（M23 / M24）。工作台待办那一列没有表头，保持整句 |
+| 5 | `overview.ts` 的 `fire_count > 1` 守卫吞掉 `trigger_count` | 守卫改成 `fire_count > 1 \|\| trigger_count != null`；overview.test 补 fire_count=1 + trigger_count=5 出现「触发 5 次」，另配 null 对照（M25） |
+| 6 | `ENUM_INVENTORY["ops.State"]` 的 note 说「两者」都对账了，漏了两份手写 TS 联合类型 | 选推荐方案：新抽取器 `tsUnionValues` 把 `OpsFreshnessState` 与 `FreshnessState` 纳入同一条差集断言，配数量下界、合成源码加 "melted" 与改名抓空两条变异用例；note 改成如实的「四份副本都有差集断言」（M26） |
+| 7 | handoff 同步 | 本节 + 时间 / 变异表 / 门禁表 / risks 9–11 / follow_up 7；既有 risks 1–8 原样保留 |
+
+第三轮 files_changed（全部在 `web/apps/admin-web/src/` 下，外加本文）：
+
+- `api/alerts.ts` —— `describeFireCount` 多返回 `figure`
+- `lib/workbench.ts` —— `describeWhy(worst, own, subject)`、删死分支、两处注释改回 `?? 0`
+- `lib/overview.ts` —— 守卫
+- `pages/AlertsPage.tsx`、`components/PlatformAlertsPanel.tsx` —— 格子只放数字
+- `lib/workbench.test.ts`、`lib/overview.test.ts`、`pages/AlertsPage.test.tsx`、
+  `components/PlatformAlertsPanel.test.tsx`、`router.test.tsx`、
+  `lib/labels.reconcile.test.ts`（`tsUnionValues` + 三条用例 + note）
+- `docs/handoffs/slices/XM-WORKBENCH-TRUTH.md`
+
+第三轮**没有**动 `api/ops.ts` 与 `ui-admin/freshness.ts`（M26 只是临时给它们加成员，
+已用 `git checkout --` 还原），也没有动任何 Go 文件、CPA 相关页面或指标。
 
 ## 评审回合二：三条阻塞级问题怎么处理的
 

@@ -94,15 +94,31 @@ export const ALERT_AGE_RESET_HINT =
  *
  *  **两个数是不同的事实，不是替换关系**：`trigger_count` 到位后仍要显示评估
  *  轮数，否则「它已经这样多久了」这个信息就没了。字段缺席（含显式 null）时
- *  只说评估轮数——不编一个 0 冒充「没触发过」。 */
+ *  只说评估轮数——不编一个 0 冒充「没触发过」。
+ *
+ *  - `rounds` / `triggers` / `combined` 是整句，给没有表头的位置（工作台待办的
+ *    右列、平台概览的副行）；
+ *  - `figure` 只有数字，给**有表头的数字列**：表头已经写着「评估轮次」、列是
+ *    右对齐 tabular-nums，格子里再写一遍「评估 N 轮」既重复又对不齐。
+ *    `trigger_count` 在场时写成「M / N」（触发 / 评估），整句退到悬停里。
+ *
+ *  这个数**只在这一处**拼进字符串（labels.reconcile 有「取值」扫描盯着）：别处
+ *  要显示它，就从这里多取一个字段，不要再开第二个出场点。 */
 export function describeFireCount(
   alert: Pick<AlertItem, "fire_count" | "trigger_count">,
-): { rounds: string; triggers: string | null; combined: string } {
+): { rounds: string; triggers: string | null; combined: string; figure: string } {
   const rounds = `评估 ${alert.fire_count} 轮`;
   const count = alert.trigger_count;
-  if (count === undefined || count === null) return { rounds, triggers: null, combined: rounds };
+  if (count === undefined || count === null) {
+    return { rounds, triggers: null, combined: rounds, figure: `${alert.fire_count}` };
+  }
   const triggers = `触发 ${count} 次`;
-  return { rounds, triggers, combined: `${triggers} · ${rounds}` };
+  return {
+    rounds,
+    triggers,
+    combined: `${triggers} · ${rounds}`,
+    figure: `${count} / ${alert.fire_count}`,
+  };
 }
 
 /** 这条告警「已持续」该从哪个时刻算，以及要不要附一句说明。

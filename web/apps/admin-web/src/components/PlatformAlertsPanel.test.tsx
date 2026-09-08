@@ -205,4 +205,24 @@ describe("持续时长与时间范围（XM-ALERTS-TAB-DURATION）", () => {
     const link = await screen.findByRole("link", { name: "全局告警中心" });
     expect(link.getAttribute("href")).toBe("/alerts");
   });
+
+  // XM-WORKBENCH-TRUTH 评审回合三：与告警中心那一列同一写法——数字列里只放数字，
+  // 整句留给悬停与表格说明。
+  it("「评估轮次」列的格子是纯数字，整句退到悬停里", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [alert({ fire_count: 3 })]);
+    renderPanel();
+    await screen.findByText("NewAPI 渠道健康数据延迟");
+
+    const table = screen.getByRole("table");
+    const headers = within(table).getAllByRole("columnheader");
+    const index = headers.findIndex((h) => (h.textContent ?? "").includes("评估轮次"));
+    expect(index).toBeGreaterThanOrEqual(0);
+    const row = within(table)
+      .getAllByRole("row")
+      .find((r) => within(r).queryAllByRole("cell").length > 0)!;
+    const cell = within(row).getAllByRole("cell")[index]!;
+    expect(cell.textContent).toBe("3");
+    expect(cell.querySelector("[title]")?.getAttribute("title")).toContain("评估 3 轮");
+  });
 });

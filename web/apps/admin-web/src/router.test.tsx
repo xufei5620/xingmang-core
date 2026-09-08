@@ -2895,9 +2895,11 @@ describe("告警中心页", () => {
     expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
     expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
     // fire_count：抖了一下与一直在响的唯一区分依据。**它是评估轮数不是次数**
-    // ——每 60 秒重评一轮、条件仍成立就 +1，所以列上写的是「评估 6 轮」而不是
-    // 一个裸数字 6（裸数字既读不出口径，也会跟表里别的 6 撞上）
-    expect(alertsTable.getByText("评估 6 轮")).not.toBeNull();
+    // ——每 60 秒重评一轮、条件仍成立就 +1。口径由表头「评估轮次」与悬停整句
+    // 承担，格子里只放数字（数字列右对齐 tabular-nums，整句对不齐）；所以这里
+    // 不用 getByText("6") 去撞表里别的 6，而是按表头定位到那一列再看格子。
+    // 单元格文本为纯数字的断言在 pages/AlertsPage.test.tsx 里。
+    expect(alertsTable.getByTitle(/^评估 6 轮。/)).not.toBeNull();
     // 规则名翻成中文，原始键仍在 detail 之外可查
     expect(screen.getByText("指标同步失败")).not.toBeNull();
   });

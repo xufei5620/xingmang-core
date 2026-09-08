@@ -136,13 +136,12 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
     numeric: true,
     value: (alert) => alert.fire_count,
     cell: (alert) => {
+      // 数字列里只放数字（与告警中心那一列同一写法）：表头已是「评估轮次」，
+      // 整句留给悬停与表格说明。
       const counts = describeFireCount(alert);
       return (
-        <span title={FIRE_COUNT_MEANING} className="block">
-          {counts.triggers ? (
-            <span className="block text-xs text-fg-muted">{counts.triggers}</span>
-          ) : null}
-          <span className="block">{counts.rounds}</span>
+        <span title={`${counts.combined}。${FIRE_COUNT_MEANING}`} className="block">
+          {counts.figure}
         </span>
       );
     },

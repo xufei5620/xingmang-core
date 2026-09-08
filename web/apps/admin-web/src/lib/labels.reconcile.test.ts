@@ -88,6 +88,22 @@ export function goTypedConstValues(source: string, typeName: string): string[] {
   return [...source.matchAll(pattern)].map((m) => m[1] ?? "");
 }
 
+/** 抽出前端手写的字符串字面量联合类型的成员，如
+ *  `export type FreshnessState = "uninitialized" | "failed" | …;`。
+ *
+ *  与 goTypedConstValues 是同一个思路：按**类型名**定位那一句声明，再把引号
+ *  里的值一个个抽出来。这种手写联合类型是后端枚举在前端的又一份副本——它
+ *  只被 typecheck 用，不会在界面上露出来，于是最容易被对账漏掉（评审的变异：
+ *  往里加一个后端不存在的 "melted"，160 条全绿）。 */
+export function tsUnionValues(source: string, typeName: string): string[] {
+  const declaration = new RegExp(
+    String.raw`^\s*(?:export\s+)?type\s+${typeName}\s*=\s*([^;]*);`,
+    "m",
+  ).exec(source);
+  if (!declaration) return [];
+  return [...(declaration[1] ?? "").matchAll(/"([^"]*)"/g)].map((m) => m[1] ?? "");
+}
+
 /** 抽出「无类型字符串常量」中常量名匹配某形态的那些，如
  *  `RuleMetricSyncFailed = "metric.sync.failed"`。
  *
@@ -654,12 +670,31 @@ describe("数据新鲜度：五个档位要有中文，取最差的顺序要与�
   const states = goTypedConstValues(source, "State");
   const fromBody = freshnessPriorityFromBody(source);
 
+  /** 这份枚举在前端还有两份**手写的 TS 联合类型**副本：`api/ops.ts` 的
+   *  `OpsFreshnessState` 与 `ui-admin/freshness.ts` 的 `FreshnessState`。它们
+   *  只被 typecheck 用、不露到界面上，所以中文对账与优先级对账都碰不到它们
+   *  ——评审往两者各加一个后端不存在的 "melted"，全量用例照样全绿。
+   *  这里把两者也纳入同一条差集断言。goSource 只是按仓库根读文件，读 TS 也一样。 */
+  const opsApiSource = goSource("web/apps/admin-web/src/api/ops.ts");
+  const uiFreshnessSource = goSource("web/packages/ui-admin/src/freshness.ts");
+  const opsApiStates = tsUnionValues(opsApiSource, "OpsFreshnessState");
+  const uiStates = tsUnionValues(uiFreshnessSource, "FreshnessState");
+
   it("两个抽取器都确实抓到了东西", () => {
     // 抽空会让下面每一条断言恒真——这类测试最典型的假绿
     expect(states.length).toBeGreaterThanOrEqual(5);
     expect(states).toContain("failed");
     expect(states).toContain("uninitialized");
     expect(fromBody.length).toBeGreaterThanOrEqual(5);
+    // 两份 TS 联合类型的抽取器也一样：抽空了下面「不多不少」会对空数组恒假
+    // 而不是恒真，但抽成只剩一个值时仍可能撞对——数量下界照样要有
+    expect(opsApiStates.length).toBeGreaterThanOrEqual(5);
+    expect(uiStates.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("前端两份手写的 TS 联合类型不多不少，正好是后端那五个状态", () => {
+    expect([...opsApiStates].sort()).toEqual([...states].sort());
+    expect([...uiStates].sort()).toEqual([...states].sort());
   });
 
   /** 新鲜度的兜底带一层「未知状态（…）」的包装，与原值**不逐字相同**，所以
@@ -754,6 +789,33 @@ describe("数据新鲜度：五个档位要有中文，取最差的顺序要与�
       // 但集合断言那一条仍然只比 goTypedConstValues 的结果，所以数量下界
       // 必须单独存在。
       expect(freshnessPriorityFromBody(renamed).length).toBeLessThan(5);
+    });
+
+    it("给前端的 TS 联合类型加一个后端不存在的成员，差集里恰好多出它", () => {
+      // 评审做过的那个变异，现在长期跑在这里：改的是输入不是实现
+      const mutatedOps = opsApiSource.replace(
+        'export type OpsFreshnessState = "uninitialized"',
+        'export type OpsFreshnessState = "melted" | "uninitialized"',
+      );
+      const mutatedUi = uiFreshnessSource.replace(
+        'export type FreshnessState = "uninitialized"',
+        'export type FreshnessState = "uninitialized" | "melted"',
+      );
+      expect(mutatedOps).not.toBe(opsApiSource);
+      expect(mutatedUi).not.toBe(uiFreshnessSource);
+      const extra = (values: string[]) => values.filter((s) => !states.includes(s));
+      expect(extra(tsUnionValues(mutatedOps, "OpsFreshnessState"))).toEqual(["melted"]);
+      expect(extra(tsUnionValues(mutatedUi, "FreshnessState"))).toEqual(["melted"]);
+      // 对照：真源码的差集为空——否则上面只是「恒多一个」
+      expect(extra(opsApiStates)).toEqual([]);
+      expect(extra(uiStates)).toEqual([]);
+    });
+
+    it("联合类型改了名让抽取器抓空时，数量下界那条拦得住", () => {
+      const renamed = uiFreshnessSource.replace("type FreshnessState =", "type FreshState =");
+      expect(renamed).not.toBe(uiFreshnessSource);
+      expect(tsUnionValues(renamed, "FreshnessState")).toEqual([]);
+      expect(tsUnionValues(renamed, "FreshnessState").length).toBeLessThan(5);
     });
 
     it("「已翻译」的判据能判出没翻译：喂一个后端不存在的状态", () => {
@@ -1116,7 +1178,7 @@ const ENUM_INVENTORY: Readonly<
   "sms.NumberState": { status: "labelled-elsewhere", note: "号码状态，SMSPanel 有映射与「未知状态」兜底" },
   "sms.OperationState": { status: "labelled-elsewhere", note: "接码操作状态，SMSPanel" },
   "sms.Capability": { status: "labelled-elsewhere", note: "上游能力位，SMSPanel" },
-  "ops.State": { status: "reconciled", note: "数据新鲜度五档：中文在 ui-admin/freshness.ts 的 describeFreshness，取最差的顺序在 lib/workbench.ts 的 FRESHNESS_PRIORITY，两者都有差集断言" },
+  "ops.State": { status: "reconciled", note: "数据新鲜度五档，前端四份副本都有差集断言：中文在 ui-admin/freshness.ts 的 describeFreshness，取最差的顺序在 lib/workbench.ts 的 FRESHNESS_PRIORITY，另有两份手写 TS 联合类型（api/ops.ts 的 OpsFreshnessState、ui-admin/freshness.ts 的 FreshnessState）用 tsUnionValues 抽出来对账" },
   "server.AssetStatus": { status: "labelled-elsewhere", note: "服务器资产状态，ServerAssetsPanel 的 ASSET_STATUS_OPTIONS" },
   "server.BillingCycle": { status: "labelled-elsewhere", note: "计费周期，lib/serverRegistryForm.ts" },
   "server.CertSource": { status: "labelled-elsewhere", note: "证书来源，ServerDomainsPanel" },

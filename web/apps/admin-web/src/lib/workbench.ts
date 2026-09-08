@@ -527,9 +527,9 @@ const FRESHNESS_RANK: Record<string, number> = Object.fromEntries(
 
 /** 前端不认识的状态排在**比 failed 还差**的位置。
  *
- *  这不是防御性编程的客套：以前的兜底写的是 `?? UNKNOWN_STATE_RANK`，而 0 恰好是当时最差的那
+ *  这不是防御性编程的客套：以前的兜底写的是 `?? 0`，而 0 恰好是当时最差的那
  *  档（uninitialized），所以它「碰巧」是对的——把 0 让给 failed 之后，同一个
- *  `?? UNKNOWN_STATE_RANK` 就变成「与同步失败并列」，再加上 `rank < worstRank` 的严格小于，先
+ *  `?? 0` 就变成「与同步失败并列」，再加上 `rank < worstRank` 的严格小于，先
  *  到的 failed 会把一个后端新增的、我们完全不认识的状态吃掉。
  *
  *  显式给一个更差的哨兵，是让这个条件为自己负责：未知状态必须冒出来让人去查
@@ -576,10 +576,15 @@ function worstFreshness(metrics: readonly MetricItem[]): FreshnessContract {
  *
  *  措辞**止步于事实**：不说「不适用」。要断言「订阅制上游结构上就没有钱包
  *  余额」，前端唯一的自有手段是硬编一张指标键名单——那是禁止的第二份副本，
- *  而且一条刚上线还没采到值的新指标与它长得一模一样。 */
+ *  而且一条刚上线还没采到值的新指标与它长得一模一样。
+ *
+ *  `subject` 是「一条指标都没有」那句话的主语：平台行说「这个平台」，开票行
+ *  说「开票的只读数据通道」——开票不是平台（同一格的 scopeNote 正在说它是只读
+ *  数据对接），这句话不能把它叫成平台。 */
 function describeWhy(
   worst: FreshnessContract,
   own: readonly MetricItem[],
+  subject: string,
 ): Pick<MatrixRow, "freshnessNote" | "freshnessEvidence"> {
   if (worst.state === "partial") {
     const partials = own.filter((m) => m.freshness.is_partial);
@@ -599,11 +604,14 @@ function describeWhy(
     };
   }
   if (worst.state === "uninitialized") {
-    if (own.length === 0) return { freshnessNote: "这个平台还没有任何指标在采。" };
+    if (own.length === 0) return { freshnessNote: `${subject}还没有任何指标在采。` };
+    // 走到这里 never 至少有一条：own 非空时 worst 就是 own 里某一条的 freshness
+    // （worstFreshness 只在 own 为空时才用 UNINITIALIZED 兜底），worst 是
+    // uninitialized 就意味着那一条自己是 uninitialized。所以这里不设空数组分支
+    // ——设了也走不到，只会让下一个人以为存在第三种情形。
     const never = own
       .filter((m) => m.freshness.state === "uninitialized")
       .map((m) => metricLabel(m.metric_key));
-    if (never.length === 0) return {};
     return {
       freshnessNote:
         `有指标在采，但「${never.join("、")}」从未采到值。` +
@@ -652,7 +660,7 @@ export function platformMatrixRows({ services, metrics, alerts }: MatrixInput): 
     const registered = instances[0];
     const status = registered ? describeServiceStatus(registered.status) : undefined;
     const freshness = worstFreshness(own);
-    const why = describeWhy(freshness, own);
+    const why = describeWhy(freshness, own, "这个平台");
     return {
       key: spec.serviceType,
       label: spec.label,
@@ -698,7 +706,8 @@ function invoiceRow({ services, metrics, alerts }: MatrixInput): MatrixRow {
   // 两样都没有才是「未接入」——今天走的是这一支。
   const statusLabel = status ? status.label : own.length > 0 ? "未登记" : "未接入";
   const freshness = worstFreshness(own);
-  const why = describeWhy(freshness, own);
+  // 主语不是「这个平台」：开票不是平台，同一格的 scopeNote 正说着它是只读数据对接
+  const why = describeWhy(freshness, own, "开票的只读数据通道");
 
   return {
     key: INVOICE_SERVICE_TYPE,

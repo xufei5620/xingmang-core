@@ -290,15 +290,14 @@ function alertColumns(
       numeric: true,
       value: (alert) => alert.fire_count,
       cell: (alert) => {
+        // 格子里只放数字：这是一列右对齐 tabular-nums 的数字列，表头已经写着
+        // 「评估轮次」，再写一遍「评估 N 轮」既重复又对不齐。整句退到悬停里
+        // （trigger_count 到位后格子写「M / N」，悬停说清哪个是触发、哪个是评估：
+        // 它们是不同的事实，「触发几次」替代不了「已经这样多少轮」）。
         const counts = describeFireCount(alert);
         return (
-          <span title={FIRE_COUNT_MEANING} className="block">
-            {/* trigger_count 到位后两个数一起显示：它们是不同的事实，
-                「触发几次」替代不了「已经这样多少轮」。 */}
-            {counts.triggers ? (
-              <span className="block text-xs text-fg-muted">{counts.triggers}</span>
-            ) : null}
-            <span className="block">{counts.rounds}</span>
+          <span title={`${counts.combined}。${FIRE_COUNT_MEANING}`} className="block">
+            {counts.figure}
           </span>
         );
       },

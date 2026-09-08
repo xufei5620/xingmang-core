@@ -777,6 +777,18 @@ describe("平台状态矩阵", () => {
       // 「登记簿里有一行」不等于「只读数据通道通了」
       expect(invoice({ services: [service("invoice", "active")] })?.scopeNote).toBe(SCOPE_NOTE);
     });
+
+    // 评审回合三：「一条指标都没有」那句话以前写死主语「这个平台」，开票行也
+    // 显示这一句——同一格的 scopeNote 正说着它是只读数据对接，这里却叫它平台。
+    it("「一条指标都没有」的那句话不把开票叫成平台", () => {
+      const note = invoice()?.freshnessNote;
+      expect(note).toBe("开票的只读数据通道还没有任何指标在采。");
+      expect(note).not.toContain("平台");
+      // 对照：平台行仍说「这个平台」——主语是参数，不是把整句换掉
+      expect(platformMatrixRows(base).find((r) => r.key === "server")?.freshnessNote).toContain(
+        "这个平台",
+      );
+    });
   });
 
   it("已登记的平台用 Registry 状态，没登记的说「未登记 / 未接入·Mx」", () => {
