@@ -246,15 +246,20 @@ export interface LifecycleGuards {
 
 /** 校验一次退款 / 终止提交。
  *
- *  这里**只拦服务端说不清的那两类**，其余一律让服务端说话：
+ *  这里拦的是两条**用户最容易填错**的规则，其余一律让服务端说话：
  *
- *  - 「累计退款额不得低于已登记值」在仓储里是 `ErrRefundNotDecreasing`，
- *    而 `finance.domainError` 没有把它列进 INVALID_PARAMS 那一支，于是它落到
- *    default 分支被原样返回，再由内核归一成 `EXECUTION_FAILED` + 一句
- *    「action … 执行失败」（`action/kernel.go`）。**服务端的原话到不了界面**，
- *    所以必须在这里拦，并把原因说全。
- *  - 「已经终止过」同理（`ErrAlreadyTerminated`），由入口自己收起来（见
+ *  - 「累计退款额不得低于已登记值」在仓储里是 `ErrRefundNotDecreasing`；
+ *  - 「已经终止过」是 `ErrAlreadyTerminated`，由入口自己收起来（见
  *    SubscriptionLifecycleDialog 的 `alreadyTerminated`），不在这一层。
+ *
+ *  ⚠️ **下面这段归因已经过期，留着是为了说清它变了**（XM-READONLY-QUERIES）：
+ *  这两条以前之所以**必须**在前端拦，是因为 `finance.domainError` 没有把它们
+ *  列进映射表，于是它们落到 default 分支被内核归一成 `EXECUTION_FAILED` + 一句
+ *  「action … 执行失败」，服务端的原话到不了界面。那两条映射现在补上了
+ *  （退款 → INVALID_PARAMS/400，重复终止 → CONFLICT/409，文案都是完整句子，
+ *  见 `internal/platform/httpapi/finance_domain_error_integration_test.go`）。
+ *  所以这一层现在是**优化**而不是必需：它省掉一次往返，而不再是「服务端说不清」。
+ *  本片只补后端映射、不动这里的行为；要不要简化留给后续切片。
  *
  *  反过来，**生效日必须落在有效期内**这一条这里不判：它在仓储里是
  *  `ErrInvalidFormat`，`domainError` 会把它映成 INVALID_PARAMS，连同

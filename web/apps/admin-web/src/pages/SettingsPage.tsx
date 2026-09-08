@@ -65,8 +65,9 @@ export function SettingsPage() {
           <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
             <p className="text-sm font-medium text-fg">告警与故障</p>
             <p className="text-xs leading-5 text-fg-muted">
-              查看可用天数 R5 规则、当前阈值、影响预览与变更历史。规则页只读预览；
-              写入仍需 Foundation-B / C3c 的审批链。
+              查看可用天数 R5 规则、当前阈值、影响预览与变更历史。规则页只读预览：
+              阈值写入还没有注册对应的 Action——审批中心（XM-0030）已启用，
+              L2 现在会落成审批单，缺的是那条写路径本身。
             </p>
             <Link
               to="/alerts?sub=rules"

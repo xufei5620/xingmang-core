@@ -136,13 +136,59 @@ describe("PaymentSummaryCards（XM-PAY1）", () => {
     expect(within(pending).queryByText("$0.00")).toBeNull();
   });
 
-  it("周/月区间：单日指标不能冒充区间合计，六卡都显示未接入并说明原因", async () => {
+  it("周/月区间：单日指标不能冒充区间合计，六卡说明原因", async () => {
     const metric = paymentsMetric();
     vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [metric] }))));
     renderCards("sub2api", { from: "2026-08-24", to: "2026-08-30" });
 
     const succeeded = await cardFor("区间成功到账");
     expect(within(succeeded).getByText(/周\/月需要按天聚合/)).toBeTruthy();
+  });
+
+  // 非单日区间的「—」是**口径不覆盖**，不是数据缺失。此前两者都挂「未接入」，
+  // 在屏幕上长得一模一样，而下一步完全相反（前者不用管、后者要查）。
+  it("周/月区间的徽章说「仅支持单日」，不与真·未接入混为一谈", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [paymentsMetric()] }))));
+    renderCards("sub2api", { from: "2026-08-24", to: "2026-08-30" });
+
+    for (const label of ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费"]) {
+      expect(within(await cardFor(label)).getByText("仅支持单日")).toBeTruthy();
+    }
+    // 「净现金流入」两平台恒为未接入，与区间无关——它**不该**跟着改口径措辞，
+    // 这是同一次渲染里的对照组。
+    const net = await cardFor("净现金流入");
+    expect(within(net).getByText("未接入")).toBeTruthy();
+    expect(within(net).queryByText("仅支持单日")).toBeNull();
+  });
+
+  // team-lead 点名要钉住的：`badge` 是可选参数，不传时逐字回到改动前的样子。
+  // 免得以后有人以为它必填而给所有调用点都传上，把真·未接入也改掉。
+  it("单日区间取不到指标时仍逐字显示「未接入」——badge 缺省行为未变", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [] }))));
+    renderCards("sub2api", { from: "2026-08-28", to: "2026-08-28" });
+
+    for (const label of ["区间成功到账", "区间待处理", "区间失败", "退款与冲正", "支付手续费", "净现金流入"]) {
+      expect(within(await cardFor(label)).getByText("未接入")).toBeTruthy();
+    }
+  });
+
+  // 两条缺席型断言各自单开：与上面的正向断言写在一起时 getByText 会先抛出，
+  // 它们根本跑不到，变异也就证明不了它们不是恒真。两条都先 await 正向锚点
+  // （卡片标题渲染出来）再同步断言。
+  it("周/月区间的卡片上不再出现「未接入」", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [paymentsMetric()] }))));
+    renderCards("sub2api", { from: "2026-08-24", to: "2026-08-30" });
+
+    const succeeded = await cardFor("区间成功到账");
+    expect(within(succeeded).queryByText("未接入")).toBeNull();
+  });
+
+  it("单日区间的卡片上不出现「仅支持单日」", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response(200, { items: [] }))));
+    renderCards("sub2api", { from: "2026-08-28", to: "2026-08-28" });
+
+    const succeeded = await cardFor("区间成功到账");
+    expect(within(succeeded).queryByText("仅支持单日")).toBeNull();
   });
 
   it("未初始化的指标不展示残留的 0 值", async () => {

@@ -396,6 +396,16 @@ func defaultObjects() []ObjectGrant {
 	add("table", "core", "service", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_lifecycle_runtime": {"SELECT", "INSERT"}, "xm_worker_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "core", "connector", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "core", "connection", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
+	// core.schema_migration_state (migration 000050) is the sanctioned read-only
+	// projection of public.schema_migrations. Design §7.6 keeps `public`
+	// River-only and marks schema_migrations no-runtime-access; the same section
+	// names "another approved read-only view" as the way out, and this is it.
+	// Reading through a core view means no runtime role needs USAGE on `public`.
+	//
+	// xm_worker_runtime is deliberately absent: §7.6 states the worker gets no
+	// access to schema_migrations, and granting it here would be an end-run
+	// around that decision. xm_lifecycle_runtime is absent for lack of any need.
+	add("view", "core", "schema_migration_state", map[string][]string{"xm_api_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "action", "action_run", map[string][]string{"xm_api_runtime": {"INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "audit", "audit_event", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	addCols("table", "audit", "chain_root", map[string][]string{"xm_lifecycle_runtime": {"SELECT", "INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}}, map[string]map[string][]string{"xm_lifecycle_runtime": {"exported_at": {"UPDATE"}, "export_target": {"UPDATE"}}})
@@ -466,10 +476,12 @@ func tableColumns(kind, schema, name string) []string {
 	}
 	key := schema + "." + name
 	columns := map[string][]string{
-		"core.environment":                          {"id", "description", "created_at"},
-		"core.service":                              {"id", "service_type", "instance_id", "environment", "endpoint", "internal_endpoint", "owner", "health_check_path", "native_console_url", "runbook_path", "status", "source_watermark", "observed_at", "created_at", "updated_at"},
-		"core.connector":                            {"id", "key", "version", "contract_version", "connection_schema_path", "target_allowlist", "read_capabilities", "write_capabilities", "supported_upstream_versions", "compatibility_test_path", "created_at", "updated_at"},
-		"core.connection":                           {"id", "connector_id", "service_id", "environment", "credential_ref", "target_allowlist", "granted_capabilities", "kill_switch", "status", "detected_upstream_version", "version_fingerprint", "last_verified_at", "created_at", "updated_at"},
+		"core.environment": {"id", "description", "created_at"},
+		"core.service":     {"id", "service_type", "instance_id", "environment", "endpoint", "internal_endpoint", "owner", "health_check_path", "native_console_url", "runbook_path", "status", "source_watermark", "observed_at", "created_at", "updated_at"},
+		"core.connector":   {"id", "key", "version", "contract_version", "connection_schema_path", "target_allowlist", "read_capabilities", "write_capabilities", "supported_upstream_versions", "compatibility_test_path", "created_at", "updated_at"},
+		"core.connection":  {"id", "connector_id", "service_id", "environment", "credential_ref", "target_allowlist", "granted_capabilities", "kill_switch", "status", "detected_upstream_version", "version_fingerprint", "last_verified_at", "created_at", "updated_at"},
+		// Mirrors public.schema_migrations exactly: golang-migrate's two columns.
+		"core.schema_migration_state":               {"version", "dirty"},
 		"action.action_run":                         {"id", "action_id", "action_version", "principal_id", "principal_type", "environment", "request_id", "risk_level", "status", "error_code", "duration_ms", "started_at", "finished_at"},
 		"audit.audit_event":                         {"id", "sequence", "occurred_at", "recorded_at", "principal_id", "principal_type", "action_id", "action_version", "action_run_id", "resource_type", "resource_id", "environment", "reason", "approval_id", "request_id", "trace_id", "source_ip", "before_summary", "after_summary", "connector_request_summary", "connector_response_summary", "result", "compensation_result", "prev_hash", "event_hash", "canonical_version"},
 		"audit.chain_root":                          {"id", "computed_at", "from_sequence", "to_sequence", "root_hash", "signature", "key_id", "exported_at", "export_target"},

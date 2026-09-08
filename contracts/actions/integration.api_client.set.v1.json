@@ -1,0 +1,73 @@
+{
+  "id": "integration.api_client.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "integration.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "client_id": {
+      "type": "string",
+      "required": false
+    },
+    "principal_id": {
+      "type": "string",
+      "required": true
+    },
+    "principal_type": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "HUMAN",
+        "SERVICE",
+        "AI",
+        "SERVER_AGENT"
+      ]
+    },
+    "display_name": {
+      "type": "string",
+      "required": true
+    },
+    "purpose": {
+      "type": "string",
+      "required": false
+    },
+    "owner": {
+      "type": "string",
+      "required": false
+    },
+    "expected_scopes": {
+      "type": "string_slice",
+      "required": false
+    },
+    "credential_ref": {
+      "type": "string",
+      "required": false
+    },
+    "status": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "active",
+        "disabled"
+      ]
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-EXT-INTEGRATION（2026-09-08，ADMIN-IA §5.4.1）：API 调用方登记簿。L1 的依据是这张表**不是授权面**——登记一行不发凭据、不授予权限、不设配额，停用一行也不会让任何请求被拒绝；授权仍由 Keycloak Realm 角色与员工账号角色决定。它不触碰任何第三方系统、不改变任何运行中的行为，写错改回即可，与 server.asset.set / finance.upstream_account.set 完全同一档。**如果哪天请求路径上真的会查这张表，这个等级必须重新评估**：那时「停用一行」等于切断一条无人值守链路，不再是 L1。client_id 留空=新登记，填了=改这一条（整行替换语义：前端总是先把当前值预填进表单再提交，缺键的字段会被清空）。principal_id 必须与 internal/platform/principal.Principal.ID 的字面值一致——它就是 action_run.principal_id 里出现的那个串，两边同源才对得上账。expected_scopes 是**期望**的权限范围，不是生效的权限范围，改它不会改变任何请求的鉴权结果。credential_ref 只收引用（secret://<scope>/<name>），**绝不收凭据值**：参数会进审计的 before/after 摘要，明文不进日志（宪法 7 条）；留空表示这个调用方没有 API Key（员工账号即如此）。无 environment 参数——环境取自调用者身份（宪法 15 条）；同一环境下 principal_id 唯一。"
+}

@@ -12,24 +12,25 @@ import {
 import { InvoiceConsolePanel } from "../components/InvoiceConsolePanel";
 import { NotFoundView } from "./NotFoundPage";
 
-/** 每一页「将来放什么、归谁做」的一句话。
+/*  这里曾经有一份 `PLACEHOLDER_COPY`：给每一页写死一句「将来放什么、归谁做」，
+ *  作为页头 description 的兜底。**2026-09-08 全部删除，因为 11 条无一可达。**
  *
- *  逐页写死而不是拿一句通用文案套所有页：一屏「敬请期待」等于什么都没说，
- *  运营看不出这块是排期在等、还是需要他去催谁。ADMIN-IA §五 对每一页都写了
- *  差距要点，这里是它面向使用者的一句话版本。 */
-const PLACEHOLDER_COPY: Readonly<Record<string, string>> = {
-  "/actions": "Action 目录、待审批队列、执行记录与风险条件。写操作一律走 Action(宪法 2、3 条)，审批链随 Foundation-B（XM-0030）上线。",
-  "/jobs": "River 队列的运行中任务、定时任务、同步批次与失败重试。每一屏都要带 Watermark 与数据新鲜度。",
-  "/identity": "账号与身份、权限规则、权限范围、密钥引用与会话。现在这两节还在「设置」页里，随本页上线迁出。密钥引用永不显示明文（只显示 CredentialRef）。",
-  "/finance": "跨平台的财务总览、支付通道、对账、异常与冻结、开票集成与财务配置。各平台的「支付与财务」页只做本平台聚合，这一页是 ADR-006「统一体验」的落点，两者并存不冲突。",
-  "/ops": "控制平面健康、稳定性与外部监控、备份与恢复、故障处理手册、迁移与数据对比，以及跨平台的模型质量保障。",
-  "/changes": "变更单、发布与回滚、自动测试与质量、发布包与安全检查、数据库变更。随 Foundation-B 上线。",
-  "/design": "设计系统的活文档：颜色与排版、按钮与表单、卡片与状态、表格与详情、页面状态、复杂组件。与 Storybook 呼应，不是另一套规范。",
-  "/ext/app": "应用目录、页面配置、页面组件与版本发布的只读蓝图。",
-  "/ext/integration": "API 调用方、Webhook、自动化流程与运行记录的只读蓝图。",
-  "/ext/publishing": "内容日历、草稿与素材、审批队列、渠道与账号、发布记录的只读蓝图。",
-  "/ext/ai": "模型线路、AI 角色、AI 工具与运行预算的只读蓝图。",
-};
+ *  两类死法，各自的成因不同，值得分开记：
+ *
+ *  - `/actions` `/jobs` `/identity` `/finance` `/ops` `/changes` `/design` 七条——
+ *    这些页都已建成（`built: true`），而 `placeholderRoutes` 只收 `!item.built`
+ *    的条目，所以它们**根本不由本组件渲染**。页建成时没人回头删这里的副本。
+ *  - `/ext/*` 四条——取值是 `blueprint?.description ?? PLACEHOLDER_COPY[path]`，
+ *    而这四个路径**都有蓝图**（`blueprints/index.ts`），蓝图那份恒胜出。
+ *    它们从写下的那天起就没生效过。
+ *
+ *  留着的代价不是占地方，是**它们的内容还在过期**：其中几条写着「随
+ *  Foundation-B 上线」，而 Foundation-B 已经交付并启用。一份不会渲染的副本，
+ *  唯一的作用就是在下一次改文案时被漏掉、然后误导读到源码的人。同一个理由
+ *  此前已经删掉过本文件里的 `/actions` 门禁横幅与 `governanceSubTabOverride`。
+ *
+ *  将来若真有一个未建成、又没有蓝图的页需要一句说明：**给它写蓝图**，
+ *  别在这里恢复第二份真相源。 */
 
 /** 未实装页的统一骨架：页头 + 子页签条 + 每格一个诚实占位。
  *
@@ -84,7 +85,7 @@ function PlaceholderBody({ item }: { item: NavItemSpec }) {
       <PageHeader
         title={item.label}
         status={hint ? <Badge tone="warning">{hint}</Badge> : null}
-        description={blueprint?.description ?? PLACEHOLDER_COPY[item.path]}
+        description={blueprint?.description}
       />
       <div className="flex flex-col gap-3">
         {blueprint?.banner ? <BlueprintBanner text={blueprint.banner} /> : null}
@@ -145,6 +146,13 @@ function subTabContent(
  *  红线要求在页面上**看得见**，不能只写在文档里：实施计划 §2.5——扩展能力
  *  四页是只读蓝图，明确标注仅预览、不保存、不发布、不执行。
  *
+ *  文案里原本有一句「**这一段**不会因为页面存在就提前建后端」。判据从
+ *  路径前缀改成 `!item.built` 之后，「这一段」这个指代就不再成立——它只对
+ *  扩展能力段为真，而条件现在覆盖任何未建成的页。改成「页面存在不代表后端
+ *  已经建好」，对每一个能走到这里的页都成立。**条件放宽时，跟着放宽的
+ *  文案里那些只对旧条件成立的指代必须一起改**，否则就留下一句在新条件下
+ *  为假的话——本轮清理的正是这一类。
+ *
  *  这里**曾经还有一支 `/actions` 的门禁横幅**，是死代码：`/actions` 在
  *  navigation.ts 里是 `built: true`，永远走 ActionsPage 而不是本页
  *  （placeholderRoutes 只收 `!item.built` 的条目）。它与 ActionsPage 里那份
@@ -152,13 +160,34 @@ function subTabContent(
  *  的副本除了制造这种漂移没有别的作用，删掉。操作与审批页的门禁由
  *  ActionsPage 的 AdvancedControlsGate 负责（ADMIN-IA §七）。 */
 function PlaceholderGate({ item }: { item: NavItemSpec }) {
-  if (item.path.startsWith("/ext/")) {
+  // 判据是 `!item.built`，**不是** `path.startsWith("/ext/")`。
+  //
+  // 原来那条按路径前缀判断的写法今天**恰好**为真，但不是因为它自己对——
+  // 它靠的是「扩展能力各页还走不走本组件」这个**外部事实**。产品负责人
+  // 2026-09-08 推翻 ADMIN-IA §5.4 之后，`/ext/app`、`/ext/integration`、
+  // `/ext/publishing` 三页各自有了真实路由，根本不经过 PlaceholderPage，
+  // 于是那条前缀判断在它们身上再也走不到——**问题被外部条件掩盖了，
+  // 而不是被修好了**。只要有人把某页临时挂回本组件，就会重现
+  // 「页面能执行了、横幅还在说不执行」这个组合，且没有任何东西会提醒他。
+  //
+  // 按 `built` 判断让这个条件为它自己负责：本组件只渲染 `!item.built` 的页
+  // （placeholderRoutes 只收这些），所以对能走到这里的每一页它都成立，
+  // 不依赖别处有没有抢先接管。
+  //
+  // **这个改动今天没有测试能区分新旧，如实记在这里而不是假装验证过。**
+  // 现存未建成的页恰好全在 `/ext/` 下，两种条件选中的是同一批页，所以
+  // router.test.tsx 那条断言在旧写法下也照样绿（变异验证只证明了「这条
+  // 横幅确实被断言着」，没证明「判据换了」）。要真正钉住它，得有一个
+  // **未建成且不在 `/ext/` 下**的页——那天到来时，加一条用它做样本的用例，
+  // 旧写法会漏掉它、新写法不会。在那之前这条改动的价值是把一个「恰好为真」
+  // 变成「为自己负责」，不是修掉一个当前可观测的 bug。
+  if (!item.built) {
     return (
       <p
         role="status"
         className="rounded-md border border-edge bg-surface-muted px-3 py-2 text-xs text-fg-muted"
       >
-        只读蓝图：仅预览、不保存、不发布、不执行。这一段不会因为页面存在就提前建后端。
+        只读蓝图：仅预览、不保存、不发布、不执行。页面存在不代表后端已经建好。
       </p>
     );
   }

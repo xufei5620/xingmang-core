@@ -36,6 +36,10 @@ var platformScopePrefixes = []string{
 	// XM-LOGIN：staff.manage 管理本地登录账号（创建、改角色、启停、重置
 	// 密码）。同上一条理由——它不该以 Realm 角色的形式出现。
 	"staff.",
+	// XM-EXT-PUBLISHING：publishing.publish 决定「谁能以公司的名义对外说话」。
+	// Realm 里出现一个 publishing.publish 角色，等于把这个决定挪出平台数据库的
+	// 管辖（ADR-016 / CR-0001 §5）——与 credential./staff. 同一条理由。
+	"publishing.",
 }
 
 // looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
@@ -164,6 +168,16 @@ func DefaultRoleScopeMap() map[string][]string {
 			// resolver_test 的 TestDefaultRoleScopeMapIsConservative 断言
 			// admin 含它、staff 不含它。
 			"server.manage",
+			// XM-EXT-APP（2026-09-08）：前端应用登记簿的写权限。与
+			// server.manage 同一档、同一条理由——登记的是我们自己部署的
+			// 前端站点的域名/负责人/登录方式/状态与「哪次发布上了哪个版本」，
+			// 全是纯记录字段：**不触碰任何第三方系统、不影响任何成本或收入
+			// 归属、也不会让任何站点发生变化**（平台没有发布通道，发布是
+			// Platform Lifecycle Operation），改错了改回来即可。
+			//
+			// 不给 staff：staff 依然不该有任何 .manage 能力
+			// （见 TestDefaultRoleScopeMapIsConservative 对 staff 的断言）。
+			"extapp.manage",
 			// XM-ASSURE1-core（渠道主动探测/检测任务）：declare/cancel/run 三个
 			// L1 Action 与 finance.upstream_account.manage 等同一档——纯配置写
 			// / 触发一次受多重闸约束的探测批次，进 admin。**probe.kill_switch
@@ -234,6 +248,38 @@ func DefaultRoleScopeMap() map[string][]string {
 			"sms.read",
 			"sms.reveal",
 			"sms.manage",
+			// XM-EXT-INTEGRATION（2026-09-08）：「接口与自动化」的两张登记簿。
+			//
+			// 两个都给 admin，理由与上面 server.manage 同一条：登记簿写的是
+			// 纯记录字段——调用方登记簿**不是授权面**（登记不发凭据、不授权、
+			// 不限流），规则登记簿**没有执行器**（登记一条规则不会让任何
+			// Action 跑起来）。改错了改回即可，不触碰任何第三方系统。
+			//
+			// **两个都不给 staff**，理由与 audit.read 那一档同向：
+			// integration.read 返回的是「哪些机器身份该来调我们、期望持有
+			// 哪些 scope」外加 action_run 里观测到的调用方——那是一张授权面
+			// 的地图，看板角色不该顺带拿到。resolver_test 的
+			// TestDefaultRoleScopeMapIsConservative 断言 admin 含这两个、
+			// staff 一个都不含。
+			//
+			// 哪天规则引擎真接上执行器，integration.manage 必须重新审定：
+			// 那时候「改一条规则」等于改一条会自己跑起来的链路，不再是
+			// 登记簿那一档（ADMIN-IA §5.4.1 把那件事留给了单独的裁定）。
+			"integration.read",
+			"integration.manage",
+			// XM-EXT-PUBLISHING（2026-09-08）：内容发布的读与编辑。
+			//
+			// 与卡片/接码同一条理由：不给就等于这个功能对唯一能用它的人也是
+			// 403。publishing.manage 写的是草稿、素材与渠道**登记**（凭据只经
+			// CredentialRef，明文另由 credential.manage 管），一件都发不出去。
+			//
+			// **publishing.publish 刻意不在这里**——理由与 fund.withdraw /
+			// sms.purchase 完全相同：把「对外不可逆」的动作从日常操作角色里
+			// 拿出来。发布本身是 L3（两票且审批人≠提交人），但审批拦的是
+			// 「这一篇发不发」，权限拦的是「谁能提起这件事」；给 admin 等于
+			// 把第一道闸拆掉，只剩审批一道。见下面的 content-publisher。
+			"publishing.read",
+			"publishing.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
@@ -284,6 +330,17 @@ func DefaultRoleScopeMap() map[string][]string {
 		// 数量上限 200，一次手滑就是两百个号；而买到的号不可退。
 		// 独立角色让「谁能花这笔钱」是一次显式授予。
 		"sms-operator": {"sms.purchase"},
+		// XM-EXT-PUBLISHING（2026-09-08）：对外发布。与 fund-operator /
+		// sms-operator 同一条设计意图——把「对外不可逆」从日常操作角色里拿出来。
+		//
+		// 它不花钱，但它比那两个更公开：发出去的内容即便删除也已经被抓取、
+		// 被截图。**「谁能以公司的名义说话」是一次显式的组织授予**，不该由
+		// 「他是管理员」顺带获得。
+		//
+		// 顺带包含 publishing.read：不给的话，持发布权的人看不到自己要发的
+		// 草稿与渠道，必须同时被授予 admin 才用得起来——那正是这次拆分想
+		// 避免的。读的泄漏面（草稿正文 + 渠道引用）本来就窄于发布权本身。
+		"content-publisher": {"publishing.read", "publishing.publish"},
 	}
 }
 

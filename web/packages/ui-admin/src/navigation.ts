@@ -276,7 +276,13 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "应用与配置",
     path: "/ext/app",
     stage: "后置",
-    built: false,
+    // XM-EXT-APP（2026-09-08）：产品负责人推翻了 ADMIN-IA §5.4「四页只读蓝图、
+    // 不得因此提前建后端」对这一页的适用（裁定变更逐字记在 §5.4）。这一页现在
+    // 有真实后端（core.ext_app / core.ext_app_release）与真实路由，
+    // **stage 仍留「后置」**：它说的是这一段在信息架构里的优先级，不是实装进度，
+    // 而实装进度由 built 表达——两者混成一个字段的话，「这一段是后置的」这条
+    // 设计事实会随着某一页建成而消失。
+    built: true,
     subTabs: sub(
       ["catalog", "应用目录"],
       ["pages", "页面配置"],
@@ -288,8 +294,14 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     id: "integration",
     label: "接口与自动化",
     path: "/ext/integration",
+    // stage 保持「后置」：这一页建成的只是四格里的两格半（调用方对账、规则
+    // 登记、运行记录），Webhook 那一格与规则的**执行**都还没有——分组本身
+    // 仍是后置能力。built 翻成 true 只表示「点进去是真页面不是占位」。
     stage: "后置",
-    built: false,
+    // XM-EXT-INTEGRATION（2026-09-08）：产品负责人推翻 ADMIN-IA §5.4
+    // 「只读蓝图、不得提前建后端」这条，对**这一页**改为真建（§5.4.1）。
+    // 扩展能力段其余三页不变，仍是刻意的只读蓝图。
+    built: true,
     subTabs: sub(
       ["clients", "API调用方"],
       ["webhooks", "Webhook"],
@@ -302,7 +314,10 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "内容发布",
     path: "/ext/publishing",
     stage: "后置",
-    built: false,
+    // ADMIN-IA §5.4.1（2026-09-08）：产品负责人推翻了「扩展能力四页只读蓝图」
+    // 在这一页上的适用，要求真建。扩展能力段里**只有这一页** built=true，
+    // 另外三页的原裁定原样有效。
+    built: true,
     subTabs: sub(
       ["calendar", "内容日历"],
       ["drafts", "草稿与素材"],

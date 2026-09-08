@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -768,6 +768,12 @@ function okHandler(url: string): Response {
   // XM-SERVER0：服务器登记簿四个只读查询，默认空列表——各测试用例需要
   // 具体数据时自己覆盖 stubFetch，不在这个共用兜底里编样例行。
   if (url.startsWith("/api/v1/servers/")) return fakeResponse(200, { items: [] });
+  // XM-EXT-APP：前端应用登记簿与发布记录簿，默认空列表——同上，需要具体
+  // 数据的用例自己覆盖 stubFetch。releases 排在 apps 前面是**必须的**：
+  // /api/v1/ext/apps/releases 以 /api/v1/ext/apps 开头，反过来写的话
+  // 发布记录会被应用列表那条静默吞掉。
+  if (url.startsWith("/api/v1/ext/apps/releases")) return fakeResponse(200, { items: [] });
+  if (url.startsWith("/api/v1/ext/apps")) return fakeResponse(200, { items: [] });
   // XM-ASSURE0：渠道保障被动指标，默认空窗口/空历史——同上，需要非空数据的
   // 用例自己覆盖 stubFetch。history 必须排在 overview 前面：两者的路径是
   // 包含关系（.../assurance/overview 不会匹配 .../assurance/history 的正则，
@@ -787,6 +793,26 @@ function okHandler(url: string): Response {
     return fakeResponse(200, emptyProbeHistoryBody());
   if (/\/api\/v1\/platforms\/[^/]+\/assurance\/probes/.test(url))
     return fakeResponse(200, emptyProbeListBody());
+  // XM-EXT-INTEGRATION：两张登记簿，默认空——同上，需要非空数据的用例自己
+  // 覆盖 stubFetch。api-clients 的响应形状不是 {items} 单键：对账页要的是
+  // 登记侧与观测侧两份，共用兜底照真形状给空值。
+  if (url.startsWith("/api/v1/integration/api-clients"))
+    return fakeResponse(200, {
+      items: [],
+      unregistered: [],
+      window_days: 7,
+      observed_since: "2026-09-01T03:00:00Z",
+      observed_truncated: false,
+      observed_source: "action.action_run",
+      observed_note: "只统计经 Action 内核的写操作。",
+      registry_note: "登记簿不是授权面。",
+    });
+  if (url.startsWith("/api/v1/integration/automation-rules"))
+    return fakeResponse(200, {
+      items: [],
+      automatic_execution: false,
+      execution_note: "规则登记在此，但当前不会自动执行：平台没有规则执行器。",
+    });
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
 }
 
@@ -868,7 +894,11 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     for (const block of ["我的待处理", "运营焦点", "最近活动", "平台状态矩阵"]) {
       expect(screen.getByRole("heading", { name: block, level: 3 })).not.toBeNull();
     }
-    for (const tile of ["紧急", "今日到期", "阻塞", "最近恢复"]) {
+    // 「今日到期」2026-09-08 收窄成「审批到期」：原型那一格数的是审批 + 重试 +
+    // 轮换到期，而重试不是一条截止线、轮换到期一个数都算不出来——合成一个数
+    // 会得到一个恒偏低、又与正确值长得一样的读数（见 lib/workbench 的
+    // approvalsDueSoonCount）。
+    for (const tile of ["紧急", "审批到期", "阻塞", "最近恢复"]) {
       expect(screen.getByRole("heading", { name: tile, level: 3 })).not.toBeNull();
     }
   });
@@ -899,14 +929,69 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(within(urgent as HTMLElement).getByRole("link", { name: /查看全部告警/ })).not.toBeNull();
   });
 
-  it("没有数据源的两格显示「—」并标「未接入」，不显示 0", async () => {
-    // 0 会被读成「今天没有到期项」，而事实是这条线还没接
+  it("「阻塞」没有数据源，显示「—」并标「未接入」，不显示 0", async () => {
+    // 0 会被读成「今天没有阻塞」，而事实是这条线还没接（M3 支付未接入，
+    // connectors/payment/ 里只有 .gitkeep）
     renderRoute("/dashboard");
-    const due = (await screen.findByRole("heading", { name: "今日到期", level: 3 })).closest(
+    const blocked = (await screen.findByRole("heading", { name: "阻塞", level: 3 })).closest(
       "article",
     ) as HTMLElement;
+    expect(within(blocked).getByText("—")).not.toBeNull();
+    expect(within(blocked).getByText("未接入")).not.toBeNull();
+    expect(within(blocked).queryByText("0")).toBeNull();
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一格以前叫「今日到期」，副行写着「随 Foundation-B
+  // 与后台任务页上线」——两样今天都在了，那句话把人指向已经到货的东西。
+  it("「审批到期」数的是窗口内到期、且此刻还批得动的待审批单", async () => {
+    const now = Date.now();
+    const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
+    const approval = (id: string, expiresAt: string, over: Record<string, unknown> = {}) => ({
+      id, action_id: "registry.connector.create", action_version: "1", risk_level: "L2",
+      params: {}, params_hash: "h", requester_id: "ops-1", requester_type: "HUMAN",
+      reason: "上线新连接器", status: "PENDING", created_at: iso(-3600_000), expires_at: expiresAt,
+      decisions: [], votes_required: 2, votes_cast: 0,
+      privileged_vote_required: false, privileged_vote_cast: false, ...over,
+    });
+    stubFetch((url) =>
+      url.startsWith("/api/v1/approvals")
+        ? fakeResponse(200, {
+            items: [
+              // 数：2 小时后到期
+              approval("a-soon", iso(2 * 3600_000)),
+              // 数：23 小时后，仍在 24 小时窗口内
+              approval("a-edge", iso(23 * 3600_000)),
+              // 不数：36 小时后到期，还不急
+              approval("a-later", iso(36 * 3600_000)),
+              // 不数：库里仍是 PENDING，但按 expires_at 已经过期，谁也批不动了
+              approval("a-expired", iso(-60_000)),
+            ],
+            limit: 50,
+            truncated: false,
+          })
+        : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    const due = (await screen.findByRole("heading", { name: "审批到期", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(due).getByText("2")).not.toBeNull();
+    expect(within(due).getByText(/24 小时内到期的待审批单/)).not.toBeNull();
+    expect(within(due).getByRole("link", { name: /查看审批队列/ })).not.toBeNull();
+    // 缺席断言，已做变异验证（把 isEffectivelyExpired 那道过滤去掉后本行转红，
+    // 计数会变成 3）。上面已 await 到真读数「2」，不会在渲染前假绿。
+    expect(within(due).queryByText("未接入")).toBeNull();
+  });
+
+  it("审批端点读不到时「审批到期」显示「—」，不拿 0 冒充「没有快到期的单」", async () => {
+    // okHandler 不挂载 /api/v1/approvals：裸 404 会被 listApprovals 翻成
+    // FeatureNotMountedError。这一格必须跟着它自己那条 query 降级。
+    renderRoute("/dashboard");
+    const due = (await screen.findByRole("heading", { name: "审批到期", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    await waitFor(() => expect(within(due).getByText("读不到")).not.toBeNull());
     expect(within(due).getByText("—")).not.toBeNull();
-    expect(within(due).getByText("未接入")).not.toBeNull();
     expect(within(due).queryByText("0")).toBeNull();
   });
 
@@ -1548,8 +1633,12 @@ describe("登记服务（写路径）", () => {
 
   it("环境取自身份且只读，不做成可选下拉", async () => {
     stubFetch(okHandler);
-    await openDialog();
-    const env = screen.getByLabelText("环境") as HTMLInputElement;
+    const dialog = await openDialog();
+    // **在对话框内查**，不用全局 screen：资源目录页有一个叫「环境」的子页签
+    // （navigation.ts 冻结的六格之一），Radix 会用触发器的文字给对应的
+    // tabpanel 挂 aria-labelledby，于是全局查「环境」会同时命中那个面板。
+    // 这一条断言的对象本来就是对话框里那个字段，scoped 查询也更贴近本意。
+    const env = dialog.getByLabelText("环境") as HTMLInputElement;
     // servicesBody 里那条记录是 development
     expect(env.value).toBe("development");
     expect(env.readOnly).toBe(true);
@@ -1745,11 +1834,26 @@ describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () =
     expect(publishing.getAttribute("href")).toBe("/ext/publishing");
     // 2026-09-07 起 F-B 一条不剩：跨平台财务 / 版本与发布 / 界面规范三页建成
     // （XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0），操作与审批更早在
-    // XM-ACTIONS0 毕业。现在挂标签的只剩扩展能力段那四条「后置」——按
-    // ADMIN-IA §5.4 它们是刻意的只读蓝图，不是待补的缺口
+    // XM-ACTIONS0 毕业。2026-09-08 产品负责人推翻 ADMIN-IA §5.4 对三页的适用：
+    // `应用与配置`（XM-EXT-APP）、`接口与自动化`（XM-EXT-INTEGRATION）、
+    // `内容发布`（XM-EXT-PUBLISHING）三页全部建成、标签去掉 → 从 4 减到 **1**。
+    //
+    // **合并这三片时这个数字必须重算,不能取任何一侧**：三片各自基于同一个
+    // 基线、各自把 4 减成 3，机械合并会留下一个「3」——而三页都建成之后正确
+    // 答案是 1。这类冲突取任一侧都是错的，只能重新数。
+    //
+    // 剩下的那一条是 `/ext/ai`，按 §5.4 **仍是刻意的只读蓝图**，不是缺口。
     expect(within(nav).queryAllByText("未建·F-B").length).toBe(0);
-    expect(within(nav).getAllByText("未建·后置").length).toBe(4);
-    const changes = within(nav).getByRole("link", { name: /版本与发布/ });
+    expect(within(nav).getAllByText("未建·后置").length).toBe(1);
+    // 三条正向对照——光断言那个数字变小的话，**任何**一条标签消失都能让它绿，
+    // 包括建错了页的情况。所以逐页钉住「它就是不挂标签的那一个」。
+    const extApp = within(nav).getByRole("link", { name: /应用与配置/ });
+    expect(extApp.getAttribute("href")).toBe("/ext/app");
+    expect(extApp.textContent).not.toMatch(/未建/);
+    const integration = within(nav).getByRole("link", { name: /接口与自动化/ });
+    expect(integration.getAttribute("href")).toBe("/ext/integration");
+    expect(integration.textContent).not.toMatch(/未建/);
+    expect(publishing.textContent).not.toMatch(/未建/);    const changes = within(nav).getByRole("link", { name: /版本与发布/ });
     expect(changes.getAttribute("href")).toBe("/changes");
     const actions = within(nav).getByRole("link", { name: /操作与审批/ });
     expect(actions.getAttribute("href")).toBe("/actions");
@@ -2023,6 +2127,18 @@ describe("未知页签与未知路径：Not Found，不静默回落", () => {
     expect(await screen.findByText("没有这个子页签")).not.toBeNull();
     // 平台页头还在：错的是子页签，不是整个平台
     expect(screen.getByRole("heading", { name: "Sub2API", level: 2 })).not.toBeNull();
+  });
+
+  it("/ext/integration 落到真页面，不是 404 也不是只读蓝图占位", async () => {
+    // built 翻成 true 之后这一页掉出 placeholderRoutes（那份只收 !item.built）,
+    // 漏加显式路由就会落到最后的 `*` 兜底 404——XM-OPS-TAILS0 的 /jobs 与
+    // XM-CHANGES0 的三页各撞过一次，这条是同一个坑的第三道防线。
+    renderRoute("/ext/integration");
+    // 正向锚点：真页面自己的内容出现了。
+    expect(await screen.findByRole("tab", { name: "API调用方" })).not.toBeNull();
+    // 再同步断言缺席：既不是 404，也不再挂 PlaceholderGate 那条只读蓝图横幅。
+    expect(screen.queryByRole("heading", { name: "页面不存在", level: 2 })).toBeNull();
+    expect(screen.queryByText(/仅预览、不保存、不发布、不执行/)).toBeNull();
   });
 
   it("没匹配上的路径落到 404 页，而不是框架的英文报错页", async () => {
@@ -2504,12 +2620,20 @@ describe("未实装页的诚实占位与门禁", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("占位页有页头与「未建」徽章", async () => {
-    // 样本第三次搬家：/jobs（XM-JOBS0）→ /finance（XM-FINANCE-GLOBAL0）→
-    // /ext/app。**治理段已经一页不剩是占位页了**，只有扩展能力四页仍走
-    // PlaceholderPage——而按 ADMIN-IA §5.4 它们是刻意的只读蓝图，会长期留在
-    // 这条路径上，所以这个样本不会再被建成真实页而搬走。
-    renderRoute("/ext/app");
-    expect(await screen.findByRole("heading", { name: "应用与配置", level: 2 })).not.toBeNull();
+    // 样本第四次搬家：/jobs（XM-JOBS0）→ /finance（XM-FINANCE-GLOBAL0）→
+    // /ext/app（XM-EXT-APP）→ /ext/ai。
+    //
+    // 上一次搬到 /ext/app 时写的理由是「扩展能力四页按 §5.4 是刻意的只读
+    // 蓝图，会长期留在这条路径上，所以这个样本不会再被建成真实页而搬走」
+    // ——2026-09-08 产品负责人推翻了那条裁定对其中三页的适用，于是这个
+    // 「不会再搬」的判断当天就被推翻了。
+    //
+    // 这次挑 `/ext/ai`：它是**唯一一页维持原裁定**的（§5.4 的裁定变更表里
+    // 逐字写着「维持原裁定」），另外两页正由并行切片在建。要是连它也建了，
+    // 这条用例该做的是**删掉**，而不是再找一页顶上——那时占位页这条路径
+    // 就真的一个使用者都没有了。
+    renderRoute("/ext/ai");
+    expect(await screen.findByRole("heading", { name: "AI能力管理", level: 2 })).not.toBeNull();
     expect(within(screen.getByRole("main")).getByText("未建·后置")).not.toBeNull();
   });
 
@@ -2517,22 +2641,63 @@ describe("未实装页的诚实占位与门禁", () => {
   // XM-ACTIONS0 把操作目录/执行记录接上真实数据后，/actions 不再是占位页，
   // 断言挪到下面的「操作与审批」独立 describe 块（门禁本身仍然存在并被断言）。
 
-  it("扩展能力四页标注「仅预览、不保存、不发布、不执行」", async () => {
+  it("已建成的 /ext/publishing 不再挂那条「不发布、不执行」的蓝图横幅", async () => {
+    // 盯的是一句**会变成假话的共享文案**：PlaceholderPage 的 PlaceholderGate
+    // 按 `path.startsWith("/ext/")` 无条件给全部 /ext/* 挂「只读蓝图：仅预览、
+    // 不保存、不发布、不执行」。内容发布 2026-09-08 建成之后，那一页有真实的
+    // 草稿、审批与发布动作，横幅仍说「不发布、不执行」就是骗人。
+    // PlaceholderGate 本身由 team-lead 统一改（三个工作树共享它），本片没动。
+    //
+    // **这条用例能证明什么、不能证明什么，写清楚：**
+    //
+    // 下面第二个断言（横幅不在）**结构上不可证伪**——PublishingPage 与
+    // PlaceholderPage 永远不会同时渲染，所以没有任何「改一个条件」的变异能让
+    // 它在锚点还绿着的时候单独变红。实测过：同时删掉 router.tsx 的显式路由并
+    // 把 built 改回 false（这一页真的落回 PlaceholderPage）之后，本用例红在
+    // **锚点**那一行（找不到「但平台还没有任何出站投递器」），第二个断言根本
+    // 没跑到。所以那次变异只证明了「这一页确实是 PublishingPage 在服务」，
+    // 没有证明第二个断言本身有效。
+    //
+    // 因此第三个断言在这里：拿一个**仍是蓝图**的页面证明这个查询确实找得到
+    // 那句话。缺席断言最常见的恒真成因是查询本身失效（文案改了、被拆进多个
+    // 元素），这一条把它挡住——横幅措辞一变，这里立刻红，而不是让第二条
+    // 悄悄地永远绿。
     renderRoute("/ext/publishing");
+    expect(await screen.findByText(/但平台还没有任何出站投递器/)).not.toBeNull();
+    expect(screen.queryByText(/仅预览、不保存、不发布、不执行/)).toBeNull();
+    cleanup();
+
+    // 同一个查询，换一个仍是蓝图的页面——必须找得到。
+    // **样本必须随合并更新**：本片写它时 `/ext/integration` 还是蓝图，
+    // 而同一批的 XM-EXT-INTEGRATION 把它建成了；三片合并后**仍走
+    // PlaceholderPage 的只剩 `/ext/ai`**。这类「拿另一个页当对照」的断言，
+    // 在并行建页时必然失效，合并时要重新挑样本。
+    renderRoute("/ext/ai");
     expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
-    expect(screen.getByRole("heading", { name: "内容发布", level: 2 })).not.toBeNull();
+  });
+
+  it("扩展能力仍是蓝图的 AI能力管理 标注「仅预览、不保存、不发布、不执行」", async () => {
+    // 样本换过两次：/ext/publishing → /ext/integration → /ext/ai。
+    // 2026-09-08 产品负责人推翻 ADMIN-IA §5.4 对三页的适用，那三页各自建成、
+    // 各自不再走 PlaceholderPage，于是**每一片都把样本换成了当时还是蓝图的
+    // 另一页**——而合并之后只剩 `/ext/ai` 一页真的还走这条路径。
+    //
+    // 用一个已建成的页测这条横幅，测的是那一页的实现,不是本组件的,绿得毫无意义。
+    renderRoute("/ext/ai");
+    expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "AI能力管理", level: 2 })).not.toBeNull();
   });
 
   it("子页签进 ?sub=，可分享可恢复", async () => {
-    // 同上搬到 /ext/app：这一条测的是 PlaceholderPage 自己的
+    // 同上搬到 /ext/ai：这一条测的是 PlaceholderPage 自己的
     // 「?sub= 可分享可恢复」，路径必须真的还走 PlaceholderPage 才算数——
     // 用一个已建成的页会让它测成那一页的实现，绿得毫无意义。
-    renderRoute("/ext/app?sub=pages");
-    expect(await screen.findByRole("tab", { name: "页面配置", selected: true })).not.toBeNull();
+    renderRoute("/ext/ai?sub=roles");
+    expect(await screen.findByRole("tab", { name: "AI角色", selected: true })).not.toBeNull();
   });
 
   it("占位页拼错的 ?sub= 给 Not Found，不回落第一格", async () => {
-    renderRoute("/ext/app?sub=拼错了");
+    renderRoute("/ext/ai?sub=拼错了");
     expect(await screen.findByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
   });
 
@@ -2654,6 +2819,18 @@ describe("设置页", () => {
     renderRoute("/settings");
     expect(await screen.findByRole("link", { name: /打开告警与故障规则/ })).not.toBeNull();
     expect(screen.queryByLabelText("Critical 天数")).toBeNull();
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一句以前写着「写入仍需 Foundation-B / C3c 的
+  // 审批链」。审批中心（XM-0030）已启用，L2 会落成审批单而不是被拒——真正缺的
+  // 是那条写路径：全仓没有注册任何写 R5 阈值的 Action。
+  it("阈值写入的阻塞说的是「没有那条 Action」，不是「审批链还没上线」", async () => {
+    renderRoute("/settings");
+    expect(await screen.findByText(/阈值写入还没有注册对应的 Action/)).not.toBeNull();
+    expect(screen.getByText(/审批中心（XM-0030）已启用/)).not.toBeNull();
+    // 缺席断言，已做变异验证（把旧那句加回 SettingsPage 后本行转红）。
+    // 上面已 await 到新措辞，不会在渲染前假绿。
+    expect(screen.queryByText(/写入仍需 Foundation-B/)).toBeNull();
   });
 
   it("设置里的凭据子页显示安全管理边界，并提供返回设置入口", async () => {
@@ -2869,5 +3046,38 @@ describe("后台任务路由挂载（XM-OPS-TAILS0：回归修复）", () => {
     renderRoute("/jobs?sub=scheduled");
     expect(await screen.findByRole("tab", { name: "定时任务", selected: true })).not.toBeNull();
     expect(await screen.findByText("平台心跳")).not.toBeNull();
+  });
+});
+
+describe("应用与配置路由挂载（XM-EXT-APP）", () => {
+  // 与上面 /jobs 那组同一条纪律，而且这一片正踩在同一个坑口上：
+  // `built` 翻成 true 的那一刻，这一页就从 placeholderRoutes（只收
+  // `!item.built`）里掉出去了，router.tsx 里不补一行显式路由，侧栏点进去
+  // 就落到最后的 `*` 兜底 NotFoundPage。ExtAppPage.test.tsx 直接渲染组件、
+  // 不经真实路由，所以那边全绿也证明不了这件事——必须在这里真的导航一次。
+  beforeEach(() => {
+    devLogin();
+    stubFetch(okHandler);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("/ext/app 渲染真实的应用与配置页，不是兜底 404、也不是占位页", async () => {
+    renderRoute("/ext/app");
+    expect(await screen.findByRole("heading", { name: "应用与配置", level: 2 })).not.toBeNull();
+    // 正向锚点：真实页面独有的东西（占位页没有登记按钮）。
+    expect(await screen.findByRole("button", { name: "登记应用" })).not.toBeNull();
+    // 锚点过了，再同步断言没有落到那两条分支。
+    expect(screen.queryByText("页面不存在")).toBeNull();
+    expect(screen.queryByText(/没有这个地址/)).toBeNull();
+    // 建成之后不该再挂占位页那条「只读蓝图」横幅——它对这一页已经是假话。
+    expect(screen.queryByText(/只读蓝图：仅预览、不保存、不发布、不执行/)).toBeNull();
+    // 也不该再有「未建」徽章。
+    expect(within(screen.getByRole("main")).queryByText("未建·后置")).toBeNull();
+  });
+
+  it("/ext/app?sub=releases 渲染「版本与发布」页签内容", async () => {
+    renderRoute("/ext/app?sub=releases");
+    expect(await screen.findByRole("tab", { name: "版本与发布", selected: true })).not.toBeNull();
+    expect(await screen.findByRole("button", { name: "记录发布" })).not.toBeNull();
   });
 });

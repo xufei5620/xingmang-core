@@ -4,6 +4,7 @@ import type { ApprovalItem } from "../api/approvals";
 import type { JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import {
+  approvalsDueSoonCount,
   focusRows,
   platformMatrixRows,
   recentlyRecoveredCount,
@@ -13,6 +14,7 @@ import {
   workItemsFromApprovals,
   workItemsFromJobRuns,
   ACTIVE_ALERTS_LIMIT,
+  APPROVAL_DUE_WINDOW_HOURS,
   WORK_APPROVALS_LIMIT,
   WORK_JOBS_LIMIT,
   RECOVERED_WINDOW_HOURS,
@@ -118,6 +120,49 @@ describe("顶部四格的计数口径", () => {
   it("RESOLVED 但没有 resolved_at 的不算——不拿缺失字段当「刚刚恢复」", () => {
     const noTimestamp = alert({ id: "1", status: "RESOLVED", resolved_at: null });
     expect(recentlyRecoveredCount([noTimestamp], NOW)).toBe(0);
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一格以前叫「今日到期」，数审批 + 重试 + 轮换到期
+  // 三样，副行写着「随 Foundation-B 与后台任务页上线」。两样今天都在了，那句话
+  // 是错的；而三样合成一个数同样错——轮换到期一个都算不出来，合计恒偏低。
+  describe("「审批到期」只数一件有真正截止时刻的事", () => {
+    function due(over: Partial<ApprovalItem> = {}): ApprovalItem {
+      return {
+        id: "ap-due", action_id: "registry.connector.create", action_version: "1",
+        risk_level: "L2", params: {}, params_hash: "sha256:abc", requester_id: "staff_bob",
+        requester_type: "HUMAN", reason: "上线新连接器", status: "PENDING",
+        created_at: "2026-08-28T08:00:00Z", expires_at: "2026-08-28T15:00:00Z",
+        decisions: [], votes_required: 2, votes_cast: 0,
+        privileged_vote_required: false, privileged_vote_cast: false, ...over,
+      };
+    }
+
+    it("窗口是滚动 24 小时，边界之内算、之外不算", () => {
+      // NOW = 2026-08-28T12:00:00Z
+      expect(APPROVAL_DUE_WINDOW_HOURS).toBe(24);
+      const inside = due({ id: "a", expires_at: "2026-08-29T11:59:00Z" });
+      const onEdge = due({ id: "b", expires_at: "2026-08-29T12:00:00Z" });
+      const outside = due({ id: "c", expires_at: "2026-08-29T12:01:00Z" });
+      expect(approvalsDueSoonCount([inside, onEdge, outside], NOW)).toBe(2);
+    });
+
+    it("已过期的不算，哪怕库里仍记着 PENDING——那张单谁也批不动了", () => {
+      // ExpirePending 定时任务会滞后，服务端在执行那一刻才按 expires_at 判；
+      // 照抄 status 会让这一格把一批动不了的事算成「快到期了，去看一眼」
+      const expired = due({ id: "a", expires_at: "2026-08-28T11:00:00Z" });
+      expect(approvalsDueSoonCount([expired], NOW)).toBe(0);
+    });
+
+    it("非 PENDING 的不算：已批准/已执行的单不是待办", () => {
+      const approved = due({ id: "a", status: "APPROVED" });
+      const executed = due({ id: "b", status: "EXECUTED" });
+      expect(approvalsDueSoonCount([approved, executed], NOW)).toBe(0);
+    });
+
+    it("expires_at 解析不出来的不算——不替它断言「快到期了」", () => {
+      const broken = due({ id: "a", expires_at: "不是一个时间" });
+      expect(approvalsDueSoonCount([broken], NOW)).toBe(0);
+    });
   });
 });
 
@@ -448,6 +493,32 @@ describe("运营焦点：三个领域分开，绝不合成总健康分", () => {
     expect(rows[2]?.count).toBeUndefined();
     expect(rows[1]?.state).toBe("未接入");
     expect(rows[2]?.state).toBe("未接入");
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一行以前写着「凭据到期与权限异常随『人员与权限』
+  // 页上线」。/identity 早就建成了——一句指错方向的话比没有话更坏，它让人去等
+  // 一个已经到货的东西。同一句话的另一份副本（WORK_CATEGORIES.expiring）上一次
+  // 已经订正过，这一份被漏掉了，所以现在两处共用同一段文案。
+  it("「安全」说的是真正的缺口，不是某个早就建成的页面", () => {
+    const security = focusRows([])[2];
+    expect(security?.domain).toBe("安全");
+    // 凭据到期缺的是数据模型：CredentialRef 只有 scope/name
+    expect(security?.detail).toContain("凭据模型里还没有到期时间");
+    expect(security?.detail).toContain("CredentialRef");
+    // 权限异常缺的是判定规则，不是页面
+    expect(security?.detail).toContain("权限异常则还没有判定规则");
+    // 缺席断言，已做变异验证（把旧那句写回 focusRows 后本行转红）。
+    // 上面三条正向断言已经落在同一个字符串上，这一行不会因为「还没渲染」假绿。
+    expect(security?.detail).not.toContain("人员与权限");
+  });
+
+  // 两处共用一份的证据：文案漂开过一次，就是这一格被漏掉的原因
+  it("「安全」行与「即将到期」分类说的是同一个凭据缺口，不各写一份", () => {
+    const security = focusRows([])[2];
+    const expiring = WORK_CATEGORIES.find((c) => c.id === "expiring");
+    const shared = "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，不记录签发与轮换到期。";
+    expect(security?.detail.startsWith(shared)).toBe(true);
+    expect(expiring?.blockedBy?.startsWith(shared)).toBe(true);
   });
 });
 

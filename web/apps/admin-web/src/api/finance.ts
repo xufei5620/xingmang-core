@@ -589,7 +589,36 @@ export const UPSTREAM_ACCOUNTS_QUERY = "finance-upstream-accounts";
 export const SUBSCRIPTION_BATCHES_QUERY = "finance-subscription-batches";
 export const PROXY_ASSETS_QUERY = "finance-proxy-assets";
 /** 上游汇总（本文件上半部分的 `listUpstreamSummaries`）。
- *  与登记簿分开的 key：改倍率要刷登记簿，但不会立刻改变已入账的窗口汇总。 */
+ *  与登记簿分开的 key：改倍率要刷登记簿，但不会立刻改变已入账的窗口汇总。
+ *
+ *  ## 上面那段话说的事，在这一条上真的发生过（2026-09-08 修复）
+ *
+ *  这条 key 一度有**两种写法**：这里的常量（`["finance-upstream-summary"]`）
+ *  与散写在五个组件里的 `["finance", "upstreams", "summary"]`。react-query 的
+ *  失效是**前缀匹配**，两个数组互不为前缀，于是谁都作废不了谁——在上游详情页
+ *  记一笔退款/终止/登记批次，摊销当场变，而平台概览资金卡、渠道管理表、
+ *  跨平台财务页、渠道详情页四处照旧显示旧的余额、可用天数、成本与毛利；
+ *  反过来，渠道管理表改绑或改倍率之后，上游详情页那几格也不动。
+ *
+ *  它躲了这么久，是因为三条性质凑齐了：没刷新的那一半**看起来完全正常**
+ *  （不是空白也不是错误态，就是一个陈旧但形状完美的读数）；**同屏内不自相
+ *  矛盾**（共用一份缓存的那几处要陈旧一起陈旧），只有跨页切换才撞得见;
+ *  而组件级用例**两侧都过**——每个组件只装配自己那一侧，断言「写完调了
+ *  invalidateQueries」，各自作废的确实是自己读的那个 key。
+ *
+ *  ## 现在由哪条测试拦着
+ *
+ *  `src/upstreamSummaryCache.test.tsx`。**注释拦不住这件事**——上面那段话
+ *  逐字预言了它，它照样发生了；所以真正的护栏是那两条跨组件用例：
+ *
+ *  - 同一个 `QueryClient` 下挂 `UpstreamAccountDetail`（写）与
+ *    `FinanceSummaryCards`（读），写完断言**读者屏幕上的数变了**；
+ *  - 四个组件同屏，断言缓存里只留**一份**上游汇总（按响应形状认，不按 key 认,
+ *    否则就成了拿 key 校验 key）。
+ *
+ *  两条都做过变异验证（把任一侧的 key 改回字面量即转红，且红在目标断言上）。
+ *  新增一处读或一处失效时，**用这个常量**；要新起一个 key 就把它加进那个文件
+ *  的同屏用例里，别让它成为第三种写法。 */
 export const UPSTREAM_SUMMARY_QUERY = "finance-upstream-summary";
 
 export async function listUpstreamAccounts(

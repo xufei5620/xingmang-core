@@ -6,6 +6,7 @@ import { Link, useSearchParams } from "react-router";
 import { listApprovals } from "../api/approvals";
 import { FeatureNotMountedError } from "../api/client";
 import { getOpsOverview, type OpsOverview } from "../api/ops";
+import { getMigrations, type MigrationsReport } from "../api/platform";
 import {
   BlueprintTabView,
   BlueprintTiles,
@@ -109,6 +110,8 @@ function renderChangesSubTab(value: string, label: string): ReactNode {
       return <ChangeRequestsTab label={label} />;
     case "releases":
       return <ReleasesTab label={label} />;
+    case "database":
+      return <DatabaseTab label={label} />;
     default:
       return <BlueprintOnlyTab tabId={value} label={label} />;
   }
@@ -187,7 +190,7 @@ const TAB_SOURCE: Readonly<Record<string, string>> = {
   packages:
     "平台自己的镜像没有供应链环节：全仓找不到 cosign / syft / trivy / grype 的调用，镜像由 deploy/scripts/deploy-local.sh 在目标机上 compose build，不推 registry，因此没有 digest 台账、没有 SBOM、没有签名、也没有漏洞扫描结果。（开票线是另一条独立流水线，它自带镜像门禁与签名，但那条线的产物不经过这个后台。）这一格等的不是接线，是先要有这些环节。",
   database:
-    "迁移是 Platform Lifecycle Operation（宪法 2、3 条）：走版本化脚本 + 人工批准，不经 Action 通道——所以这一格等的**不是** Foundation-B。仓库里有版本化迁移脚本（db/migrations/），生产库的 public.schema_migrations 也确实记着已应用到哪一版，但后台还没有任何只读端点读它。缺的是一条新 Query，外加定它归 ops.read 还是 registry.read 并同步 dbroles 授权。",
+    "迁移是 Platform Lifecycle Operation（宪法 2、3 条）：走版本化脚本 + 人工批准，不经 Action 通道——所以这一格与 Foundation-B 无关。只读 Query 已接（GET /api/v1/ops/migrations，权限 ops.read）：版本号来自生产库的 public.schema_migrations，脚本清单来自二进制里嵌着的 db/migrations。蓝图那张表还要「迁移前后行数 / 执行人 / 验证 / 回滚路径」，平台没有逐条迁移台账，这四列取不到——下面显示的是取得到的那部分，取不到的不编。",
 };
 
 /** 页头那一行的一句话结论。
@@ -198,7 +201,8 @@ const TAB_SOURCE: Readonly<Record<string, string>> = {
 const TAB_HEADLINE: Readonly<Record<string, string>> = {
   tests: "这一格今天没有数据源，也还没定由谁来供——它等的是一次复审，不是排期。",
   packages: "这一格等的不是接线：平台自己的镜像还没有签名、SBOM 与漏洞扫描环节。",
-  database: "这一格等的是一条只读 Query，不是 Foundation-B——迁移本来就不经 Action 通道。",
+  database:
+    "这一格接的是库自己记着的迁移版本：跑到哪一版、有没有卡在半截、二进制里还带着几版没跑。",
 };
 
 /** 表体空状态里的一句话。比页签落款短：详细归因在落款里，这里只说这张表为什么没有行。 */
@@ -207,7 +211,7 @@ const TABLE_SOURCE: Readonly<Record<string, string>> = {
   releases: "这张表要的是发布历史，而平台没有发布记录表；上面那张卡只回答「现在跑的是哪个提交」。",
   tests: "CI 结果没有来源：GitHub Actions 停摆中，过渡期由分支 Handoff + 服务器本地门禁承担。",
   packages: "没有签名 / SBOM / 漏洞扫描环节，也就没有这张表的行。",
-  database: "已应用的迁移版本记在 public.schema_migrations，但还没有只读端点能把它取出来。",
+  database: "已应用的迁移版本见上面那张表；蓝图这张表要的逐条台账平台没有留。",
 };
 
 /** 取蓝图里的一格，并把落款换成上面那份如实的归因。 */
@@ -434,6 +438,139 @@ function CurrentDeployment({ data }: { data: OpsOverview }) {
       ) : null}
       <p className="text-xs text-fg-muted">
         这是「现在跑的是什么」，不是发布历史：回滚之后这里直接变成回滚后的提交，不留上一条。
+      </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 数据库变更：库跑到哪一版（XM-READONLY-QUERIES）
+// ---------------------------------------------------------------------------
+
+/** 「数据库变更」格。
+ *
+ *  这一格此前是纯蓝图态，落款写着「缺的是一条新 Query」。那条 Query 现在有了
+ *  （GET /api/v1/ops/migrations，ops.read），但它只答得出两件事：
+ *
+ *  - 库自己记着跑到哪一版、有没有卡在半截（public.schema_migrations 就两列）；
+ *  - 二进制里带着哪些脚本、还有几版没跑（db/migrations 嵌进了二进制）。
+ *
+ *  蓝图那张表还要「迁移前后行数 / 执行人 / 验证 / 回滚路径」——平台**没有**
+ *  逐条迁移台账，那四列今天取不到。所以这一格是「真实读数 + 保留蓝图预览」
+ *  的组合，而不是把蓝图那张表填满：编四列出来比空着更糟。 */
+function DatabaseTab({ label }: { label: string }) {
+  const query = useQuery({
+    queryKey: ["ops-migrations"],
+    queryFn: ({ signal }) => getMigrations({ signal }),
+  });
+
+  return (
+    <section className="flex flex-col gap-3">
+      <PageHeader
+        title={label}
+        description={TAB_HEADLINE.database}
+        onRefresh={() => void query.refetch()}
+        refreshing={query.isFetching}
+        lastRefreshedAt={query.dataUpdatedAt || undefined}
+      />
+      <section className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
+        <header className="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 className="text-sm font-medium text-fg">迁移状态</h3>
+          <p className="text-xs text-fg-muted">GET /api/v1/ops/migrations</p>
+        </header>
+        <ApiStateView
+          isPending={query.isPending}
+          error={query.error}
+          onRetry={() => void query.refetch()}
+          compact
+        >
+          {query.data ? <MigrationState data={query.data} /> : null}
+        </ApiStateView>
+        <p className="text-xs text-fg-muted">
+          本页只读：执行迁移与回滚是 Platform Lifecycle Operation（宪法 2、3
+          条），走版本化脚本 + 变更单 + 人工批准，不经 Action 通道，后台也没有对应端点。
+        </p>
+      </section>
+      <ChangesBlueprintPreview tabId="database" />
+    </section>
+  );
+}
+
+function MigrationState({ data }: { data: MigrationsReport }) {
+  const pending = data.items.filter((m) => !m.applied);
+  return (
+    <div className="flex flex-col gap-3">
+      <dl className="flex flex-col gap-1">
+        <DeploymentRow label="已应用到" value={`第 ${data.applied_version} 版`} />
+        <DeploymentRow label="脚本总数" value={`${data.items.length} 版`} />
+      </dl>
+
+      {/* dirty 是这一格最要紧的一位：库卡在半截时服务照常起、端点照常回
+          200，别处一点征兆都没有。所以它用 alert 而不是普通文本。 */}
+      {data.dirty ? (
+        <p
+          role="alert"
+          className="rounded-md border border-danger bg-danger/10 px-3 py-2 text-xs text-danger"
+        >
+          库标着 dirty：上一次迁移跑到一半失败了，schema 处在半截状态。这种库既不能继续迁移也不该继续服务
+          ——处置见 docs/runbooks/，不要在后台重试，这里也没有重试入口。
+        </p>
+      ) : (
+        <p className="text-xs text-fg-muted">
+          dirty = false：最近一次迁移是跑完的，schema 不在半截状态。
+        </p>
+      )}
+
+      {data.ahead > 0 ? (
+        <p
+          role="alert"
+          className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg"
+        >
+          还有 {data.ahead} 版没应用：这个进程的二进制里带着比库更新的迁移脚本，通常意味着镜像更新了而迁移容器没跑（或跑失败了没人看日志）。
+          未应用的是第 {pending.map((m) => m.version).join("、")} 版。
+        </p>
+      ) : (
+        <p className="text-xs text-fg-muted">
+          没有落后的版本：二进制里带的每一版都已应用。这一行比较的是**这个进程**与它连着的库，不是仓库与库。
+        </p>
+      )}
+
+      <div className="overflow-x-auto rounded-lg border border-edge">
+        <table className="w-full border-collapse">
+          <thead className="border-b border-edge bg-surface-muted">
+            <tr>
+              <th className="px-3 py-2 text-left text-xs font-medium text-fg-muted">编号</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-fg-muted">名称</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-fg-muted">状态</th>
+              <th className="px-3 py-2 text-left text-xs font-medium text-fg-muted">
+                down 脚本
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.items.map((m) => (
+              <tr key={m.version} className="border-b border-edge last:border-b-0">
+                <td className="px-3 py-2 font-mono text-xs text-fg">{m.version}</td>
+                <td className="px-3 py-2 text-sm text-fg">{m.name}</td>
+                <td className="px-3 py-2">
+                  <Badge tone={m.applied ? "success" : "warning"}>
+                    {m.applied ? "已应用" : "未应用"}
+                  </Badge>
+                </td>
+                <td className="px-3 py-2 text-xs text-fg-muted">
+                  {/* 刻意不叫「可回滚」：迁移是 forward-only（规格 §5.7），
+                      down 脚本存在只是让退路有据可查，不是一个按钮。 */}
+                  {m.has_down ? "有" : "无"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-xs text-fg-muted">
+        「已应用」是按版本号推断的：public.schema_migrations 只记一个版本号加一个 dirty
+        标记，库里没有逐条台账，所以不大于那个版本号的都算已应用。也正因为如此，蓝图这张表要的「迁移前后行数 /
+        执行人 / 验证 / 回滚路径」四列取不到。
       </p>
     </div>
   );

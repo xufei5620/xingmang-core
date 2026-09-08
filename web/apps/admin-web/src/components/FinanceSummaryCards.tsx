@@ -12,6 +12,7 @@ import {
 import {
   listChannelSummaries,
   listUpstreamSummaries,
+  UPSTREAM_SUMMARY_QUERY,
   type ChannelSummary,
   type Money,
   type Runway,
@@ -146,7 +147,7 @@ export function FinanceSummaryCards({
     queryFn: ({ signal }) => listChannelSummaries({ signal }),
   });
   const upstreamQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 

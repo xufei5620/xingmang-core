@@ -1606,6 +1606,27 @@
     },
     {
       "kind": "view",
+      "schema": "core",
+      "name": "schema_migration_state",
+      "owner": "xm_migrator",
+      "columns": [
+        "dirty",
+        "version"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "view",
       "schema": "finance",
       "name": "runway_threshold_current_verified",
       "owner": "xm_migrator",

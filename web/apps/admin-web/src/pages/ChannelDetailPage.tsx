@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { listServices } from "../api/platform";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
-import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
+import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, UPSTREAM_SUMMARY_QUERY, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
 import { channelFieldNullReason, SCHEDULING_WRITE_HINT, USAGE_WINDOW_SUB2API_HINT } from "../lib/channelFieldReasons";
 import { formatScaledMinorUnits } from "../lib/money";
 import { runwayReasonText } from "../lib/runway";
@@ -119,7 +119,7 @@ function ChannelDetailShell({ platform, channelId }: { platform: SupplyPlatform;
     queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
   });
   const summaryQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 
