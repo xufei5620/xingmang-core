@@ -2,7 +2,7 @@
 
 - **status**: ready-for-review（分支内交付，未推 GitHub、未部署）
 - **branch**: `ai/claude/XM-OPS-TRUTH`（起点 e4f7dcf）
-- **commit**: 见分支末端提交（提交消息以「obs(ops): 让作业日志说本轮生效模式…」开头）
+- **commit**: `f802ab7`（32 files changed, +2638 / -287）
 - **时间**: 开始 2026-09-08T16:15:41Z，结束 2026-09-08T17:05Z（约 50 分钟）
 - **需求来源**: `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1、三·2、二表第一行
 - **旧账**: `docs/handoffs/ACCEPTANCE-LOG.md:88`（作业日志打 env 兜底值）、`:82`/`:86`
