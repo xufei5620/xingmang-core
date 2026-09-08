@@ -1,0 +1,31 @@
+{
+  "id": "extapp.app.retire",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "extapp.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "app_id": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-EXT-APP：把一个前端站点在登记簿里标记为已下线（status = retired），只改 status，不动其它字段。与 extapp.app.set 分开是有意的，同 server.asset.retire 分开 server.asset.set 的理由：这是一个能被单独审计检索的状态迁移（「这个站点什么时候下线、谁做的、为什么」不该靠比对一次整行更新的 before/after 才答得出），也让列表页能有一个不必打开完整编辑表单的一键下线按钮。reason 必填并写进审计 after 摘要。**这个动作不会真的把站点关掉**：平台没有关停站点的通道，那是 Platform Lifecycle Operation（宪法 2、3 条）。它改的只是登记簿里的一个字段，因此保持 L1——抬到 L2 会让「改一个记录字段」需要走审批，而真正关站的那个动作反而不经过这里。"
+}

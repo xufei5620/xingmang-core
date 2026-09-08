@@ -168,6 +168,14 @@ type Deps struct {
 	ServerSuppliers    ServerSupplierLister
 	ServerDomains      ServerDomainLister
 	ServerServiceNotes ServerServiceNoteLister
+	// ExtApps / ExtAppReleases 是前端应用登记簿与发布记录簿的两个只读查询
+	// （XM-EXT-APP）。「应用」= 平台自己纳管的前端站点（ADMIN-IA §5.4.1），
+	// 不是被管平台的前端、也不是页面搭建器。权限同样复用 registry.ScopeRead。
+	//
+	// **这一对里没有发布端点，将来也不该有**：发布与回滚是 Platform Lifecycle
+	// Operation（宪法 2、3 条），走版本化脚本 + 人工批准。
+	ExtApps        ExtAppLister
+	ExtAppReleases ExtAppReleaseLister
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -645,6 +653,18 @@ func NewRouter(d Deps) http.Handler {
 				Get("/servers/domains", ListServerDomainsHandler(d.ServerDomains))
 			api.With(RequireScope(registry.ScopeRead)).
 				Get("/servers/service-notes", ListServerServiceNotesHandler(d.ServerServiceNotes))
+
+			// 前端应用登记簿与发布记录簿（XM-EXT-APP）。同样复用
+			// registry.ScopeRead：能看服务清单与服务器登记簿的人本就该能看
+			// 「我们自己有哪些前端站点」，三者是同一类知识面。
+			//
+			// 写路径（登记 / 修改 / 下线 / 记录发布）不在这里——三个 L1
+			// Action，走执行通道，权限是独立的 extapp.manage。
+			// **没有发布端点**：这两条只回答「登记了什么」，不做任何事。
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/ext/apps", ListExtAppsHandler(d.ExtApps))
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/ext/apps/releases", ListExtAppReleasesHandler(d.ExtAppReleases))
 
 			// 利润台账（XM-0037b）**复用 finance.read**，不另立一个 scope：
 			// 台账里的毛利就是「倍率 × 用量」的结果，能看登记簿里那个倍率的人

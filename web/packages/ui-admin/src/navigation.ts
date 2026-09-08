@@ -276,7 +276,13 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     label: "应用与配置",
     path: "/ext/app",
     stage: "后置",
-    built: false,
+    // XM-EXT-APP（2026-09-08）：产品负责人推翻了 ADMIN-IA §5.4「四页只读蓝图、
+    // 不得因此提前建后端」对这一页的适用（裁定变更逐字记在 §5.4）。这一页现在
+    // 有真实后端（core.ext_app / core.ext_app_release）与真实路由，
+    // **stage 仍留「后置」**：它说的是这一段在信息架构里的优先级，不是实装进度，
+    // 而实装进度由 built 表达——两者混成一个字段的话，「这一段是后置的」这条
+    // 设计事实会随着某一页建成而消失。
+    built: true,
     subTabs: sub(
       ["catalog", "应用目录"],
       ["pages", "页面配置"],
