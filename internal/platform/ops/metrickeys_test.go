@@ -75,6 +75,9 @@ func TestRegisteredMetricsMatchConnectorContracts(t *testing.T) {
 		jobs.MetricPlatformHeartbeat,
 		jobs.MetricRetentionLastRun,
 		jobs.MetricApprovalQueue,
+		// 卡片同步的每轮状态（XM-CARD-VISIBILITY）。同上：不来自 Connector
+		// 契约，本用例真正守的是「白名单与指标常量只有一个来源」。
+		jobs.MetricCardSyncStatus,
 		// CPA 只读文件后端（XM-CPA0，connectors/cpa）。
 		cpa.MetricRequestsDaily,
 		cpa.MetricCostDaily,

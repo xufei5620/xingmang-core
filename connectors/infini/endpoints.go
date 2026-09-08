@@ -244,8 +244,10 @@ func (c *Client) switchOp(ctx context.Context, path, cardID string) error {
 		return err
 	}
 	if !data.Success {
-		// 上游原文只进 Unwrap 链
-		return connector.NewError(connector.KindRejected, "infini "+path,
+		// 上游原文脱敏后进 Detail（对外文本与日志都看得到），原文进 cause。
+		// 冻结/解冻是运营当场点的按钮，失败时有人正等着看「为什么」。
+		return connector.NewErrorWithDetail(connector.KindRejected, "infini "+path,
+			"upstream refused: "+redactUpstreamText(data.Message),
 			fmt.Errorf("upstream refused: %s", data.Message))
 	}
 	return nil
@@ -435,8 +437,21 @@ func optionalTimestamp(raw rawTimestamp, field string) (string, error) {
 
 // ---------- 批量状态 ----------
 
-// batchStatusMax 是上游一次批量查询的上限（文档：1~100）。
-const batchStatusMax = 100
+// BatchStatusMax 是上游一次批量查询的上限（文档：1~100）。
+//
+// **这个数在全仓只许有这一处定义**（XM-CARD-VISIBILITY）。真相源是上游自己的
+// 规格：contracts/connectors/infini/openapi/card.yaml 里
+// components.schemas.BatchGetCardStatusesRequest.properties.card_ids.maxItems，
+// 由 endpoints_test.go 的 TestBatchStatusMaxMatchesOpenAPI 读那份契约钉住。
+//
+// 导出的理由是领域层的分批步长必须用同一个数：此前 cards/sync.go 自己写了
+// 一个 batchStatusChunk = 100，两处各改一处不会有任何测试发红，而漂开之后
+// 每一批都会被这里本地拒掉，日志上看起来却像上游出了问题。
+//
+// 注意**不要**把 cards/sync.go 的 discoveryPageSize（也是 100）合并进来：
+// 那是列表翻页大小，与批量上限毫无关系，合并只会把两个不相干的上游限制
+// 焊死在一起。
+const BatchStatusMax = 100
 
 // BatchCardStatus 一次查多张卡的生命周期状态，返回 card_id → status。
 //
@@ -449,9 +464,15 @@ func (c *Client) BatchCardStatus(ctx context.Context, cardIDs []string) (map[str
 	if len(cardIDs) == 0 {
 		return map[string]string{}, nil
 	}
-	if len(cardIDs) > batchStatusMax {
-		return nil, connector.NewError(connector.KindRejected, "infini POST /v2/cards/status/batch",
-			fmt.Errorf("一次最多 %d 张，收到 %d 张", batchStatusMax, len(cardIDs)))
+	if len(cardIDs) > BatchStatusMax {
+		// Detail 里的「平台侧前置拒绝」是**唯一**能把这一侧与上游拒绝分开的
+		// 标记：两者的 Kind 都是 rejected、op 也逐字相同，此前对外文本一模
+		// 一样，运维分不出是谁说的「不」。2026-09-08 那次风暴里这个歧义是
+		// 活的——一个超过 100 张卡的账号看起来会和 LINFENG 的失败完全一样。
+		return nil, connector.NewErrorWithDetail(connector.KindRejected,
+			"infini POST /v2/cards/status/batch",
+			fmt.Sprintf("平台侧前置拒绝：一次最多 %d 张，收到 %d 张", BatchStatusMax, len(cardIDs)),
+			fmt.Errorf("一次最多 %d 张，收到 %d 张", BatchStatusMax, len(cardIDs)))
 	}
 
 	body, err := json.Marshal(map[string]any{"card_ids": cardIDs})
@@ -525,9 +546,10 @@ func (c *Client) DeleteCard(ctx context.Context, cardID string) error {
 		return err
 	}
 	if !data.Success {
-		// 上游原文只进 Unwrap 链（ADR-004）。当成成功会让页面显示
-		// 「已关停」而卡还活着——那是最坏的一种错。
-		return connector.NewError(connector.KindRejected, "infini "+path,
+		// 上游原文脱敏后进 Detail，原文进 cause（ADR-004）。当成成功会让
+		// 页面显示「已关停」而卡还活着——那是最坏的一种错。
+		return connector.NewErrorWithDetail(connector.KindRejected, "infini "+path,
+			"upstream refused: "+redactUpstreamText(data.Message),
 			fmt.Errorf("upstream refused: %s", data.Message))
 	}
 	return nil

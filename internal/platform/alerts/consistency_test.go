@@ -30,6 +30,21 @@ func TestApprovalQueueMetricKeyMatchesJob(t *testing.T) {
 	}
 }
 
+// TestCardSyncMetricKeyMatchesJob：alerts 把卡片同步的观测键写成字面量
+// （不 import jobs——jobs 已经 import alerts，反向引用会成环）。
+// 它必须与 jobs 实际写出的键逐字一致，否则 cards.sync.failed **一条都不评估**：
+// 没有报错，只是永远不响，而这条规则的整个价值就在于「某个账号一直在被拒」
+// 时会响（XM-CARD-VISIBILITY）。
+func TestCardSyncMetricKeyMatchesJob(t *testing.T) {
+	if alerts.DefaultCardSyncMetricKey != jobs.MetricCardSyncStatus {
+		t.Fatalf("卡片同步指标键漂移：alerts=%q, jobs=%q",
+			alerts.DefaultCardSyncMetricKey, jobs.MetricCardSyncStatus)
+	}
+	if !ops.KnownMetricKey(alerts.DefaultCardSyncMetricKey) {
+		t.Fatalf("%q 不在 ops 的已注册指标白名单里", alerts.DefaultCardSyncMetricKey)
+	}
+}
+
 // TestChannelBalanceMetricKeyMatchesConnector：alerts 把渠道余额的指标键
 // 写成字面量，是为了不让平台层依赖某一个具体 Connector。
 // 那个字面量必须与 connectors/sub2api 实际产出的键逐字一致，
@@ -93,6 +108,9 @@ func TestRulesCoverDocumentedFirstBatch(t *testing.T) {
 	want := []string{
 		// XM-0030c：有审批单挂太久没人决定。
 		"approval.pending.too_long",
+		// XM-CARD-VISIBILITY：某个账号的某一步卡片同步连续 N 轮失败。
+		// 位置由 RuleKeys() 的升序决定（cards. 排在 channel. 前面）。
+		"cards.sync.failed",
 		"channel.balance.low",
 		"channel.token.invalid",
 		"metric.data.stale",

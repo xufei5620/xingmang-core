@@ -139,8 +139,30 @@ keyId 与 secret 分成两个引用是为了让它们能各自轮换。keyId 是
 | 信封 `code != 0` | `rejected` | 上游收下了但拒绝，重试无意义 |
 | `data.success == false` | `rejected` | 同上（信封成功不等于操作成功） |
 | 非 JSON、超大响应 | `bad_response` | 告警，人工看 |
+| **平台侧前置拒绝**（如批量超过 100 张） | `rejected` | 改**我们自己的**调用，与上游无关 |
 
-供应商原始错误文本只进 `Unwrap` 链与服务端日志，不进对外错误文本（ADR-004）。
+### 上游原文的两层可见性（XM-CARD-VISIBILITY 修订）
+
+- **上游的 HTTP 状态码、业务码与脱敏后的 `message`** 进 `connector.Error.Detail`，
+  因而进对外错误文本、作业结果与结构化日志。
+- **原始响应体**只进 `Unwrap` 链与服务端日志，不进对外文本。
+- 脱敏规则见 `connectors/infini/redact.go`：像凭据的字段（token/secret/key/
+  password/authorization/signature/digest/cvv…）**整个值去掉**；12~19 位数字串
+  （允许组间空格或连字符）**打成 `****` + 末 4 位**。分隔符类含全角冒号与
+  全角引号——本仓库的上游文案按约定用全角标点，只认 ASCII 冒号的掩码
+  在这个仓库里已经漏过一次。
+
+这是对此前写法的一次**有意放宽**，理由必须记下来：ADR-004 的铁律原文是
+「第三方错误不得原样透传给**用户**」，而实现此前执行成了「不透传给**调用方**」
+——严过 ADR 一档。代价是 2026-09-08 的告警风暴里，一条打了 1724 次的失败在
+日志与后台上都只写着 `rejected: infini POST /v2/cards/status/batch`，三天答不出
+为什么。放宽的边界有两条硬约束：对外文本只带**码 + 脱敏后的 message**，绝不带
+原始响应体；给最终用户看的那一层仍由领域层翻成中文指引
+（`internal/platform/cards/upstream_error.go`），一个字的上游原文都不到那里。
+
+**平台侧前置拒绝要与上游拒绝可辨。** 两者的 `Kind` 都是 `rejected`、`Op` 也逐字
+相同，此前对外文本一模一样，运维分不出是谁说的「不」。现在本地那一侧的 Detail
+以「平台侧前置拒绝：」开头。
 
 401 单独成类的实际理由：这条通道上 401 最可能的成因是 IP 白名单没生效或
 本机时钟偏差超 ±300 秒，与「网络不通」的排查方向完全不同。
@@ -306,6 +328,16 @@ Infini 后台的 Webhook 设置里确有卡片事件三种：`card.status_change
 8. ⬜ **申请单 `status` 的完整取值**与终态判定条件（异步开卡的轮询出口）。
 9. ⬜ **冻结后的 `status` 取值**（文档未列）。
 10. ⬜ **限流阈值** —— 文档未提及，用于定同步周期。
+11. ⬜ **`POST /v2/cards/status/batch` 的 `card_ids` 到底是哪个 id 空间**
+    —— OpenAPI 把它描述成「Internal ORGANIZATION_CARD primary key ids」
+    （`contracts/connectors/infini/openapi/card.yaml`），而我们传的是
+    `GET /v2/cards/list` 回来的 `id`。两者若不是同一个空间，批量查状态就会
+    对每个账号稳定地失败，而单查照常成功——这与 2026-09-08 生产上观察到的
+    形状一致（见 `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md`）。
+    该端点要求的 `card.create` 权限我们**确实持有**，所以「权限不足」不是
+    显然的解释。**这一条只是假设，不是结论**：XM-CARD-VISIBILITY 让上游的
+    业务码与 message 进了日志与告警，第一次看到原话时按那句话判定，
+    不要拿这条假设去反推。
 
 ## 已知的上游权限划分（2026-09-04 实测）
 

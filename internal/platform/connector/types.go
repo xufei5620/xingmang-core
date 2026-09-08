@@ -39,17 +39,62 @@ const (
 
 // Error 是 Connector 层的统一错误。
 type Error struct {
-	Kind  ErrorKind
-	Op    string // 出错的操作，如 "sub2api.users.read"
-	cause error
+	Kind ErrorKind
+	Op   string // 出错的操作，如 "sub2api.users.read"
+	// Detail 是**已经脱敏过**的上游简述（业务码 + 处理过的 message、
+	// 或本地前置拒绝的原因），会进 Error() 文本。
+	//
+	// 为什么要有它（XM-CARD-VISIBILITY）：只有 Kind + Op 时，一次失败在日志、
+	// 作业错误串与后台上都只剩「rejected: infini POST /v2/cards/status/batch」
+	// 这 40 个字符。2026-09-08 的告警风暴里，运维盯着这一句查了三天也答不出
+	// 「LINFENG 到底为什么被拒」——分类回答的是「要不要重试」，回答不了
+	// 「要改什么」。
+	//
+	// ADR-004 的铁律是「第三方错误不得原样透传给**用户**」：这里进对外文本的
+	// 不是原文，是脱敏后的码 + 摘要，且面向的是管理端运维；真正给用户看的
+	// 那一层仍由领域层翻成中文指引（见 cards/upstream_error.go）。
+	// **原始响应体永远只进 cause**，不进 Detail。
+	Detail string
+	cause  error
 }
 
 // NewError 构造 Connector 错误。cause 只进 Unwrap 链，不进 Error() 文本。
+//
+// 行为与 Detail 引入之前逐字节一致（Detail 为空时 Error() 不变），
+// 因此其余六个连接器的对外错误文本一个字都没动。
 func NewError(kind ErrorKind, op string, cause error) error {
 	return &Error{Kind: kind, Op: op, cause: cause}
 }
 
-func (e *Error) Error() string { return string(e.Kind) + ": " + e.Op }
+// NewErrorWithDetail 构造带脱敏简述的 Connector 错误。
+//
+// detail **必须是调用方已经脱敏过的文本**：这个函数不做脱敏，它只负责
+// 把简述放进对外文本。原始响应体请放 cause。
+func NewErrorWithDetail(kind ErrorKind, op, detail string, cause error) error {
+	return &Error{Kind: kind, Op: op, Detail: detail, cause: cause}
+}
+
+func (e *Error) Error() string {
+	if e.Detail == "" {
+		return string(e.Kind) + ": " + e.Op
+	}
+	return string(e.Kind) + ": " + e.Op + " (" + e.Detail + ")"
+}
+
+// DetailOf 取出错误链里最靠外的那条脱敏简述；没有则返回空串。
+//
+// 供作业与日志显式取用：调用方不必知道 *Error 的形状，也不会不小心
+// 把整条 Unwrap 链（含原始响应体）打进日志。
+func DetailOf(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ce *Error
+	if errors.As(err, &ce) {
+		return ce.Detail
+	}
+	return ""
+}
 
 // Unwrap 暴露根因给日志与 errors.Is，不进对外文本。
 func (e *Error) Unwrap() error { return e.cause }

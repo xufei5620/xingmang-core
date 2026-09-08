@@ -320,7 +320,7 @@ func TestSyncerAdvancesOpenWithdrawals(t *testing.T) {
 		Withdrawals: svc,
 		Now:         func() time.Time { return issueNow },
 	})
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatalf("同步失败: %v", err)
 	}
 
@@ -343,7 +343,7 @@ func TestSyncerSkipsWithdrawalsWhenUnconfigured(t *testing.T) {
 	syncer := NewSyncer([]Account{{ID: testAccount, Client: fake}}, store, SyncOptions{
 		Now: func() time.Time { return issueNow },
 	})
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatalf("没配提现不该让同步失败: %v", err)
 	}
 }

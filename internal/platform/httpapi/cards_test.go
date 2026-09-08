@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,13 @@ type fakeCardQuerier struct {
 	ops          []cards.Operation
 	memberEmails []string
 	challenges   []cards.CardChallenge
+	paused       map[string]cards.AccountSyncPause
+	pausedErr    error
 	err          error
+}
+
+func (f *fakeCardQuerier) PausedAccounts(ctx context.Context) (map[string]cards.AccountSyncPause, error) {
+	return f.paused, f.pausedErr
 }
 
 func (f *fakeCardQuerier) ListCards(ctx context.Context, account, ownerRef string) ([]cards.CardView, error) {
@@ -251,5 +258,94 @@ func TestAllCardTransactionsCarryCardAlias(t *testing.T) {
 	}
 	if body.Items[0].OccurredAt != "2026-09-05T05:29:45Z" {
 		t.Fatalf("时间应为 RFC3339 UTC, got %q", body.Items[0].OccurredAt)
+	}
+}
+
+// 被暂停的账号必须在卡片列表这一屏上说清楚（XM-CARD-VISIBILITY）。
+//
+// 暂停会让这个账号的卡数据**按设计**一直陈旧下去。宪法 12 条要求陈旧本身
+// 可见，而「为什么陈旧」必须和数据在同一屏上——否则运营看到的是一整页
+// 安静的旧数据，没有任何东西说明它为什么不动了。
+func TestListCardsExposesPausedAccounts(t *testing.T) {
+	pausedAt := time.Date(2026, 9, 8, 16, 0, 0, 0, time.UTC)
+	store := &fakeCardQuerier{
+		cards: []cards.CardView{{CardID: "card_1", Status: "active"}},
+		paused: map[string]cards.AccountSyncPause{
+			"LINFENG": {
+				Account: "LINFENG", Paused: true,
+				Reason:   "上游拒绝待查 XM-CARD-VISIBILITY",
+				PausedBy: "human:ops", PausedAt: pausedAt,
+			},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	ListCardsHandler(store, []string{"MAIN", "LINFENG"}, 5*time.Minute)(
+		rec, cardRequest(t, "/api/v1/cards"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，响应 = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		PausedAccounts []struct {
+			Account  string `json:"account"`
+			Reason   string `json:"reason"`
+			PausedBy string `json:"paused_by"`
+			PausedAt string `json:"paused_at"`
+		} `json:"paused_accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PausedAccounts) != 1 {
+		t.Fatalf("应有一条暂停记录，实际 %+v", body.PausedAccounts)
+	}
+	got := body.PausedAccounts[0]
+	if got.Account != "LINFENG" {
+		t.Fatalf("account = %q", got.Account)
+	}
+	if got.Reason == "" {
+		t.Fatal("暂停理由必须回给前端：不然徽标只写「已暂停」，等于没说")
+	}
+	if got.PausedBy != "human:ops" {
+		t.Fatalf("paused_by = %q", got.PausedBy)
+	}
+	// 时间一律 UTC RFC3339（宪法条款 14）。前端要靠它算「已暂停 N 小时」——
+	// 一个被忘掉的暂停必须看得出来。
+	if got.PausedAt != pausedAt.Format(time.RFC3339) {
+		t.Fatalf("paused_at = %q, want %q", got.PausedAt, pausedAt.Format(time.RFC3339))
+	}
+}
+
+// 读不到暂停清单时回空数组，绝不假装「没有账号被暂停」。
+//
+// 与成员邮箱同一条纪律（缺了不该让整页 500），但后果不同：邮箱缺了只是
+// 下拉少几个选项，暂停徽标缺了会让一个**故意停掉**的账号看起来只是
+// 「数据有点旧」。所以这里不做任何暗示。
+func TestListCardsSurvivesPausedAccountsReadFailure(t *testing.T) {
+	store := &fakeCardQuerier{
+		cards:     []cards.CardView{{CardID: "card_1", Status: "active"}},
+		pausedErr: errors.New("boom"),
+	}
+
+	rec := httptest.NewRecorder()
+	ListCardsHandler(store, []string{"MAIN"}, 5*time.Minute)(
+		rec, cardRequest(t, "/api/v1/cards"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("暂停清单读不到不该让整页失败，状态码 = %d", rec.Code)
+	}
+	var body struct {
+		PausedAccounts []map[string]any `json:"paused_accounts"`
+		Items          []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.PausedAccounts) != 0 {
+		t.Fatalf("读不到时应为空数组，实际 %+v", body.PausedAccounts)
+	}
+	if len(body.Items) != 1 {
+		t.Fatalf("卡片主体照常返回，实际 %+v", body.Items)
 	}
 }

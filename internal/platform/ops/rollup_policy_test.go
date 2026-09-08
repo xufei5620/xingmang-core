@@ -37,8 +37,13 @@ func TestPolicyCoversExactlyRegisteredMetrics(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("policy + explicit exclusions = %v, registry = %v", got, want)
 	}
-	if len(policies) != 25 || len(excluded) != 8 {
-		t.Fatalf("active policy/exclusion counts = %d/%d, want 25/8", len(policies), len(excluded))
+	// XM-CARD-VISIBILITY：新增 cards.sync.status，25 → 26。
+	//
+	// 这条断言与上面那条 DeepEqual 是冗余的（那条钉的是集合，这条只钉大小），
+	// 而且每次契约长一条就要手改一次——正是「同一个数字钉在两处」。
+	// 删掉它属于 ops 的范围，本片不动，只记在 handoff 里。
+	if len(policies) != 26 || len(excluded) != 8 {
+		t.Fatalf("active policy/exclusion counts = %d/%d, want 26/8", len(policies), len(excluded))
 	}
 }
 

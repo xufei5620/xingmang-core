@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,12 @@ type CardQuerier interface {
 	OperationsNeedingAttention(ctx context.Context) ([]cards.Operation, error)
 	// ActiveChallenges 返回尚未过期的 3DS 验证挑战。
 	ActiveChallenges(ctx context.Context) ([]cards.CardChallenge, error)
+	// PausedAccounts 返回当前被暂停同步的账号（XM-CARD-VISIBILITY）。
+	//
+	// 为什么读端点非要有它：被暂停的账号的卡数据**按设计**会一直陈旧下去。
+	// 宪法 12 条要求陈旧本身可见，而「为什么陈旧」必须和数据在同一屏上——
+	// 否则运营看到的是一整页安静的旧数据，没有任何东西说明它为什么不动了。
+	PausedAccounts(ctx context.Context) (map[string]cards.AccountSyncPause, error)
 }
 
 // CardStatsQuerier 单独一个接口而不是并进 CardQuerier。
@@ -198,8 +205,50 @@ func ListCardsHandler(store CardQuerier, accounts []string, syncInterval time.Du
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{
 			"items": out, "accounts": accounts, "member_emails": memberEmails,
+			"paused_accounts": pausedAccountItems(r.Context(), store),
 		})
 	}
+}
+
+// pausedAccountItem 是「这个账号的同步正停着」。
+type pausedAccountItem struct {
+	Account string `json:"account"`
+	// Reason 是运营暂停时填的那句话，原样回给前端。
+	Reason   string `json:"reason,omitempty"`
+	PausedBy string `json:"paused_by,omitempty"`
+	// PausedAt 是 RFC3339 的 UTC 时刻（宪法条款 14）。
+	// 前端要靠它显示「已暂停 N 小时」——一个被忘掉的暂停必须看得出来。
+	PausedAt string `json:"paused_at"`
+}
+
+// pausedAccountItems 读暂停清单；读不到时回空数组而不是让整页 500。
+//
+// 与上面的成员邮箱同一条纪律：它是页面上的一枚徽标，不是主体。
+// 但两者有个区别值得说清——邮箱缺了只是下拉少几个选项，暂停徽标缺了会让
+// 一个**故意停掉**的账号看起来只是「数据有点旧」。所以这里在缺失时不做
+// 任何暗示：不返回徽标，也绝不返回「未暂停」。
+func pausedAccountItems(ctx context.Context, store CardQuerier) []pausedAccountItem {
+	paused, err := store.PausedAccounts(ctx)
+	if err != nil {
+		return []pausedAccountItem{}
+	}
+	ids := make([]string, 0, len(paused))
+	for id := range paused {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	out := make([]pausedAccountItem, 0, len(ids))
+	for _, id := range ids {
+		p := paused[id]
+		out = append(out, pausedAccountItem{
+			Account:  p.Account,
+			Reason:   p.Reason,
+			PausedBy: p.PausedBy,
+			PausedAt: p.PausedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return out
 }
 
 // ListCardTransactionsHandler 列出一张卡的流水。

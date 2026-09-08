@@ -1,0 +1,31 @@
+{
+  "id": "cards.account_sync.pause",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "card.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NATURALLY_IDEMPOTENT_LAST_WRITE_WINS",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REWRITE",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD-VISIBILITY 把某个 Infini 账号从 card_sync 的循环里摘出来。它不碰上游、不花钱，只写 cards.account_sync_pause 一行（迁移 000055，行缺席 = 未暂停）。为什么进后台而不是环境变量：这是运营在出事当下要改的开关——某个账号被上游拒到底、或者正在上游后台做维护，此刻要能立刻把它摘出去，而做成环境变量意味着改一次要重启 worker，重启 worker 恰好是事故当中最不该做的动作；env 只留「会不会花真钱」那一类（XM_CARDS_MODE）。与 000034 把提现额度从 env 搬进库是同一条先例：约束力不来自「改不了」，而来自「改它要留痕、且权限与用它的权限分开」。风险等级定 L1 且**不要抬到 L2**，三条理由：(1) assurance.probe.kill_switch.set 是同一个形状的周期任务开关，它就是 L1；(2) L2 及以上会把 req.Params 冻进 ApprovalSubmission 交给第二个人看，而 reason 是运营手打的自由文本——抬级正是「粘贴进来的凭据被冻进审批单给人看」的那条路径，L1 时内核不持久化任何 params；(3) 需要审批的暂停开关是自相矛盾的，人去够它的时刻正是「现在就出事了」。减掉的控制一道都没有：card.manage 权限、仅人类身份、reason 必填（Schema 强制，不是内核那个 L2 以下选填的 req.Reason）、全程审计。reason 会同时进审计摘要与管理端的暂停徽标：暂停会让这个账号的卡数据按设计一直陈旧下去，宪法 12 条要求陈旧可见，而「为什么陈旧」必须和数据在同一屏上。审计摘要里一个卡片字段都没有——这个动作作用于账号，而审计是 append-only，多写的每个字段都删不掉。暂停期间 cards.sync.failed 告警对该账号一条都不报（否则会变成永远清不掉的告警，运营一定会把整条规则静默，连带丢掉其余账号的信号）；代价是「忘了恢复的暂停」看不见，由 Query 的 paused_accounts[].paused_at 承担，两半缺一不可。本片不做自动到期恢复：那会在没人看着的时候把同步重新打向一个仍然拒绝我们的上游，而这个切片存在的意义正是不要让失败反复且无人知晓；迁移里已预留 expires_at 列，将来真要做不必再来一次迁移。"
+}

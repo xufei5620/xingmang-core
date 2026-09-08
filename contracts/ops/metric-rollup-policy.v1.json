@@ -444,6 +444,22 @@
       "expected_interval_seconds": null,
       "full_value_required": true,
       "partial_value_allowed": true
+    },
+    {
+      "policy_version": 1,
+      "metric_key": "cards.sync.status",
+      "value_kind": "document_status",
+      "primary_kind": "count",
+      "primary_json_pointer": "/account_count",
+      "currency_json_pointer": "",
+      "business_day_json_pointer": "",
+      "unit": "accounts",
+      "scale": 1,
+      "sum_mode": "forbidden",
+      "bucket_timezone": "UTC",
+      "expected_interval_seconds": null,
+      "full_value_required": false,
+      "partial_value_allowed": true
     }
   ]
 }

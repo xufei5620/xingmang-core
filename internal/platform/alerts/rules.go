@@ -53,6 +53,12 @@ const (
 	// warning 而不是 critical：一张单挂着不等于生产出事，它等于**一件本该
 	// 发生的变更还没发生**。真正的故障会由别的规则报出来。
 	RuleApprovalPendingTooLong = "approval.pending.too_long"
+	// RuleCardSyncFailed：某个账号的某一步卡片同步连续 N 轮失败
+	// （XM-CARD-VISIBILITY）。规则声明与判定在 rules_cards.go；
+	// **常量必须留在本文件**——前端的 labels.reconcile.test.ts 只读
+	// internal/platform/alerts/rules.go 抽 ^Rule[A-Z]，挪走会让那道门禁
+	// 看不见新规则从而恒绿，规则就带着一个静默下拉里选不到的键上线。
+	RuleCardSyncFailed = "cards.sync.failed"
 )
 
 // 默认配置。三个数字都可由部署覆盖（见 RuleConfig 各字段与 cmd/platform-worker）。
@@ -261,7 +267,10 @@ const silencePolicyText = "支持按 rule_key 静默与全局静默；窗口内�
 func Rules(cfg RuleConfig) []Rule {
 	cfg = cfg.normalized()
 	staleFor := time.Duration(staleCyclesBeforeAlert) * cfg.CollectionInterval
-	return []Rule{
+	// XM-CARD-VISIBILITY 的合并点之一：卡片同步规则接在末尾。
+	// 必须进这个切片——RuleKeys() / KnownRuleKey() 都由它派生，而
+	// KnownRuleKey 正是静默窗口的存在性校验；不在这里的规则**静默不了**。
+	return append([]Rule{
 		{
 			Key:           RuleMetricSyncFailed,
 			Title:         "指标同步失败",
@@ -389,7 +398,7 @@ func Rules(cfg RuleConfig) []Rule {
 			SilencePolicy: silencePolicyText,
 			Owner:         cfg.Owner,
 		},
-	}
+	}, cardSyncRules(cfg)...)
 }
 
 // RuleKeys 返回全部已知规则键（升序）。
@@ -616,6 +625,14 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 			if finding, ok := e.approvalFinding(o, f, environment); ok {
 				findings = append(findings, finding)
 			}
+		}
+		// XM-CARD-VISIBILITY 的合并点之一：卡片同步的按账号/步骤连续失败。
+		if o.MetricKey == DefaultCardSyncMetricKey {
+			cardFindings, cardErr := e.cardSyncFindings(ctx, o, environment, now)
+			if cardErr != nil {
+				return nil, cardErr
+			}
+			findings = append(findings, cardFindings...)
 		}
 		// R6：上游自报版本变了。判据是这条观测里**有没有 version**，不是它的
 		// 指标键叫什么——将来多一个连接器探测，它自动就被覆盖，不必回来改这里。

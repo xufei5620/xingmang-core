@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -222,4 +225,79 @@ func TestCardTransactionsDecodesPage(t *testing.T) {
 	if page.Transactions[0].Merchant != "OPENAI" {
 		t.Fatalf("Merchant = %q", page.Transactions[0].Merchant)
 	}
+}
+
+// BatchStatusMax 的真相源是上游自己的规格，不是我们抄下来的常量。
+//
+// 把两个 Go 常量合并成一个之后，Go 与契约之间仍然可以静默漂开：
+// 上游把上限改成 50、我们照旧发 100，症状是每一批都被上游拒，
+// 而错误分类看起来和 LINFENG 那次一模一样。所以这条闸**读**契约文件，
+// 不复述里面的数字（记忆：闸的范围要发现不要手列）。
+func TestBatchStatusMaxMatchesOpenAPI(t *testing.T) {
+	minItems, maxItems := readBatchCardIDsBounds(t)
+	if maxItems != BatchStatusMax {
+		t.Fatalf("契约 maxItems = %d，BatchStatusMax = %d；两者必须一致",
+			maxItems, BatchStatusMax)
+	}
+	// 空清单的提前返回对应契约的 minItems：契约若改成 0，那段提前返回
+	// 就不再是「注定被拒的请求不发出去」而是漏掉一次合法调用。
+	if minItems != 1 {
+		t.Fatalf("契约 minItems = %d，与 BatchCardStatus 的空清单提前返回不符", minItems)
+	}
+}
+
+// readBatchCardIDsBounds 从契约里读 card_ids 的 minItems / maxItems。
+//
+// 用行扫描而不是引一个 YAML 库：yaml.v3 目前只是间接依赖，为一条测试把它
+// 提成直接依赖会动 go.mod，而本片与三个切片并行。扫描范围严格限定在
+// BatchGetCardStatusesRequest 这一个 schema 内，读不到就 Fatal——
+// 一条「找不到就跳过」的闸等于没有闸。
+func readBatchCardIDsBounds(t *testing.T) (minItems, maxItems int) {
+	t.Helper()
+	path := filepath.Join("..", "..", "contracts", "connectors", "infini", "openapi", "card.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读契约 %s: %v", path, err)
+	}
+
+	const schemaHeader = "    BatchGetCardStatusesRequest:"
+	lines := strings.Split(string(raw), "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimRight(line, "\r") == schemaHeader {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("契约里找不到 %s", strings.TrimSpace(schemaHeader))
+	}
+
+	minItems, maxItems = -1, -1
+	for _, line := range lines[start:] {
+		trimmed := strings.TrimSpace(strings.TrimRight(line, "\r"))
+		// 下一个同级 schema 开始就停：别把别的 schema 的边界读进来。
+		if trimmed != "" && !strings.HasPrefix(line, "     ") {
+			break
+		}
+		switch {
+		case strings.HasPrefix(trimmed, "minItems:"):
+			minItems = mustAtoi(t, strings.TrimSpace(strings.TrimPrefix(trimmed, "minItems:")))
+		case strings.HasPrefix(trimmed, "maxItems:"):
+			maxItems = mustAtoi(t, strings.TrimSpace(strings.TrimPrefix(trimmed, "maxItems:")))
+		}
+	}
+	if minItems < 0 || maxItems < 0 {
+		t.Fatalf("契约里没读到 card_ids 的 minItems/maxItems（读到 %d/%d）", minItems, maxItems)
+	}
+	return minItems, maxItems
+}
+
+func mustAtoi(t *testing.T, s string) int {
+	t.Helper()
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("契约里的数字 %q 解析失败: %v", s, err)
+	}
+	return n
 }
