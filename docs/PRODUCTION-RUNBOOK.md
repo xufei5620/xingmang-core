@@ -67,6 +67,59 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 
 ## 3. Build and release gates
 
+> ### 照抄本节会撞上的五处（2026-09-08 RC104 实测）
+>
+> 这一节里有五处**写着但过不去**的东西。RC100–RC103 每一版都发布成功了，说明
+> 历来都是绕过去的，只是没人写回来。下一个人照抄会以为自己的环境坏了，所以
+> 先列在这里；每条都给出实测结论，不是猜测。
+>
+> **① `git verify-commit HEAD` 从来没通过过。** 它带 `throw`，要求源码提交本身
+> 已签名。实测 `v0.1.0-rc100/101/102/103-signed` 四个 tag 各自指向的提交，
+> `%G?` **全是 `N`（无签名）**，包括生产在跑的 `331777a`。实际做法一直是
+> **tag 签名、提交不签**（`commit.gpgsign` 未设，`user.signingkey` 倒是配了
+> `~/.ssh/invoice_release_signing_ed25519`、`gpg.format=ssh`）。
+> **要么真的开始签提交，要么把这一步改成实情——现在这样是最坏的：**
+> 文档写着一道闸，而没人过得去。
+>
+> **② RC49–52 失败证据锚点必须在证据所在的工作树里跑。** 四个
+> `verify-rcNN-failure-evidence.ps1` 检查的是 `release/` 下的目录名集合，而
+> `release/` 是 **gitignore 的本地目录**：那四组证据在
+> `K:/发票/wt-XM-INV-SEC-RC49`，发布工作树里一个都没有，照本节顺序跑必然报
+> `RCnn failure evidence exact directory namespace drifted`。在
+> `wt-XM-INV-SEC-RC49` 里跑，四个都是 exit 0。
+>
+> **③ 工作树绑定判据永远不等。** 下面镜像门禁那段用
+> `[string]::Equals((git rev-parse --show-toplevel), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, …)`
+> 直接比较两个字符串，但 **git 在 Windows 上回正斜杠** `K:/发票/…`、
+> **`Resolve-Path` 回反斜杠** `K:\发票\…`，于是必然 `throw`。判据的意图
+> （在对的工作树、HEAD 等于签名 tag）是对的，**比较前要先归一分隔符**。
+>
+> **④ 打 tag 之前必须先推进发布身份。** `release-image-gate-lib.ps1` 把上一版
+> 的发布身份**写死**在库里（tag 名、`releaseName`、九个镜像引用），所以每版都要
+> 先有一个 `chore(release): 门禁与 runbook 从 RCnn 改名到 RCnn+1` 的提交，
+> **然后**才打 tag、建镜像。本节没写这一步。顺序反了的代价是：tag 要作废重打、
+> 九个镜像要重建（RC104 就因此白跑了一轮）。改名共 **76 处 / 四个文件**
+> （字面量 68、正则转义 6、**大小写夹具 2**——后者是故意写错大小写用来证明
+> 校验器拒绝漂移的，必须一起推进）。交接文档与 `RELEASE-RC*.md` 是历史记述，
+> 不参与改名。
+>
+> **⑤ 第 14 节那条备份命令里的两个路径在生产上不存在。**
+> `SOURCE_STATE_ROOT=/root/invoice-system/source-state` 与
+> `PRODUCTION_ENV_FILE=/root/invoice-system/app/deploy/.env.production` 都没有。
+> 真实路径按代际/按 release 分：源状态在
+> `/root/invoice-system/source-state-generations/v4-<sha>/`（`cutover` 是它的
+> 子目录），环境文件在 `/root/invoice-system/app/releases/<sha>/.env.production`。
+> **反查办法**：`docker inspect -f '{{range .Mounts}}…' invoice-source-agents-prod-sub2api-balances-1`
+> 拿源状态根，`docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' invoice-system-prod-api-1`
+> 拿当前 release 目录。
+>
+> 另外两条不算"落差"但同样咬人的实测细节：验 `SHA256SUMS` 签名时，
+> `Get-Content -Raw | ssh-keygen`（本节已禁）与 `cmd /c "… < file"`（本节推荐）
+> **在本仓库的 `发票` 中文路径段上都会假报失败**，前者报
+> `incorrect signature`、后者报「文件名、目录名或卷标语法不正确」；
+> **用 bash 的重定向一次就过**。以及 `verify.ps1` 在新建工作树里会因为
+> 前端依赖没装而死在 `vitest not recognized`，先 `npm ci`。
+
 Run locally from the exact RC100 candidate worktree
 `K:\发票\wt-XM-INV-AUTOLOGIN`:
 
