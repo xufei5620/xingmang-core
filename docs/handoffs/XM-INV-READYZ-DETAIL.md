@@ -308,17 +308,105 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 | 64-96 | 新增 `logSourceEventDead`（64-87 注释，88-96 函数）。**纯新增，不改任何已有函数。** |
 | 220-230 | `RunOnce` 里唯一的实质改动：把 `MarkSourceEventFailed` 的返回接成 `grade, err`，然后 `if grade == postgresstore.SourceEventDead { logSourceEventDead(...) }`。 |
 
-第 221-231 那一段在 `logProjectionFailure(p.logger(), claim, processErr)` 之后
-——**在 `errors.Is(processErr, domain.ErrAccountLockBusy)` 和
-`errors.As(processErr, &dependency)` 那些分类分支的下游**，和 40001 分类应该
-不在同一处。合并时如果冲突，我这边要保留的只有「`grade, err =` 这个接法」和
-「那个 `if grade == ...` 三行」。
+第 220-230 那一段在 `logProjectionFailure(p.logger(), claim, processErr)`
+（219 行，非本片改动）之后——**在
+`errors.Is(processErr, domain.ErrAccountLockBusy)` 和
+`errors.As(processErr, &dependency)` 那些分类分支的下游**，和 40001 分类不在
+同一处。合并时如果冲突，我这边要保留的只有「`grade, err =` 这个接法」和
+「那个 `if grade == ...` 三行」。**下一节有给合并的人的完整判据。**
 
 同时改了 `postgresstore/source_sync.go`（`MarkSourceEventFailed` 的签名与
-`return`、审计事件、三个常量、两条查询改用参数绑定阈值），这个文件 brief
-没提到有别人在动。
+`return`、审计事件、三个常量、两条查询改用参数绑定阈值）。**这个文件也和
+`inv-ser-retry` 重叠**，合并要点见下一节。
 
-## 五、变异验证（全部「改条件／改常量」，无一处删代码）
+## 五、与 XM-INV-SER-RETRY 的合并要点
+
+**这一节写给做合并的人，不是写给评审的人。** `inv-ser-retry` 与本片同时改了
+同样两个文件。行号是本片合入后的状态，仅供定位，**以函数名为准**。
+
+### 两片各自的落点
+
+| 文件 | 本片（READYZ-DETAIL） | XM-INV-SER-RETRY |
+| --- | --- | --- |
+| `postgresstore/source_sync.go` | 常量块 57-80、`ClaimUnprocessedSourceEvents` 的认领谓词 604 与 609 两行、`MarkSourceEventFailed` 函数体 703-813（我加的文档注释 694-702） | `MarkSourceEventBusy` 866-899，签名新增 `reason` |
+| `application/source_processor.go` | 注释 50-54、新函数 `logSourceEventDead` 64-96、`RunOnce` 里 `MarkSourceEventFailed` 调用点及其后 220-230 | `RunOnce` 里 40001 的错误分类（183-198 那一带，即现有 `ErrAccountLockBusy` 分支附近） |
+
+**两边在两个文件里都不相邻。** `source_sync.go`：我最后一处改到 813 行，
+`MarkSourceEventBusy` 的文档注释从 866 行开始，中间隔着约 50 行未改动代码。
+`source_processor.go`：他们的分支止于 198 行，我第一处实质改动在 220 行，
+中间隔着 `sourceDependencyWait` 分支与 `deadEventAccountHint` 那一段约 20 行
+未改动代码。**三路合并大概率自动过。** 下面几条是万一要手动解冲突时的判据。
+
+### 必须保留的，按重要性排序
+
+**1. `sourceEventDeadThreshold` 必须同时被两处引用。这是最要紧的一条。**
+
+- `MarkSourceEventFailed`：`processing_status=CASE WHEN attempt_count>=$7 ...`
+- `ClaimUnprocessedSourceEvents`：`sie.attempt_count < $3`
+
+两处必须绑同一个常量。**若解冲突时把任一处退回字面量 8，今天的行为不变
+（8 == 8），但那个潜伏 bug 就回来了**：日后有人调这个常量却只改到一处，认领
+谓词一旦小于判级阈值，事件就会在**能被判死之前**不再被认领——它永久卡住，
+`Dead` 永远是 0，**readyz 对着一个卡死的事件保持绿色**。那是本片要修的毛病
+（红了但没人吭声）的镜像，且更难发现。
+
+**这条的唯一护栏是测试，没有别的东西会提醒任何人。** 只要碰过上面两条查询
+中的任何一条，请单独跑：
+
+```bash
+INVOICE_TEST_DATABASE_URL=... go test ./internal/application/ \
+  -run TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate -count=1
+```
+
+它是**行为式**的（真跑满 8 次 `RunOnce`、逐次核对状态，再验第 9 次认领不到），
+不断言常量本身，所以「改了常量却漏改另一处」它抓得住。
+
+**2. `MarkSourceEventFailed` 返回 `(string, error)`，且 `RunOnce` 必须接住。**
+调用点只有一处（`source_processor.go` 220-224）。**这一条的失败是静默的**：
+若合并后把返回值接成 `_`，判死日志与审计行的分流就没了，而**编译照样通过**
+（只有留下未使用的 `grade` 变量才会编译不过）。护栏是
+`TestSourceProjectionWorkerLogsAnErrorOnlyWhenTheEventActuallyDies`。
+
+**3. `MarkSourceEventFailed` 里那条 `writeAudit` 必须留在
+`if newStatus == SourceEventDead` 分支内**、且在 `tx.Commit` 之前。移出分支
+会让每次重试都写审计行——M13 变异复现过这个后果。
+
+### 他们的新分支必须排在我的日志之前
+
+`inv-ser-retry` 新增的 40001 分支要放在 `logProjectionFailure`（219 行）
+**之上**，与现有 `ErrAccountLockBusy` 分支并列。
+
+- 若落在 `logProjectionFailure` **之后**：一个只是要改期重试的事件会先被写一条
+  `msg="source event projection failed"` 的 WARN，日志开始说谎。
+- 若落在 `MarkSourceEventFailed` **之后**：那段分类直接成了死代码。
+
+### 一个交互，不是冲突，别当成回归去「修」
+
+他们若把 40001 路由到 `MarkSourceEventBusy`，那条路径会
+`attempt_count=greatest(attempt_count-1,0)` **把这次尝试退回去**，于是序列化
+冲突永远累积不到判死阈值。**结果是本片的判死 Error 日志和
+`source_ingest_event.dead` 审计行对 40001 不再触发——这是对的**：序列化冲突
+本来就不是终态失败，不该被当成事故报出来。本片的观测只覆盖真正走到
+`MarkSourceEventFailed` 的路径。**看到「40001 不再产生判死记录」不要当成本片
+的回归。**
+
+### 合并顺序
+
+**倾向本片先合，但这是弱偏好，两种顺序都行。** 理由：本片是那次六小时 503 的
+根因可观测性修复，先落地意味着 `inv-ser-retry` 上线时 readyz 的检查名和判死的
+Error 日志已经在位，万一它引入回归能立刻看见。反过来先合他们也没问题——我在
+两个文件里都是「往下游插入」，rebase 一样干净。
+
+**无论谁后合，后合的一方跑这四个用例即可：**
+
+```bash
+go test ./internal/application/ -count=1 -run \
+ 'TestSourceProjectionWorkerLogsAnErrorOnlyWhenTheEventActuallyDies|TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate|TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint|TestDeadAndRetryableProjectionFailuresAreDistinguishableByLevel'
+```
+
+（需要 `INVOICE_TEST_DATABASE_URL`；前三个是集成用例。）
+
+## 六、变异验证（全部「改条件／改常量」，无一处删代码）
 
 每一条都配了**对照组**并确认它没红。跑法：临时改文件 → 跑目标与对照 → 还原。
 脚本在 scratchpad，不在仓库里。
@@ -372,7 +460,7 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 - 死掉的事件不再被认领（第 9 次 `processed=0`） → M16 打红。
 - 日志不含 payload 明文 → **未做变异验证**，见「风险」第 4 条。
 
-## 六、门禁
+## 七、门禁
 
 在 `K:/发票/wt-XM-INV-READYZ-DETAIL/backend` 下跑的，全部真跑、真绿：
 
@@ -393,15 +481,22 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 - 任何需要连生产的东西 —— 按硬约束，没有也不该有生产访问。
 - 前端 —— 一行没动。
 
-## 七、Commits
+## 八、Commits
 
 - `fbda234` feat(readyz): name the failing check, and announce dead source events
-  （实现 + 测试 + runbook）
-- 本文档另起一个 commit。
+  —— 第一件事的全部，加第二件事的 Error 日志、测试、runbook。
+- `b9b6e17` docs(handoffs): 本文档初版。
+- `a16adac` test(readyz): 判死日志的 `attempt` 与库里 `attempt_count` 对账
+  （M12 变异验证过）。
+- `4e6f786` docs(handoffs): 补 M12。
+- `a1a1895` feat(source-ingest): `source_ingest_event.dead` 审计事件 +
+  `sourceEventDeadThreshold` —— **按 team-lead 2026-09-08 的意见做的，推翻了
+  我第一版「不写审计行」的判断**，理由见第三节。
+- 本节所在的这次修订另起一个 commit（合并要点一节 + 更正记录）。
 
 **未推送**（按约束）。
 
-## 八、文件清单
+## 九、文件清单
 
 新增：
 
@@ -430,7 +525,7 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 - `docs/PRODUCTION-RUNBOOK.md` —— 新增「Reading a 503 from `/readyz`」一节
   （对照表 + `docker logs` 与审计表查询命令）。
 
-## 九、风险 / 需要你签字的地方
+## 十、风险 / 需要你签字的地方
 
 1. **公网暴露检查名这个权衡**（第二节）。这是本片唯一一个真正的产品决定，
    请你自己过一遍那个残余风险再签。回退成本极小，做法写在那一节里。
@@ -452,7 +547,7 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
    `backend/Dockerfile`、未碰 `K:/星芒统一控制平台/` 与其他 worktree ——逐条
    确认过。
 
-## 十、后续（建议，不阻塞本片）
+## 十一、后续（建议，不阻塞本片）
 
 1. **`deploy/roll-forward.sh` 第 121 行现在把响应体丢掉了**
    （`curl -s -o /dev/null`），失败时只会说「readyz not 200 within 600s
