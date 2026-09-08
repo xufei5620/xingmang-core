@@ -526,3 +526,46 @@ describe("every wire value a user can see has Chinese copy", () => {
     );
   });
 });
+
+// The response ENVELOPE was the last strict key set left on this request after
+// the item DTO and its nested service units were relaxed. A backend that adds
+// `generated_at` beside `items` -- one deploy ahead of this bundle -- rejected
+// the whole summary with the same banner as the original incident.
+describe("getUserEligibilitySummary: the response envelope", () => {
+  it("ignores an unknown top-level key and marks the rows degraded", async () => {
+    stubFetchReturning({
+      items: [SUMMARY_ITEM],
+      generated_at: "2026-09-08T17:00:00Z",
+      next_cursor: null,
+    });
+    const summaries = await httpInvoiceApi.getUserEligibilitySummary();
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].status).toBe(PENDING);
+    expect(summaries[0].availableMinor).toBe(0);
+    expect(summaries[0].eligibilityDegraded).toBe(true);
+  });
+
+  it("does not mark rows degraded when the envelope is exactly what it expects", async () => {
+    stubFetchReturning({ items: [SUMMARY_ITEM] });
+    const summaries = await httpInvoiceApi.getUserEligibilitySummary();
+    expect(summaries[0].eligibilityDegraded).toBe(false);
+  });
+
+  it("still requires items", async () => {
+    stubFetchReturning({ generated_at: "2026-09-08T17:00:00Z" });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "开票资格摘要响应",
+    );
+  });
+
+  it("still refuses a non-array or oversized items list", async () => {
+    stubFetchReturning({ items: { length: 1 } });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "开票资格摘要数量无效",
+    );
+    stubFetchReturning({ items: Array.from({ length: 33 }, () => SUMMARY_ITEM) });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "开票资格摘要数量无效",
+    );
+  });
+});

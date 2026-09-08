@@ -1055,7 +1055,11 @@ function eligibilitySummaryReady(summary?: UserEligibilitySummary) {
   );
 }
 
-function EligibilitySummaryPanel({
+// Exported for the render test: the degraded badge below is the only place the
+// summary's eligibilityDegraded flag becomes visible, and a flag that is
+// computed and tested but never rendered is exactly what the second review
+// found here. Absence is asserted too (see App.eligibility-summary-panel.test).
+export function EligibilitySummaryPanel({
   items,
   loading,
 }: {
@@ -1085,9 +1089,17 @@ function EligibilitySummaryPanel({
                   <SourceBadge source={item.source} />
                   <strong>{item.sourceLabel}</strong>
                 </div>
-                <Badge tone={eligibilitySummaryReady(item) ? "green" : "amber"}>
-                  {eligibilityStatusLabel(item.status)}
-                </Badge>
+                <div>
+                  <Badge tone={eligibilitySummaryReady(item) ? "green" : "amber"}>
+                    {eligibilityStatusLabel(item.status)}
+                  </Badge>
+                  {item.eligibilityDegraded && (
+                    // Same badge as the lot list: this bundle is behind the
+                    // backend for this row (unknown status, reason or key).
+                    // Without it the flag was computed, tested and invisible.
+                    <Badge tone="amber">账本状态待确认</Badge>
+                  )}
+                </div>
               </div>
               <div className="eligibility-money-grid">
                 <div className="eligibility-money-primary">

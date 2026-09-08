@@ -706,7 +706,9 @@ function mapServiceUnitSummary(
 // -- the same red banner, from the same cause, on the same request that this
 // slice exists because of. An unknown key cannot make a displayed number wrong:
 // every field is read by name and the amount invariants below still run. So the
-// key is ignored and the row is marked degraded.
+// key is ignored and the row is marked degraded. The response ENVELOPE around
+// these items (`{items: [...]}` in getUserEligibilitySummary) gets the same
+// treatment for the same reason; it is the same request.
 //
 // Deliberately NOT extended to exactObjectKeys's other callers (admin account
 // ledger, payment candidates, the pagination cursor). Those are a different
@@ -2211,15 +2213,28 @@ export const httpInvoiceApi: InvoiceApiClient = {
     const response = await requestJSON<unknown>(
       "/api/v1/user/eligibility-summary",
     );
-    exactObjectKeys(response, ["items"], ["items"], "开票资格摘要响应");
+    // The envelope gets the same tolerance as the items inside it. It was the
+    // last strict key set on this request: a top-level `generated_at` (or any
+    // other field the backend adds a deploy ahead of this bundle) rejected the
+    // whole summary -- the same banner, the same cause, one wrapper further
+    // out. `items` stays required and capped; `response.items` is read by
+    // name, so an unknown sibling cannot change any number shown.
+    requiredObjectKeys(response, ["items"], "开票资格摘要响应");
+    const envelopeUnknown = unknownObjectKeys(response, ["items"]).length > 0;
     if (!Array.isArray(response.items) || response.items.length > 32) {
       throw new InvoiceApiError("开票资格摘要数量无效，已停止显示。", {
         code: "INVALID_ELIGIBILITY_RESPONSE",
       });
     }
-    return response.items.map((item) =>
-      mapEligibilitySummary(item as BackendEligibilitySummary),
-    );
+    return response.items.map((item) => {
+      const summary = mapEligibilitySummary(item as BackendEligibilitySummary);
+      // An unknown envelope key means this bundle is behind the backend for
+      // every row it carries, so every row says so -- the same visible,
+      // unselectable, non-crashing degradation as an unknown item key.
+      return envelopeUnknown
+        ? { ...summary, eligibilityDegraded: true }
+        : summary;
+    });
   },
 
   async getInvoicePolicy() {

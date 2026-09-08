@@ -15,24 +15,55 @@ package eligibilitywire
 // So the code is scanned too. A status value can enter a response in exactly
 // two ways that the column's CHECK constraint does not cover:
 //
-//	1. Go assigns a literal to a FundingLot/EligibilitySummary EligibilityStatus
+//	1. Go assigns a value to a FundingLot/EligibilitySummary EligibilityStatus
 //	   field (application/service.go's freshness override is this), or
-//	2. a query supplies a literal default for a NULL column
+//	2. a query supplies a default for a NULL column
 //	   (COALESCE(eas.eligibility_status,'missing') is this).
 //
 // Both are found by walking the source, so adding a third one makes the probes
 // go red on their own rather than waiting for someone to remember the contract.
+//
+// The RECOGNITION rule is where the second cut of this file went wrong. It
+// matched *ast.BasicLit only -- a bare "..." on the right-hand side -- so
+// `const probe = "x"; lot.EligibilityStatus = probe` was invisible, and worse,
+// invisible silently: no literal found reads exactly like no status introduced,
+// and every probe stays green. In the other direction, extracting the EXISTING
+// "source_unavailable" into a named constant (a pure refactor) went red with
+// "declared but no longer introduced anywhere", i.e. the gate told the reader
+// to delete the value from the contract -- the incident this package exists to
+// prevent, re-enacted by the gate itself.
+//
+// So values are now resolved with go/types constant evaluation
+// (types.Info.Types[expr].Value): a literal, a named constant, a concatenation
+// of constants, a constant from anywhere in the same package all evaluate the
+// same. And the one hand-written part that remains -- "this is the set of
+// shapes I understand" -- refuses to answer rather than answering with a gap:
+// an EligibilityStatus assigned from an expression the checker cannot fold to
+// a constant (a variable, a helper's return value, a conversion) makes the scan
+// return an error naming file:line, unless it is a passthrough of another
+// EligibilityStatus field, which introduces no vocabulary. Likewise a COALESCE
+// over eligibility_status whose default is not a single-quoted literal in the
+// (constant) query text is an error, not "no default found".
+//
+// The type check is deliberately lenient about IMPORTS: every imported package
+// is stubbed empty, so anything reached through an import is an unresolved
+// expression rather than a build-time dependency on the whole module graph.
+// Constant folding of in-package values does not need imports, and a status
+// spelled as a constant from ANOTHER package therefore lands on the
+// refuse-to-answer path -- which is the correct answer for a scan that only
+// walks these three directories.
 
 import (
 	"fmt"
 	"go/ast"
+	"go/constant"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -56,8 +87,18 @@ const (
 	LiteralCoalesceDefault = "coalesce-default"
 )
 
-var coalesceDefaultPattern = regexp.MustCompile(
-	`(?i)COALESCE\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.eligibility_status\s*,\s*'([^']*)'`,
+var (
+	coalesceDefaultPattern = regexp.MustCompile(
+		`(?i)COALESCE\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.eligibility_status\s*,\s*'([^']*)'`,
+	)
+	// coalesceAnyDefaultPattern is the shape-only half: every COALESCE over the
+	// column, whatever its default is. The scan refuses to answer for any match
+	// here that coalesceDefaultPattern cannot read (a bind parameter, another
+	// column, a CASE), because "no literal default" and "a default I could not
+	// read" must not be the same green.
+	coalesceAnyDefaultPattern = regexp.MustCompile(
+		`(?i)COALESCE\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\.eligibility_status\s*,`,
+	)
 )
 
 // StatusLiteral is one eligibility_status value that CODE introduces, as
@@ -111,24 +152,8 @@ func ScanStatusLiterals() (StatusScan, error) {
 	scan := StatusScan{Literals: []StatusLiteral{}, Funcs: map[string]bool{}}
 	for _, parts := range scannedPackageDirs {
 		dir := filepath.Join(append([]string{root}, parts...)...)
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			return StatusScan{}, fmt.Errorf("eligibilitywire: scan %s: %w", dir, err)
-		}
-		names := []string{}
-		for _, entry := range entries {
-			name := entry.Name()
-			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			rel := strings.Join(append(append([]string{}, parts...), name), "/")
-			if err := scanFile(&scan, filepath.Join(dir, name), rel); err != nil {
-				return StatusScan{}, err
-			}
+		if err := scanPackageDir(&scan, dir, strings.Join(parts, "/")); err != nil {
+			return StatusScan{}, err
 		}
 	}
 	sort.Slice(scan.Literals, func(i, j int) bool {
@@ -140,31 +165,124 @@ func ScanStatusLiterals() (StatusScan, error) {
 	return scan, nil
 }
 
-func scanFile(scan *StatusScan, path, rel string) error {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+// stubImporter hands go/types an empty, complete package for every import so
+// the checker can fold this package's own constants without the module graph.
+// Anything reached through an import is simply unresolved; see the file
+// comment for why that is the wanted answer.
+type stubImporter struct{}
+
+func (stubImporter) Import(path string) (*types.Package, error) {
+	name := path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		name = path[i+1:]
+	}
+	pkg := types.NewPackage(path, name)
+	pkg.MarkComplete()
+	return pkg, nil
+}
+
+// scanPackageDir parses every non-test .go file in dir as one package,
+// type-checks it leniently, and records the eligibility_status values the
+// package introduces. rel is the repository-relative, slash-separated
+// directory used in locations.
+func scanPackageDir(scan *StatusScan, dir, rel string) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return fmt.Errorf("eligibilitywire: parse %s: %w", rel, err)
+		return fmt.Errorf("eligibilitywire: scan %s: %w", dir, err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return fmt.Errorf("eligibilitywire: scan %s: no Go source files; the scanned package list has gone stale", rel)
+	}
+	fset := token.NewFileSet()
+	files := make([]*ast.File, 0, len(names))
+	relOf := map[*ast.File]string{}
+	for _, name := range names {
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return fmt.Errorf("eligibilitywire: parse %s/%s: %w", rel, name, err)
+		}
+		files = append(files, file)
+		relOf[file] = rel + "/" + name
+	}
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	config := types.Config{
+		Importer:    stubImporter{},
+		FakeImportC: true,
+		// Errors are expected in bulk (every import is a stub). They are
+		// swallowed on purpose: the checker keeps going and still records
+		// constant values for everything it could fold.
+		Error: func(error) {},
+	}
+	// The package name only matters for error text; the files agree on it.
+	pkgName := files[0].Name.Name
+	_, _ = config.Check(pkgName, fset, files, info)
+
+	for _, file := range files {
+		if err := scanTypedFile(scan, fset, info, file, relOf[file]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func scanTypedFile(scan *StatusScan, fset *token.FileSet, info *types.Info, file *ast.File, rel string) error {
+	where := func(pos token.Pos) string {
+		return fmt.Sprintf("%s:%d", rel, fset.Position(pos).Line)
 	}
 	record := func(value, kind string, pos token.Pos, fn string) {
 		scan.Literals = append(scan.Literals, StatusLiteral{
 			Value: value, Kind: kind, File: rel, Line: fset.Position(pos).Line, Func: fn,
 		})
 	}
+	// statusValue classifies an expression that lands in an EligibilityStatus
+	// field: a constant is recorded, a passthrough of another EligibilityStatus
+	// field introduces nothing, and everything else is refused.
+	statusValue := func(expr ast.Expr, fn string) error {
+		if value, ok := constantString(info, expr); ok {
+			record(value, LiteralAssignment, expr.Pos(), fn)
+			return nil
+		}
+		if isStatusPassthrough(expr) {
+			return nil
+		}
+		return fmt.Errorf(
+			"eligibilitywire: %s assigns EligibilityStatus from `%s`, which the scan cannot evaluate as a constant; "+
+				"the status vocabulary this introduces is unknowable here. Assign a constant (or pass another "+
+				"EligibilityStatus field through), or teach discover.go the shape -- do not let it answer with a gap",
+			where(expr.Pos()), types.ExprString(expr))
+	}
+	var walkErr error
 	walk := func(node ast.Node, fn string) {
 		ast.Inspect(node, func(n ast.Node) bool {
+			if walkErr != nil {
+				return false
+			}
 			switch typed := n.(type) {
 			case *ast.AssignStmt:
 				for i, lhs := range typed.Lhs {
-					selector, ok := lhs.(*ast.SelectorExpr)
-					if !ok || selector.Sel == nil || selector.Sel.Name != "EligibilityStatus" {
+					if !isStatusPassthrough(lhs) {
 						continue
 					}
-					if i >= len(typed.Rhs) {
-						continue
+					if len(typed.Lhs) != len(typed.Rhs) {
+						// a.EligibilityStatus, err = f(): the value is a
+						// tuple element no constant folding can see.
+						walkErr = fmt.Errorf(
+							"eligibilitywire: %s assigns EligibilityStatus from a multi-value expression `%s`; "+
+								"the scan cannot evaluate it", where(typed.Pos()), types.ExprString(typed.Rhs[0]))
+						return false
 					}
-					if value, ok := stringLiteral(typed.Rhs[i]); ok {
-						record(value, LiteralAssignment, typed.Rhs[i].Pos(), fn)
+					if err := statusValue(typed.Rhs[i], fn); err != nil {
+						walkErr = err
+						return false
 					}
 				}
 			case *ast.KeyValueExpr:
@@ -172,20 +290,34 @@ func scanFile(scan *StatusScan, path, rel string) error {
 				if !ok || key.Name != "EligibilityStatus" {
 					break
 				}
-				if value, ok := stringLiteral(typed.Value); ok {
-					record(value, LiteralAssignment, typed.Value.Pos(), fn)
+				if err := statusValue(typed.Value, fn); err != nil {
+					walkErr = err
+					return false
 				}
-			case *ast.BasicLit:
-				if typed.Kind != token.STRING {
+			case ast.Expr:
+				// Any constant string expression (a literal, a named constant,
+				// a concatenation) is a candidate query text. A match stops the
+				// descent so the same text is not recorded again from its own
+				// sub-expressions.
+				text, ok := constantString(info, typed)
+				if !ok {
 					break
 				}
-				text, err := strconv.Unquote(typed.Value)
-				if err != nil {
+				readable := coalesceDefaultPattern.FindAllStringSubmatch(text, -1)
+				if len(coalesceAnyDefaultPattern.FindAllStringIndex(text, -1)) > len(readable) {
+					walkErr = fmt.Errorf(
+						"eligibilitywire: %s contains a COALESCE over eligibility_status whose default is not a "+
+							"single-quoted literal; the scan cannot read what value a NULL row reports there",
+						where(typed.Pos()))
+					return false
+				}
+				if len(readable) == 0 {
 					break
 				}
-				for _, match := range coalesceDefaultPattern.FindAllStringSubmatch(text, -1) {
+				for _, match := range readable {
 					record(match[1], LiteralCoalesceDefault, typed.Pos(), fn)
 				}
+				return false
 			}
 			return true
 		})
@@ -198,23 +330,39 @@ func scanFile(scan *StatusScan, path, rel string) error {
 				scan.Funcs[name] = true
 			}
 			walk(fn, name)
-			continue
+		} else {
+			walk(decl, "")
 		}
-		walk(decl, "")
+		if walkErr != nil {
+			return walkErr
+		}
 	}
 	return nil
 }
 
-func stringLiteral(expr ast.Expr) (string, bool) {
-	literal, ok := expr.(*ast.BasicLit)
-	if !ok || literal.Kind != token.STRING {
-		return "", false
+// constantString returns the folded value of expr when the checker resolved it
+// to a string constant. A bare literal that the checker did not record (its
+// enclosing expression was invalid past recovery) is still a constant by
+// definition, so it is read directly rather than dropped.
+func constantString(info *types.Info, expr ast.Expr) (string, bool) {
+	if tv, ok := info.Types[expr]; ok && tv.Value != nil && tv.Value.Kind() == constant.String {
+		return constant.StringVal(tv.Value), true
 	}
-	value, err := strconv.Unquote(literal.Value)
-	if err != nil {
-		return "", false
+	if literal, ok := ast.Unparen(expr).(*ast.BasicLit); ok && literal.Kind == token.STRING {
+		value := constant.MakeFromLiteral(literal.Value, token.STRING, 0)
+		if value.Kind() == constant.String {
+			return constant.StringVal(value), true
+		}
 	}
-	return value, true
+	return "", false
+}
+
+// isStatusPassthrough reports whether expr is `<anything>.EligibilityStatus`.
+// On the left it selects the field being written; on the right it is a value
+// copied from another status field, which introduces no new vocabulary.
+func isStatusPassthrough(expr ast.Expr) bool {
+	selector, ok := ast.Unparen(expr).(*ast.SelectorExpr)
+	return ok && selector.Sel != nil && selector.Sel.Name == "EligibilityStatus"
 }
 
 // --- persisted statuses, discovered from the migrations -------------------

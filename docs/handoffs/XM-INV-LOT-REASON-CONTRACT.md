@@ -1,11 +1,13 @@
 # XM-INV-LOT-REASON-CONTRACT: 资格枚举契约化 + 未知值降级 + 分请求独立加载
 
-- **status:** implemented and self-tested locally，**已过一轮复审并整改 6 条
-  major**（见下面「复审整改（第二轮）」）。前端 vitest 295 passed / 18 files、
-  `npm run typecheck`、`npm run build` 全绿；后端 `go build ./...`、`go vet`
-  干净，定向 `go test` 与相关包 `-short` 全绿。变异验证两轮共 35 条，其中第一轮
-  2 条、第二轮 1 条**没有变红**，都记在表里没有事后抹平——第二轮那条至今仍是绿的
-  （App.tsx 那一行没有测试能碰到），已缩小到最小并写进 risks 12。
+- **status:** implemented and self-tested locally，**已过两轮复审：第二轮整改 6 条
+  major，第三轮整改 3 条 major**（见下面「复审整改（第二轮）」与「复审整改（第三轮）」）。
+  第三轮后前端 vitest 303 passed / 19 files、`npm run typecheck` 全绿；后端
+  `go vet ./...` 干净，`./internal/eligibilitywire/... ./internal/httpapi/...` 全绿
+  （全量 go test 由主会话跑）。变异验证三轮共 47 条，其中第一轮 2 条、第二轮 1 条
+  **没有变红**，都记在表里没有事后抹平——第二轮那条至今仍是绿的（App.tsx 那一行没有
+  测试能碰到），已缩小到最小并写进 risks 12；第三轮 12 条全部按预期（含 1 条「必须
+  保持绿」的无害重构）。
 - **branch:** `ai/claude/XM-INV-LOT-REASON-CONTRACT`（起点 = RC105 生产提交
   `a265b90`），worktree `K:/发票/wt-XM-INV-FE-REASONS`。
 - **commit:** 见本文件末尾「commit」一节（提交后回填）。
@@ -30,6 +32,18 @@
 `COALESCE(x.eligibility_status,'…')` 的默认值——减去从迁移 CHECK 发现的持久化集，
 就是合成集，与契约双向比对。探针的输入空间改成 `LotStatusInputSpace()`
 = 持久化集 ∪ 发现到的合成集，**不再读契约**。
+
+> **第三轮更正（R7）**：上面「字符串字面量赋值」这句在第二轮是字面意思——识别规则
+> 只认 `*ast.BasicLit`，所以 `const x = "..."; lot.EligibilityStatus = x` 看不见且
+> 不报错（复审变异 V2 全绿），而把**现有**的 `"source_unavailable"` 抽成常量这种纯
+> 重构反而变红、且提示词教人把它从契约里删掉（V3）。现在识别规则是 `go/types` 常量
+> 求值（`types.Info.Types[expr].Value`）：字面量、命名常量、常量拼接一视同仁；赋给
+> `EligibilityStatus` 的表达式**求不出常量值就拒绝作答**（`ScanStatusLiterals`
+> 返回带 `文件:行号` 的错误，六道探针全部 Fatal），唯一的例外是透传另一个
+> `EligibilityStatus` 字段（`user_dto.go:153`、`service.go:1319` 这种），它不引入
+> 新词汇。COALESCE 侧同理：查询文本按常量求值（常量拼出来的也算），默认值不是单引号
+> 字面量的 COALESCE 同样拒绝作答。跨包常量在这套 stub-import 的类型检查下解析不出来，
+> 会落到拒绝路径——对一个只扫三个目录的扫描器来说这是正确答案。
 
 证据（MB8 / MB9）：在 service.go 的新鲜度循环里加一个与 `source_unavailable` 完全同形
 的分支写入 `refund_review_probe`，整改后 **3 处同时变红**；随后单独把 httpapi 探针的
@@ -95,6 +109,11 @@ COALESCE 默认值 ∪ 该路径上的响应期覆盖），并保留一条**有�
 另加 `TestSummaryStatusScanIsNotLookingAtNothing`：扫描按函数名取范围是不可避免的
 手写部分，所以断言那两个函数名仍然存在——「扫到空」和「本来就没有」必须可区分。
 
+> **第三轮更正（R7）**：摘要侧用的是同一个扫描器，所以第二轮里「该路径上的响应期
+> 覆盖」也只对裸字面量成立——复审变异 V7（覆盖写成 helper 返回值）当时全绿。
+> 现在 helper 返回值会让扫描拒绝作答，`TestSummaryStatusesAreDiscovered` 与
+> `TestSummaryStatusScanIsNotLookingAtNothing` 一起 Fatal（第三轮 MB18）。
+
 顺带把 `http-api.ts` 里最后一处客户端硬拒配对（`status === "source_unavailable"` 却
 没有 `SOURCE_NOT_READY` 就整条 throw）拉齐成降级。它今天不炸只是因为不可达，
 「不可达」是关于后端的事实、不是这段代码的性质。
@@ -116,9 +135,43 @@ source_unavailable]」。
 未知键不可能让某个显示出来的数字变错——每个字段都按名读取，金额不变量照跑；而拒绝它
 就是原样复现本次事故。
 
-其余 13 个 `exactObjectKeys` 调用点**有意保持严格**（管理员账本、支付候选、分页游标
-等：其中几个是金额 DTO，多出一个键更该读成「这不是我以为的那条响应」，且都不在用户
-开票页上）。这个取舍与它们各自的触发条件写在 risks 10，不再当成已经收口。
+~~其余 13 个 `exactObjectKeys` 调用点**有意保持严格**（……且都不在用户开票页上）。~~
+**第三轮更正（R8）**：第二轮数出的「其余 13 个」里有一个数错了——
+`getUserEligibilitySummary` 自己的响应**信封**（`http-api.ts` 的
+`exactObjectKeys(response, ["items"], …, "开票资格摘要响应")`）就在用户开票页上，
+而且正是被放宽的那条响应的外壳：后端在顶层加一个 `generated_at`，整条摘要照样被拒。
+现已改成 `requiredObjectKeys(response, ["items"], …)`：`items` 必填与 `length > 32`
+上限原样保留，未知顶层键忽略并把该次响应的**每一行**置 `eligibilityDegraded`（这个
+bundle 落后于后端是对整条响应成立的事实，不是某一行的）。其余 **11** 个调用点（本轮
+按行号逐个数过：`mapServiceUnitSummary` 的严格分支、`mapEligibilityFreeze`、
+`eligibilityFreezeCursor`、`mapAccountLedgerListItem` / `Recharge` /
+`ConsumptionDay` / `Detail` ×2、`accountLedgerCursor`、`getEligibilityFreezes` 与
+`getAccountLedger` 的信封）仍然严格，且确实都不在用户开票页上；取舍与触发条件见
+risks 10。第二轮写的「13 个」是数错了，不是又有两个被放宽。
+
+### 复审整改（第三轮）
+
+第三轮复审提了 3 条 major（另 1 条 minor 未在本轮处理，见 risks 14）。改法已分别写进
+上面 R1 / R5（R7）与 R6（R8）的「第三轮更正」引文里，第三条如下；变异编号见文末第三张
+变异表。
+
+### R9 —— 摘要面板从未渲染 `eligibilityDegraded`
+
+`UserEligibilitySummary.eligibilityDegraded` 被算、被测（两轮共 7 条断言），
+`EligibilitySummaryPanel` 里却没有任何引用——全仓库唯一的降级徽章在 lot 列表
+（`order.eligibilityDegraded`）。第二轮的 R6 又把它变成了承重件：未知键 ⇒ degraded
+⇒「用户看到降级徽章而不是红横幅」（risks 13 原文）——那个徽章不存在，风险表里写了
+一句假的用户可见事实。
+
+改法：`EligibilitySummaryPanel` 的 `eligibility-source-head` 里补与 lot 同款的
+`<Badge tone="amber">账本状态待确认</Badge>`（与状态徽章并排，复用既有
+`.eligibility-source-head > div` 的 flex 样式，不加 CSS）。仓库没有 jsdom / RTL
+（risks 12），所以渲染测试用 `react-dom/server` 的 `renderToStaticMarkup`：
+`App.eligibility-summary-panel.test.tsx` 断言 degraded=true 时徽章在渲染结果里、
+false/undefined 时不在、混合列表只出现在降级那一行；「不在」这一侧做了变异验证
+（徽章改成无条件渲染 → 2 红，MF27）。为此 `EligibilitySummaryPanel` 从 App.tsx 导出，
+测试在导入前 stub 了一个只有 `location.href` 的 `window`（App.tsx 与 AuthProvider.tsx
+各在模块顶层读一次 `window.location.href`，导入链上没有别的浏览器依赖）。
 
 ---
 
@@ -224,6 +277,17 @@ XM-INV-ELIG-AUTO-RECONCILE 给后端加了第 4 个持久化 `eligibility_status
 | `web/src/lib/user-data-load.ts` | 全失败/部分失败文案分岔 + 可读原因追加；`setFailed` 设置器；`sourceAccountPanelMode` |
 | `web/src/App.tsx` | `failedRequests` 进 context；`SourceAccountStatus` 按面板模式渲染，新增「已关联账号暂时无法读取」态 |
 
+第三轮另外修改：
+
+| 文件 | 改动 |
+| --- | --- |
+| `backend/internal/eligibilitywire/discover.go` | 识别规则改为 `go/types` 常量求值（stub 掉所有 import 的宽松类型检查）；赋值求不出常量且非透传 ⇒ 拒绝作答（`文件:行号`）；COALESCE 默认值从常量查询文本读取，读不出 ⇒ 拒绝；空目录 ⇒ 拒绝 |
+| `backend/internal/eligibilitywire/discover_test.go` | **新增** 8 条识别规则测试：命名常量/常量拼接被解析、裸字面量与透传照旧、5 种求不出常量的形态被拒且报行号、常量拼出的 COALESCE 默认值被解析、非字面量默认值被拒、空目录被拒、常量状态能到达契约闸 |
+| `web/src/lib/http-api.ts` | 摘要响应信封 `exactObjectKeys` → `requiredObjectKeys`；未知顶层键 ⇒ 全部行置 degraded |
+| `web/src/lib/http-api.eligibility-pending-reconciliation.test.ts` | +4 用例：信封带 `generated_at`/`next_cursor` 不再抛错且 degraded、精确信封不 degraded、`items` 仍必填、非数组/33 条仍拒 |
+| `web/src/App.tsx` | `EligibilitySummaryPanel` 导出；摘要卡头部补「账本状态待确认」徽章 |
+| `web/src/App.eligibility-summary-panel.test.tsx` | **新增** 4 条 `renderToStaticMarkup` 渲染断言（在场 / 缺席 / 已知状态但 degraded / 混合列表定位） |
+
 ### 被有意推翻的既有断言
 
 `invoice-contract.test.ts` 原有：
@@ -256,6 +320,13 @@ expect(() => mapLot({ ...lot, reason_code: "UNKNOWN" })).toThrow(
 | `cd backend && go vet ./internal/{eligibilitywire,httpapi,application,postgresstore}/...` | exit 0 |
 | `go test -p 1 -count=1 -run 'TestUserFundingLot\|TestUserEligibilitySummary\|TestGeneratedTypeScript\|TestLotEligibility\|TestLotPersisted\|TestLotSynthetic\|TestSummaryStatus\|TestContractRejects' ./internal/httpapi/... ./internal/application/... ./internal/eligibilitywire/...` | ok ×3 |
 | `go test -p 1 -count=1 -short ./internal/{application,httpapi,eligibilitywire}/...` | ok ×3 |
+
+第三轮整改后重跑（时间为 UTC 实测）：
+
+| 命令 | 结果 | 起止 / 耗时 |
+| --- | --- | --- |
+| `cd web && npm run typecheck && npm test -- --run` | typecheck exit 0；19 files / **303** tests passed | 17:57:13Z → 17:57:19Z，6 s |
+| `cd backend && go vet ./... && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | vet exit 0；ok ×2 | 17:57:21Z → 17:57:25Z，4 s |
 
 **门禁顺序天然正确**：`verify.ps1` 的 go test 排在 npm test 之前，所以契约漂移会先在
 Go 侧变红，前端根本走不到。
@@ -381,6 +452,35 @@ context 里的列表传进去」这一处。**这一处仍然是裸的**，见 r
 
 ---
 
+## 变异表（第三轮：复审整改）
+
+全部变异均已还原（discover.go / http-api.ts / App.tsx 用整改后快照 `cp` 回，
+service.go 用 `git checkout`），还原后 `diff -q` 通过，两段门禁复跑通过。
+
+### 后端
+
+| # | 变异 | 预期 | 实际 |
+| --- | --- | --- | --- |
+| MB16 | `constantString` 去掉 `go/types` 分支（退回只认裸字面量） | 红 | 3 红：命名常量赋值、常量拼接的 COALESCE 默认值、常量状态到达契约闸 |
+| MB17 | 求不出常量的赋值不再拒绝（`if isStatusPassthrough` → `if true`） | 红 | 1 红，5 个子用例里 4 个红（helper 返回、局部变量、复合字面量里的 helper、跨包常量）；「元组赋值」走 `AssignStmt` 里另一条拒绝路径，此变异下仍绿——是两条独立的闸，不是漏 |
+| MB18 | **复审 V7 原样**：`ListUserEligibilitySummaries` 的 `EligibilityStatus: item.EligibilityStatus` 改成 `zzSummaryStatusOverride(item)` | 红 | 4 红，全部报 `service.go:1319 assigns EligibilityStatus from zzSummaryStatusOverride(item)` |
+| MB19 | **复审 V2 原样**：service.go 新鲜度循环里加 `const statusRefundReviewProbe` 赋值 | 红 | 2 红：合成集发现、persisted∪synthetic（第一次跑因 CRLF 让插入没落地而假绿，已重跑并核对插入行） |
+| MB20 | **复审 V3 原样**：把现有 `"source_unavailable"` 抽成 `const statusSourceUnavailable` | **绿**（第二轮此处假红） | 绿 |
+| MB21 | 非字面量 COALESCE 默认值不再拒绝 | 红 | 1 红 |
+| MB22 | 空目录不再拒绝 | 红 | 1 红 |
+
+### 前端
+
+| # | 变异 | 预期 | 实际 |
+| --- | --- | --- | --- |
+| MF25 | 摘要信封改回 `exactObjectKeys` | 红 | 1 红（`generated_at` 再次被拒） |
+| MF26 | 信封未知键不再置 degraded | 红 | 1 红 |
+| MF27 | 摘要面板徽章改成无条件渲染（**缺席型断言的变异验证**） | 红 | 2 红：不 degraded 时不该有、混合列表只该有一处 |
+| MF28 | 摘要面板徽章删掉 | 红 | 3 红 |
+| MF29 | `items.length > 32` 上限放到 320 | 红 | 1 红（33 条被接受） |
+
+---
+
 ## risks / follow_ups
 
 1. **前端修好 ≠ 账本修好。** 上游 12 / 34 仍处于
@@ -422,20 +522,32 @@ context 里的列表传进去」这一处。**这一处仍然是裸的**，见 r
 
 ### 第二轮新增
 
-9. **发现层扫的是三个包，扫到的每一个非持久化字面量都会被要求解释。** 如果有人在
-   `application` / `postgresstore` / `httpapi` 里写了一个 `EligibilityStatus = "..."`
-   或一条新的 `COALESCE(x.eligibility_status,'...')`，而那个值并不真的会出现在响应里
-   （比如只是内部中间态），`TestLotSyntheticStatusesAreDiscovered` 会红。**正确的处置是
-   在契约里承认它、或者把那个字面量挪出扫描范围，不是把它加进某个豁免名单**——扫描范围
-   一旦有豁免，就又变回手列的了。失败信息里带 `文件:行号`，不用 grep。
-10. **`exactObjectKeys` 的其余 13 个调用点仍然是严格键集，这是有意的，但它们有同一个
-    失败模式。** 触发条件：后端给对应 DTO 新增一个字段，且后端先于前端 bundle 上线 →
+9. **发现层扫的是三个包，扫到的每一个非持久化状态值都会被要求解释；识别规则是常量求值
+   加拒绝作答，不是字面量匹配。**（第三轮改写）如果有人在 `application` /
+   `postgresstore` / `httpapi` 里给 `EligibilityStatus` 赋一个**常量**（字面量、命名
+   常量、常量拼接都算）或写一条新的 `COALESCE(x.eligibility_status,'...')`，而那个值
+   并不真的会出现在响应里，`TestLotSyntheticStatusesAreDiscovered` 会红。如果赋的
+   是**求不出常量值的东西**（变量、helper 返回值、类型转换、`x, err = f()`、别的包的
+   常量），扫描会直接报错 `文件:行号 assigns EligibilityStatus from ...`，六道探针一起
+   Fatal——它不知道你引入了什么，所以不作答。唯一不用解释的写法是透传另一个
+   `EligibilityStatus` 字段。**正确的处置是在契约里承认新值、或把赋值改成常量、或教
+   `discover.go` 一种新形状，不是把它加进某个豁免名单**——扫描范围一旦有豁免，就又变回
+   手列的了。仍然看不见的形态（记下来不装没有）：通过反射/`unsafe`、通过 SQL 的
+   `CASE WHEN` 而非 COALESCE 生成的默认值、以及 `$n` 绑定参数里传进来的状态值——
+   前两者今天代码里没有，第三个会被「非字面量 COALESCE 默认值」的拒绝路径拦下。
+10. **`exactObjectKeys` 的其余 11 个调用点仍然是严格键集，这是有意的，但它们有同一个
+    失败模式。**（第三轮更正：第二轮写的「13 个……都不在用户开票页上」是错的——
+    `getUserEligibilitySummary` 的响应**信封**就在用户开票页上，而且是被放宽的那条响应
+    自己的外壳；它已单独处理，见 R8，现在与 item / 源服务单位一样「忽略未知键 + 置
+    degraded」。）触发条件：后端给对应 DTO 新增一个字段，且后端先于前端 bundle 上线 →
     那一条响应被整条拒掉（`INVALID_ELIGIBILITY_RESPONSE`，文案「服务返回的 X 字段超出
-    安全白名单。」）。受影响的是管理员账本列表/详情、账本充值明细、消耗时间线、分页游标、
-    资格冻结记录等。保留严格的理由：其中几个是金额 DTO，多出一个未知键更该读成「这不是
-    我以为的那条响应」；而且都不在用户开票页上，炸的是管理端一个列表而不是用户的整页。
-    **这不是「已经收口」，是一个写下来的取舍**：下一个给这些 DTO 加字段的人应当知道自己
-    会复现同一个横幅，处方现成（照 `mapEligibilitySummary` 改成忽略未知键 + degraded）。
+    安全白名单。」）。受影响的是管理员账本列表/详情、账本充值明细、消耗时间线、两个分页
+    游标、资格冻结记录及其信封、管理员账本信封，以及 `mapServiceUnitSummary` 在管理端
+    调用下的严格分支。保留严格的理由：其中几个是金额 DTO，多出一个未知键更该读成「这不是
+    我以为的那条响应」；而且这 11 个确实都在 `/api/v1/admin/...` 或游标解析上，不在
+    用户开票页上，炸的是管理端一个列表而不是用户的整页（本轮按行号逐个核过，清单见 R8）。**这不是「已经收口」，是一个写下来的取舍**：下一个给这些 DTO
+    加字段的人应当知道自己会复现同一个横幅，处方现成（照 `mapEligibilitySummary` 与
+    `getUserEligibilitySummary` 的信封改成忽略未知键 + degraded）。
 11. **`exactObjectKeys` 的必填键校验在那 13 个调用点没有测试覆盖**（变异 MF20 只红了本轮
     新写的那一条）。既有欠账，本轮没有扩大也没有修；补的话是独立一刀。
 12. **`SourceAccountStatus` 里 `failed: failedRequests` 这一行没有任何测试覆盖**
@@ -444,9 +556,19 @@ context 里的列表传进去」这一处。**这一处仍然是裸的**，见 r
     里的列表传进去」。**要真正闭合，需要引入一次渲染测试**（RTL + jsdom，或 Playwright
     一条用户流），那是一个需要加依赖的独立决定，不该塞进本次修复。在那之前，改动
     `SourceAccountStatus` 的人请自己确认这一行还在。
-13. **摘要键集放宽后，「未知键」不再是拒绝理由，但仍会置 `eligibilityDegraded`。** 也就是
-    说后端加字段会让用户看到降级徽章而不是红横幅。这是有意的（可见、不可选、不崩），
-    但意味着**降级徽章会因为一次纯粹的部署时序而出现**，运营看到时不要当成账本异常。
+13. **摘要键集（item、嵌套源服务单位、响应信封）放宽后，「未知键」不再是拒绝理由，但仍会
+    置 `eligibilityDegraded`，并且从第三轮起摘要面板真的会渲染它。** 也就是说后端加
+    字段会让用户在摘要卡头部看到「账本状态待确认」徽章（与 lot 列表同款）而不是红横幅。
+    第二轮写下这句时那个徽章并不存在（R9）——这一版由
+    `App.eligibility-summary-panel.test.tsx` 双向钉住。信封上的未知键会让该次响应的
+    **每一张**摘要卡都带徽章。这是有意的（可见、不可选、不崩），但意味着**降级徽章会因为
+    一次纯粹的部署时序而出现**，运营看到时不要当成账本异常。
+14. **第三轮复审的 minor 未处理**：`accountBlockStateLabels`（App.tsx）与
+    `eligibilityStatusLabels`（eligibility-labels.ts）两张表没有闸钉在一起，App.tsx
+    lot 徽章里还有第三份手抄的「对账中暂不可开票」；`eligibility-labels.ts` 的注释把
+    「一个状态一句话」写成了已成立的事实。风险低（不同枚举、`!== "active"` 兜底），
+    留作独立一刀：导出/搬出 `accountBlockStateLabels` 后一行断言把两张表钉在一起，
+    徽章文字改用 `eligibilityStatusLabel(order.eligibilityStatus)`。
 
 ## commit
 
@@ -456,5 +578,9 @@ context 里的列表传进去」这一处。**这一处仍然是裸的**，见 r
 - **第二轮复审整改：`d558fe0`**（父提交 `3db6994`）。12 files changed,
   1410 insertions(+), 185 deletions(-)。按要求是**追加提交**，没有 amend / rebase。
   本文件的哈希回填是紧随其后的 `docs` 提交，因为哈希在提交前不存在。
+- 第二轮哈希回填：`9c5a8cf`（`docs`）。
+- **第三轮复审整改**：紧随 `9c5a8cf` 的追加提交（本文件随该提交一起改动，哈希在提交前
+  不存在；要时看 `git log -1 -- backend/internal/eligibilitywire/discover_test.go`）。
+  没有 amend / rebase。
 
 分支 `ai/claude/XM-INV-LOT-REASON-CONTRACT`，worktree `K:/发票/wt-XM-INV-FE-REASONS`。
