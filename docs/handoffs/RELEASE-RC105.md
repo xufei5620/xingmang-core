@@ -55,3 +55,19 @@ RC105 的 L0 让认领按「时间合法 > 状态合法 > 首批次」排序，�
 5. 镜像门禁（预期 exit 42）→ 普通校验 → 严格可传输校验
 6. `ssh-keygen -Y sign` 签 `SHA256SUMS`（bash 重定向验签）
 7. **停下，把传输/部署/修复命令交给负责人**
+
+## 补记：2026-09-08 部署结果（UTC；+08 加 8 小时）
+
+| 步骤 | 开始 | 耗时 | 结果 |
+|---|---|---|---|
+| 签名备份（停服务） | 14:18:25 | 221s | `invoice-20260908T141825Z`，验签 Good，7 组件，dump 1.5G；暂存私钥已 shred |
+| 传输 641MB + 服务器侧校验和 | 14:18:50 | 2m25s | 三个 OK |
+| 加载镜像 / imageId 比对 / 服务器自验签名 | 14:22:11 | ~50s | 9/9 相符；签名 Good；66/66 OK |
+| 展开源码 + 环境文件 | 14:23:01 | 1s | `4fa39a4f`；仅改 `INVOICE_IMAGE_TAG=0.1.0-rc105` |
+| roll-forward（负责人执行） | 14:24 | ~3m | 步骤 0b–5 通过，第 6 步按预期红（readyz 503：`source_ingest_dead_events`） |
+| `ingest-acknowledge-unreplayable` dry run ×2 | 14:28:2x | 40s | 两条均 `acknowledged: true`；重投工具同时报 `replay blocked`（同一理由：批次 90adb1e5 ceiling 09:29:16 > observed 07:08:33 + 5m）——**L0 让两个工具在生产上说同一句话** |
+| apply ×2（operator `99ed401b-…`） | 14:29:40 | 2s | 两条 → `processed / UNREPLAYABLE_BINDING` |
+| 验证 | 14:29:42 | — | dead/failed = 0；**readyz 200（内网与公网）**；十条流 pending/dead 全 0；19 张额度 / 6 用户不再 `source_unavailable` |
+
+部署记录：`/root/invoice-system/deployment-records/rc105-deploy-20260908T141816Z/`。
+客户 2222 的三个 EVENT_DEAD 冻结按设计保持开放，走管理端解冻流程。
