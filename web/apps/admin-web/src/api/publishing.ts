@@ -41,6 +41,17 @@ export const PUBLISHING_DRAFT_STATUS_LABELS: Readonly<Record<PublishingDraftStat
   ARCHIVED: "已归档",
 };
 
+/** 素材类型（publishing.AssetKind）。素材是**引用**不是上传——平台没有对象存储。
+ *
+ *  提到这一层而不是留在 PublishingPage 的行内选项里，是为了让
+ *  lib/labels.reconcile.test.ts 能对着 model.go 逐条对账：后端加第四种素材
+ *  类型时，界面上不该出现一个没有中文名的下拉项。 */
+export const PUBLISHING_ASSET_KIND_LABELS: Readonly<Record<string, string>> = {
+  image: "图片",
+  video: "视频",
+  link: "链接",
+};
+
 export const PUBLISHING_CHANNEL_STATUS_LABELS: Readonly<
   Record<PublishingChannelStatus, string>
 > = {

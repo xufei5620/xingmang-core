@@ -113,7 +113,10 @@ export interface AutomationRulesResponse {
 /** 触发类别的中文标签。不认识的取值原样显示内部名——吞掉它只会让一个
  *  将来新增的类别看起来像空白。 */
 export const TRIGGER_KIND_LABELS: Readonly<Record<string, string>> = {
-  manual: "手动或定时触发",
+  // manual 就是 manual。原来这一条写的是「手动或定时触发」，把两个不同的
+  // 取值揉进了一个标签——下拉里于是同时出现「手动或定时触发」和「定时」两项，
+  // 选的人无从分辨。后端 TriggerManual/TriggerSchedule 是两个独立取值。
+  manual: "手动",
   schedule: "定时",
   event: "事件",
   webhook: "Webhook",
@@ -129,9 +132,21 @@ export const RULE_STATUS_LABELS: Readonly<Record<string, string>> = {
   disabled: "已作废",
 };
 
+/** 调用方**登记**状态的中文标签。
+ *
+ *  「已停用」三个字单独摆着会被读成「这个调用方被拦下了」，而 doc.go 第 1 条
+ *  写得很清楚：**停用一行不会让任何请求被拒绝**，登记簿不是授权面。所以中文
+ *  里必须带上「登记」二字——否则运营会以为停用等于断供，出事时找错地方。 */
 export const CLIENT_STATUS_LABELS: Readonly<Record<string, string>> = {
-  active: "在册",
-  disabled: "已停用",
+  active: "登记在册",
+  disabled: "登记已停用",
+};
+
+/** 状态徽章的悬停解释，与上面那张表配套。 */
+export const CLIENT_STATUS_HINTS: Readonly<Record<string, string>> = {
+  active: "登记簿里是有效的一行。登记不发凭据、不授予权限，真实授权仍由角色决定。",
+  disabled:
+    "只是登记簿上停用了，**该身份的请求照样会被放行**——授权由 Keycloak 角色决定，不看这张表。要真正断供得去改角色。",
 };
 
 export async function listApiClients(

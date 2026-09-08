@@ -2,7 +2,8 @@
 
 - **status:** implemented，未上线。纯前端展示层改动，**后端一行未改**
   （`git status internal/ cmd/` 为空）。
-- **branch:** `ai/claude/XM-I18N-LABELS`，基线 `8c446e5`。未提交、未推送。
+- **branch:** `ai/claude/XM-I18N-LABELS`。基线 `8c446e5`（提交 `d24f9b5`），
+  之后合入主线 `a2d02ae`（合并提交 `79be3fc`）并在合并后追加一轮。未推送。
 - **来源：** 产品负责人原话——「这些报错也好、审批也好、告警也好，能不能有中文
   对照，在管理后端都显示中文。因为我的英语水平不好。」
 
@@ -97,8 +98,14 @@ assurance/job_args.go`，**任何按目录去找的人都会漏掉它**。
 
 ### 3.2 对账测试（本片的核心交付物）
 
-**`web/apps/admin-web/src/lib/labels.reconcile.test.ts`（新增，513 行，35 条）**
-—— **直接读后端 Go 源码**，把每个枚举值逐个对着前端的表查差集。覆盖：
+**`web/apps/admin-web/src/lib/labels.reconcile.test.ts`（新增，55 条）**
+—— **直接读后端 Go 源码**，把每个枚举值逐个对着前端的表查差集。
+
+> **这一节写于合并主线之前，当时只有下表这 13 组，而那远远不够。** 合并之后
+> 发现新模块的枚举可以整个绕过这套断言，于是补了「枚举清点」那一层——见
+> **第七点五节**。下表保留原样，它仍然是每一组差集断言的索引。
+
+覆盖：
 
 | 组 | 读的文件 | 抽取方式 |
 |---|---|---|
@@ -208,20 +215,20 @@ ${meaning.label}\` : level` 的逻辑，没有调 `riskLevelText`——于是变
 `router.test.tsx:1651` 用的是 `/错误码 PERMISSION_DENIED/`，新文案仍然包含这个
 子串，未受影响——不是我放宽的，它本来就这么写。
 
-## 六、门禁
+## 六、门禁（合并主线后复跑，下表为最终结果）
 
 | 门禁 | 结果 |
 |---|---|
-| `go test -p 1 -count=1 ./...`（八个代理变量全 unset） | 退出 0，58 个包 ok，0 FAIL；跑了两遍确认稳定 |
+| `go test -p 1 -count=1 ./...`（八个代理变量全 unset） | 退出 0，**62** 个包 ok，0 FAIL |
 | `go vet ./...` | 退出 0 |
 | `bash scripts/check-governance.sh` | 退出 0 |
 | `pnpm -r run typecheck` | 5 个包全 Done |
-| `pnpm -r run test` | 1985 + 261 + 16 + 10 全绿（admin-web 从 1955 增至 1985，新增 30 条） |
+| `pnpm -r run test` | **2115** + 262 + 16 + 10 全绿。本片新增 **52** 条：合并前 32（1955→1987），合并后 20（对账文件 35→55 条） |
 | `pnpm -r run build` | 退出 0 |
 
 **build 的坑按要求单独核过**：不只看退出码。`ui-storybook build: ✓ 163 modules
 transformed` 与 `Storybook build completed successfully` 之后，
-**`admin-web build: ✓ 361 modules transformed`** 与 `dist/assets/index-*.js`
+**`admin-web build: ✓ 375 modules transformed`** 与 `dist/assets/index-*.js`
 的产物行都在（先 `rm -rf dist/assets dist/index.html` 再构建，确认是这次生成
 的），`build: Done` 出现 2 次，全文 grep `assertion|libuv|abort` 命中 0 次。
 这一次没有复现那个 libuv 拆卸崩溃。
@@ -303,6 +310,79 @@ worktree 自己的 `web/packages/*`），配合 `--config.verify-deps-before-run
   （两个命名空间的值恰好不冲突），但那是巧合。没并进 `labels.ts`，因为并进去
   就得先把这两个命名空间在调用点分开——那是另一片的工作量。
   → **follow_up：分开这两个枚举，再各自纳入对账。**
+
+## 七点五、合并主线之后（2026-09-08 下午）——门禁自己被抓到有洞
+
+主线上来了三个新模块（extapp / integration / publishing）与资源目录的三条只读
+Query。合并之后**对账测试一条都没红**。
+
+**那不是通过，那是漏。** 三个新模块一次带来十个新枚举，而我那些分组测试只认
+我当初逐个列出的那几个文件——「我列了 13 组」与「后端一共有多少组」之间
+**没有任何东西在对账**。我上一轮在本文档里写的「后端加了新码而前端没跟，这里
+变红」这句话，**范围说大了**：它只对我枚举过的那 13 组成立。
+
+### 补的东西
+
+**`ENUM_INVENTORY` + `discoverGoStringEnums()`（labels.reconcile.test.ts）** ——
+反过来问：把 `internal/platform` 下所有字符串枚举（`type X string` 且同文件里
+≥2 个该类型常量）**发现**出来，共 **68 个**，每一个都必须在清点表里有一行。
+新增枚举 → 红 → 有人必须写一行说清它要不要中文。
+
+三档，含义写在测试的注释里，**不许被读成「已验证的覆盖」**：
+
+| 档 | 条数 | 含义 |
+|---|---|---|
+| `reconciled` | 23 | 上面有一组自己的差集断言盯着 |
+| `labelled-elsewhere` | 23 | 界面上会露出、也已经有中文，但**还没纳入对账**——后端加取值时不会有任何东西变红 |
+| `backend-only` | 22 | 判断它不露到界面上，附一句依据 |
+
+**后两档是待办清单，不是完成度。** 机器只保证「每个枚举都被分过类」这一件事；
+分类本身是**我写下的判断**，值得验收线扫一眼——尤其 `backend-only` 那 22 条。
+分错的代价与今天相同（某处中文没跟上），不会造成安全上的假绿。
+
+### 新纳入对账的 10 个枚举
+
+`integration.{ClientStatus,RuleStatus,TriggerKind}`、
+`extapp.{AppStatus,AuthMode,ReleaseKind}`、
+`publishing.{DraftStatus,ChannelStatus,Platform,AssetKind}`、
+`registry.ConnectionStatus`。
+
+三个新模块**本来就都写了中文**（页面作者都翻了），问题不是没翻，是**又多了三份
+私有映射、且都不在门禁里**。所以这一轮没有搬家，只是把它们各自钉住——与我对
+alerts / jobs 的做法一致。
+
+### 顺带修的三处
+
+1. **`TRIGGER_KIND_LABELS.manual` 是错的**：写成「手动或定时触发」，而 schedule
+   另有一项叫「定时」。下拉里同时出现这两项，选的人无从分辨；后端
+   `TriggerManual` / `TriggerSchedule` 是两个独立取值。改成「手动」。
+   （出处大概是 `blueprints/ext.ts` 里那份**节点类型**清单——那里「手动或定时触发」
+   是一个节点，说法没问题，被抄成逐值标签才出错。蓝图那份没动。）
+   新增断言：四个中文名两两不同，且除 schedule 外都不含「定时」。
+2. **`CLIENT_STATUS_LABELS.disabled` 会误导**：裸一个「已停用」，而
+   `integration/doc.go` 第 1 条写得很清楚——**停用一行不会让任何请求被拒绝**，
+   登记簿不是授权面。改成「登记已停用」，并加 `CLIENT_STATUS_HINTS` 说明
+   「该身份的请求照样会被放行，要真正断供得去改角色」。新增断言钉住这两点。
+3. **`ConnectionStatusBadge` 是三元链**：`enabled ? … : killed ? … : "已停用"`
+   —— 与我这一片开头修的那个 `succeeded/failed` 是同一类 fail-silent，后端加
+   第四个取值那天会把它显示成「已停用」。改成查表，认不出来原样显示；
+   `killed` 保持「已拉闸」而不是「已停用」（Kill Switch 是显式紧急动作）。
+
+**规则状态与渠道状态按你的提醒逐条核过**：`RULE_STATUS_LABELS` 是
+草稿 / 已登记 / 已作废，**不含**「启用 / 生效 / 运行」——已加一条断言机械地守住
+这一点（`registered` 不许被翻成「已启用」，因为登记不会让任何 Action 跑起来）。
+publishing 的三张表里**没有任何一处回显凭据**，也加了断言（不许出现
+`secret://` / credential / token / api_key），并另加一条：草稿状态不许凭空多出
+「已发布」——后端 `DraftStatus` 刻意没有 PUBLISHED。
+
+### 变异验证（合并后这一轮）
+
+| 变异 | 期望 | 结果 |
+|---|---|---|
+| 在 `notify/notify.go` 里新增 `type Flavour string` + 两个常量（模拟「新模块带来新枚举」） | 「没有哪个后端枚举是清点表不知道的」红 | 红，差集恰为 `["notify.Flavour"]` |
+| 往清点表里塞一条后端不存在的 `ghost.Removed` | 「清点表里也没有后端已经删掉的枚举」红 | 红，差集恰为 `["ghost.Removed"]` |
+
+第一条正是今天早上静悄悄溜过去的那个场景。现在它会红。
 
 ## 八、risks
 

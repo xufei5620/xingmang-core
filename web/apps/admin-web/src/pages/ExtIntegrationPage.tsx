@@ -20,6 +20,7 @@ import {
   setAutomationRuleStatus,
   API_CLIENTS_QUERY,
   AUTOMATION_RULES_QUERY,
+  CLIENT_STATUS_HINTS,
   CLIENT_STATUS_LABELS,
   RULE_STATUS_LABELS,
   TRIGGER_KIND_LABELS,
@@ -323,7 +324,10 @@ function clientColumns(): readonly DataTableColumn<ApiClientItem>[] {
       header: "状态",
       value: (row) => row.status,
       cell: (row) => (
-        <Badge tone={row.status === "active" ? "success" : "neutral"}>
+        <Badge
+          tone={row.status === "active" ? "success" : "neutral"}
+          title={CLIENT_STATUS_HINTS[row.status]}
+        >
           {CLIENT_STATUS_LABELS[row.status] ?? row.status}
         </Badge>
       ),

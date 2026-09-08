@@ -15,6 +15,7 @@ import {
   savePublishingDraft,
   setPublishingChannelStatus,
   submitPublish,
+  PUBLISHING_ASSET_KIND_LABELS,
   PUBLISHING_CHANNEL_STATUS_LABELS,
   PUBLISHING_DRAFT_STATUS_LABELS,
   PUBLISHING_PLATFORM_LABELS,
@@ -518,9 +519,12 @@ function AssetDialog({ onSaved }: { onSaved: () => void }) {
             value={kind}
             onValueChange={(v) => setKind(v as "image" | "video" | "link")}
             options={[
-              { value: "image", label: "图片" },
-              { value: "video", label: "视频" },
-              { value: "link", label: "链接" },
+              // 选项由同一份对照表生成，不再在页面里手抄一遍
+              // （对账测试对着 publishing/model.go 盯着那张表）。
+              ...Object.entries(PUBLISHING_ASSET_KIND_LABELS).map(([value, label]) => ({
+                value,
+                label,
+              })),
             ]}
           />
         </FormField>

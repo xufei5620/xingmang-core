@@ -28,6 +28,20 @@ import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { describeServiceStatus } from "@xingmang/ui-admin";
 import { ALERT_RULES } from "../api/alerts";
+import { appStatusLabel, authModeLabel, releaseKindLabel } from "../api/extapp";
+import {
+  CLIENT_STATUS_HINTS,
+  CLIENT_STATUS_LABELS,
+  RULE_STATUS_LABELS,
+  TRIGGER_KIND_LABELS,
+} from "../api/integration";
+import {
+  PUBLISHING_ASSET_KIND_LABELS,
+  PUBLISHING_CHANNEL_STATUS_LABELS,
+  PUBLISHING_DRAFT_STATUS_LABELS,
+  PUBLISHING_PLATFORM_LABELS,
+} from "../api/publishing";
+import { CONNECTION_STATUS_LABELS } from "../pages/RegistryPage";
 import { jobKindLabel, jobStateLabel } from "../api/jobs";
 import {
   describeNotifyStatus,
@@ -452,6 +466,302 @@ describe("后台任务：运行状态与任务种类都要有中文", () => {
   it("每一个任务种类都有中文", () => {
     const missing = jobKinds.filter((k) => !translated(jobKindLabel(k), k));
     expect(missing).toEqual([]);
+  });
+});
+
+// --- 扩展能力三页（2026-09-08 合并进来的三个新模块）------------------------
+
+describe("接口与自动化：登记状态、规则状态、触发类别都要有中文", () => {
+  const source = goSource("internal/platform/integration/types.go");
+  const clientStatuses = goTypedConstValues(source, "ClientStatus");
+  const ruleStatuses = goTypedConstValues(source, "RuleStatus");
+  const triggerKinds = goTypedConstValues(source, "TriggerKind");
+
+  it("抽取器确实抓到了这三组常量", () => {
+    expect(clientStatuses).toEqual(expect.arrayContaining(["active", "disabled"]));
+    expect(ruleStatuses).toEqual(expect.arrayContaining(["draft", "registered", "disabled"]));
+    expect(triggerKinds).toEqual(
+      expect.arrayContaining(["manual", "schedule", "event", "webhook"]),
+    );
+  });
+
+  it("三组取值都有中文", () => {
+    expect(clientStatuses.filter((v) => !(v in CLIENT_STATUS_LABELS))).toEqual([]);
+    expect(ruleStatuses.filter((v) => !(v in RULE_STATUS_LABELS))).toEqual([]);
+    expect(triggerKinds.filter((v) => !(v in TRIGGER_KIND_LABELS))).toEqual([]);
+  });
+
+  it("规则状态的中文里**不能**出现「启用 / 生效 / 运行」", () => {
+    // doc.go 第 2 条：规则登记簿**没有执行器**，登记一条不会让任何 Action 跑起来。
+    // 后端为此刻意不用 enabled/active 命名(types.go 的注释写明了)，中文若写成
+    // 「已启用」正好把那份克制抵消掉——人会以为配好了就会自己跑。
+    for (const [value, label] of Object.entries(RULE_STATUS_LABELS)) {
+      expect(label, value).not.toMatch(/启用|生效|运行|已开启/);
+    }
+    // 正向锚点：这几条确实翻过，不是因为表是空的才「都不含那些词」。
+    expect(RULE_STATUS_LABELS["registered"]).toBe("已登记");
+    expect(RULE_STATUS_LABELS["draft"]).toBe("草稿");
+  });
+
+  it("每个触发类别各是各的，中文不许把两个取值揉成一句", () => {
+    // 原来 manual 写的是「手动或定时触发」，与 schedule 的「定时」在下拉里
+    // 同时出现，选的人无从分辨。中文名两两不同是这类表的基本要求。
+    const labels = Object.values(TRIGGER_KIND_LABELS);
+    expect(new Set(labels).size).toBe(labels.length);
+    for (const [value, label] of Object.entries(TRIGGER_KIND_LABELS)) {
+      if (value !== "schedule") expect(label, value).not.toContain("定时");
+    }
+  });
+
+  it("调用方停用的中文要说清「停的是登记，不是放行」", () => {
+    // doc.go 第 1 条：停用一行**不会让任何请求被拒绝**。裸一个「已停用」会让
+    // 运营以为断供了，出事时找错地方。
+    expect(CLIENT_STATUS_LABELS["disabled"]).toContain("登记");
+    expect(CLIENT_STATUS_HINTS["disabled"]).toMatch(/照样会被放行|不看这张表/);
+  });
+});
+
+describe("应用与配置：应用状态、登录方式、发布类型都要有中文", () => {
+  const source = goSource("internal/platform/extapp/types.go");
+  const appStatuses = goTypedConstValues(source, "AppStatus");
+  const authModes = goTypedConstValues(source, "AuthMode");
+  const releaseKinds = goTypedConstValues(source, "ReleaseKind");
+
+  it("抽取器确实抓到了这三组常量", () => {
+    expect(appStatuses).toEqual(expect.arrayContaining(["active", "planned", "retired"]));
+    expect(authModes).toEqual(expect.arrayContaining(["oidc", "local", "dev-header"]));
+    expect(releaseKinds).toEqual(expect.arrayContaining(["deploy", "rollback"]));
+  });
+
+  it("三组取值都有中文（未知值原样返回，所以判据是「翻过了」）", () => {
+    expect(appStatuses.filter((v) => !translated(appStatusLabel(v), v))).toEqual([]);
+    expect(authModes.filter((v) => !translated(authModeLabel(v), v))).toEqual([]);
+    expect(releaseKinds.filter((v) => !translated(releaseKindLabel(v), v))).toEqual([]);
+  });
+
+  it("判据反向验证：后端不存在的值必须判成没翻过", () => {
+    expect(translated(appStatusLabel("melted"), "melted")).toBe(false);
+    expect(translated(authModeLabel("smoke-signal"), "smoke-signal")).toBe(false);
+    expect(translated(releaseKindLabel("teleport"), "teleport")).toBe(false);
+  });
+});
+
+describe("内容发布：草稿状态、渠道状态、平台、素材类型都要有中文", () => {
+  const source = goSource("internal/platform/publishing/model.go");
+  const draftStatuses = goTypedConstValues(source, "DraftStatus");
+  const channelStatuses = goTypedConstValues(source, "ChannelStatus");
+  const platforms = goTypedConstValues(source, "Platform");
+  const assetKinds = goTypedConstValues(source, "AssetKind");
+
+  it("抽取器确实抓到了这四组常量", () => {
+    expect(draftStatuses).toEqual(expect.arrayContaining(["DRAFT", "SCHEDULED", "ARCHIVED"]));
+    expect(channelStatuses).toEqual(expect.arrayContaining(["ACTIVE", "PAUSED", "RETIRED"]));
+    expect(platforms).toEqual(expect.arrayContaining(["x", "telegram", "other"]));
+    expect(assetKinds.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("草稿状态、渠道状态、平台都有中文", () => {
+    expect(draftStatuses.filter((v) => !(v in PUBLISHING_DRAFT_STATUS_LABELS))).toEqual([]);
+    expect(channelStatuses.filter((v) => !(v in PUBLISHING_CHANNEL_STATUS_LABELS))).toEqual([]);
+    expect(platforms.filter((v) => !(v in PUBLISHING_PLATFORM_LABELS))).toEqual([]);
+  });
+
+  it("素材类型也有中文（选项写在页面里）", () => {
+    expect(assetKinds.filter((v) => !(v in PUBLISHING_ASSET_KIND_LABELS))).toEqual([]);
+  });
+
+  it("草稿状态里不能凭空多出一个「已发布」", () => {
+    // model.go：DraftStatus **没有 PUBLISHED**。前端多一个终态就是多一处骗人的
+    // 地方——人会以为内容已经出去了。反向对账：前端的键不能超出后端。
+    const extra = Object.keys(PUBLISHING_DRAFT_STATUS_LABELS).filter(
+      (k) => !draftStatuses.includes(k),
+    );
+    expect(extra).toEqual([]);
+    for (const label of Object.values(PUBLISHING_DRAFT_STATUS_LABELS)) {
+      expect(label).not.toMatch(/已发布|已送达/);
+    }
+  });
+
+  it("中文里一个字都不许回显凭据", () => {
+    // 渠道带 CredentialRef（形如 secret://<scope>/<name>），这张表只翻状态。
+    // 这一片定级刻意留在 L1，正是为了让误粘的明文不进审批单——展示层同理。
+    const all = [
+      ...Object.values(PUBLISHING_CHANNEL_STATUS_LABELS),
+      ...Object.values(PUBLISHING_PLATFORM_LABELS),
+      ...Object.values(PUBLISHING_DRAFT_STATUS_LABELS),
+    ].join(" ");
+    expect(all).not.toMatch(/secret:\/\/|credential|token|api[_-]?key/i);
+  });
+});
+
+describe("资源目录：连接状态要有中文", () => {
+  const statuses = goTypedConstValues(
+    goSource("internal/platform/registry/connector.go"),
+    "ConnectionStatus",
+  );
+
+  it("抽取器确实抓到了那一组常量", () => {
+    expect(statuses).toEqual(expect.arrayContaining(["enabled", "disabled", "killed"]));
+  });
+
+  it("每一个连接状态都有中文", () => {
+    expect(statuses.filter((v) => !(v in CONNECTION_STATUS_LABELS))).toEqual([]);
+  });
+
+  it("killed 不能被说成普通的「停用」", () => {
+    // Kill Switch 拉闸是一次显式的紧急动作（宪法 26 条），与停用不是一回事。
+    expect(CONNECTION_STATUS_LABELS["killed"]).toBe("已拉闸");
+    expect(CONNECTION_STATUS_LABELS["killed"]).not.toBe(CONNECTION_STATUS_LABELS["disabled"]);
+  });
+});
+
+// --- 枚举清点：后端一共有多少个枚举，我盖到了几个 --------------------------
+
+/** 后端全部字符串枚举的清点。
+ *
+ *  **为什么需要它**：2026-09-08 合并主线时，三个新模块（extapp / integration /
+ *  publishing）一次带来十个新枚举，而上面那些分组测试**一条都没红**——它们只认
+ *  我当初逐个列出的那几个文件。也就是说，「我列了 13 组」与「后端一共有多少组」
+ *  之间**没有任何东西在对账**，新模块可以静悄悄地绕过整套门禁。这正是本片要防的
+ *  那类分叉，只不过这次发生在门禁自己身上。
+ *
+ *  所以这一条反过来问：把 internal/platform 下所有字符串枚举**发现**出来，
+ *  每一个都必须在下面的清点表里有一行。新增枚举 → 这里红 → 有人必须写一行，
+ *  说清它是要给中文，还是根本不露到界面上。
+ *
+ *  **清点表里的分类是人写下的判断，不是机器验证过的事实。** 机器只保证
+ *  「每个枚举都被分过类」这一件事。三档的含义：
+ *
+ *  - `reconciled` —— 上面有一组自己的差集断言盯着它；
+ *  - `labelled-elsewhere` —— 界面上会露出、也已经有中文，但**还没纳入对账**，
+ *    后端加取值时不会有任何东西变红（这是记账，不是保证）；
+ *  - `backend-only` —— 判断它不露到界面上，附一句依据。
+ *
+ *  后两档是**待办清单**，不是已完成的覆盖。要收窄它，就把某一行改成
+ *  `reconciled`，并在上面补一组差集断言。 */
+const ENUM_INVENTORY: Readonly<
+  Record<string, { status: "reconciled" | "labelled-elsewhere" | "backend-only"; note: string }>
+> = {
+  "action.Code": { status: "reconciled", note: "内核错误码，lib/labels.ts" },
+  "action.RiskLevel": { status: "reconciled", note: "风险等级，lib/labels.ts" },
+  "action.RunStatus": { status: "reconciled", note: "执行状态，lib/labels.ts" },
+  "approval.Status": { status: "reconciled", note: "审批状态，lib/labels.ts" },
+  "approval.Verdict": { status: "reconciled", note: "表决，lib/labels.ts" },
+  "principal.Type": { status: "reconciled", note: "身份类别，lib/labels.ts" },
+  "finance.Status": { status: "reconciled", note: "上游账号启停，lib/labels.ts" },
+  "alerts.Severity": { status: "reconciled", note: "告警严重度，lib/alerts.ts" },
+  "alerts.Status": { status: "reconciled", note: "告警状态，lib/alerts.ts" },
+  "alerts.NotifyStatus": { status: "reconciled", note: "投递状态，lib/alerts.ts" },
+  "jobs.RunState": { status: "reconciled", note: "任务运行状态，api/jobs.ts" },
+  "registry.ServiceStatus": { status: "reconciled", note: "服务状态，ui-admin/freshness.ts" },
+  "registry.ConnectionStatus": { status: "reconciled", note: "连接状态，pages/RegistryPage.tsx" },
+  "integration.ClientStatus": { status: "reconciled", note: "调用方登记状态，api/integration.ts" },
+  "integration.RuleStatus": { status: "reconciled", note: "规则登记状态，api/integration.ts" },
+  "integration.TriggerKind": { status: "reconciled", note: "触发类别，api/integration.ts" },
+  "extapp.AppStatus": { status: "reconciled", note: "应用状态，api/extapp.ts" },
+  "extapp.AuthMode": { status: "reconciled", note: "登录方式，api/extapp.ts" },
+  "extapp.ReleaseKind": { status: "reconciled", note: "发布类型，api/extapp.ts" },
+  "publishing.DraftStatus": { status: "reconciled", note: "草稿状态，api/publishing.ts" },
+  "publishing.ChannelStatus": { status: "reconciled", note: "渠道状态，api/publishing.ts" },
+  "publishing.Platform": { status: "reconciled", note: "发布平台，api/publishing.ts" },
+  "publishing.AssetKind": { status: "reconciled", note: "素材类型，api/publishing.ts" },
+  "finance.RunwayLevel": { status: "labelled-elsewhere", note: "可用天数档位，FinanceSummaryCards 与 FinancePage 有语气表与文案" },
+  "finance.RunwayUnknownReason": { status: "labelled-elsewhere", note: "算不出可用天数的原因，lib/runway.ts 的 runwayReasonText" },
+  "finance.AccessMethod": { status: "labelled-elsewhere", note: "接入方式，api/finance.ts 的 describeAccessMethod" },
+  "finance.SystemType": { status: "labelled-elsewhere", note: "系统类型；是平台标识（sub2api/newapi），当地址用不翻译" },
+  "finance.CandidateState": { status: "labelled-elsewhere", note: "渠道绑定候选态，ChannelBindingCard 有文案" },
+  "finance.CandidateEvidenceStatus": { status: "labelled-elsewhere", note: "候选证据充分度，同上" },
+  "finance.PlatformBucketKind": { status: "labelled-elsewhere", note: "平台归属桶，financeShared 有文案" },
+  "cards.OperationState": { status: "labelled-elsewhere", note: "卡操作状态，lib/cardStatus.ts" },
+  "cards.RenewalRiskLevel": { status: "labelled-elsewhere", note: "续订风险档，lib/cardStatus.ts" },
+  "sms.NumberState": { status: "labelled-elsewhere", note: "号码状态，SMSPanel 有映射与「未知状态」兜底" },
+  "sms.OperationState": { status: "labelled-elsewhere", note: "接码操作状态，SMSPanel" },
+  "sms.Capability": { status: "labelled-elsewhere", note: "上游能力位，SMSPanel" },
+  "ops.State": { status: "labelled-elsewhere", note: "数据新鲜度五档，ui-admin/freshness.ts 的 describeFreshness" },
+  "server.AssetStatus": { status: "labelled-elsewhere", note: "服务器资产状态，ServerAssetsPanel 的 ASSET_STATUS_OPTIONS" },
+  "server.BillingCycle": { status: "labelled-elsewhere", note: "计费周期，lib/serverRegistryForm.ts" },
+  "server.CertSource": { status: "labelled-elsewhere", note: "证书来源，ServerDomainsPanel" },
+  "server.ServiceKind": { status: "labelled-elsewhere", note: "服务类型，lib/serverRegistryForm.ts 的 SERVICE_KIND_OPTIONS" },
+  "registry.Environment": { status: "labelled-elsewhere", note: "环境名；当地址用，不翻译" },
+  "savedviews.Density": { status: "labelled-elsewhere", note: "表格密度，ui-admin 的密度切换" },
+  "savedviews.SortDirection": { status: "labelled-elsewhere", note: "排序方向；由表头箭头表达，界面上不出现这两个词" },
+  "audit.Result": { status: "labelled-elsewhere", note: "审计结果，lib/audit.ts 的 resultLabel" },
+  "jobs.ScheduleActivity": { status: "labelled-elsewhere", note: "周期任务活动迹象，JobsPage" },
+  "alerts.RunwayImpactTransition": { status: "labelled-elsewhere", note: "阈值改动的影响预览，RunwayThresholdRulePanel" },
+  "action.FieldType": { status: "backend-only", note: "Action Schema 的字段类型；只在参数校验里用" },
+  "audit/archive.KeyPurpose": { status: "backend-only", note: "归档签名密钥用途；只在归档工具链里" },
+  "audit/archive.VerificationCode": { status: "backend-only", note: "归档校验结果码；只在离线校验工具里" },
+  "connector.BudgetErrorCode": { status: "backend-only", note: "连接器预算错误码；只进服务端日志与观测" },
+  "connector.ErrorKind": { status: "backend-only", note: "连接器错误类别；折进新鲜度的 last_error_code 自由文本" },
+  "ratelimit.ErrorKind": { status: "backend-only", note: "限流内部错误类别；只进日志" },
+  "finance.ChannelEconomicsConflict": { status: "backend-only", note: "渠道经济性冲突原因；界面用的是 channelFieldReasons 的自有文案" },
+  "jobs.AuditArchiveMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "jobs.CPAMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "jobs.FinanceCollectMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "jobs.NewAPIMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "jobs.ReqlogMetricsMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "jobs.Sub2APIMode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "sms.Mode": { status: "backend-only", note: "部署模式，来自环境变量" },
+  "notify.Domain": { status: "backend-only", note: "企微通道域；只在发信封时用" },
+  "notify.Severity": { status: "backend-only", note: "信封严重度；界面读的是 alerts.Severity" },
+  "ops.PrimaryKind": { status: "backend-only", note: "指标主值类别；界面读的是格式化后的数字" },
+  "ops.SyncStatus": { status: "backend-only", note: "同步状态；界面读的是 ops.State" },
+  "ops.ValueKind": { status: "backend-only", note: "指标值语义；只在聚合与降采样里" },
+  "shadow.Measure": { status: "backend-only", note: "影子核对口径；影子评估没有管理端界面" },
+  "shadow.Side": { status: "backend-only", note: "影子核对来源侧；同上" },
+  "shadow.Verdict": { status: "backend-only", note: "影子核对结论；同上" },
+};
+
+/** 发现 internal/platform 下所有「字符串枚举」：一个 `type X string`，
+ *  加上同一个文件里至少两个该类型的字符串常量。
+ *
+ *  「至少两个」是为了滤掉那些只给字符串起个别名的类型——只有一个取值的类型
+ *  没有「翻译不全」这个问题。 */
+function discoverGoStringEnums(): string[] {
+  const root = new URL("internal/platform/", REPO_ROOT);
+  const files = readdirSync(root, { recursive: true }).filter(
+    (name) => name.endsWith(".go") && !name.endsWith("_test.go"),
+  );
+  const out = new Set<string>();
+  for (const file of files) {
+    const relative = file.replaceAll("\\", "/");
+    const source = readFileSync(new URL(relative, root), "utf8");
+    const slash = relative.lastIndexOf("/");
+    const prefix = slash < 0 ? "" : relative.slice(0, slash) + ".";
+    for (const m of source.matchAll(/^type ([A-Z]\w*) string$/gm)) {
+      const typeName = m[1] ?? "";
+      if (goTypedConstValues(source, typeName).length >= 2) out.add(prefix + typeName);
+    }
+  }
+  return [...out].sort();
+}
+
+describe("枚举清点：后端每一个字符串枚举都必须被分过类", () => {
+  const discovered = discoverGoStringEnums();
+
+  it("发现器确实扫到了东西", () => {
+    // 扫空了会让下面两条差集断言双双恒真——那正是它们最容易失效的方式。
+    expect(discovered.length).toBeGreaterThanOrEqual(60);
+    expect(discovered).toContain("action.Code");
+    expect(discovered).toContain("publishing.DraftStatus");
+  });
+
+  it("没有哪个后端枚举是清点表不知道的", () => {
+    // 红在这里 = 后端新增了枚举。补一行，写清它要不要中文。
+    const unlisted = discovered.filter((key) => !(key in ENUM_INVENTORY));
+    expect(unlisted).toEqual([]);
+  });
+
+  it("清点表里也没有后端已经删掉的枚举", () => {
+    // 反向也要对：留着一行早就不存在的枚举，会让清点数看起来比实际覆盖得多。
+    const stale = Object.keys(ENUM_INVENTORY).filter((key) => !discovered.includes(key));
+    expect(stale).toEqual([]);
+  });
+
+  it("每一行都写了依据，没有空注释", () => {
+    for (const [key, entry] of Object.entries(ENUM_INVENTORY)) {
+      expect(entry.note.length, key).toBeGreaterThan(0);
+    }
   });
 });
 

@@ -440,10 +440,24 @@ function ConnectionsTable({
   );
 }
 
+/** 连接状态的中文（registry.ConnectionStatus，三个取值）。
+ *
+ *  查表而不是接一串三元：三元的最后一档是**兜底**，后端加第四个取值那天，
+ *  它会被显示成「已停用」——一个新状态被说成一个旧的假状态，比不翻译更糟。
+ *  认不出来的取值原样显示。这张表由 lib/labels.reconcile.test.ts 对着
+ *  internal/platform/registry/connector.go 对账。 */
+export const CONNECTION_STATUS_LABELS: Readonly<Record<string, string>> = {
+  enabled: "已启用",
+  // 「已拉闸」而不是「已停用」：Kill Switch 是一次显式的紧急动作，
+  // 与普通停用不是一回事（宪法 26 条）。
+  killed: "已拉闸",
+  disabled: "已停用",
+};
+
 /** 连接状态。killed 用 danger——Kill Switch 已拉闸不是一个普通的「停用」。 */
 function ConnectionStatusBadge({ status, killSwitch }: { status: string; killSwitch: string }) {
   const tone = status === "enabled" ? "success" : status === "killed" ? "danger" : "neutral";
-  const label = status === "enabled" ? "已启用" : status === "killed" ? "已拉闸" : "已停用";
+  const label = CONNECTION_STATUS_LABELS[status] ?? status;
   return (
     <div className="flex flex-col gap-1">
       <Badge tone={tone}>{label}</Badge>
