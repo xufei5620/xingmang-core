@@ -355,7 +355,13 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 `MarkSourceEventBusy` 的文档注释从 866 行开始，中间隔着约 50 行未改动代码。
 `source_processor.go`：他们的分支止于 198 行，我第一处实质改动在 220 行，
 中间隔着 `sourceDependencyWait` 分支与 `deadEventAccountHint` 那一段约 20 行
-未改动代码。**三路合并大概率自动过。** 下面几条是万一要手动解冲突时的判据。
+未改动代码。
+
+**✅ 已实测：零冲突。** team-lead 2026-09-08 建了试合并工作树
+（`ai/claude/XM-INV-MERGE-TRIAL`，基线 `331777a`），按
+`XM-INV-SER-RETRY` → `XM-INV-READYZ-DETAIL` → `XM-INV-DEAD-REQUEUE` 依次合入，
+**三个全部干净**。所以**本节不是必读流程，而是万一要手动解冲突时的判据**——
+以及，更要紧的，是下面那条排序约束的唯一载体。
 
 ### 必须保留的，按重要性排序
 
@@ -391,14 +397,20 @@ INVOICE_TEST_DATABASE_URL=... go test ./internal/application/ \
 `if newStatus == SourceEventDead` 分支内**、且在 `tx.Commit` 之前。移出分支
 会让每次重试都写审计行——M13 变异复现过这个后果。
 
-### 他们的新分支必须排在我的日志之前
+### 他们的新分支必须排在我的日志之前（**目前天然满足，但没有东西守着它**）
 
 `inv-ser-retry` 新增的 40001 分支要放在 `logProjectionFailure`（219 行）
 **之上**，与现有 `ErrAccountLockBusy` 分支并列。
 
 - 若落在 `logProjectionFailure` **之后**：一个只是要改期重试的事件会先被写一条
-  `msg="source event projection failed"` 的 WARN，日志开始说谎。
+  `msg="source event projection failed"` 的 WARN——**这不是噪声，是记录与事实
+  不符**，而且它不会让任何测试变红，只会在半年后让某个查日志的人得出错误结论。
 - 若落在 `MarkSourceEventFailed` **之后**：那段分类直接成了死代码。
+
+**按试合并的实际结果，这一条今天已经满足**：SER-RETRY 的分类落在 183-198，
+在 219 之上，不需要任何人调整。**但它必须留在文档里**——将来有人重排这几个
+分支、或把那段分类挪个位置，**编译器不会拦他**；本片的测试也不会，它们都不
+经过 40001 这条路径（见下一小节）。这句话是目前唯一的护栏。
 
 ### 一个交互，不是冲突，别当成回归去「修」
 
