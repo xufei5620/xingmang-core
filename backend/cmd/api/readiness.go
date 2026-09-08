@@ -20,8 +20,10 @@ import (
 // The vocabulary is deliberately coarser than the set of conditions the
 // validators distinguish. Sub-conditions that actually occur in production
 // get their own name -- above all the two independent `Dead > 0` gates, which
-// live in different tables, need different repairs, and were previously
-// indistinguishable from each other and from the other nine checks. The
+// live in different tables and need different repairs. Telling those apart
+// was always possible, but only by reading this file and then counting rows
+// in both tables; nothing the endpoint or the log said distinguished them,
+// or distinguished either from the other nine checks. The
 // structural-consistency assertions (a malformed health report, a duplicated
 // stream) share a bucket: they mean the report itself is broken rather than a
 // dependency being down, and the exact text of those is in the log line

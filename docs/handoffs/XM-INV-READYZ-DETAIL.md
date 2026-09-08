@@ -41,13 +41,26 @@ team-lead）。
 - **`health.Dead > 0` 有两处，不是一处。**
   `validateSourceIngestRuntimeReadiness` 看的是 `source_ingest_events`，
   `eligibilityProjectionReady` 看的是 `eligibility_projection_jobs`。两者
-  报的话完全不同、修法完全不同，但对外都只是同一句 `NOT_READY`。
-  **连事后复盘都说不清是哪一个**——这正好是这一片存在的理由，所以我给了它们
-  各自的名字。加上 `validateSourceRuntimeReadiness` 里的
-  `DeadEvents != 0`，一共三处「dead」。
-- **eligibility 那条判死其实已经有记录了。** XM-INV-PROJECTION-FAILURE-GRADING
-  在 `consumption.go` 里写了 `eligibility.projection.dead` 审计事件。缺记录的
-  只有 `source_ingest_events` 这条路径，也就是 brief 说的那条。
+  报的话完全不同、修法完全不同，但对外都只是同一句 `NOT_READY`。加上
+  `validateSourceRuntimeReadiness` 里的 `DeadEvents != 0`，一共三处「dead」。
+
+  **这一条要说准确**（team-lead 2026-09-08 更正，我第一版写岔了）：事故当时
+  **是分清了**的——两张表都查了，`source_ingest_events` 的 dead 是 3、
+  `eligibility_projection_jobs` 的 dead 是 0，所以定位到前者。问题不在于
+  「没分清」，而在于**分清的代价**：只能靠逐道读源码、再挨个查库反推。
+  **系统本身从没向外说过任何能区分这三处的话**——端点没说，日志也没说（当时
+  连日志都没有，见下一条）。一个没读过这段代码的运维根本无从下手，而这正是
+  readyz 本该替人回答的问题。**准确的问题陈述比夸张的更有说服力**，所以这一
+  片的依据是「外部观察者无法区分」，不是「谁没分清」。
+- **`readyz` 把 err 整个丢掉，连日志都没有**——`if err := s.readiness(ctx);
+  err != nil` 之后 err 再没被用过。这比 brief 预设的更糟（原以为至少有记录）。
+  **按 team-lead 的排序，这一条排在最前面**：哪怕公网响应体一个字不改，只要
+  服务端日志记下是哪一道挂了，这次事故的定位时间就从几小时变成一分钟。
+- **eligibility 那条判死已经有记录了，source_ingest 那条没有。**
+  XM-INV-PROJECTION-FAILURE-GRADING 在 `consumption.go` 写了
+  `eligibility.projection.dead` 审计事件；`source_ingest_events` 这条没有对应
+  的。**这是本片第二件事最有力的依据：不是提议加一个新机制，而是同一件事在
+  仓库里早有做法，只是漏了一条路径。**
 
 ## 二、第一件：readyz 说出是哪一道
 
@@ -103,6 +116,13 @@ level=ERROR msg="readiness check failed" check=source_ingest_dead_events error="
    反例 `location = /metrics { return 404; }` 挡的是**指标**（数量、分布、
    时序），那是另一个量级的信息，不是一个子系统名。
 3. **风险是可界定的，且被结构性地限住了**（下一节）。
+
+team-lead 2026-09-08 给了同向的判据，一并记在这里：**稳定检查名本身不携带
+任何数据**——没有账号 id、没有连接串、没有计数；泄漏的只是「这套系统有这么
+一道检查」，而攻击者从代码里本来就能知道。**具体的数字和 id 一律不进响应体。**
+这一条在实现里是**结构性成立**的，不是靠自觉：`readinessSummaryPattern` 的
+字符集里根本没有数字，所以「dead 有 3 条」这种计数**拼都拼不出来**（M8 变异
+证明了塞一个 `db1` 进去就会被打红）。
 
 **残余风险，明说：** 攻击者轮询 `/readyz` 能知道当前哪个子系统坏了，也能枚举
 出这套系统里有 AV 扫描器和 PDF sidecar。我判断可接受，因为：暴露的是**子系统
@@ -189,36 +209,93 @@ clamav 和 pdf-scanner 坏掉，必须报 clamav，且断言 pdf-scanner **没�
 就已经算出来**的那个 grade。生产调用点只有一个（`source_processor.go`）。
 新增 `SourceEventFailed`/`SourceEventDead` 两个常量对齐 SQL 里的字面量。
 
-`RunOnce` 在 mark 之后按 grade 分流：终态那一次调新的 `logSourceEventDead`，
-**Error 级**。
+`RunOnce` 在 mark 之后按 grade 分流。终态那一次做**两件事**：
+
+1. **实时信号**——`logSourceEventDead`，**Error 级**。
+2. **持久记录**——`MarkSourceEventFailed` 在**同一个事务里**写一条
+   `source_ingest_event.dead` 审计事件。
 
 ```
 level=WARN  msg="source event projection failed" ...          ← 第 1..7 次，会自愈
 level=ERROR msg="source event marked dead" ... attempt=8 ...  ← 第 8 次，终态
 ```
 
-### 为什么是级别，不是别的
+### 为什么是级别
 
-brief 让我先看仓库已有的做法、优先复用。看下来：
+brief 的判据是「一个只按错误级别做巡检的人应该能发现它」，那就让它是 Error。
+这也是 `internal/application` 包里**唯一**一条 Error；整个 api 进程里 Error
+只用在启动被拒、进程停止、后台 worker 失败三处，所以这条不会被淹。
 
-- **没有指标设施。** `backend/go.mod` 只有 pgx、go-oidc、go-jose、oauth2，
-  没有 prometheus/otel；nginx 那边 `location = /metrics { return 404; }`。
-  新造一套指标通道，还得有人去订阅它，**在事故当天帮不上任何忙**。
-- **审计表能复用，但这里是冗余的。** `eligibility.projection.dead` 是现成的
-  先例，我认真考虑过照抄一个 `source.event.dead`。**最后没做**：
-  `source_ingest_events` 这一行本身就是持久证据（`processing_status`、
-  `processing_error`、`updated_at` 都在），而且 `MarkSourceEventFailed` 在能
-  关联到账号时已经会写一条 `EVENT_DEAD` 冻结。而 `writeAudit` 的 `after` 是
-  **哈希**存的（`stateHash`），细节本来也读不出来。**缺的从来不是记录，是
-  没人吭声。** 「优先复用别新造」这条，在这里的正确解读是别再加一层冗余。
-- **判据本身就是级别。** brief 说「一个只按错误级别做巡检的人应该能发现它」。
-  那就让它是 Error。这也是 `internal/application` 包里**唯一**一条 Error；
-  整个 api 进程里 Error 只用在启动被拒、进程停止、后台 worker 失败三处，所以
-  这条不会被淹。
+顺带排除掉的：**没有指标设施可复用**——`backend/go.mod` 只有 pgx、go-oidc、
+go-jose、oauth2，没有 prometheus/otel，nginx 那边
+`location = /metrics { return 404; }`。新造一套指标通道还得有人去订阅它，
+**在事故当天帮不上任何忙**。
 
 日志字段：`source_instance_id`、`stream_id`、`event_id`、`entity_type`、
 `attempt`、`error`。**沿用 `logProjectionFailure` 的规矩：只有 id 和错误，
 绝不含 payload**（有测试专门断言 payload 明文不出现）。
+
+### 审计事件：我第一版判断错了，已按 team-lead 的意见改回来
+
+**第一版我没写审计行**，理由是「`source_ingest_events` 那一行本身就是持久
+证据，再写一条是冗余；缺的不是记录而是没人吭声」。**这个判断是错的**，
+team-lead 2026-09-08 指出了更强的依据，我接受并已实现：
+
+> 「不是我提议加一个新机制，而是同一件事在仓库里已经有做法，只是漏了一条
+> 路径……这样评审的人只需要判断『一致』，不需要判断『合不合理』。」
+
+这条比我原来的推理有力。我当时把问题看成「要不要加一层记录」（于是去权衡
+冗余），实际的问题是「同一个不可逆状态转换，仓库里已经有一半在写审计行，
+另一半没写」——**那是缺口，不是设计选择**。而且两者答的问题本来就不同：
+日志是几秒内被巡检抓到的实时信号，审计行是三周后容器日志早已滚掉时还在的
+那条记录。
+
+**形状严格照抄，没有另设计。** 参考了两个现成先例：
+
+| 来源 | 抄了什么 |
+| --- | --- |
+| `source_ingest_event.repair_requeued`（`eligibility_repair.go`，同一张表已有的审计事件） | action 前缀、`object_type="source_ingest_event"`、`object_id=event_id`、payload 里带 `source_instance_id`/`stream_id` 的习惯 |
+| `eligibility.projection.dead`（`consumption.go`，同一类判死） | 判级字段 `attempts` / 错误 / `threshold`，以及**写在应用 grade 的同一个事务里** |
+
+**事件名是 `source_ingest_event.dead`，不是我原先设想的 `source.event.dead`**
+——仓库里这张表的既有前缀就是 `source_ingest_event.`，照它来。
+
+```go
+writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanceID,
+    Reason: "source event reached the terminal dead grade"},
+    "source_ingest_event.dead", "source_ingest_event", claim.EventID, nil,
+    map[string]any{"source_instance_id": ..., "stream_id": ..., "entity_type": ...,
+        "attempts": attemptCount, "processing_error": errorCode,
+        "threshold": sourceEventDeadThreshold})
+```
+
+**无条件写**，这是它补的缺口所在：同一函数里那条 `EVENT_DEAD` 冻结是**有条件**
+的（只在能把事件关联到账号时才写，关联不上就什么都不留——那段代码自己的注释
+就承认这是结构性缺口）。审计行不带这个条件，判死就有记录。
+
+**注意**：`writeAudit` 把 `after` 过 `stateHash` 哈希后存，所以 payload 里
+那些字段读不回来，能直接读的是 action / object_id / actor / reason /
+`created_at`。`eligibility.projection.dead` 也是同样情况——**保持一致**优先于
+让它更好读；要改就两条一起改，那是另一片的事。
+
+**无迁移。** `audit_events` 的 `object_type`/`object_id` 是自由文本、无 CHECK
+约束，`invoice_app` 对该表的 INSERT 权限早就有（`writeAudit` 遍布全仓）。
+**没有新建表，所以不涉及 compose permissions 作业的重放。**
+
+### 顺带收掉的一个魔数
+
+`8` 原本在两条查询里各写一遍：`MarkSourceEventFailed` 的
+`attempt_count>=8`（判级）和 `ClaimUnprocessedSourceEvents` 的
+`attempt_count < 8`（认领谓词）。**这两个必须严格相等**——认领谓词小于判级
+阈值，事件会在能被判死之前就不再被认领（**readyz 反而对着一个永久卡住的事件
+保持绿色**，正好是这一片要修的 bug 的反面）；大于则会反复认领已经死掉的行。
+现在两处读同一个 `sourceEventDeadThreshold`，且都以**查询参数**绑定（不是字符
+串拼接）。它同时是审计事件的 `threshold` 字段，对应
+`projectionFailureDeadThreshold` 在 eligibility 那边的角色，取值也刻意相同。
+
+`TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate` 不去断言
+这个常量，而是**真跑满 8 次 RunOnce**、逐次核对状态，再验证第 9 次认领不到
+——因为要测的正是这两条查询是否同步。
 
 ## 四、我动了 `source_processor.go` 的哪几行
 
@@ -228,8 +305,8 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 | 行 | 改了什么 |
 | --- | --- |
 | 50-54 | 给已有的 `logProjectionFailure` 文档注释加一段（说明它仍然在 mark 之前写、仍然不知道 grade）。**纯注释，函数体没动。** |
-| 64-97 | 新增 `logSourceEventDead`（64-88 注释，89-97 函数）。**纯新增，不改任何已有函数。** |
-| 221-231 | `RunOnce` 里唯一的实质改动：把 `MarkSourceEventFailed` 的返回接成 `grade, err`，然后 `if grade == postgresstore.SourceEventDead { logSourceEventDead(...) }`。 |
+| 64-96 | 新增 `logSourceEventDead`（64-87 注释，88-96 函数）。**纯新增，不改任何已有函数。** |
+| 220-230 | `RunOnce` 里唯一的实质改动：把 `MarkSourceEventFailed` 的返回接成 `grade, err`，然后 `if grade == postgresstore.SourceEventDead { logSourceEventDead(...) }`。 |
 
 第 221-231 那一段在 `logProjectionFailure(p.logger(), claim, processErr)` 之后
 ——**在 `errors.Is(processErr, domain.ErrAccountLockBusy)` 和
@@ -238,7 +315,8 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 「那个 `if grade == ...` 三行」。
 
 同时改了 `postgresstore/source_sync.go`（`MarkSourceEventFailed` 的签名与
-`return`，加两个常量），这个文件 brief 没提到有别人在动。
+`return`、审计事件、三个常量、两条查询改用参数绑定阈值），这个文件 brief
+没提到有别人在动。
 
 ## 五、变异验证（全部「改条件／改常量」，无一处删代码）
 
@@ -258,6 +336,11 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 | M10 | `readinessCheckNamePattern` 放宽成 `^.{1,500}$` | `.../check_name_carrying_a_host` | dsn 用例、未分类、happy path | ✅ 目标红、对照绿 |
 | M11 | `readinessCheckNamePattern` 放宽成 `^.{0,500}$`（接受空串） | `.../empty_check_name` | —— | ✅ 红 |
 | M12 | 判死日志里 `claim.Attempt` 改成 `claim.Attempt+1` | 判死接线集成测试（`attempt=8` 对账断言） | —— | ✅ 红在 `attempt=9` |
+| M13 | 审计写入**移出** `if newStatus == SourceEventDead` 分支（变成无条件写） | 「重试不写审计行」+「8 次后恰好 1 行」 | 冻结兄弟用例、级别单测 | ✅ 全对 |
+| M14 | 审计 action 改名 `.dead` → `.died` | 同上两条 | 冻结兄弟用例 | ✅ 全对 |
+| M15 | 审计 `Reason` 文案改成别的话 | 逐字 reason 断言 | 阈值耦合用例、冻结兄弟用例 | ✅ 全对 |
+| M16 | 认领谓词与判级阈值解耦（传 `sourceEventDeadThreshold-1`） | 阈值耦合用例（第 8 次认领不到） | 级别单测、readyz 逐道表 | ✅ 全对 |
+| M17 | 审计 `object_type` 改成 `ingest_event`（偏离 repair_requeued 先例） | object_type 断言 | 阈值耦合用例 | ✅ 全对 |
 
 **两次头一版变异给的是假信号，重做了，记在这里免得后人踩：**
 
@@ -285,7 +368,9 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 - 重试期不出现 Error 级日志、不出现「marked dead」 → M6、M7 打红。
 - 日志不刷屏（30 次探测只 1 行） → M5 打红。
 - 后一道检查没被跑到 → M2 打红。
-- 日志不含 payload 明文 → **未做变异验证**，见「风险」第 3 条。
+- 重试不写 `source_ingest_event.dead` 审计行 → M13 打红。
+- 死掉的事件不再被认领（第 9 次 `processed=0`） → M16 打红。
+- 日志不含 payload 明文 → **未做变异验证**，见「风险」第 4 条。
 
 ## 六、门禁
 
@@ -329,7 +414,8 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 - `backend/internal/application/source_processor_dead_log_test.go` —— 级别可
   区分性（单测）。
 - `backend/internal/application/source_processor_dead_log_integration_test.go`
-  —— 接线证明（真库，第 1 次 vs 第 8 次）。
+  —— 接线证明（真库，第 1 次 vs 第 8 次）、审计行断言（含重试期的缺席断言）、
+  阈值耦合用例（真跑满 8 次 + 第 9 次认领不到）。
 
 改动：
 
@@ -337,10 +423,12 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 - `backend/internal/httpapi/server.go` —— handler 改调 `writeNotReady`，
   Server 加 `readinessLog` 字段，新增 `writeNotReady`。
 - `backend/internal/postgresstore/source_sync.go` —— `MarkSourceEventFailed`
-  返回 grade，两个新常量。
+  返回 grade 并写 `source_ingest_event.dead` 审计事件；新增
+  `SourceEventFailed`/`SourceEventDead`/`sourceEventDeadThreshold` 三个常量；
+  判级与认领两条查询改为参数绑定该阈值。
 - `backend/internal/application/source_processor.go` —— 见第四节。
 - `docs/PRODUCTION-RUNBOOK.md` —— 新增「Reading a 503 from `/readyz`」一节
-  （对照表 + 两条 `docker logs` 命令）。
+  （对照表 + `docker logs` 与审计表查询命令）。
 
 ## 九、风险 / 需要你签字的地方
 
@@ -348,13 +436,19 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
    请你自己过一遍那个残余风险再签。回退成本极小，做法写在那一节里。
 2. **`MarkSourceEventFailed` 改了签名。** 生产调用点只有一个，但如果有别的
    worktree 正在加新的调用点，合并时会编译不过（这是好事——不会静默出错）。
-3. **「日志不含 payload 明文」这条断言我没做变异验证。** 它沿用的是
+3. **判死路径上多了一次 `audit_events` INSERT，且在同一个事务里。** 它失败会
+   让整笔回滚，事件停在 `processing` 直到租约（10 分钟）到期后被重新认领——
+   与该函数里 `freezeEligibilityTx` 已有的失败语义**一致**，不是新的失败模式。
+   量级也不必担心：只在第 8 次、即事件终结那一次写，不是每次重试都写。
+4. **「日志不含 payload 明文」这条断言我没做变异验证。** 它沿用的是
    XM-INV-OBS-BUNDLE 已有的写法，而要变异它就得真的往日志里塞明文密文，
    我不愿意在测试代码里写这种东西。断言本身是有效的（`logSourceEventDead`
    压根不接触 `PayloadCiphertext`），但它属于「结构上不可能」而非「被证明会
    变红」，如实标出来。
-4. 无浮点金额、无新的密钥/密文落盘或落日志、无 `contracts/` 改动、无 admin
-   OIDC 改动、无迁移、未碰任何发布身份文件、未打 tag、未碰
+5. 无浮点金额、无新的密钥/密文落盘或落日志、无 `contracts/` 改动、无 admin
+   OIDC 改动、**无迁移**（审计事件复用既有 `audit_events` 表，`object_type`
+   无 CHECK 约束、`invoice_app` 的 INSERT 权限早已存在，**因此不涉及 compose
+   permissions 作业的重放**）、未碰任何发布身份文件、未打 tag、未碰
    `backend/Dockerfile`、未碰 `K:/星芒统一控制平台/` 与其他 worktree ——逐条
    确认过。
 
@@ -370,3 +464,7 @@ brief 让我先看仓库已有的做法、优先复用。看下来：
 3. 若将来真的接了指标通道，`readiness check failed` 和
    `source event marked dead` 这两条是天然的计数点；本片没有为此预留任何
    东西，也不建议现在预留。
+4. `writeAudit` 把 `after` 哈希后存，所以 `source_ingest_event.dead` 和
+   `eligibility.projection.dead` 的 `attempts`/`threshold` 等字段都读不回来。
+   这一片**刻意保持了与既有先例一致**而没有单独优化。若哪天要让审计负载可读，
+   那是横跨全表的一次改动，两条一起改。

@@ -77,12 +77,11 @@ func logProjectionFailure(logger *slog.Logger, claim postgresstore.SourceEventCl
 // first, and this backend has no metrics facility at all (its only
 // dependencies are pgx, go-oidc, go-jose and oauth2).
 //
-// No durable record is written here on purpose. The dead row is already its
-// own durable evidence -- source_ingest_events keeps processing_status,
-// processing_error and updated_at, and MarkSourceEventFailed additionally
-// raises an EVENT_DEAD eligibility freeze whenever the event can be
-// correlated to an account. What was missing was never the record; it was
-// that nothing announced it.
+// This line is the live signal; the durable record is the
+// source_ingest_event.dead audit event MarkSourceEventFailed writes in the
+// same transaction as the grade itself. Neither replaces the other: the log
+// is what an error-level watch trips on within seconds, and the audit row is
+// what is still there weeks later, after the container's logs have rotated.
 //
 // Carries ids and the error only, never payload contents, matching
 // logProjectionFailure's rule.

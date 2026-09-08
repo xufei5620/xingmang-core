@@ -66,6 +66,19 @@ const (
 	SourceEventDead   = "dead"
 )
 
+// sourceEventDeadThreshold is the consecutive-attempt count at which an event
+// becomes terminally dead. It was the bare literal 8 in two separate queries:
+// MarkSourceEventFailed's `attempt_count>=8` grade and
+// ClaimUnprocessedSourceEvents' `attempt_count < 8` claim predicate. Those two
+// have to agree exactly -- a claim predicate below the grade would stop
+// re-claiming an event before it could ever be graded dead, and one above it
+// would keep re-claiming rows already marked dead -- so they now read the same
+// constant, bound as a query parameter (XM-INV-READYZ-DETAIL). It is also the
+// `threshold` field of the source_ingest_event.dead audit event, mirroring
+// projectionFailureDeadThreshold's role in eligibility.projection.dead, whose
+// value this deliberately matches.
+const sourceEventDeadThreshold = 8
+
 type SourceIngestHealth struct {
 	Pending       int64
 	Dead          int64
@@ -588,12 +601,12 @@ func (s *Store) ClaimUnprocessedSourceEvents(ctx context.Context, limit int, now
 		JOIN source_ingest_batches sib ON sib.source_instance_id=sie.source_instance_id
 			AND sib.stream_id=sie.stream_id AND sib.batch_id=sie.first_batch_id
 		WHERE (
-			(sie.processing_status IN ('queued','failed') AND sie.attempt_count < 8 AND sie.next_attempt_at <= $1)
+			(sie.processing_status IN ('queued','failed') AND sie.attempt_count < $3 AND sie.next_attempt_at <= $1)
 			OR (sie.processing_status='waiting_dependency' AND sie.next_attempt_at <= $1)
 			OR (sie.processing_status='processing' AND sie.lease_expires_at <= $1)
 		)
 		ORDER BY sie.next_attempt_at,sie.created_at,sie.event_id
-		FOR UPDATE OF sie SKIP LOCKED LIMIT $2`, now, limit)
+		FOR UPDATE OF sie SKIP LOCKED LIMIT $2`, now, limit, sourceEventDeadThreshold)
 	if err != nil {
 		return nil, err
 	}
@@ -698,14 +711,16 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
 	var newStatus string
+	var attemptCount int
 	err = tx.QueryRow(ctx, `
 		UPDATE source_ingest_events SET
-			processing_status=CASE WHEN attempt_count>=8 THEN 'dead' ELSE 'failed' END,
+			processing_status=CASE WHEN attempt_count>=$7 THEN 'dead' ELSE 'failed' END,
 			processing_error=$1,next_attempt_at=$2,lease_token=NULL,lease_expires_at=NULL,updated_at=now()
 		WHERE source_instance_id=$3 AND stream_id=$4 AND event_id=$5
 			AND processing_status='processing' AND lease_token=$6
-		RETURNING processing_status`, errorCode, next,
-		claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken).Scan(&newStatus)
+		RETURNING processing_status,attempt_count`, errorCode, next,
+		claim.SourceInstanceID, claim.StreamID, claim.EventID, claim.LeaseToken,
+		sourceEventDeadThreshold).Scan(&newStatus, &attemptCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.ErrConflict
 	}
@@ -713,6 +728,26 @@ func (s *Store) MarkSourceEventFailed(ctx context.Context, claim SourceEventClai
 		return "", err
 	}
 	if newStatus == SourceEventDead {
+		// XM-INV-READYZ-DETAIL: the same durable record eligibility's own
+		// terminal grade already writes (eligibility.projection.dead, in
+		// markEligibilityProjectionJobFailedOrDead), for the one dead path
+		// that never had it. Shaped after this table's existing audit event
+		// source_ingest_event.repair_requeued (eligibility_repair.go) --
+		// same action prefix, same object_type/object_id, same habit of
+		// carrying source_instance_id and stream_id in the payload -- and
+		// after eligibility.projection.dead for the grading fields
+		// (attempts, the error, the threshold). Written inside this
+		// transaction, so it commits with the row it describes or not at
+		// all; the freeze below is conditional on correlation succeeding,
+		// but this is not, which is the gap it closes.
+		if err = writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanceID,
+			Reason: "source event reached the terminal dead grade"},
+			"source_ingest_event.dead", "source_ingest_event", claim.EventID, nil,
+			map[string]any{"source_instance_id": claim.SourceInstanceID, "stream_id": claim.StreamID,
+				"entity_type": claim.EntityType, "attempts": attemptCount,
+				"processing_error": errorCode, "threshold": sourceEventDeadThreshold}); err != nil {
+			return "", err
+		}
 		// XM-INV-POLICY-ANCHOR 2.5: a dead event with no freeze yet would
 		// otherwise hold its scan cycle open indefinitely (see the freeze
 		// correlation in tryPublishEconomicScanCyclesTx). There is no

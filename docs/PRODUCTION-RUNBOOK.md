@@ -2053,6 +2053,23 @@ The retry attempts before it stay at `level=WARN`
 (`msg="source event projection failed"`); only the eighth and final one, which
 is irreversible without operator repair, is an error.
 
+Container logs rotate, so the same transition also writes a durable
+`source_ingest_event.dead` audit event, the ingest-path counterpart of
+`eligibility.projection.dead`. Use it when the question is "what died, and
+when", days or weeks later:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT created_at,object_id,actor_id,reason FROM audit_events
+      WHERE action='source_ingest_event.dead' ORDER BY created_at DESC LIMIT 50"
+```
+
+`object_id` is the `source_ingest_events.event_id`. Unlike the `EVENT_DEAD`
+eligibility freeze raised alongside it, this row is written unconditionally:
+the freeze only appears when the event can be correlated to an account, so
+freezes are not a reliable census of dead events and this is.
+
 **Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
 A per-account error from the eligibility-projection worker no longer trips
 `/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
