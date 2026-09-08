@@ -34,6 +34,16 @@
 //     per-account processing errors) back to status='queued'/attempts=0 so
 //     the worker retries it. Optional --account narrows to one external
 //     account id. See docs/handoffs/XM-INV-PROJECTION-FAILURE-GRADING.md.
+//   - --kind=ingest-requeue-dead: XM-INV-DEAD-REQUEUE -- the same operation
+//     one layer down, on source_ingest_events: resets every row
+//     MarkSourceEventFailed escalated to processing_status='dead' (after 8
+//     consecutive attempts) back to 'queued'/attempt_count=0 so the source
+//     processor claims it again. Deliberately never touches
+//     eligibility_freezes or source_economic_scan_cycles -- it reports both
+//     instead. Optional --event narrows to exactly one ingest event id (the
+//     exact, recommended form for a reviewed set of rows); optional
+//     --account narrows via the event's own open freezes. See
+//     docs/handoffs/XM-INV-DEAD-REQUEUE.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -69,6 +79,7 @@ const (
 	kindQueueNarrow           = "queue-narrow"
 	kindPolicyStartReanchor   = "policy-start-reanchor"
 	kindProjectionRequeueDead = "projection-requeue-dead"
+	kindIngestRequeueDead     = "ingest-requeue-dead"
 
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
@@ -84,8 +95,9 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), or projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING)")
-	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead only; empty means every dead job)")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING), or ingest-requeue-dead (XM-INV-DEAD-REQUEUE)")
+	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead and ingest-requeue-dead only; empty means every dead row)")
+	eventID := flag.String("event", "", "optional source_ingest_events event id filter (ingest-requeue-dead only; empty means every dead ingest event)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -100,17 +112,26 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, *accountID, os.Stdout); err != nil {
+	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, *accountID, *eventID, os.Stdout); err != nil {
 		slog.Error("eligibility-repair failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind, accountID string, out io.Writer) error {
+func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind, accountID, eventID string, out io.Writer) error {
 	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow &&
-		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead {
-		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor,
-			kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead)
+		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
+		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor,
+			kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead, kindIngestRequeueDead)
+	}
+	// A narrowing flag that the chosen --kind ignores is rejected rather than
+	// silently dropped: an operator who meant to touch three named rows and
+	// mistyped --kind must not instead run unnarrowed across every dead row.
+	if eventID != "" && kind != kindIngestRequeueDead {
+		return fmt.Errorf("--event is only valid with --kind=%s", kindIngestRequeueDead)
+	}
+	if accountID != "" && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
+		return fmt.Errorf("--account is only valid with --kind=%s or --kind=%s", kindProjectionRequeueDead, kindIngestRequeueDead)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -150,6 +171,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindProjectionRequeueDead {
 		return runProjectionRequeueDead(ctx, store, apply, operatorID, accountID, out)
+	}
+	if kind == kindIngestRequeueDead {
+		return runIngestRequeueDead(ctx, store, apply, operatorID, accountID, eventID, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -250,6 +274,24 @@ func runProjectionRequeueDead(ctx context.Context, store *postgresstore.Store, a
 		return fmt.Errorf("repair projection requeue dead: %w", err)
 	}
 	printProjectionRequeueDeadSummary(out, result)
+	return nil
+}
+
+func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID, accountID, eventID string, out io.Writer) error {
+	// Like projection-requeue-dead, this repair resolves no freeze, so there
+	// is no encrypted resolution note or evidence to prepare here. Unlike it,
+	// that is not merely "nothing to resolve": see
+	// postgresstore.IngestRequeueDeadRepairInput's doc comment for why
+	// leaving eligibility_freezes standing is what keeps the failure mode of
+	// a second death no worse than today's.
+	in := postgresstore.IngestRequeueDeadRepairInput{Apply: apply, OperatorID: operatorID,
+		AccountID: accountID, EventID: eventID}
+	result, err := store.RepairIngestRequeueDead(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-DEAD-REQUEUE repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair ingest requeue dead: %w", err)
+	}
+	printIngestRequeueDeadSummary(out, result)
 	return nil
 }
 
@@ -415,6 +457,62 @@ func printProjectionRequeueDeadSummary(out io.Writer, result postgresstore.Proje
 			fmt.Fprintf(out, "%-38s %s\n", accountErr.ExternalAccountID, accountErr.Message)
 		}
 	}
+}
+
+func printIngestRequeueDeadSummary(out io.Writer, result postgresstore.IngestRequeueDeadRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-DEAD-REQUEUE: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %-10s %-18s %8s %21s %8s\n", "EVENT", "STREAM", "ENTITY", "ATTEMPTS", "DEAD_SINCE", "REQUEUED")
+	for _, event := range result.Events {
+		fmt.Fprintf(out, "%-38s %-10s %-18s %8d %21s %8t\n", event.EventID, event.StreamID,
+			event.EntityType, event.PreviousAttempts, formatRepairTime(event.DeadSince), event.Requeued)
+		fmt.Fprintf(out, "  source=%s operation=%s created_at=%s catchup_key=%t\n",
+			event.SourceInstanceID, event.Operation, formatRepairTime(event.CreatedAt), event.HasCatchupKey)
+		fmt.Fprintf(out, "  payload_hash=%s\n", event.PayloadHash)
+		if event.ProcessingError != "" {
+			fmt.Fprintf(out, "  processing_error: %s\n", event.ProcessingError)
+		}
+		// Scan cycles and freezes are reported, never modified. 'published'
+		// is a no-op for cycle publication (a published cycle is never
+		// re-evaluated), 'processing' means this requeue holds that cycle
+		// open until the event terminates again, and 'blocked' means
+		// verifyFactBatchContextTx will reject the fact so the requeued
+		// event spends its whole ladder and dies again. Read this before
+		// applying.
+		for _, cycle := range event.ScanCycles {
+			fmt.Fprintf(out, "  scan_cycle: %s cycle_status=%s\n", cycle.ScanCycleID, cycle.CycleStatus)
+		}
+		if len(event.ScanCycles) == 0 {
+			fmt.Fprintf(out, "  scan_cycle: (none -- not mapped to a schema v3 economic cycle)\n")
+		}
+		for _, freeze := range event.OpenFreezes {
+			fmt.Fprintf(out, "  open_freeze: %s account=%s reason=%s (left open on purpose)\n",
+				freeze.FreezeID, freeze.ExternalAccountID, freeze.FreezeReason)
+		}
+		if len(event.OpenFreezes) == 0 {
+			fmt.Fprintf(out, "  open_freeze: (none correlated to this payload hash)\n")
+		}
+	}
+	fmt.Fprintf(out, "\ntotal requeued: %d\n", result.TotalRequeued)
+	fmt.Fprintf(out, "events affected: %d\n", len(result.Events))
+	if len(result.Errors) > 0 {
+		fmt.Fprintf(out, "\nEVENT ERRORS (not applied, other events still processed):\n")
+		for _, eventErr := range result.Errors {
+			fmt.Fprintf(out, "%-60s %s\n", eventErr.EventKey, eventErr.Message)
+		}
+	}
+}
+
+// formatRepairTime renders a timestamp for the summary table above, leaving
+// a zero time blank rather than printing a year-1 placeholder.
+func formatRepairTime(at time.Time) string {
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format(time.RFC3339)
 }
 
 func readOneLineSecret(path string) (string, error) {

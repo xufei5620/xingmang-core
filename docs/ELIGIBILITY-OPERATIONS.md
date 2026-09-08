@@ -511,3 +511,86 @@ Before requeuing a dead job, check `last_error`/`last_error_code` in the
 dry-run report -- requeuing an account whose underlying data problem was
 never actually fixed just spends another 8 attempts (roughly 63 minutes of
 backoff) before it goes dead again.
+
+## Dead source ingest events (XM-INV-DEAD-REQUEUE, 2026-09-08)
+
+`source_ingest_events` has the same dead-letter grade one layer further up:
+`MarkSourceEventFailed` marks a row `processing_status='dead'` on its eighth
+consecutive attempt, `SourceIngestHealth.Dead>0` fails `/readyz`, and (when
+the account can be correlated) `MarkSourceEventFailed` also opens an
+`EVENT_DEAD` freeze so the account stops being invoiceable while one of its
+facts is missing.
+
+A dead ingest row still carries its original encrypted payload, so the fact
+it was carrying is recoverable -- but only by putting the row back on the
+queue, which nothing does automatically. `ClaimUnprocessedSourceEvents`
+filters `attempt_count < 8`, so a dead row is invisible to the worker for
+good.
+
+**`invoice-eligibility-repair --kind=ingest-requeue-dead`** lists every dead
+ingest row (optionally narrowed with `--event`, or with `--account`) with its
+attempt count, error, when it was created and how long it has been dead, the
+economic scan cycles it belongs to *and their current status*, and the open
+freezes correlated to its payload hash. Apply resets
+`processing_status='queued'`, `attempt_count=0`, `next_attempt_at=now()`,
+clears the lease and the stale `processing_error`, and writes one
+`source_ingest_event.repair_requeued` audit event per row. One transaction
+per event, so one row's conflict never blocks another row in the same run.
+
+It deliberately changes nothing else:
+
+- **Freezes are left open.** The freeze is what lets
+  `tryPublishEconomicScanCyclesTx` treat a dead event as complete; resolving
+  it here would leave a dead-again event with no freeze, which holds its scan
+  cycle open and, through `source_economic_one_active_scan_cycle`, wedges the
+  stream. Resolve the freeze afterwards through the normal admin path, which
+  refuses to run until the account has no projection job left and its latest
+  finalized balance evidence evaluates `matched` -- that gate is exactly what
+  makes "requeue first, resolve second" the only valid order.
+- **Scan cycles are left alone.** An already-`published` cycle is never
+  re-evaluated, and `verifyFactBatchContextTx` still accepts a fact whose
+  cycle has published, so the fact lands as a late fact and reprojects. A
+  cycle still in `processing` *does* go back to incomplete until the requeued
+  event terminates -- read the `cycle_status` line in the dry-run report
+  before applying. A `blocked` cycle means the fact will be rejected and the
+  event will simply die again.
+- **`created_at` is left alone.** Readiness ages a pending event from
+  `created_at`, so a long-dead row requeued here is immediately "old":
+  `/readyz` stays 503 with a *different* reason (`source ingestion processing
+  is unhealthy` instead of `contains dead events`) until the event actually
+  reaches `processed`. That is accurate, not a regression.
+
+```
+# dry run (default) -- reports what would change, writes nothing
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-requeue-dead
+
+# apply one specific, individually reviewed event
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-requeue-dead --event=<ingest-event-uuid> \
+  --apply --operator-id=<admin-uuid>
+
+# narrow to one account (correlated through that account's open freezes)
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-requeue-dead --account=<external-account-uuid> \
+  --apply --operator-id=<admin-uuid>
+```
+
+`--account` correlates through open `eligibility_freezes` rows whose
+`source_revision_hash` equals the event's `payload_hash` -- the only account
+attribution the ingest layer has, since the payload is ciphertext. A dead
+event whose account was never frozen is invisible to `--account`; run
+unnarrowed, or use `--event`, to reach it.
+
+As with `projection-requeue-dead`: read the reported `processing_error`
+first. If the underlying cause is not fixed, the row spends eight fresh
+attempts (five minutes apart, so roughly 35 minutes) and goes dead again --
+reusing the same still-open freeze rather than opening a second one, so the
+system lands back exactly where it started. Re-running the tool later is
+safe and idempotent.
