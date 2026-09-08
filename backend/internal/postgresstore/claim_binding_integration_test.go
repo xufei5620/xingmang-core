@@ -186,6 +186,142 @@ func TestClaimBindingTakesTheNewestOfSeveralValidBindings(t *testing.T) {
 	}
 }
 
+// TestClaimBindingRejectsRedeliveriesBeyondTheClockSkewTolerance is
+// XM-INV-BINDING-SKEW T2, on the credits stream because that is where the
+// shape occurs naturally: the agent rescans credits every minute
+// (agents/sourceagent/economics_db.go), so a parked event accumulates one
+// binding per cycle and, after half an hour, most of them are older than its
+// own frozen observation by more than the clock can explain.
+//
+// The event is observed once, at t0, and re-delivered into five successive
+// published cycles whose ceilings run t0, t0+3m, t0+10m, t0+20m, t0+30m.
+// source_ingest_events.observed_at is written at first delivery and never
+// rewritten (CommitSourceBatch takes the priorHash branch on a re-delivery),
+// so every one of those ceilings is compared against t0. The right answer is
+// the newest binding that is BOTH status-valid and time-valid: cycle 2.
+//
+// Note what the assertion is not. "Still picks the first batch" would have
+// been green under the most likely regression of all -- deleting arm 1 and
+// reverting to first_batch_id -- because first_batch_id *is* the first batch.
+// Requiring cycle 2 makes this test red under both "delete the time
+// predicate" (it would pick cycle 5) and "delete arm 1" (it would pick
+// cycle 1).
+func TestClaimBindingRejectsRedeliveriesBeyondTheClockSkewTolerance(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "credits")
+	const eventID = "88000000-0000-4000-8000-0000000000c0"
+	ladder := []struct {
+		cycleID string
+		offset  time.Duration
+		// inTolerance records, for this test's own reading, which side of
+		// factClockSkewTolerance the cycle's ceiling falls on. Every offset is
+		// at least two minutes clear of the boundary so a fixture built from
+		// several time.Now() readings cannot drift across it.
+		inTolerance bool
+	}{
+		{"89000000-0000-4000-8000-0000000000c1", 0, true},
+		{"89000000-0000-4000-8000-0000000000c2", 3 * time.Minute, true},
+		{"89000000-0000-4000-8000-0000000000c3", 10 * time.Minute, false},
+		{"89000000-0000-4000-8000-0000000000c4", 20 * time.Minute, false},
+		{"89000000-0000-4000-8000-0000000000c5", 30 * time.Minute, false},
+	}
+	observed := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Microsecond)
+	event := newDeadIngestEvent(eventID, "credit_event")
+	event.ObservedAt = observed
+
+	batchIDs := make([]string, len(ladder))
+	for i, step := range ladder {
+		fixture.chain.commit(t, fixture.store, fixture.ctx, fixture.sourceID, "credits",
+			step.cycleID, observed.Add(step.offset), []SourceBatchEvent{event})
+		batchIDs[i] = fixture.batchIDForSequence(t, "credits", int64(i+1))
+		if i == 0 {
+			// Between retries, with the account already frozen over it: the
+			// state a real parked-then-failed event sits in, and the state
+			// that lets each later cycle count this one as complete and
+			// publish (consumption.go's completeness filter). Without the
+			// freeze the first cycle never leaves 'processing' and
+			// source_economic_one_active_scan_cycle rejects the second.
+			fixture.reviveForClaim(t, "credits", eventID, 3)
+			fixture.freezeOverEvent(t, eventID, "credit_event")
+			fixture.publishCycle(t, "credits")
+		}
+	}
+	for i, step := range ladder {
+		if status := fixture.cycleStatus(t, "credits", step.cycleID); status != "published" {
+			t.Fatalf("cycle %d (%s) status=%q, want published; the claim would be choosing among fewer "+
+				"candidates than this test believes", i+1, step.cycleID, status)
+		}
+	}
+	var frozenObservedAt time.Time
+	if err := fixture.store.pool.QueryRow(fixture.ctx, `SELECT observed_at FROM source_ingest_events
+		WHERE source_instance_id=$1 AND stream_id='credits' AND event_id=$2`,
+		fixture.sourceID, eventID).Scan(&frozenObservedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !frozenObservedAt.Equal(observed) {
+		t.Fatalf("observed_at=%s after five re-deliveries, want the first delivery's %s; this test is about a "+
+			"frozen observation and the fixture no longer has one", frozenObservedAt, observed)
+	}
+
+	claim := fixture.claimFor(t, eventID)
+	if claim.BatchID != batchIDs[1] || claim.ScanCycleID != ladder[1].cycleID || claim.BatchSequence != 2 {
+		switch claim.BatchID {
+		case batchIDs[0]:
+			t.Fatalf("claim fell back to the first batch %s; arm 1 selected nothing at all, so a re-delivery "+
+				"inside the tolerance is no longer usable", claim.BatchID)
+		case batchIDs[4]:
+			t.Fatalf("claim took batch %s, whose ceiling is 30 minutes past the event's own observed_at; "+
+				"validateFactMetadata would refuse every attempt against it", claim.BatchID)
+		default:
+			t.Fatalf("claim.BatchID=%s cycle=%s sequence=%d, want batch %s / cycle %s / sequence 2",
+				claim.BatchID, claim.ScanCycleID, claim.BatchSequence, batchIDs[1], ladder[1].cycleID)
+		}
+	}
+	if !claim.ObservedAt.Equal(observed) {
+		t.Fatalf("claim.ObservedAt=%s, want the frozen first observation %s", claim.ObservedAt, observed)
+	}
+	if want := observed.Add(ladder[1].offset); !claim.ScanCeilingAt.Equal(want) {
+		t.Fatalf("claim.ScanCeilingAt=%s, want cycle 2's ceiling %s", claim.ScanCeilingAt, want)
+	}
+
+	// The chosen binding is one the fact validator will actually carry, and
+	// every excluded one is one it would have refused -- checked through
+	// validateFactMetadata itself rather than by re-deriving the arithmetic.
+	factMetadata := func(ceiling time.Time) error {
+		return validateFactMetadata(fixture.sourceID, "dead-requeue", eventID, claim.PayloadHash,
+			"credits:1", testHash("dead-requeue-manifest"), testHash("dead-requeue-config"),
+			"SUB2_BALANCE_1E8", observed.Add(-time.Hour), claim.ObservedAt, ceiling, claim.BatchSequence)
+	}
+	for i, step := range ladder {
+		err := factMetadata(observed.Add(step.offset))
+		if step.inTolerance && err != nil {
+			t.Fatalf("validateFactMetadata refused cycle %d's ceiling (+%s): %v", i+1, step.offset, err)
+		}
+		if !step.inTolerance {
+			if err == nil {
+				t.Fatalf("validateFactMetadata accepted cycle %d's ceiling (+%s); the ladder does not straddle "+
+					"the tolerance and the selection assertion above proves nothing", i+1, step.offset)
+			}
+			if err.Error() != factMetadataTimeInvalidMessage {
+				t.Fatalf("validateFactMetadata returned %q for cycle %d, want %q verbatim",
+					err.Error(), i+1, factMetadataTimeInvalidMessage)
+			}
+		}
+	}
+
+	// The floodgate assertion. Every binding on the ladder is acceptable to
+	// the untouched verifier, so the three the claim declined were declined by
+	// the new time rule and not because verifyFactBatchContextTx would have
+	// refused them anyway.
+	for i, step := range ladder {
+		if err := fixture.store.ValidateEconomicFactContext(fixture.ctx, fixture.sourceID, "credits",
+			eventID, batchIDs[i], step.cycleID, claim.PayloadHash,
+			batchCeilingForTest(t, fixture, "credits", batchIDs[i])); err != nil {
+			t.Fatalf("verifyFactBatchContextTx refuses cycle %d's binding on its own terms (%v); the claim's "+
+				"choice cannot be attributed to the clock-skew predicate", i+1, err)
+		}
+	}
+}
+
 // batchCeilingForTest reads a batch's own scan_ceiling_at, which is what
 // verifyFactBatchContextTx compares the caller's watermark against.
 func batchCeilingForTest(t *testing.T, f deadIngestFixture, stream, batchID string) time.Time {

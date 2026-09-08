@@ -604,11 +604,23 @@ const sourceEventLease = 10 * time.Minute
 // This is not a relaxation of verifyFactBatchContextTx, which is untouched.
 // It hands that function a triple that is *true*: the mapping row is real,
 // written by CommitSourceBatch inside the transaction that verified the
-// batch's hash chain and signing key. The conditions below are exactly the
-// ones the verifier itself applies (schema_version='3.0', mapping
-// payload_hash equal to the event's, cycle status in its accepted set), so
-// the preferred branch can only ever pick a binding the verifier would
-// accept.
+// batch's hash chain and signing key. Three of the conditions below are the
+// verifier's own (schema_version='3.0', mapping payload_hash equal to the
+// event's, cycle status in its accepted set), so the preferred branch can
+// only ever pick a binding the verifier would accept.
+//
+// The fourth condition -- factClockSkewTolerance on b.scan_ceiling_at against
+// sie.observed_at -- is deliberately NOT the verifier's. It is
+// validateFactMetadata's (consumption.go), which runs *earlier* than the
+// verifier and refuses the fact outright, so a binding that fails it never
+// reaches verifyFactBatchContextTx at all. Without it the preference above is
+// a trap: an event parked for hours and then woken picks a re-delivery whose
+// ceiling its own frozen observed_at can never carry, and burns all eight
+// attempts on a rule the verifier is never reached to apply. Production
+// 2026-09-07: a customer binding woke usage events first observed at
+// 07:08:33; the newest binding's ceiling was 09:28:14, two hours fifteen
+// later, and every attempt returned "source fact event time/watermark is
+// invalid" until the events were dead and the whole source latched.
 //
 // The fallback is deliberate rather than a strict refusal to claim. An event
 // whose only bindings are unusable keeps today's behavior exactly: it is
@@ -623,7 +635,12 @@ const sourceEventLease = 10 * time.Minute
 // Side effects of preferring a later batch all point at "more correct": the
 // fact records the source_sequence and scan_ceiling_at of the scan that
 // actually observed it, not of a scan that was abandoned.
-const claimBindingSelect = `
+// Not a const: the time predicate below is rendered from
+// factClockSkewToleranceSQL so the five minutes stays stated in exactly one
+// place. Both callers already concatenate this fragment at runtime
+// (ClaimUnprocessedSourceEvents below and ingestRequeueDeadReplayBindingTx in
+// ingest_requeue_dead_repair.go), so nothing needs it to be constant-foldable.
+var claimBindingSelect = `
 	JOIN LATERAL (
 		SELECT chosen.sequence,chosen.batch_id,chosen.schema_version,chosen.signing_key_id,
 			chosen.stream_watermark_at,chosen.source_cursor,chosen.scan_ceiling_at,
@@ -644,6 +661,28 @@ const claimBindingSelect = `
 					AND m.event_id=sie.event_id AND m.payload_hash=sie.payload_hash
 					AND b.schema_version='3.0'
 					AND c.cycle_status IN ('receiving','processing','published')
+					-- XM-INV-BINDING-SKEW: and a batch whose ceiling this
+					-- event's own observation can actually carry. The claim
+					-- hands scan_ceiling_at over as the fact's
+					-- stream_watermark_at (application/source_processor.go:
+					-- every Observe* call site passes
+					-- StreamWatermarkAt: claim.ScanCeilingAt) against the
+					-- event's observed_at, which source_ingest_events freezes
+					-- at first delivery and never rewrites on a re-delivery.
+					-- validateFactMetadata refuses that pair past
+					-- factClockSkewTolerance, before verifyFactBatchContextTx
+					-- is ever reached, so a binding this predicate excludes is
+					-- one the runtime would spend all eight attempts refusing.
+					-- Production 2026-09-07: observed 07:08:33, newest
+					-- binding's ceiling 09:28:14, eight refusals of "source
+					-- fact event time/watermark is invalid".
+					--
+					-- If XM-INV-OBSERVED-AT-PER-BINDING (L2) lands, this
+					-- predicate and the outer query must move to
+					-- COALESCE(m.observed_at,sie.observed_at) together: left
+					-- as is, it would exclude the very re-delivery L2 exists
+					-- to make usable.
+					AND b.scan_ceiling_at<=sie.observed_at+` + factClockSkewToleranceSQL + `
 				ORDER BY b.sequence DESC
 				LIMIT 1
 			)

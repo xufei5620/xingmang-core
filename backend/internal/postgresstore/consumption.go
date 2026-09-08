@@ -312,6 +312,66 @@ func parseOptionalCausal(domainValue, orderValue string) (string, *big.Int, erro
 
 func validHash(value string) bool { return hexHashPattern.MatchString(strings.TrimSpace(value)) }
 
+// XM-INV-BINDING-SKEW: factClockSkewTolerance is the one definition of how far
+// a fact's stream_watermark_at may run ahead of the observation that carries
+// it. It is a clock-skew allowance between the agent host and this database,
+// nothing more: a watermark further ahead than this means the batch the fact
+// is being written against is not the scan that observed the event.
+//
+// Three places have to agree, and each used to state the five minutes
+// separately: validateFactMetadata below; the three fact tables' DDL CHECKs
+// (migrations/0009_consumption_eligibility_ledger.sql -- source_usage_events,
+// source_credit_events, balance_reconciliation_checkpoints); and, from this
+// slice on, claimBindingSelect (source_sync.go), which must not hand the claim
+// a binding this rule will then refuse. The Go rule and the SQL fragment are
+// both rendered from this constant. The DDL copies cannot be -- a migration is
+// a frozen file -- so TestFactClockSkewToleranceMatchesEveryFactTableCheckConstraint
+// reads them back with pg_get_constraintdef and fails if they drift. Same
+// discipline as transientRequeueMarkers/transientRequeueMarkerSQL in
+// source_sync.go: one definition, rendered, plus a test that proves nothing
+// else states it.
+//
+// This unifies exactly one judgement, not every five minutes in the tree.
+// Deliberate near-misses, none of them this rule and none of them safe to fold
+// in: RegisterCutoverManifest's CutoverAt-against-DatabaseClock bound below;
+// the batch-level scan_ceiling_at<=source_captured_at CHECK in the same
+// migration (agent capture time, not any record's observation); the payload
+// freshness bound in application/source_processor.go (the source's own
+// updated_at against claim.ObservedAt); and sourceingest/receiver.go's
+// transport-level DefaultMaximumSkew.
+const factClockSkewTolerance = 5 * time.Minute
+
+// factClockSkewToleranceSQL renders factClockSkewTolerance for the queries
+// that must apply the same rule server-side. Rendered in seconds rather than
+// as "5 minutes" on purpose: the text has to be something nobody would type by
+// hand, so a later edit that spells the interval out inside a query instead of
+// embedding this variable is caught by a test rather than by review alone.
+// PostgreSQL parses interval '300 seconds' and interval '5 minutes' to the
+// identical value, so the spelling is free; being un-typeable is not.
+var factClockSkewToleranceSQL = renderFactClockSkewToleranceSQL(factClockSkewTolerance)
+
+func renderFactClockSkewToleranceSQL(tolerance time.Duration) string {
+	// The input is a compile-time constant, so a value that could change the
+	// shape of the query is a programming error: stop the process rather than
+	// emit a query nobody checked. Mirrors renderTransientRequeueMarkerSQL.
+	if tolerance <= 0 || tolerance%time.Second != 0 || tolerance > time.Hour {
+		panic("fact clock skew tolerance must be a positive whole number of seconds no larger than an hour: " + tolerance.String())
+	}
+	return fmt.Sprintf("interval '%d seconds'", int64(tolerance/time.Second))
+}
+
+// factMetadataTimeInvalidMessage is validateFactMetadata's verdict on a fact
+// whose three timestamps cannot be true together -- any of them missing, the
+// event later than the watermark, or the watermark further than
+// factClockSkewTolerance past the observation. It is a named constant because
+// it is quoted outside this file: it is the exact text production logged eight
+// times per event on 2026-09-07, and ingestRequeueDeadReplayBindingTx's
+// clock-skew verdict quotes it so an operator reading a dry run can match the
+// reason to the log line character for character. Deliberately covers all
+// three branches, so it is named after the check and not after any one of
+// them.
+const factMetadataTimeInvalidMessage = "source fact event time/watermark is invalid"
+
 func validateFactMetadata(sourceID, externalUserID, eventID, revision, cursor, manifestHash, configurationHash, unitCode string, eventAt, observedAt, watermarkAt time.Time, sequence int64) error {
 	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(externalUserID) == "" ||
 		strings.TrimSpace(eventID) == "" || len(eventID) > 256 || sequence <= 0 ||
@@ -320,8 +380,8 @@ func validateFactMetadata(sourceID, externalUserID, eventID, revision, cursor, m
 		return errors.New("complete v3 source fact metadata is required")
 	}
 	if eventAt.IsZero() || observedAt.IsZero() || watermarkAt.IsZero() || eventAt.After(watermarkAt) ||
-		watermarkAt.After(observedAt.Add(5*time.Minute)) {
-		return errors.New("source fact event time/watermark is invalid")
+		watermarkAt.After(observedAt.Add(factClockSkewTolerance)) {
+		return errors.New(factMetadataTimeInvalidMessage)
 	}
 	return nil
 }

@@ -106,11 +106,24 @@ func (f deadIngestFixture) commitEvents(t *testing.T, stream, cycleID string, ev
 // included -- and only adds a fresh mapping row under the new cycle.
 func (f deadIngestFixture) commitSupersedingCycle(t *testing.T, stream, cycleID string, events []SourceBatchEvent) {
 	t.Helper()
+	f.commitSupersedingCycleAt(t, stream, cycleID, time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond), events)
+}
+
+// commitSupersedingCycleAt is commitSupersedingCycle with the successor
+// cycle's scan ceiling given rather than assumed. The default (now+1m) sits
+// comfortably inside factClockSkewTolerance of an event observed "now", which
+// is why every caller above this line is unaffected by XM-INV-BINDING-SKEW;
+// the tests that need a late re-delivery -- the 2026-09-07 shape, where the
+// re-delivery's ceiling was two hours past the event's frozen observation --
+// pass their own. One code path rather than a near-copy, so a change to the
+// supersede input cannot apply to only half the tests.
+func (f deadIngestFixture) commitSupersedingCycleAt(t *testing.T, stream, cycleID string,
+	ceiling time.Time, events []SourceBatchEvent) {
+	t.Helper()
 	f.chain.sequence[stream]++
 	sequence := f.chain.sequence[stream]
 	batchID := fmt.Sprintf("87%06d-0000-4000-8000-%012d", sequence, sequence)
 	bodyHash := testHash(stream + cycleID + fmt.Sprint(sequence))
-	ceiling := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	input := SourceBatchInput{
 		SchemaVersion: "3.0", SourceInstanceID: f.sourceID, StreamID: stream,
 		BatchID: batchID, Sequence: sequence, BodyHash: bodyHash,
@@ -981,5 +994,289 @@ func TestIngestRequeueDeadApplyRequiresOperatorAndValidFilters(t *testing.T) {
 	// None of the rejections may have written anything.
 	if row := fixture.readIngestEvent(t, "usage", eventID); row.status != "dead" || row.attemptCount != 8 {
 		t.Fatalf("a rejected invocation mutated the row: %+v", row)
+	}
+}
+
+// TestIngestRequeueDeadBlocksAnEventWhoseOnlyLaterBindingIsTooLate is
+// XM-INV-BINDING-SKEW T4a: the exact shape of the two usage events stranded in
+// production on 2026-09-07, and this slice's acceptance criterion.
+//
+// The event was first observed at t0 and its first batch's cycle was
+// superseded to 'blocked'. The agent then re-delivered the identical event id
+// into a cycle that published -- but two hours later, so that cycle's batch
+// carries a scan ceiling the event's own frozen observed_at can never carry.
+// Before this slice the claim preferred that later binding purely because its
+// cycle status was acceptable, and the two repair tools deadlocked over it:
+// ingest-requeue-dead reported "replayable", the runtime then refused the fact
+// eight times with "source fact event time/watermark is invalid", and
+// ingest-acknowledge-unreplayable refused to write it off because a "usable"
+// binding existed. Six customers could not invoice for 25 hours.
+//
+// The verdict here comes from the pre-existing blocked-cycle case, not from
+// the new clock-skew one: with the claim's time predicate in place the late
+// binding is excluded, the claim falls back to first_batch_id, and that
+// binding's cycle is 'blocked'. The new case is reached only by the shape in
+// TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance below,
+// which is why both tests exist.
+// TestIngestRequeueDeadRequeuesAnEventRescuedByALaterValidBinding is this
+// test's control arm: its successor ceiling is one minute past the
+// observation, well inside the tolerance, and it must stay green -- so the
+// pair says "late re-deliveries are refused", not "re-deliveries are refused".
+func TestIngestRequeueDeadBlocksAnEventWhoseOnlyLaterBindingIsTooLate(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "usage")
+	const eventID = "88000000-0000-4000-8000-0000000000e1"
+	const blockedCycleID = "89000000-0000-4000-8000-0000000000e1"
+	const successorCycleID = "89000000-0000-4000-8000-0000000000e2"
+	observed := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	event := newDeadIngestEvent(eventID, "usage_event")
+	event.ObservedAt = observed
+
+	fixture.chain.commit(t, fixture.store, fixture.ctx, fixture.sourceID, "usage",
+		blockedCycleID, observed, []SourceBatchEvent{event})
+	firstBatchID := fixture.batchIDForSequence(t, "usage", 1)
+	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+	fixture.freezeOverEvent(t, eventID, "usage_event")
+	// The re-delivery, two hours after the event was observed -- production's
+	// gap was 2h19m47s.
+	fixture.commitSupersedingCycleAt(t, "usage", successorCycleID,
+		observed.Add(2*time.Hour), []SourceBatchEvent{event})
+	successorBatchID := fixture.batchIDForSequence(t, "usage", 2)
+
+	if status := fixture.cycleStatus(t, "usage", blockedCycleID); status != "blocked" {
+		t.Fatalf("first cycle status=%q, want blocked", status)
+	}
+	if status := fixture.cycleStatus(t, "usage", successorCycleID); status != "published" {
+		t.Fatalf("successor cycle status=%q, want published; without a published late binding this test does not "+
+			"reproduce the production shape", status)
+	}
+	before := fixture.readIngestEvent(t, "usage", eventID)
+	if before.status != "dead" {
+		t.Fatalf("event status=%q, want dead", before.status)
+	}
+
+	dryRun, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{}, AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dryRun.Events) != 1 {
+		t.Fatalf("events=%+v, want one", dryRun.Events)
+	}
+	found := dryRun.Events[0]
+	if !found.ReplayBlocked || found.Requeued {
+		t.Fatalf("ReplayBlocked=%t Requeued=%t, want true/false: requeuing this event can only burn eight "+
+			"attempts on a fact validateFactMetadata refuses on arrival", found.ReplayBlocked, found.Requeued)
+	}
+	if dryRun.TotalBlockedSkipped != 1 || dryRun.TotalRequeued != 0 {
+		t.Fatalf("totals blocked=%d requeued=%d, want 1/0", dryRun.TotalBlockedSkipped, dryRun.TotalRequeued)
+	}
+	if found.ReplayBatchID != firstBatchID || found.ReplayScanCycleID != blockedCycleID ||
+		found.ReplayCycleStatus != "blocked" {
+		t.Fatalf("replay binding=%s/%s/%s, want the first batch %s in the blocked cycle %s; the late successor "+
+			"batch %s must not be selected", found.ReplayBatchID, found.ReplayScanCycleID, found.ReplayCycleStatus,
+			firstBatchID, blockedCycleID, successorBatchID)
+	}
+	wantReason := "replay scan cycle " + blockedCycleID + " is 'blocked'; verifyFactBatchContextTx accepts only " +
+		"receiving/processing/published, so every attempt would be refused"
+	if found.ReplayBlockedReason != wantReason {
+		t.Fatalf("reason=%q, want %q: this shape is caught by the blocked-cycle case, and a blocked cycle must "+
+			"keep its own reason rather than being reported as clock skew", found.ReplayBlockedReason, wantReason)
+	}
+	// Both mappings are still reported as evidence, and exactly the blocked
+	// one is marked as the binding that governs.
+	if len(found.ScanCycles) != 2 {
+		t.Fatalf("scan cycles=%+v, want both mappings reported", found.ScanCycles)
+	}
+	for _, cycle := range found.ScanCycles {
+		if wantBinding := cycle.ScanCycleID == blockedCycleID; cycle.ReplayBinding != wantBinding {
+			t.Fatalf("cycle %s ReplayBinding=%t, want %t", cycle.ScanCycleID, cycle.ReplayBinding, wantBinding)
+		}
+	}
+
+	// The other half of the acceptance criterion: the write-off tool must now
+	// let these rows through, because it re-derives "replayable" from the very
+	// same function.
+	ack, err := fixture.store.AcknowledgeUnreplayableIngestEvent(fixture.ctx,
+		IngestAcknowledgeUnreplayableInput{EventID: eventID},
+		AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatalf("acknowledge refused the stranded event: %v", err)
+	}
+	if ack.Applied || !ack.Acknowledged || !ack.Event.ReplayBlocked {
+		t.Fatalf("acknowledge dry run=%+v, want Applied=false Acknowledged=true ReplayBlocked=true", ack)
+	}
+
+	if after := fixture.readIngestEvent(t, "usage", eventID); after != before {
+		t.Fatal("a dry run modified the event")
+	}
+	if count := fixture.requeueAuditCount(t, eventID); count != 0 {
+		t.Fatalf("requeue audit rows=%d, want 0", count)
+	}
+	if count := unreplayableAuditCount(t, fixture, eventID); count != 0 {
+		t.Fatalf("unreplayable audit rows=%d, want 0", count)
+	}
+}
+
+// TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance is
+// XM-INV-BINDING-SKEW T4b, and the only shape that reaches the repair's new
+// clock-skew case. Once claimBindingSelect filters arm 1 by time, arm 1 can
+// never hand this function a skewed binding -- the filter is that same
+// comparison -- so the case can only fire on the first_batch_id fallback, with
+// that batch's own cycle in an otherwise acceptable status. T4a above does not
+// reach it (its fallback lands in a 'blocked' cycle and the pre-existing case
+// answers first), so without this test the new branch would be dead code whose
+// deletion nothing notices.
+//
+// The two rows are a discriminating pair: identical but for the gap between
+// the event's observed_at and its own batch's scan ceiling. The +1m row must
+// stay replayable, or the case is not a clock rule but a blanket refusal.
+//
+// Nothing in the schema forbids the +2h row: the only batch-level time rule is
+// scan_ceiling_at <= source_captured_at + 5 minutes, and the fixture moves
+// both together. Today's agent would not produce it (every v3 connector stamps
+// a record's observed_at at page-emission time while the batch ceiling is the
+// cycle horizon fixed at cycle start), which is exactly why the guard is worth
+// having: the tool's verdict should rest on its own code, not on an agent's
+// current habit.
+func TestIngestRequeueDeadBlocksAFirstBindingBeyondTheClockSkewTolerance(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ceilingOffset time.Duration
+		wantBlocked   bool
+	}{
+		{"a first binding inside the tolerance stays replayable", time.Minute, false},
+		{"a first binding beyond the tolerance does not", 2 * time.Hour, true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := seedDeadIngestFixture(t, "usage")
+			const eventID = "88000000-0000-4000-8000-0000000000e5"
+			const cycleID = "89000000-0000-4000-8000-0000000000e5"
+			observed := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+			event := newDeadIngestEvent(eventID, "usage_event")
+			event.ObservedAt = observed
+
+			fixture.chain.commit(t, fixture.store, fixture.ctx, fixture.sourceID, "usage",
+				cycleID, observed.Add(tc.ceilingOffset), []SourceBatchEvent{event})
+			batchID := fixture.batchIDForSequence(t, "usage", 1)
+			fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+			fixture.freezeOverEvent(t, eventID, "usage_event")
+			fixture.publishCycle(t, "usage")
+			// Load-bearing guard: were the cycle not published, the
+			// pre-existing blocked-cycle case would answer first and the new
+			// case would never be reached -- the sub-test would pass without
+			// exercising the thing it claims to.
+			if status := fixture.cycleStatus(t, "usage", cycleID); status != "published" {
+				t.Fatalf("cycle status=%q, want published", status)
+			}
+			before := fixture.readIngestEvent(t, "usage", eventID)
+
+			dryRun, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+				IngestRequeueDeadRepairInput{EventID: eventID},
+				AuditActor{Type: "admin", ID: deadIngestOperator})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dryRun.Events) != 1 {
+				t.Fatalf("events=%+v, want one", dryRun.Events)
+			}
+			found := dryRun.Events[0]
+			// Every earlier case passes on both rows, so the verdict below can
+			// only be the clock-skew one.
+			if found.ReplayBatchID != batchID || found.ReplayScanCycleID != cycleID ||
+				found.ReplayCycleStatus != "published" {
+				t.Fatalf("replay binding=%s/%s/%s, want %s/%s/published", found.ReplayBatchID,
+					found.ReplayScanCycleID, found.ReplayCycleStatus, batchID, cycleID)
+			}
+			if found.ReplayBlocked != tc.wantBlocked || found.Requeued == tc.wantBlocked {
+				t.Fatalf("ReplayBlocked=%t Requeued=%t, want ReplayBlocked=%t", found.ReplayBlocked,
+					found.Requeued, tc.wantBlocked)
+			}
+
+			if !tc.wantBlocked {
+				if dryRun.TotalRequeued != 1 || dryRun.TotalBlockedSkipped != 0 {
+					t.Fatalf("totals requeued=%d blocked=%d, want 1/0", dryRun.TotalRequeued, dryRun.TotalBlockedSkipped)
+				}
+				if found.ReplayBlockedReason != "" {
+					t.Fatalf("reason=%q, want empty for a replayable event", found.ReplayBlockedReason)
+				}
+				// The acknowledge guard is the mirror image and must still
+				// refuse: a replayable event has a repair, not a write-off.
+				if _, err = fixture.store.AcknowledgeUnreplayableIngestEvent(fixture.ctx,
+					IngestAcknowledgeUnreplayableInput{EventID: eventID},
+					AuditActor{Type: "admin", ID: deadIngestOperator}); err == nil ||
+					!strings.Contains(err.Error(), "ingest-requeue-dead") {
+					t.Fatalf("acknowledge error=%v, want the usable-replay-binding guard", err)
+				}
+				return
+			}
+
+			if dryRun.TotalRequeued != 0 || dryRun.TotalBlockedSkipped != 1 {
+				t.Fatalf("totals requeued=%d blocked=%d, want 0/1", dryRun.TotalRequeued, dryRun.TotalBlockedSkipped)
+			}
+			// The reason, in full. It names validateFactMetadata rather than
+			// the verifier -- the whole point of the case -- and quotes the
+			// runtime's own message so an operator can match a dry run against
+			// the log line character for character.
+			ceiling := batchCeilingForTest(t, fixture, "usage", batchID)
+			var frozenObservedAt time.Time
+			if err = fixture.store.pool.QueryRow(fixture.ctx, `SELECT observed_at FROM source_ingest_events
+				WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+				fixture.sourceID, eventID).Scan(&frozenObservedAt); err != nil {
+				t.Fatal(err)
+			}
+			wantReason := "replay batch " + batchID + " has scan_ceiling_at " +
+				ceiling.UTC().Format(time.RFC3339Nano) + ", more than " + factClockSkewTolerance.String() +
+				" after the event's observed_at " + frozenObservedAt.UTC().Format(time.RFC3339Nano) +
+				"; validateFactMetadata would reject the fact with \"" + factMetadataTimeInvalidMessage +
+				"\" before verifyFactBatchContextTx is reached, so every attempt would be refused"
+			if found.ReplayBlockedReason != wantReason {
+				t.Fatalf("reason=%q,\nwant %q", found.ReplayBlockedReason, wantReason)
+			}
+			// The prediction is true: the fact validator really does refuse
+			// this pair, with that exact message. Without this the reason
+			// would be an unverified claim about another function.
+			if err = validateFactMetadata(fixture.sourceID, "dead-requeue", eventID,
+				found.PayloadHash, "usage:1", testHash("dead-requeue-manifest"),
+				testHash("dead-requeue-config"), "SUB2_BALANCE_1E8", observed.Add(-time.Hour),
+				frozenObservedAt, ceiling, 1); err == nil || err.Error() != factMetadataTimeInvalidMessage {
+				t.Fatalf("validateFactMetadata(observed=%s, watermark=%s) returned %v, want %q",
+					frozenObservedAt, ceiling, err, factMetadataTimeInvalidMessage)
+			}
+			// ...while the untouched verifier would have accepted the very
+			// same binding, so the refusal is attributable to the clock rule
+			// and to nothing else.
+			if err = fixture.store.ValidateEconomicFactContext(fixture.ctx, fixture.sourceID, "usage",
+				eventID, batchID, cycleID, found.PayloadHash, ceiling); err != nil {
+				t.Fatalf("verifyFactBatchContextTx refuses this binding on its own terms (%v); the new case "+
+					"cannot be shown to be what blocked it", err)
+			}
+
+			ack, ackErr := fixture.store.AcknowledgeUnreplayableIngestEvent(fixture.ctx,
+				IngestAcknowledgeUnreplayableInput{EventID: eventID},
+				AuditActor{Type: "admin", ID: deadIngestOperator})
+			if ackErr != nil {
+				t.Fatalf("acknowledge refused an event the runtime can never replay: %v", ackErr)
+			}
+			if ack.Applied || !ack.Acknowledged {
+				t.Fatalf("acknowledge dry run=%+v, want Applied=false Acknowledged=true", ack)
+			}
+			if after := fixture.readIngestEvent(t, "usage", eventID); after != before {
+				t.Fatal("a dry run modified the event")
+			}
+
+			// The escape hatch still works: an operator who has decided to
+			// spend the retry ladder deliberately can.
+			forced, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+				IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator,
+					EventID: eventID, IncludeBlockedCycles: true},
+				AuditActor{Type: "admin", ID: deadIngestOperator})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if forced.TotalRequeued != 1 || !forced.Events[0].Requeued || !forced.Events[0].ReplayBlocked {
+				t.Fatalf("forced result=%+v, want requeued but still flagged", forced.Events)
+			}
+		})
 	}
 }

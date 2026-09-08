@@ -649,9 +649,23 @@ There is no supported repair for that state, and none should be invented:
   follows it too: `ClaimUnprocessedSourceEvents` prefers the event's newest
   *currently valid* binding over `first_batch_id`, so an event whose evidence
   is already on file is replayable again. Only an event with **no** valid
-  binding at all is genuinely stuck. See
-  `docs/handoffs/XM-INV-DEAD-REQUEUE.md` and
-  `docs/handoffs/XM-INV-CLAIM-BINDING.md`.
+  binding at all is genuinely stuck.
+
+  **"Currently valid" includes time.** Since XM-INV-BINDING-SKEW the claim
+  only accepts a re-delivery whose batch `scan_ceiling_at` is within
+  `factClockSkewTolerance` (5 minutes) of the event's `observed_at`. That
+  column is frozen at the event's *first* delivery and never rewritten, and
+  `validateFactMetadata` rejects a wider gap outright -- before the fact-context
+  verifier is even reached -- so a binding outside the window is not a rescue,
+  it is eight guaranteed refusals. Until XM-INV-OBSERVED-AT-PER-BINDING (L2)
+  lets a re-delivery carry its own observation, this recovery works for a
+  prompt agent restart and **not** for an event parked for hours: a rescan that
+  arrives more than five minutes after the event was first observed does not
+  rescue it. For those, `ingest-requeue-dead` now reports
+  `ReplayBlocked=true` naming `validateFactMetadata`, and the write-off below
+  is the available disposition. See `docs/handoffs/XM-INV-DEAD-REQUEUE.md`,
+  `docs/handoffs/XM-INV-CLAIM-BINDING.md` and
+  `docs/handoffs/XM-INV-STRANDED-EVENTS-DESIGN.md`.
 
 ### Acknowledging a fact that can never be replayed
 

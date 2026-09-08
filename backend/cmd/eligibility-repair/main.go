@@ -106,7 +106,7 @@ func main() {
 	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING), or ingest-requeue-dead (XM-INV-DEAD-REQUEUE)")
 	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead and ingest-requeue-dead only; empty means every dead row)")
 	eventID := flag.String("event", "", "optional source_ingest_events event id filter (ingest-requeue-dead only; empty means every dead ingest event)")
-	includeBlockedCycles := flag.Bool("include-blocked-cycles", false, "ingest-requeue-dead only: also requeue events whose replay the economic fact-context check would refuse (skipped by default -- such a requeue can only burn eight attempts and die again)")
+	includeBlockedCycles := flag.Bool("include-blocked-cycles", false, "ingest-requeue-dead only: also requeue events whose replay the runtime would refuse -- an unusable scan-cycle binding, or a binding whose scan_ceiling_at runs past the event's observed_at (skipped by default -- such a requeue can only burn eight attempts and die again)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")

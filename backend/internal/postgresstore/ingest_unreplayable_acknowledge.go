@@ -73,9 +73,18 @@ type IngestAcknowledgeUnreplayableResult struct {
 //
 // It refuses unless the event is genuinely unreplayable, re-deriving that
 // through the same ingestRequeueDeadReplayBindingTx the requeue tool uses:
-// if any binding verifyFactBatchContextTx would accept exists, the answer is
-// to requeue the event, not to write its fact off. That guard is what keeps
-// this from being a "mark anything processed" button.
+// if any binding the runtime would accept exists, the answer is to requeue
+// the event, not to write its fact off. That guard is what keeps this from
+// being a "mark anything processed" button.
+//
+// XM-INV-BINDING-SKEW: "the runtime" is deliberately broader than
+// "verifyFactBatchContextTx". The reuse is the whole mechanism -- when that
+// function learned to predict validateFactMetadata's clock-skew refusal as
+// well, this tool inherited it with no code change here, and the two tools
+// cannot disagree about what "replayable" means. On 2026-09-07 they did
+// disagree, and two usage events sat dead for 25 hours because requeue said
+// "replayable" and this call said "then I will not write it off". Do not add
+// a parallel check here.
 func (s *Store) AcknowledgeUnreplayableIngestEvent(ctx context.Context, in IngestAcknowledgeUnreplayableInput,
 	actor AuditActor) (IngestAcknowledgeUnreplayableResult, error) {
 	eventID := strings.TrimSpace(in.EventID)
