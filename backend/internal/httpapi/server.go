@@ -53,6 +53,7 @@ type Server struct {
 	operations         OperationsService
 	sourceMode         string
 	readiness          func(context.Context) error
+	readinessLog       readinessOutcomeLog
 	smtpTestSender     mailer.Sender
 	smtpTestRecipient  string
 	publicOrigin       string
@@ -177,8 +178,11 @@ func (s *Server) routes() {
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
 			if err := s.readiness(ctx); err != nil {
-				writeError(w, http.StatusServiceUnavailable, "NOT_READY", "required dependencies are unavailable")
+				s.writeNotReady(w, err)
 				return
+			}
+			if s.readinessLog.record("", time.Now().UTC()) {
+				s.logger.Info("readiness recovered")
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
@@ -1206,6 +1210,25 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
+}
+
+// writeNotReady is /readyz's 503 path (XM-INV-READYZ-DETAIL). The log always
+// carries the full underlying error; the body carries only the check name and
+// its fixed summary, and only when both survive readinessFailureFields'
+// patterns. An unclassified or rejected failure publishes the byte-identical
+// body this endpoint returned before this slice.
+func (s *Server) writeNotReady(w http.ResponseWriter, err error) {
+	logCheck, publishCheck, publishSummary := readinessFailureFields(err)
+	if s.readinessLog.record(logCheck, time.Now().UTC()) {
+		s.logger.Error("readiness check failed", "check", logCheck, "error", err)
+	}
+	if publishCheck == "" {
+		writeError(w, http.StatusServiceUnavailable, "NOT_READY", "required dependencies are unavailable")
+		return
+	}
+	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+		"error": map[string]string{"code": "NOT_READY", "message": publishSummary, "check": publishCheck},
+	})
 }
 func handleDomainError(w http.ResponseWriter, err error) {
 	switch {

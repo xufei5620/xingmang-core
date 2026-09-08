@@ -1994,6 +1994,136 @@ degrades exactly as it did before this change. This grace needs no operator
 action; it is derived from the same timing contract in the paragraph above,
 not independently configured.
 
+**Reading a 503 from `/readyz` (XM-INV-READYZ-DETAIL).** The endpoint runs
+eleven checks in dependency order and stops at the first failure. Its 503 body
+names that check:
+
+```bash
+curl -s https://invoice.solov.cc/readyz
+# {"error":{"code":"NOT_READY","message":"source ingestion has dead events requiring operator repair","check":"source_ingest_dead_events"}}
+```
+
+`check` is a stable identifier, safe to alert on. It is deliberately short of
+detail -- `/readyz` is unauthenticated, so the body never carries the
+underlying error, a host, a port, a path or an account id. **The exact cause is
+in the API log**, which is where triage should actually start:
+
+```bash
+docker logs --since 30m invoice-system-prod-api-1 2>&1 | grep 'readiness check failed'
+# level=ERROR msg="readiness check failed" check=source_ingest_dead_events error="source ingestion contains dead events"
+```
+
+That line is rate-limited to one per five minutes while the same check keeps
+failing (the container healthcheck probes every 10s), and it repeats
+immediately whenever the failing check changes. Recovery logs
+`msg="readiness recovered"` once, so an episode has both ends.
+
+| `check` | What it means | Where to look |
+| --- | --- | --- |
+| `database` | The pool cannot ping PostgreSQL | `postgres` container, connection limits |
+| `admin_settings` | The settings row cannot be read or decrypted | field keyring, `admin_settings` |
+| `invoice_issuer` | Issuer still unconfigured | admin settings page (see the issuer section above) |
+| `clamav_daemon` | clamd unreachable | `clamav` container |
+| `clamav_signatures` | Signature database older than `CLAMAV_MAX_SIGNATURE_AGE` | freshclam |
+| `pdf_scanner` | Sidecar socket unreachable | `pdf-scanner` container, capability token |
+| `source_health_query` | The source-health query itself failed | database load, statement timeouts |
+| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` | `invoice-eligibility-repair --kind=ingest-requeue-dead`, dead-event paragraph below |
+| `source_ingest` | Ingest backlog too old or inconsistent | `deploy/check-pending-spools.sh`, source agents |
+| `eligibility_health_query` | The projection-health query failed | database load, lock contention |
+| `eligibility_projection_dead_jobs` | `eligibility_projection_jobs.status='dead'` | `invoice-eligibility-repair --kind=projection-requeue-dead`, next paragraph |
+| `eligibility_projection_stuck` | Projection queue not draining for 15 minutes | eligibility-projection worker |
+| `source_stream_dead_events` | A required stream reports dead events | source agent for that stream |
+| `source_streams` | Any other stream health problem | the log line carries the exact text |
+
+The three dead-event checks are the ones that never clear by themselves. Note
+that `source_ingest_dead_events` and `eligibility_projection_dead_jobs` are
+different tables needing different repairs despite both reading as "dead";
+telling them apart was the reason for this slice.
+
+**A source event reaching the dead grade** now writes its own error-level line
+at the moment of the transition, so it is visible to an error-level log watch
+rather than only once `/readyz` has already gone 503:
+
+```bash
+docker logs --since 24h invoice-system-prod-api-1 2>&1 | grep 'source event marked dead'
+# level=ERROR msg="source event marked dead" source_instance_id=... stream_id=usage event_id=... entity_type=usage_event attempt=8 error="..."
+```
+
+The retry attempts before it stay at `level=WARN`
+(`msg="source event projection failed"`); only the eighth and final one, which
+is irreversible without operator repair, is an error.
+
+Container logs rotate, so the same transition also writes a durable
+`source_ingest_event.dead` audit event, the ingest-path counterpart of
+`eligibility.projection.dead`. Use it when the question is "what died, and
+when", days or weeks later:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT created_at,object_id,actor_id,reason FROM audit_events
+      WHERE action='source_ingest_event.dead' ORDER BY created_at DESC LIMIT 50"
+```
+
+`object_id` is the `source_ingest_events.event_id`. Unlike the `EVENT_DEAD`
+eligibility freeze raised alongside it, this row is written unconditionally:
+the freeze only appears when the event can be correlated to an account. **Take
+the census from these audit rows, not from the freezes** — counting freezes
+silently omits every dead event that never correlated to an account.
+
+**Recovering them (XM-INV-DEAD-REQUEUE).** A dead ingest event never revives
+on its own. Requeue it with the same repair binary the projection path uses,
+under a different `--kind`:
+
+```bash
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+```
+
+Dry run is the default (each account's transaction is rolled back, nothing is
+written), `--apply` requires `--operator-id`, every requeued row is audited,
+and `--account` / `--event` narrow the selection. It resets `attempt_count` to
+zero, which is not cosmetic: the claim predicate is `attempt_count <` the dead
+threshold, so a row flipped back to `queued` without that reset is **never
+claimed again** — `Dead` drops to zero, `/readyz` stops reporting
+`source_ingest_dead_events` and starts failing on pending age instead, and the
+work still never runs. That state is worse than not repairing at all.
+
+**Read `cycle_status` in the dry-run report before applying.**
+`verifyFactBatchContextTx` (`postgresstore/consumption.go`) looks the event up
+by the exact `(event_id, batch_id, scan_cycle_id)` triple and accepts only
+`receiving`, `processing` or `published`; anything else is `ErrConflict`.
+`published` is safe, `processing` is fine but holds that stream's watermark
+until it drains, and **`blocked` must not be requeued** — the facts are
+rejected, so the event burns another retry round and dies again.
+
+> **`blocked` does not mean "try again later".** Nothing about waiting changes
+> a cycle's status. A dead event bound to a blocked cycle **cannot be
+> recovered by requeueing at all**, now or later. The options are to resolve
+> the cycle itself first, or to accept that this event's data is lost and
+> resolve its eligibility freeze through the normal path
+> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
+> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
+> "to see" costs a retry round and leaves everything exactly as it was.
+
+**As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
+the repair against production found all three dead events bound to blocked
+cycles — `e58b9430` (balances) and `b1de0e2b` (usage, shared by two events).
+Those cycles were superseded on 09-07 when the collection agent restarted.
+That is `supersede` working as designed, but note the consequence: **once it
+terminates a cycle, events still incomplete on that cycle can never be
+reprojected.** Expect this shape after any agent restart that supersedes a
+cycle with unfinished events on it, and check `cycle_status` first rather than
+reaching for `--apply`.
+
+The repair deliberately leaves eligibility freezes alone. The scan-cycle
+completeness filter is `NOT (status IN ('failed','dead') AND ef.id IS NOT
+NULL)` — the freeze is precisely what stops a dead event from holding its
+cycle open. Clearing it and then failing the reprojection again produces "dead
+but unfrozen", which blocks the whole stream indefinitely.
+
 **Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
 A per-account error from the eligibility-projection worker no longer trips
 `/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
