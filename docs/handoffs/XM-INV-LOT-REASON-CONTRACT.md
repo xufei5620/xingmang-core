@@ -236,5 +236,8 @@ request itself fails` 后重跑 → 变红 → 还原 → 绿。
 
 ## commit
 
-见分支 `ai/claude/XM-INV-LOT-REASON-CONTRACT` 的单次提交（提交哈希在本文件提交后由
-`git log` 可查；本文件随该提交一并提交）。
+`a3d7a84c36805820448fed1b2c42a0a1bca045c2`（分支
+`ai/claude/XM-INV-LOT-REASON-CONTRACT`，父提交 `a265b90` = RC105 生产提交）。
+16 files changed, 2454 insertions(+), 176 deletions(-)。
+
+本文件的哈希回填是紧随其后的第二次提交（`docs`），因为哈希在首次提交前不存在。
