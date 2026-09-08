@@ -51,7 +51,7 @@ export function toWorkItems(
     // 只响了一轮时不说「评估 1 轮」（那是噪音）；但 trigger_count 在场时不管
     // 轮数是几都要带——「触发 5 次」与「评估 1 轮」是两个事实，一个和它无关的
     // 守卫不能把另一个整段吞掉。
-    detail: `${a.rule_key} · 最近 ${a.last_seen_at}${a.fire_count > 1 || a.trigger_count != null ?` · ${describeFireCount(a).combined}` : ""}`,
+    detail: `${a.rule_key} · 最近 ${a.last_seen_at}${a.fire_count > 1 || a.trigger_count != null ? ` · ${describeFireCount(a).combined}` : ""}`,
     href: "/alerts",
   }));
 
