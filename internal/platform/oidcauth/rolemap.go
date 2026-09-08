@@ -244,6 +244,25 @@ func DefaultRoleScopeMap() map[string][]string {
 			"sms.read",
 			"sms.reveal",
 			"sms.manage",
+			// XM-EXT-INTEGRATION（2026-09-08）：「接口与自动化」的两张登记簿。
+			//
+			// 两个都给 admin，理由与上面 server.manage 同一条：登记簿写的是
+			// 纯记录字段——调用方登记簿**不是授权面**（登记不发凭据、不授权、
+			// 不限流），规则登记簿**没有执行器**（登记一条规则不会让任何
+			// Action 跑起来）。改错了改回即可，不触碰任何第三方系统。
+			//
+			// **两个都不给 staff**，理由与 audit.read 那一档同向：
+			// integration.read 返回的是「哪些机器身份该来调我们、期望持有
+			// 哪些 scope」外加 action_run 里观测到的调用方——那是一张授权面
+			// 的地图，看板角色不该顺带拿到。resolver_test 的
+			// TestDefaultRoleScopeMapIsConservative 断言 admin 含这两个、
+			// staff 一个都不含。
+			//
+			// 哪天规则引擎真接上执行器，integration.manage 必须重新审定：
+			// 那时候「改一条规则」等于改一条会自己跑起来的链路，不再是
+			// 登记簿那一档（ADMIN-IA §5.4.1 把那件事留给了单独的裁定）。
+			"integration.read",
+			"integration.manage",
 		},
 		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
 		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。

@@ -294,8 +294,14 @@ export const EXT_NAV_ITEMS: readonly NavItemSpec[] = [
     id: "integration",
     label: "接口与自动化",
     path: "/ext/integration",
+    // stage 保持「后置」：这一页建成的只是四格里的两格半（调用方对账、规则
+    // 登记、运行记录），Webhook 那一格与规则的**执行**都还没有——分组本身
+    // 仍是后置能力。built 翻成 true 只表示「点进去是真页面不是占位」。
     stage: "后置",
-    built: false,
+    // XM-EXT-INTEGRATION（2026-09-08）：产品负责人推翻 ADMIN-IA §5.4
+    // 「只读蓝图、不得提前建后端」这条，对**这一页**改为真建（§5.4.1）。
+    // 扩展能力段其余三页不变，仍是刻意的只读蓝图。
+    built: true,
     subTabs: sub(
       ["clients", "API调用方"],
       ["webhooks", "Webhook"],

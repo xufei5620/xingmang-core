@@ -793,6 +793,26 @@ function okHandler(url: string): Response {
     return fakeResponse(200, emptyProbeHistoryBody());
   if (/\/api\/v1\/platforms\/[^/]+\/assurance\/probes/.test(url))
     return fakeResponse(200, emptyProbeListBody());
+  // XM-EXT-INTEGRATION：两张登记簿，默认空——同上，需要非空数据的用例自己
+  // 覆盖 stubFetch。api-clients 的响应形状不是 {items} 单键：对账页要的是
+  // 登记侧与观测侧两份，共用兜底照真形状给空值。
+  if (url.startsWith("/api/v1/integration/api-clients"))
+    return fakeResponse(200, {
+      items: [],
+      unregistered: [],
+      window_days: 7,
+      observed_since: "2026-09-01T03:00:00Z",
+      observed_truncated: false,
+      observed_source: "action.action_run",
+      observed_note: "只统计经 Action 内核的写操作。",
+      registry_note: "登记簿不是授权面。",
+    });
+  if (url.startsWith("/api/v1/integration/automation-rules"))
+    return fakeResponse(200, {
+      items: [],
+      automatic_execution: false,
+      execution_note: "规则登记在此，但当前不会自动执行：平台没有规则执行器。",
+    });
   return fakeResponse(404, { error: { code: "NOT_REGISTERED", message: "未知路径" } });
 }
 
@@ -1814,16 +1834,23 @@ describe("四分组侧栏：分组与条目逐字对齐 ADMIN-IA v3 §一", () =
     expect(publishing.getAttribute("href")).toBe("/ext/publishing");
     // 2026-09-07 起 F-B 一条不剩：跨平台财务 / 版本与发布 / 界面规范三页建成
     // （XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0），操作与审批更早在
-    // XM-ACTIONS0 毕业。2026-09-08 产品负责人推翻 ADMIN-IA §5.4 对三页的
-    // 适用，`应用与配置` 随 XM-EXT-APP 建成 → 剩三条「后置」；另外两页
-    // （接口与自动化 / 内容发布）由并行切片在建，建成时这个数还要减
+    // XM-ACTIONS0 毕业。2026-09-08 产品负责人推翻 ADMIN-IA §5.4 对三页的适用：
+    // `应用与配置`（XM-EXT-APP）与 `接口与自动化`（XM-EXT-INTEGRATION）建成、
+    // 标签去掉 → 从 4 减到 **2**；`内容发布` 由并行切片在建，合进来时还要再减 1。
+    //
+    // **合并这两片时这个数字必须重算,不能取任何一边**：两片各自基于同一个
+    // 基线、各自把 4 减成 3，机械合并会留下一个「3」——而两页都建成之后
+    // 正确答案是 2。这类冲突取任一侧都是错的，只能重新数。
     expect(within(nav).queryAllByText("未建·F-B").length).toBe(0);
-    expect(within(nav).getAllByText("未建·后置").length).toBe(3);
-    // 建成的那一页不再挂标签——这一条是上面那个数字的正向对照：
-    // 光断言「从 4 变成 3」的话，任何一条标签消失都能让它绿
+    expect(within(nav).getAllByText("未建·后置").length).toBe(2);
+    // 两条正向对照——光断言那个数字变小的话，**任何**一条标签消失都能让它绿，
+    // 包括建错了页的情况。所以逐页钉住「它就是不挂标签的那一个」。
     const extApp = within(nav).getByRole("link", { name: /应用与配置/ });
     expect(extApp.getAttribute("href")).toBe("/ext/app");
     expect(extApp.textContent).not.toMatch(/未建/);
+    const integration = within(nav).getByRole("link", { name: /接口与自动化/ });
+    expect(integration.getAttribute("href")).toBe("/ext/integration");
+    expect(integration.textContent).not.toMatch(/未建/);
     const changes = within(nav).getByRole("link", { name: /版本与发布/ });
     expect(changes.getAttribute("href")).toBe("/changes");
     const actions = within(nav).getByRole("link", { name: /操作与审批/ });
@@ -2098,6 +2125,18 @@ describe("未知页签与未知路径：Not Found，不静默回落", () => {
     expect(await screen.findByText("没有这个子页签")).not.toBeNull();
     // 平台页头还在：错的是子页签，不是整个平台
     expect(screen.getByRole("heading", { name: "Sub2API", level: 2 })).not.toBeNull();
+  });
+
+  it("/ext/integration 落到真页面，不是 404 也不是只读蓝图占位", async () => {
+    // built 翻成 true 之后这一页掉出 placeholderRoutes（那份只收 !item.built）,
+    // 漏加显式路由就会落到最后的 `*` 兜底 404——XM-OPS-TAILS0 的 /jobs 与
+    // XM-CHANGES0 的三页各撞过一次，这条是同一个坑的第三道防线。
+    renderRoute("/ext/integration");
+    // 正向锚点：真页面自己的内容出现了。
+    expect(await screen.findByRole("tab", { name: "API调用方" })).not.toBeNull();
+    // 再同步断言缺席：既不是 404，也不再挂 PlaceholderGate 那条只读蓝图横幅。
+    expect(screen.queryByRole("heading", { name: "页面不存在", level: 2 })).toBeNull();
+    expect(screen.queryByText(/仅预览、不保存、不发布、不执行/)).toBeNull();
   });
 
   it("没匹配上的路径落到 404 页，而不是框架的英文报错页", async () => {

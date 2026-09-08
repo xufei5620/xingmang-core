@@ -1,0 +1,36 @@
+{
+  "id": "integration.automation_rule.set_status",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "integration.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "rule_id": {
+      "type": "string",
+      "required": true
+    },
+    "status": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "draft",
+        "registered",
+        "disabled"
+      ]
+    }
+  },
+  "notes": "XM-EXT-INTEGRATION（2026-09-08）：单独改一条规则登记的状态。三个取值都不会让规则跑起来（没有执行器），所以这个 Action **不要求 reason**——与 integration.api_client.set_status 刻意不同：那个的停用会改变对账结论，这个改的只是一条登记的编写进度。L1 依据同 integration.automation_rule.set。"
+}

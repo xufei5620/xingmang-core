@@ -28,6 +28,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/extapp"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/integration"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/lifecycle"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
@@ -154,6 +155,18 @@ func main() {
 	// 会让人在真要登记一个新站点的时候才发现保存键点不动。
 	extAppStore := extapp.NewStore(pool)
 	if err := extapp.RegisterActions(actionRegistry, extAppStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 「接口与自动化」的两张登记簿（XM-EXT-INTEGRATION，ADMIN-IA §5.4.1）。
+	// 四个 L1 Action 都是纯登记写入：调用方登记簿**不是授权面**（登记不发
+	// 凭据、不授权、不限流），规则登记簿**没有执行器**（登记一条规则不会让
+	// 任何 Action 跑起来）。注册失败即拒绝启动，同上。
+	//
+	// 环境显式传给仓储、不由请求参数自称（宪法 15 条）。
+	integrationStore := integration.NewStore(pool, cfg.Environment, nil)
+	if err := integration.RegisterActions(actionRegistry, integrationStore); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -596,6 +609,12 @@ func main() {
 		ServerServiceNotes: serverStore,
 		ExtApps:            extAppStore,
 		ExtAppReleases:     extAppStore,
+		// 「接口与自动化」两张登记簿的读与写共用同一个仓储（同上）。
+		// CallerActivity 是**另一张表**（action.action_run）的汇总——
+		// 调用方那一格的价值全在登记簿与它的对账上，所以两者一起给。
+		APIClients:      integrationStore,
+		CallerActivity:  action.NewPgCallerStore(pool),
+		AutomationRules: integrationStore,
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。

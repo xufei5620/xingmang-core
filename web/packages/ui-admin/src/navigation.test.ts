@@ -285,20 +285,20 @@ describe("查表与状态标签", () => {
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0 + 治理段 0 + 扩展能力 3。
+    // 全局段 0 + 治理段 0 + 扩展能力 2。
     //
     // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
     // 2026-09-08 产品负责人推翻了 ADMIN-IA §5.4「扩展能力四页只读蓝图、
-    // 不得因此提前建后端」对其中三页的适用：`应用与配置` 已建成
-    // （XM-EXT-APP，从这份清单里掉出去），`接口与自动化` 与 `内容发布`
-    // 由并行切片在建，建成时同样要从这里删掉。
+    // 不得因此提前建后端」对其中三页的适用：`应用与配置`（XM-EXT-APP）与
+    // `接口与自动化`（XM-EXT-INTEGRATION）已建成、从这份清单里掉出去，
+    // `内容发布`（XM-EXT-PUBLISHING）由并行切片在建，建成时同样要删掉。
     //
-    // **剩下的这几条含义已经不统一了**：`/ext/ai` 按 §5.4 仍是刻意的只读
-    // 蓝图（不预留后端、不做写入、不做执行），另外两条则是「在建，还没接上」。
-    // 两种含义混在同一份 built:false 里——这是 built 这个字段本身的表达力
-    // 上限，不是数据错了；真要分开得给导航加第三种状态，那属于另一次 IA 改动。
+    // **剩下的这两条含义已经不统一了**：`/ext/ai` 按 §5.4 仍是刻意的只读
+    // 蓝图（不预留后端、不做写入、不做执行），`/ext/publishing` 则是
+    // 「在建，还没合进来」。两种含义混在同一份 built:false 里——这是 built
+    // 这个字段本身的表达力上限，不是数据错了；真要分开得给导航加第三种
+    // 状态，那属于另一次 IA 改动。
     expect(paths).toEqual([
-      "/ext/integration",
       "/ext/publishing",
       "/ext/ai",
     ]);
@@ -325,10 +325,30 @@ describe("查表与状态标签", () => {
       "/changes",
       "/design",
       "/settings",
-      // XM-EXT-APP（2026-09-08）：扩展能力段的第一页建成。它排在最后
-      // 是因为 NAV_GROUPS 里扩展能力是第四段——顺序即声明顺序，不是
-      // 按建成时间排的。
+      // XM-EXT-APP / XM-EXT-INTEGRATION（2026-09-08）：扩展能力段前两页建成。
+      // 它们排在最后是因为顺序即 navigation.ts 的声明顺序（扩展能力是第四段），
+      // **不是按建成时间排的**——下一页建成时要插到声明顺序对应的位置，
+      // 不是追加到末尾。
       "/ext/app",
+      "/ext/integration",
     ]);
+  });
+
+  it("接口与自动化建成后不再挂「未建」标签，同段其余三页仍挂", () => {
+    // 这一条与上面两条不重复：它盯的是**侧栏上看得见的那个字**。
+    // 一页已经接了真数据却仍挂着「未建·后置」，会让人以为里面的数字是假的。
+    //
+    // 先取条目再断言，理由同上面那条 stageHintOf：写成
+    // `navStageHint(navItemByPath(path)?.item!)` 的话，路径写错会让
+    // toBeUndefined() 恒真。
+    const hintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
+    expect(hintOf("/ext/integration")).toBeUndefined();
+    for (const path of ["/ext/app", "/ext/publishing", "/ext/ai"]) {
+      expect(hintOf(path), `${path} 仍是只读蓝图，标签必须留着`).toBe("未建·后置");
+    }
   });
 });
