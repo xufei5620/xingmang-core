@@ -285,15 +285,17 @@ describe("查表与状态标签", () => {
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0 + 治理段 0 + 扩展能力 4。
+    // 全局段 0 + 治理段 0 + 扩展能力 3。
     //
     // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
-    // **剩下的四条不是缺口**——扩展能力段按 ADMIN-IA §5.4 与实施计划 §2.5
+    // **剩下的三条不是缺口**——扩展能力段按 ADMIN-IA §5.4 与实施计划 §2.5
     // 是刻意的只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里
     // 表达的是「后端未接且不打算接」，与治理段那三页当初的含义不是一回事。
+    //
+    // 2026-09-08：「接口与自动化」按 ADMIN-IA §5.4.1 的新裁定真建，掉出这份
+    // 清单。**只有它一页**——同一条裁定明确其余三页的只读蓝图定位不变。
     expect(paths).toEqual([
       "/ext/app",
-      "/ext/integration",
       "/ext/publishing",
       "/ext/ai",
     ]);
@@ -320,6 +322,27 @@ describe("查表与状态标签", () => {
       "/changes",
       "/design",
       "/settings",
+      // 2026-09-08 建成（XM-EXT-INTEGRATION）。排在最后是因为顺序即
+      // navigation.ts 的声明顺序，而扩展能力段排在治理段之后。
+      "/ext/integration",
     ]);
+  });
+
+  it("接口与自动化建成后不再挂「未建」标签，同段其余三页仍挂", () => {
+    // 这一条与上面两条不重复：它盯的是**侧栏上看得见的那个字**。
+    // 一页已经接了真数据却仍挂着「未建·后置」，会让人以为里面的数字是假的。
+    //
+    // 先取条目再断言，理由同上面那条 stageHintOf：写成
+    // `navStageHint(navItemByPath(path)?.item!)` 的话，路径写错会让
+    // toBeUndefined() 恒真。
+    const hintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
+    expect(hintOf("/ext/integration")).toBeUndefined();
+    for (const path of ["/ext/app", "/ext/publishing", "/ext/ai"]) {
+      expect(hintOf(path), `${path} 仍是只读蓝图，标签必须留着`).toBe("未建·后置");
+    }
   });
 });

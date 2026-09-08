@@ -1,0 +1,39 @@
+{
+  "id": "integration.api_client.set_status",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "integration.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "client_id": {
+      "type": "string",
+      "required": true
+    },
+    "status": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "active",
+        "disabled"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-EXT-INTEGRATION（2026-09-08）：单独启用/停用一条调用方登记。与 integration.api_client.set 分开的理由同 server.asset.retire——这是一个能被单独审计检索的状态迁移，也让列表页能提供一个不必打开完整表单的开关。**status 只描述登记状态，不描述放行状态**：disabled 不会让该身份的请求被拒绝（这张表不在请求路径上）。reason 必填：停用之后对账页会把这个身份归到「已停用却仍在调用」一类，事后第一个问题就是当时为什么停用。L1 依据同 integration.api_client.set。"
+}

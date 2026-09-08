@@ -53,6 +53,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { ChangesPage } from "./pages/ChangesPage";
 import { DesignPage } from "./pages/DesignPage";
+import { ExtIntegrationPage } from "./pages/ExtIntegrationPage";
 import { FinancePage } from "./pages/FinancePage";
 import { OpsPage } from "./pages/OpsPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -401,6 +402,11 @@ export const routes = [
               { path: "finance", Component: FinancePage },
               { path: "changes", Component: ChangesPage },
               { path: "design", Component: DesignPage },
+              // XM-EXT-INTEGRATION（2026-09-08）：同一条纪律再来一次——
+              // `/ext/integration` 的 built 刚翻成 true，于是它掉出了
+              // placeholderRoutes（那份只收 !item.built）。不在这里补显式
+              // 路由的话，侧栏上有条目、点进去落到最后的 `*` 兜底 404。
+              { path: "ext/integration", Component: ExtIntegrationPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

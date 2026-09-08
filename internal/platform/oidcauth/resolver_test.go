@@ -689,6 +689,25 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 			t.Fatalf("staff 默认不该含 %s", sc)
 		}
 	}
+	// XM-EXT-INTEGRATION（2026-09-08）：「接口与自动化」两张登记簿的读写。
+	//
+	// 方向与 server.manage 那条相同：两个都给 admin（登记簿是纯记录字段，
+	// 调用方登记簿不是授权面、规则登记簿没有执行器），两个都不给 staff。
+	//
+	// **读侧也不给 staff** 是这里与 registry.read 分家的全部理由：
+	// integration.read 返回的是「哪些机器身份该来调我们、期望持有哪些
+	// scope」外加 action_run 里观测到的调用方——那是一张授权面的地图，
+	// 看板角色不该顺带拿到。
+	for _, sc := range []string{"integration.read", "integration.manage"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应含 %s：登记簿是纯记录字段（不发凭据、不授权、无执行器），"+
+				"不给就等于「接口与自动化」页对唯一能用它的人 403, got %v", sc, admin)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 默认不该含 %s：调用方登记簿是一张授权面的地图，"+
+				"看板角色不该顺带拿到", sc)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------

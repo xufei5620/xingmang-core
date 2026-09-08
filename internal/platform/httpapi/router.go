@@ -14,6 +14,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/integration"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -153,6 +154,20 @@ type Deps struct {
 	ServerSuppliers    ServerSupplierLister
 	ServerDomains      ServerDomainLister
 	ServerServiceNotes ServerServiceNoteLister
+	// APIClients / AutomationRules 是「接口与自动化」的两张登记簿
+	// （XM-EXT-INTEGRATION）。各自为 nil 时对应端点不挂载——与
+	// PlatformUsers 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	//
+	// APIClients 还额外要求 CallerActivity 非 nil：那一格的全部价值在于
+	// **对账**（登记簿 × action_run 里实际观测到的调用方），只给登记簿一半
+	// 就变成了一张什么也不校验的台账。缺哪一半都不挂，比挂一个只有半边
+	// 事实的端点诚实。
+	APIClients      APIClientLister
+	CallerActivity  CallerAggregator
+	AutomationRules AutomationRuleLister
+	// IntegrationNow 只为测试注入固定时钟（观测窗口的起点由它算）；
+	// nil 时用 time.Now，生产从不设置它。
+	IntegrationNow func() time.Time
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -596,6 +611,28 @@ func NewRouter(d Deps) http.Handler {
 				Get("/servers/domains", ListServerDomainsHandler(d.ServerDomains))
 			api.With(RequireScope(registry.ScopeRead)).
 				Get("/servers/service-notes", ListServerServiceNotesHandler(d.ServerServiceNotes))
+
+			// 「接口与自动化」的两张登记簿（XM-EXT-INTEGRATION，ADMIN-IA §5.4.1）。
+			//
+			// 读侧用**新 scope** integration.read 而不是复用 registry.read：
+			// 后者默认发给 staff，而调用方登记簿是一张授权面的地图
+			// （谁该来调我们、期望持有哪些 scope），看板角色不该顺带拿到
+			// （见 internal/platform/integration.ScopeRead 的注释）。
+			//
+			// 写路径（四个 L1 Action）不在这里——走
+			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+			// **这两条路由都不会触发任何 Action**：调用方那条只读两张表，
+			// 规则那条只拿注册表查声明、不拿 handler。
+			if d.APIClients != nil && d.CallerActivity != nil {
+				api.With(RequireScope(integration.ScopeRead)).
+					Get("/integration/api-clients",
+						ListAPIClientsHandler(d.APIClients, d.CallerActivity, d.IntegrationNow))
+			}
+			if d.AutomationRules != nil {
+				api.With(RequireScope(integration.ScopeRead)).
+					Get("/integration/automation-rules",
+						ListAutomationRulesHandler(d.AutomationRules, d.ActionRegistry))
+			}
 
 			// 利润台账（XM-0037b）**复用 finance.read**，不另立一个 scope：
 			// 台账里的毛利就是「倍率 × 用量」的结果，能看登记簿里那个倍率的人
