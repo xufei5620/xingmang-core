@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { RouterProvider, createMemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2519,6 +2519,37 @@ describe("未实装页的诚实占位与门禁", () => {
   // 「操作与审批页显示 F-B 门禁」原来在这里断言，作为占位页的一个特例。
   // XM-ACTIONS0 把操作目录/执行记录接上真实数据后，/actions 不再是占位页，
   // 断言挪到下面的「操作与审批」独立 describe 块（门禁本身仍然存在并被断言）。
+
+  it("已建成的 /ext/publishing 不再挂那条「不发布、不执行」的蓝图横幅", async () => {
+    // 盯的是一句**会变成假话的共享文案**：PlaceholderPage 的 PlaceholderGate
+    // 按 `path.startsWith("/ext/")` 无条件给全部 /ext/* 挂「只读蓝图：仅预览、
+    // 不保存、不发布、不执行」。内容发布 2026-09-08 建成之后，那一页有真实的
+    // 草稿、审批与发布动作，横幅仍说「不发布、不执行」就是骗人。
+    // PlaceholderGate 本身由 team-lead 统一改（三个工作树共享它），本片没动。
+    //
+    // **这条用例能证明什么、不能证明什么，写清楚：**
+    //
+    // 下面第二个断言（横幅不在）**结构上不可证伪**——PublishingPage 与
+    // PlaceholderPage 永远不会同时渲染，所以没有任何「改一个条件」的变异能让
+    // 它在锚点还绿着的时候单独变红。实测过：同时删掉 router.tsx 的显式路由并
+    // 把 built 改回 false（这一页真的落回 PlaceholderPage）之后，本用例红在
+    // **锚点**那一行（找不到「但平台还没有任何出站投递器」），第二个断言根本
+    // 没跑到。所以那次变异只证明了「这一页确实是 PublishingPage 在服务」，
+    // 没有证明第二个断言本身有效。
+    //
+    // 因此第三个断言在这里：拿一个**仍是蓝图**的页面证明这个查询确实找得到
+    // 那句话。缺席断言最常见的恒真成因是查询本身失效（文案改了、被拆进多个
+    // 元素），这一条把它挡住——横幅措辞一变，这里立刻红，而不是让第二条
+    // 悄悄地永远绿。
+    renderRoute("/ext/publishing");
+    expect(await screen.findByText(/但平台还没有任何出站投递器/)).not.toBeNull();
+    expect(screen.queryByText(/仅预览、不保存、不发布、不执行/)).toBeNull();
+    cleanup();
+
+    // 同一个查询，换一个仍是蓝图的页面——必须找得到。
+    renderRoute("/ext/integration");
+    expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
+  });
 
   it("扩展能力仍是蓝图的三页标注「仅预览、不保存、不发布、不执行」", async () => {
     // 样本从 /ext/publishing 换成 /ext/integration：内容发布 2026-09-08 建成

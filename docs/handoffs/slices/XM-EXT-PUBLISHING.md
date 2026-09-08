@@ -145,6 +145,19 @@ ADMIN-IA §5.4 原本裁定扩展能力四页「只读蓝图，不得因此提�
 **这不是我认为该这样，是我不想在一个交接片里替 DBR 线做决定** —— 建议在
 DBR2 落地时一次性补齐全部 44 张表；本片的 6 张表清单已列在上表。
 
+### 关于 sqlc —— 本片**零足迹**
+
+`go tool sqlc generate` **一次都没跑**。核对过：`git diff 8c446e5..HEAD -- 'internal/platform/*/gen/'`
+为空，本片两个 commit 里没有任何 `gen/models.go`。
+
+不需要跑的原因：`internal/platform/publishing/store_pg.go` 是**手写 pgx**，与
+`approval` / `sms` / `cards` 同一形态；`sqlc.yaml` 里也没有 publishing 的条目。
+
+**据此提醒下一个人**：仓库里已存在一处 sqlc 漂移（8 个 `gen/models.go` 缺 000025
+之后新增表的模型，全量重新生成会各 +462 行）。那不是本片造成的，本片也没有碰它。
+`scripts/ci-local.sh` 的 sqlc 一致性检查今天本来就是红的——**别为了让它变绿去全量
+重新生成**，那会把三个工作树各自在做的迁移卷成三份互不相同的巨大 diff。
+
 **生产上线要注意的一点**：本迁移 `CREATE SCHEMA publishing`（与 000001~000025
 建 core/action/audit/ops/alerts/finance/ui/assurance 同一形态，有先例）。角色拆分
 真正落地后，新 schema 的 default ACL 需要一并配——那正是开票线 RC101 栽过的坑
@@ -311,6 +324,8 @@ CredentialRef（领域层 + 库层两道）、`publishing.manage` 权限、全�
 | 5 | httpapi 用例的 `fakeDelivery` 换成 `{PlatformX}` | 变红 | ✅ 红在 `publishing_test.go:150`「can_deliver 为真」，锚点（这一行确实返回了、引用原样回显）全过 |
 | 6 | `PublishingPage.tsx` 渠道行条件 `channel.can_deliver ?` → `true ?` | 变红 | ✅ 红在「渠道那一格逐行写『未接投递器』」与「对照组」两条 |
 | 7 | `DeliveryGate` 的 `length > 0` → `length >= 0` | 变红 | ✅ 红在「页头常驻门禁」与「对照组」两条 |
+| 8 | `navigation.ts` 的 `built` true → false（想验「共享蓝图横幅不出现在本页」那条） | 变红 | ❌ **没红**——`built` 不影响 router.tsx 里的显式路由，页面照常渲染。改成「同时删掉显式路由 + built:false」之后确实红了，但红在**锚点**上（找不到本页自己的门禁横幅），目标那行 `queryByText` 根本没跑到。**这次变异什么都没证明**，结论写进了用例注释，见 §八末尾 |
+| 9 | `PlaceholderGate` 的横幅措辞去掉「仅预览、不保存、不发布、不执行」 | 变红 | ✅ 红在第三个断言（拿仍是蓝图的 `/ext/integration` 证明这个查询找得到那句话）。验完**已还原**，`git status` 确认 `PlaceholderPage.tsx` 未被改动 |
 
 **对照组（确认它不是「怎么改都红」）**：
 
@@ -324,6 +339,15 @@ CredentialRef（领域层 + 库层两道）、`publishing.manage` 权限、全�
   不会再验一次。
 - 变异 6、7 期间，「后端说能投递时页面改口」那条用例**始终是绿的**，
   说明它测的确实是另一个方向，不是恒真。
+
+**一条如实降级的断言（变异 8 的结论）**：`router.test.tsx` 里「已建成的
+`/ext/publishing` 不再挂那条『不发布、不执行』的蓝图横幅」，它的**缺席那一半
+结构上不可证伪**——`PublishingPage` 与 `PlaceholderPage` 永远不会同时渲染，
+没有任何「改一个条件」的变异能让它在锚点还绿着的时候单独变红。
+**没有把这一点含糊过去**：用例注释里写清了这条能证明什么、不能证明什么，
+并补了第三个断言——拿一个仍是蓝图的页面（`/ext/integration`）证明这个查询确实
+找得到那句话。缺席断言最常见的恒真成因是**查询本身失效**（文案改了、被拆进多个
+元素），第三条把它挡住了，变异 9 验证了这一点。
 
 **其它有意义的正向锚点**（本仓库栽过「旧实现下照样绿」四次，逐条问过）：
 
@@ -377,11 +401,27 @@ CredentialRef（领域层 + 库层两道）、`publishing.manage` 权限、全�
 - `web/apps/admin-web/src/router.tsx` —— 显式路由（`built:true` 之后它掉出
   `placeholderRoutes`，不补就 404）
 - `web/apps/admin-web/src/router.test.tsx` —— 「未建·后置」4→3、蓝图横幅样本换成
-  `/ext/integration`
+  `/ext/integration`，并**新增一条**「已建成的 /ext/publishing 不再挂那条『不发布、
+  不执行』的蓝图横幅」（含它自身局限的说明，见 §八末尾）
 
-**按派工没碰**：`PlaceholderPage.tsx`（它的 `PLACEHOLDER_COPY["/ext/publishing"]`
-现在是死条目，留给该文件的负责人清理）、`blueprints/ext.ts`（蓝图规格作为冻结的
-设计记录保留，`blueprints.test.ts` 仍在测它）。
+**`web/apps/admin-web/src/pages/PlaceholderPage.tsx` 的 `/ext/*` 横幅与占位文案由
+team-lead 统一处理，本片未动。** 三个 `/ext/*` 工作树共享这一个文件，各改一遍
+合并时必撞；team-lead 会在三片落地后一次性改对（届时只剩 `/ext/ai` 该挂那条横幅）。
+本片受影响的两处，供他核对：
+
+- `PlaceholderGate`（约 159–163 行）按 `path.startsWith("/ext/")` **无条件**挂
+  「只读蓝图：仅预览、不保存、不发布、不执行」。**这句话对本页今天已经不会出现**
+  ——`built:true` 让 `/ext/publishing` 有了自己的路由，根本不经过 `PlaceholderPage`。
+  已加用例钉住（`router.test.tsx`「已建成的 /ext/publishing 不再挂那条…」），
+  但那条断言的局限也写在注释里了，见 §八末尾；
+- `PLACEHOLDER_COPY["/ext/publishing"]`（约 31 行）现在是死条目。
+
+**本片自己那条横幅是本片负责的**：`PublishingPage.tsx` 的 `DeliveryGate` 说的是
+「投递器未接」（今天为真、接上后要改），不是「整页不执行」。它有测试 + 两次
+变异钉住（变异 6、7）。
+
+**另外没碰**：`blueprints/ext.ts`（蓝图规格作为冻结的设计记录保留，
+`blueprints.test.ts` 仍在测它）。
 
 ---
 
@@ -442,8 +482,8 @@ CredentialRef（领域层 + 库层两道）、`publishing.manage` 权限、全�
    本片的 6 张表清单已备好。
 6. **定时投递任务。** 有了投递器之后，「到点自动发」需要一个 River 任务；
    本片的内容日历就地写明了今天没有它。
-7. **`PlaceholderPage.PLACEHOLDER_COPY` 里 `/ext/publishing` 那条死条目**可以删了
-   （按派工本片没碰那个文件）。
+7. **`PlaceholderPage.tsx` 的 `/ext/*` 横幅与 `PLACEHOLDER_COPY`** —— 归 team-lead，
+   三片落地后一次性改。本片不动，也**不建议别的片顺手改**：三个工作树共享它。
 8. **发布记录与审批单的关联**目前要经审计链绕一跳（§二）。若日后觉得值得，
    可以在内核给 Handler 的 context 里注入 approvalID——那是一次共享热点文件的
    改动，值不值得由内核那条线定。
