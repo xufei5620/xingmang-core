@@ -339,10 +339,15 @@ writeAudit(ctx, tx, AuditActor{Type: "source_connector", ID: claim.SourceInstanc
 `return`、审计事件、三个常量、两条查询改用参数绑定阈值）。**这个文件也和
 `inv-ser-retry` 重叠**，合并要点见下一节。
 
-## 五、与 XM-INV-SER-RETRY 的合并要点
+## 五、与并行切片的合并要点（SER-RETRY 代码重叠 / DEAD-REQUEUE 文档依赖）
 
-**这一节写给做合并的人，不是写给评审的人。** `inv-ser-retry` 与本片同时改了
-同样两个文件。行号是本片合入后的状态，仅供定位，**以函数名为准**。
+**这一节写给做合并的人，不是写给评审的人。** 两种关系不同，分开看：
+
+- **`XM-INV-SER-RETRY`：代码重叠**，与本片改了同样两个文件——本节主体讲这个。
+- **`XM-INV-DEAD-REQUEUE`：没有代码重叠，但本片的 runbook 依赖它**——见本节
+  最后一小节，**那一条影响合并顺序**。
+
+行号是本片合入后的状态，仅供定位，**以函数名为准**。
 
 ### 两片各自的落点
 
@@ -435,6 +440,33 @@ Error 日志已经在位，万一它引入回归能立刻看见。反过来先�
 go test ./internal/application/ -count=1 -run \
  'TestSourceProjectionWorkerLogsAnErrorOnlyWhenTheEventActuallyDies|TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate|TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint|TestDeadAndRetryableProjectionFailuresAreDistinguishableByLevel'
 ```
+
+### ⚠️ 本片的 runbook 前向引用了 XM-INV-DEAD-REQUEUE 的命令
+
+**代码没有依赖，文档有。** `docs/PRODUCTION-RUNBOOK.md` 里
+`source_ingest_dead_events` 那一行和「recovering them」那段，现在指向
+`invoice-eligibility-repair --kind=ingest-requeue-dead`。**这个 kind 不在本
+分支里**——本分支只有 `kindProjectionRequeueDead`
+（`backend/cmd/eligibility-repair/main.go:71`），我核实过。它来自
+`XM-INV-DEAD-REQUEUE`。
+
+后果分两种情形：
+
+- **DEAD-REQUEUE 先合或同批合**：没问题，两边对得上。
+- **本片先合而 DEAD-REQUEUE 被推迟或撤下**：runbook 会指向一个**不存在的命令**
+  ——运维照着敲会得到 invalid kind。这比原来那句「见下面的说明」更糟，因为它
+  看起来像可执行的指引。**这种情况下必须把那段改回「暂无摄取侧修复工具」**，
+  或推迟本片的 runbook 那一段。
+
+**所以：若不能保证两片同批上线，请让 DEAD-REQUEUE 不晚于本片。** 试合并
+（`XM-INV-MERGE-TRIAL`）里两者是同批的，按那个批次走就没有这个问题。
+
+**这段 runbook 内容的事实来源是 team-lead 对 DEAD-REQUEUE 的审阅，不是我自己
+核实的**——按硬约束我没有去读那个工作树。里面写的 dry-run 默认、
+`--apply` 要 `--operator-id`、`attempt_count` 归零、`cycle_status='blocked'`
+不可投、不动冻结这几条，**在 DEAD-REQUEUE 真正落地时应当照它的实现再核一遍
+措辞**。若它的 flag 名或行为与上述不符，改 runbook 那一段即可，本片代码不受
+影响。
 
 （需要 `INVOICE_TEST_DATABASE_URL`；前三个是集成用例。）
 

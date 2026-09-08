@@ -2027,7 +2027,7 @@ immediately whenever the failing check changes. Recovery logs
 | `clamav_signatures` | Signature database older than `CLAMAV_MAX_SIGNATURE_AGE` | freshclam |
 | `pdf_scanner` | Sidecar socket unreachable | `pdf-scanner` container, capability token |
 | `source_health_query` | The source-health query itself failed | database load, statement timeouts |
-| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` | the dead-event paragraph below |
+| `source_ingest_dead_events` | `source_ingest_events.processing_status='dead'` | `invoice-eligibility-repair --kind=ingest-requeue-dead`, dead-event paragraph below |
 | `source_ingest` | Ingest backlog too old or inconsistent | `deploy/check-pending-spools.sh`, source agents |
 | `eligibility_health_query` | The projection-health query failed | database load, lock contention |
 | `eligibility_projection_dead_jobs` | `eligibility_projection_jobs.status='dead'` | `invoice-eligibility-repair --kind=projection-requeue-dead`, next paragraph |
@@ -2067,8 +2067,40 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
 
 `object_id` is the `source_ingest_events.event_id`. Unlike the `EVENT_DEAD`
 eligibility freeze raised alongside it, this row is written unconditionally:
-the freeze only appears when the event can be correlated to an account, so
-freezes are not a reliable census of dead events and this is.
+the freeze only appears when the event can be correlated to an account. **Take
+the census from these audit rows, not from the freezes** — counting freezes
+silently omits every dead event that never correlated to an account.
+
+**Recovering them (XM-INV-DEAD-REQUEUE).** A dead ingest event never revives
+on its own. Requeue it with the same repair binary the projection path uses,
+under a different `--kind`:
+
+```bash
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+```
+
+Dry run is the default (each account's transaction is rolled back, nothing is
+written), `--apply` requires `--operator-id`, every requeued row is audited,
+and `--account` / `--event` narrow the selection. It resets `attempt_count` to
+zero, which is not cosmetic: the claim predicate is `attempt_count <` the dead
+threshold, so a row flipped back to `queued` without that reset is **never
+claimed again** — `Dead` drops to zero, `/readyz` stops reporting
+`source_ingest_dead_events` and starts failing on pending age instead, and the
+work still never runs. That state is worse than not repairing at all.
+
+**Read `cycle_status` in the dry-run report before applying.** Rows whose
+cycle is `blocked` must not be requeued: `verifyFactBatchContextTx` rejects
+their facts, so they burn another retry round and die again. `published` is
+safe. `processing` is fine but holds that stream's watermark until it drains.
+
+The repair deliberately leaves eligibility freezes alone. The scan-cycle
+completeness filter is `NOT (status IN ('failed','dead') AND ef.id IS NOT
+NULL)` — the freeze is precisely what stops a dead event from holding its
+cycle open. Clearing it and then failing the reprojection again produces "dead
+but unfrozen", which blocks the whole stream indefinitely.
 
 **Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
 A per-account error from the eligibility-projection worker no longer trips
