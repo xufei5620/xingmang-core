@@ -63,7 +63,11 @@ Go **不会**对「定义了却没被调用的函数」报错，所以另外做�
 | balances | balance_checkpoint | `fcd2e2c6-98aa-8587-9714-8b5aeea0d566` | 写off |
 
 两条都**先跑 dry run**（不带 `--apply`），确认报告与预期一致再 apply。
-`--apply` 需要 `--operator-id=<管理员 UUID>`。命令形状见
+`--apply` 的 `--operator-id` 由产品负责人于 2026-09-08 确认为
+`99ed401b-e78a-4883-b9bf-f4cb4ba1cf17`（签发方 `https://console.solov.cc`，
+审计中 412 个动作，也是 `admin_settings.updated_by`）。它落进审计事件，
+记录的是**谁批准写掉那条客户数据**，所以必须由负责人本人指定，不得代填。
+命令形状见
 `docs/ELIGIBILITY-OPERATIONS.md` 第 530 节与第 664 节。
 
 那条余额检查点**结构上无法重投**：agent 侧的 event id 把载荷哈希折进去了，
@@ -84,7 +88,15 @@ Go **不会**对「定义了却没被调用的函数」报错，所以另外做�
   `go test -p 1 -count=1 ./...` **退出 0，29 个包 ok**（`postgresstore` 273s）、
   `scripts/check-no-secrets.ps1` 0。
 - `ai/claude/XM-INV-RC104`（合并后，专用库 `invoice_test_rc104`）：`go build` 0、`go vet ./internal/application/` 0、`go test -p 1 -count=1 ./...` **退出 0，29 个包 ok**（`postgresstore` 255.9s、`application` 27.4s、`eligibility-repair` 16.9s、`internal/migrate` 8.2s——迁移 0031 在全新库上从零跑通）。
-- `scripts/verify.ps1` 完整发布门禁：**尚未运行**。
+- `scripts/verify.ps1` 完整发布门禁：第一轮因新工作树缺前端依赖失败
+  （`vitest` not recognized，非代码问题），`npm ci` 补齐后重跑中。
+  **注意**：门禁自带隔离 PostgreSQL 并跑集成测试（`postgresstore` 198.9s）；
+  第一轮那些 1.4 秒的 Go 包是死在到达该段之前的早期无库阶段，不代表门禁不测。
+- 发布签名身份已核（**未触碰私钥内容**）：用 `~/.ssh/invoice_release_allowed_signers`
+  反验上一版 `release/0.1.0-rc103-exact1/SHA256SUMS.sig`，回 `Good ... signature`，
+  指纹 `SHA256:5MWY6RAaQcgWjBs67XzKwqB2swGgOLVLg+I8TSWGnTA`。
+  **手册第 438 行那条 `cmd /c ... < file` 写法在本仓库的 `发票` 中文路径段上会报
+  「文件名、目录名或卷标语法不正确」**；改用 bash 的重定向即可，签名本身没问题。
 
 ## 已知的既有欠账（非本次引入）
 
