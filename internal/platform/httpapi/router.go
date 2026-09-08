@@ -35,8 +35,23 @@ type Deps struct {
 	Kernel         ActionExecutor
 	ActionRegistry *action.Registry
 	Services       ServiceLister
-	Metrics        MetricLister
-	MetricHistory  MetricHistoryLister
+	// Connectors / Connections 是资源目录另外两张表的只读查询
+	// （XM-READONLY-QUERIES）。与 Services 同为 *registry.Store，分成三个字段
+	// 是因为它们是三个窄接口（见 ConnectorLister / ConnectionLister）。
+	//
+	// 为 nil 时对应路由不挂载——与 RequestLogs 同一条纪律：端点不存在（404）
+	// 比端点存在却一调就 500 诚实。生产装配始终提供（同一个 Store）。
+	Connectors  ConnectorLister
+	Connections ConnectionLister
+	// Migrations 供「版本与发布 → 数据库变更」那一格读已应用的迁移版本
+	// （XM-READONLY-QUERIES）。权限是 ops.read，见 migrations.go 的说明。
+	//
+	// 为 nil 时不挂载：这份读数依赖 public.schema_migrations 的读权限，而库
+	// 角色拆分落地后该权限需要显式授予（见交接文档）。没授权的部署应当是
+	// 端点不存在，而不是端点存在却每次 500。
+	Migrations    MigrationReporter
+	Metrics       MetricLister
+	MetricHistory MetricHistoryLister
 	// Jobs 供「后台任务」页的两个只读端点（XM-JOBS0）：周期任务目录 + 队列
 	// 积压 + worker 心跳的快照，以及分页的运行记录。与 Metrics/Alerts 同样
 	// 是核心能力，不做 nil 门禁——platform-api 进程总是持有数据库连接池,
@@ -282,6 +297,26 @@ func NewRouter(d Deps) http.Handler {
 			// 「哪个端点要什么权限」的单一清单
 			api.With(RequireScope(registry.ScopeRead)).
 				Get("/services", ListServicesHandler(d.Services))
+			// 资源目录的另外两张表（XM-READONLY-QUERIES），**复用
+			// registry.ScopeRead**：服务 / 连接器 / 连接是同一份「平台管着哪些
+			// 系统、用哪种实现连、连成了几条」的知识面，能看第一张就该看得见
+			// 另外两张（同 /servers/* 复用它的理由）。
+			//
+			// ⚠️ 与下面凭据模块的 /connectors/config 不是同一个东西：那一条读
+			// 的是「连接器跑在 fake 还是 real 模式」（credentials 包，权限
+			// connector.manage），这里读的是 core.connector 登记簿。路径相邻
+			// 但分属两个模块，改动时别当成一族。
+			//
+			// 写路径不在这里：connector.create 是 L2、connection.create 是 L3、
+			// connection.set_status 是 L2，一律走 Action 端点并经审批中心裁决。
+			if d.Connectors != nil {
+				api.With(RequireScope(registry.ScopeRead)).
+					Get("/connectors", ListConnectorsHandler(d.Connectors))
+			}
+			if d.Connections != nil {
+				api.With(RequireScope(registry.ScopeRead)).
+					Get("/connections", ListConnectionsHandler(d.Connections))
+			}
 			api.With(RequireScope(ops.ScopeRead)).
 				Get("/metrics", ListMetricsHandler(d.Metrics))
 			// 历史样本与最新态同属运营指标，共用 ops.read
@@ -304,6 +339,20 @@ func NewRouter(d Deps) http.Handler {
 					DB:               d.DB,
 					AlertDelivery:    d.OpsAlertDelivery,
 				}))
+			// 数据库变更（XM-READONLY-QUERIES）同样复用 ops.read：迁移版本
+			// 回答「这套部署自己处在什么状态」，与心跳、队列积压、控制平面
+			// 健康同一类运行保障知识面。它**不归 registry.read**——那一族说的
+			// 是「平台管着哪些被管系统」，迁移是平台自己的运行事实。
+			//
+			// 挂在 /ops/ 下而不是顶层 /migrations：与上面 /ops/overview 同一
+			// 个族，路径本身就说清了它属于运行保障而不是资源目录。
+			//
+			// 只读。执行迁移与回滚是 Platform Lifecycle Operation（宪法 2、3
+			// 条），走版本化脚本 + 变更单 + 人工批准，不经 Action，更不经 HTTP。
+			if d.Migrations != nil {
+				api.With(RequireScope(ops.ScopeRead)).
+					Get("/ops/migrations", ListMigrationsHandler(d.Migrations))
+			}
 			// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 			api.With(RequireScope(audit.ScopeRead)).
 				Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))

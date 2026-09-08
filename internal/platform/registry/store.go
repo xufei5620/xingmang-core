@@ -241,6 +241,24 @@ func (s *Store) CreateConnector(ctx context.Context, in Connector) (Connector, e
 	return connectorFromRow(row), nil
 }
 
+// ListConnectors 列出全部已登记的 Connector 类型版本。
+//
+// **不带环境参数**，与 ListServicesByEnvironment 不同：core.connector 没有
+// environment 列（迁移 000001），它登记的是「平台有哪几种连接实现」这个类型
+// 目录，全平台一份。给它编一个环境过滤等于凭空造一条不存在的隔离。
+// 真正按环境隔离的是 Connection——见 ListConnectionsByEnvironment。
+func (s *Store) ListConnectors(ctx context.Context) ([]Connector, error) {
+	rows, err := s.q.ListConnectors(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list connectors: %w", err)
+	}
+	out := make([]Connector, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, connectorFromRow(r))
+	}
+	return out, nil
+}
+
 // GetConnector 按 key+version 读取。
 func (s *Store) GetConnector(ctx context.Context, key, version string) (Connector, error) {
 	row, err := s.q.GetConnector(ctx, gen.GetConnectorParams{Key: key, Version: version})
@@ -280,6 +298,27 @@ func (s *Store) ListConnectionsByService(ctx context.Context, serviceID uuid.UUI
 	rows, err := s.q.ListConnectionsByService(ctx, serviceID)
 	if err != nil {
 		return nil, fmt.Errorf("list connections: %w", err)
+	}
+	out := make([]Connection, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, connectionFromRow(r))
+	}
+	return out, nil
+}
+
+// ListConnectionsByEnvironment 列出某环境下的全部连接。
+//
+// 与 ListConnectionsByService 并存：那一条回答「这个服务挂了哪几条连接」，
+// 这一条回答「本环境一共有哪些连接」。环境过滤是硬要求——连接带着
+// credential_ref 与 granted_capabilities，一个 staging 身份不该看见生产的
+// 那几条（宪法 15 条）。
+func (s *Store) ListConnectionsByEnvironment(ctx context.Context, env Environment) ([]Connection, error) {
+	if _, err := ParseEnvironment(string(env)); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.ListConnectionsByEnvironment(ctx, string(env))
+	if err != nil {
+		return nil, fmt.Errorf("list connections by environment: %w", err)
 	}
 	out := make([]Connection, 0, len(rows))
 	for _, r := range rows {

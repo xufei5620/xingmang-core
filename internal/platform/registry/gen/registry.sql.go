@@ -282,6 +282,50 @@ func (q *Queries) GetServiceByInstance(ctx context.Context, arg GetServiceByInst
 	return i, err
 }
 
+const listConnectionsByEnvironment = `-- name: ListConnectionsByEnvironment :many
+SELECT id, connector_id, service_id, environment, credential_ref, target_allowlist, granted_capabilities, kill_switch, status, detected_upstream_version, version_fingerprint, last_verified_at, created_at, updated_at FROM core.connection
+WHERE environment = $1
+ORDER BY created_at
+`
+
+// 与 ListConnectionsByService 并存而不是替换它：那一条是「这个服务挂了哪几条
+// 连接」（写路径复核用），这一条是「本环境一共有哪些连接」（注册表那一格用）。
+// 环境过滤不能省——一个 staging 身份不该看见生产的连接（宪法 15 条）。
+func (q *Queries) ListConnectionsByEnvironment(ctx context.Context, environment string) ([]CoreConnection, error) {
+	rows, err := q.db.Query(ctx, listConnectionsByEnvironment, environment)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CoreConnection{}
+	for rows.Next() {
+		var i CoreConnection
+		if err := rows.Scan(
+			&i.ID,
+			&i.ConnectorID,
+			&i.ServiceID,
+			&i.Environment,
+			&i.CredentialRef,
+			&i.TargetAllowlist,
+			&i.GrantedCapabilities,
+			&i.KillSwitch,
+			&i.Status,
+			&i.DetectedUpstreamVersion,
+			&i.VersionFingerprint,
+			&i.LastVerifiedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listConnectionsByService = `-- name: ListConnectionsByService :many
 SELECT id, connector_id, service_id, environment, credential_ref, target_allowlist, granted_capabilities, kill_switch, status, detected_upstream_version, version_fingerprint, last_verified_at, created_at, updated_at FROM core.connection
 WHERE service_id = $1
@@ -310,6 +354,47 @@ func (q *Queries) ListConnectionsByService(ctx context.Context, serviceID uuid.U
 			&i.DetectedUpstreamVersion,
 			&i.VersionFingerprint,
 			&i.LastVerifiedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listConnectors = `-- name: ListConnectors :many
+SELECT id, key, version, contract_version, connection_schema_path, target_allowlist, read_capabilities, write_capabilities, supported_upstream_versions, compatibility_test_path, created_at, updated_at FROM core.connector
+ORDER BY key, version
+`
+
+// 连接器登记簿没有 environment 列：它登记的是「有哪几种连接实现」，
+// 那是全平台一份的类型目录，不按环境分。按 (key, version) 排序而不是
+// created_at——同一个 key 的多个版本要挨在一起，登记先后没有阅读意义。
+func (q *Queries) ListConnectors(ctx context.Context) ([]CoreConnector, error) {
+	rows, err := q.db.Query(ctx, listConnectors)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CoreConnector{}
+	for rows.Next() {
+		var i CoreConnector
+		if err := rows.Scan(
+			&i.ID,
+			&i.Key,
+			&i.Version,
+			&i.ContractVersion,
+			&i.ConnectionSchemaPath,
+			&i.TargetAllowlist,
+			&i.ReadCapabilities,
+			&i.WriteCapabilities,
+			&i.SupportedUpstreamVersions,
+			&i.CompatibilityTestPath,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

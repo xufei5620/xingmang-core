@@ -28,6 +28,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
+	"github.com/xufei5620/xingmang-platform/internal/platform/lifecycle"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
@@ -498,7 +499,15 @@ func main() {
 		Approvals:    approvalService,
 		ApprovalExec: kernel,
 		Services:     registryStore,
-		Metrics:      opsStore,
+		// 资源目录另外两张表（XM-READONLY-QUERIES）复用同一个 registryStore：
+		// 三张表在同一个仓储里，读它们不该另开第二条访问 core.* 的路径。
+		Connectors:  registryStore,
+		Connections: registryStore,
+		// 「版本与发布 → 数据库变更」读已应用的迁移版本（XM-READONLY-QUERIES）。
+		// 独立的 Store：它读的是 public.schema_migrations，与 core.* 不是同一个
+		// schema，也不属于任何业务仓储。
+		Migrations: lifecycle.NewStore(pool),
+		Metrics:    opsStore,
 		// 历史样本复用同一个 Store：最新态与样本是同一个仓储的两张表
 		MetricHistory: opsStore,
 		// 后台任务概览与运行记录（XM-JOBS0）
