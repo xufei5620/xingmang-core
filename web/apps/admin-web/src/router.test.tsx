@@ -2668,17 +2668,24 @@ describe("未实装页的诚实占位与门禁", () => {
     cleanup();
 
     // 同一个查询，换一个仍是蓝图的页面——必须找得到。
-    renderRoute("/ext/integration");
+    // **样本必须随合并更新**：本片写它时 `/ext/integration` 还是蓝图，
+    // 而同一批的 XM-EXT-INTEGRATION 把它建成了；三片合并后**仍走
+    // PlaceholderPage 的只剩 `/ext/ai`**。这类「拿另一个页当对照」的断言，
+    // 在并行建页时必然失效，合并时要重新挑样本。
+    renderRoute("/ext/ai");
     expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
   });
 
-  it("扩展能力仍是蓝图的三页标注「仅预览、不保存、不发布、不执行」", async () => {
-    // 样本从 /ext/publishing 换成 /ext/integration：内容发布 2026-09-08 建成
-    // （XM-EXT-PUBLISHING），它已经不走 PlaceholderPage，拿它测这条横幅会测成
-    // 那一页的实现。剩下三页按 ADMIN-IA §5.4 仍是刻意的只读蓝图。
-    renderRoute("/ext/integration");
+  it("扩展能力仍是蓝图的 AI能力管理 标注「仅预览、不保存、不发布、不执行」", async () => {
+    // 样本换过两次：/ext/publishing → /ext/integration → /ext/ai。
+    // 2026-09-08 产品负责人推翻 ADMIN-IA §5.4 对三页的适用，那三页各自建成、
+    // 各自不再走 PlaceholderPage，于是**每一片都把样本换成了当时还是蓝图的
+    // 另一页**——而合并之后只剩 `/ext/ai` 一页真的还走这条路径。
+    //
+    // 用一个已建成的页测这条横幅，测的是那一页的实现,不是本组件的,绿得毫无意义。
+    renderRoute("/ext/ai");
     expect(await screen.findByText(/仅预览、不保存、不发布、不执行/)).not.toBeNull();
-    expect(screen.getByRole("heading", { name: "接口与自动化", level: 2 })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "AI能力管理", level: 2 })).not.toBeNull();
   });
 
   it("子页签进 ?sub=，可分享可恢复", async () => {

@@ -279,11 +279,14 @@ describe("查表与状态标签", () => {
     expect(stageHintOf("/changes")).toBeUndefined();
     expect(stageHintOf("/design")).toBeUndefined();
     expect(stageHintOf("/finance")).toBeUndefined();
-    // 2026-09-08：「内容发布」也建成了（XM-EXT-PUBLISHING，裁定变更见
-    // ADMIN-IA §5.4.1），于是它同样不再挂阶段标签。仍挂标签的换成扩展能力段
-    // 剩下的三页——那三页按 §5.4 原裁定**刻意只做只读蓝图**，不是缺口。
+    // 2026-09-08：扩展能力段三页全部建成（XM-EXT-APP / XM-EXT-INTEGRATION /
+    // XM-EXT-PUBLISHING，裁定变更见 ADMIN-IA §5.4），于是它们都不再挂阶段标签。
+    // **仍挂标签的只剩 `/ext/ai` 一页**——它按 §5.4 原裁定**刻意只做只读蓝图**，
+    // 不是缺口。
+    expect(stageHintOf("/ext/app")).toBeUndefined();
+    expect(stageHintOf("/ext/integration")).toBeUndefined();
     expect(stageHintOf("/ext/publishing")).toBeUndefined();
-    expect(stageHintOf("/ext/app")).toBe("未建·后置");
+    expect(stageHintOf("/ext/ai")).toBe("未建·后置");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
@@ -351,9 +354,12 @@ describe("查表与状态标签", () => {
       expect(item, `导航里没有 ${path}`).toBeDefined();
       return navStageHint(item!);
     };
-    expect(hintOf("/ext/integration")).toBeUndefined();
-    for (const path of ["/ext/app", "/ext/publishing", "/ext/ai"]) {
-      expect(hintOf(path), `${path} 仍是只读蓝图，标签必须留着`).toBe("未建·后置");
+    // 三片各自写这条时都只知道自己那一页，于是各自把「其余三页仍挂标签」
+    // 写进了断言。**合并后三页都建成了，这类断言必须整体重算**——这正是
+    // 「取任一侧都错」的那类冲突在测试里的表现。
+    for (const path of ["/ext/app", "/ext/integration", "/ext/publishing"]) {
+      expect(hintOf(path), `${path} 已建成，不该再挂「未建」标签`).toBeUndefined();
     }
+    expect(hintOf("/ext/ai"), "/ext/ai 仍是只读蓝图，标签必须留着").toBe("未建·后置");
   });
 });
