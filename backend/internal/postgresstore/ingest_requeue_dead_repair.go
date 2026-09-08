@@ -479,15 +479,20 @@ func (s *Store) repairIngestRequeueDeadEvent(ctx context.Context, candidate Inge
 func ingestRequeueDeadReplayBindingTx(ctx context.Context, tx pgx.Tx, row *IngestRequeueDeadRepairEvent) error {
 	var schemaVersion, batchID string
 	var mappingPayloadHash, cycleID, cycleStatus *string
+	// claimBindingSelect is embedded verbatim rather than reimplemented. This
+	// function's only job is to predict what the claim will hand the verifier,
+	// so it has to resolve the binding with the *same SQL the claim uses*.
+	// Restating the rule would let the two drift, and a repair tool whose
+	// prediction has drifted from the runtime is worse than no prediction --
+	// a report disagreeing with reality is exactly the defect this tool was
+	// last fixed for.
 	err := tx.QueryRow(ctx, `
-		SELECT b.schema_version,b.batch_id::text,m.payload_hash,
+		SELECT sib.schema_version,sib.batch_id::text,m.payload_hash,
 			c.scan_cycle_id::text,c.cycle_status
-		FROM source_ingest_events sie
-		JOIN source_ingest_batches b ON b.source_instance_id=sie.source_instance_id
-			AND b.stream_id=sie.stream_id AND b.batch_id=sie.first_batch_id
+		FROM source_ingest_events sie`+claimBindingSelect+`
 		LEFT JOIN source_economic_scan_cycle_events m ON m.source_instance_id=sie.source_instance_id
 			AND m.stream_id=sie.stream_id AND m.event_id=sie.event_id
-			AND m.batch_id=b.batch_id AND m.scan_cycle_id=b.scan_cycle_id
+			AND m.batch_id=sib.batch_id AND m.scan_cycle_id=sib.scan_cycle_id
 		LEFT JOIN source_economic_scan_cycles c ON c.source_instance_id=m.source_instance_id
 			AND c.stream_id=m.stream_id AND c.scan_cycle_id=m.scan_cycle_id
 		WHERE sie.source_instance_id=$1 AND sie.stream_id=$2 AND sie.event_id=$3`,

@@ -717,18 +717,22 @@ func TestIngestRequeueDeadNarrowsByEventAndByAccount(t *testing.T) {
 	}
 }
 
-// TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked reproduces the
-// exact production shape found on 2026-09-08: an agent restart superseded the
-// cycle a dead event's own first_batch_id belongs to (so that cycle is now
-// 'blocked'), and the agent's next scan re-delivered the identical
-// deterministic event id under a cycle that went on to publish.
+// TestIngestRequeueDeadRequeuesAnEventRescuedByALaterValidBinding is the
+// production shape found on 2026-09-08 -- an agent restart superseded the
+// cycle the dead event's own first_batch_id belongs to (now 'blocked'), and
+// the agent's next scan re-delivered the identical deterministic event id
+// under a cycle that went on to publish -- read *after* XM-INV-CLAIM-BINDING.
 //
-// The event therefore has two mappings, one 'blocked' and one 'published' --
-// but ClaimUnprocessedSourceEvents joins sie.first_batch_id, so a replay is
-// verified against the blocked one and verifyFactBatchContextTx refuses it.
-// The repair must reach that verdict itself: report both mappings, mark which
-// one governs, and requeue nothing.
-func TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked(t *testing.T) {
+// Before that slice the claim was pinned to first_batch_id, so the replay was
+// verified against the blocked binding and refused, and this repair correctly
+// refused to requeue. Now the claim prefers the newest valid binding, so the
+// published one governs and the event is replayable again. The repair must
+// reach the *same* verdict as the runtime: it resolves the binding with the
+// very SQL the claim uses (claimBindingSelect), so the two cannot disagree.
+//
+// This test is the executable form of the expected dry-run change for the two
+// production usage events.
+func TestIngestRequeueDeadRequeuesAnEventRescuedByALaterValidBinding(t *testing.T) {
 	fixture := seedDeadIngestFixture(t, "usage")
 	const eventID = "88000000-0000-4000-8000-0000000000a1"
 	const supersededCycleID = "89000000-0000-4000-8000-0000000000a1"
@@ -737,10 +741,6 @@ func TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked(t *testing.T) {
 	fixture.commitEvents(t, "usage", supersededCycleID, []SourceBatchEvent{event})
 	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
 	fixture.freezeOverEvent(t, eventID, "usage_event")
-	// The agent restarts, abandons its cycle, and rescans: the stale cycle is
-	// superseded to 'blocked' and the same event id is re-delivered under the
-	// successor, which publishes because the dead event's own open freeze
-	// counts it complete.
 	fixture.commitSupersedingCycle(t, "usage", successorCycleID, []SourceBatchEvent{event})
 	if status := fixture.cycleStatus(t, "usage", supersededCycleID); status != "blocked" {
 		t.Fatalf("superseded cycle status=%q, want blocked", status)
@@ -748,75 +748,127 @@ func TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked(t *testing.T) {
 	if status := fixture.cycleStatus(t, "usage", successorCycleID); status != "published" {
 		t.Fatalf("successor cycle status=%q, want published", status)
 	}
-	before := fixture.readIngestEvent(t, "usage", eventID)
-	if before.status != "dead" {
+	if before := fixture.readIngestEvent(t, "usage", eventID); before.status != "dead" {
 		t.Fatalf("re-delivery must not revive the dead row: status=%q", before.status)
 	}
 
+	dryRun, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{}, AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dryRun.Events) != 1 {
+		t.Fatalf("events=%+v, want one", dryRun.Events)
+	}
+	found := dryRun.Events[0]
+	if found.ReplayBlocked || !found.Requeued {
+		t.Fatalf("verdict=%+v, want replayable via the published binding", found)
+	}
+	if found.ReplayScanCycleID != successorCycleID || found.ReplayCycleStatus != "published" {
+		t.Fatalf("replay binding=%s/%s, want the published successor %s",
+			found.ReplayScanCycleID, found.ReplayCycleStatus, successorCycleID)
+	}
+	if dryRun.TotalRequeued != 1 || dryRun.TotalBlockedSkipped != 0 {
+		t.Fatalf("totals requeued=%d blocked=%d, want 1/0", dryRun.TotalRequeued, dryRun.TotalBlockedSkipped)
+	}
+	// Both mappings are still reported, and exactly the published one is now
+	// marked as the binding that governs.
+	if len(found.ScanCycles) != 2 {
+		t.Fatalf("scan cycles=%+v, want both mappings reported", found.ScanCycles)
+	}
+	for _, cycle := range found.ScanCycles {
+		if wantReplay := cycle.ScanCycleID == successorCycleID; cycle.ReplayBinding != wantReplay {
+			t.Fatalf("cycle %s ReplayBinding=%t, want %t", cycle.ScanCycleID, cycle.ReplayBinding, wantReplay)
+		}
+	}
+
+	// Apply, then prove the prediction matches the runtime: the worker claims
+	// the row and carries the same binding the report named.
+	if _, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator},
+		AuditActor{Type: "admin", ID: deadIngestOperator}); err != nil {
+		t.Fatal(err)
+	}
+	claim := fixture.claimFor(t, eventID)
+	if claim.ScanCycleID != found.ReplayScanCycleID || claim.BatchID != found.ReplayBatchID {
+		t.Fatalf("claim carried %s/%s but the report predicted %s/%s; prediction and runtime disagree",
+			claim.BatchID, claim.ScanCycleID, found.ReplayBatchID, found.ReplayScanCycleID)
+	}
+	if err := fixture.store.ValidateEconomicFactContext(fixture.ctx, fixture.sourceID, "usage",
+		claim.EventID, claim.BatchID, claim.ScanCycleID, claim.PayloadHash, claim.ScanCeilingAt); err != nil {
+		t.Fatalf("the verifier refused the binding the repair promised: %v", err)
+	}
+}
+
+// TestIngestRequeueDeadSkipsWhenEveryBindingIsUnusable is the balance
+// checkpoint's shape, and the reverse of the test above: an event whose
+// bindings are *all* unusable stays skipped, with the totals and the reason
+// saying so. Two bindings on different batches, so "picked the newest" and
+// "fell back to the first" are distinguishable outcomes.
+func TestIngestRequeueDeadSkipsWhenEveryBindingIsUnusable(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "usage")
+	const eventID = "88000000-0000-4000-8000-0000000000a5"
+	const otherEventID = "88000000-0000-4000-8000-0000000000a6"
+	const firstCycleID = "89000000-0000-4000-8000-0000000000a5"
+	const secondCycleID = "89000000-0000-4000-8000-0000000000a6"
+	const thirdCycleID = "89000000-0000-4000-8000-0000000000a7"
+	event := newDeadIngestEvent(eventID, "usage_event")
+	fixture.commitEvents(t, "usage", firstCycleID, []SourceBatchEvent{event})
+	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+	// No freeze: the dead event keeps each cycle incomplete, so cycle 2 can be
+	// superseded by cycle 3 and both of this event's bindings end up blocked.
+	fixture.commitSupersedingCycle(t, "usage", secondCycleID, []SourceBatchEvent{event})
+	fixture.commitSupersedingCycle(t, "usage", thirdCycleID,
+		[]SourceBatchEvent{newDeadIngestEvent(otherEventID, "usage_event")})
+	for _, cycleID := range []string{firstCycleID, secondCycleID} {
+		if status := fixture.cycleStatus(t, "usage", cycleID); status != "blocked" {
+			t.Fatalf("cycle %s status=%q, want blocked", cycleID, status)
+		}
+	}
+	before := fixture.readIngestEvent(t, "usage", eventID)
+
 	for _, mode := range []bool{false, true} {
 		result, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
-			IngestRequeueDeadRepairInput{Apply: mode, OperatorID: deadIngestOperator},
+			IngestRequeueDeadRepairInput{Apply: mode, OperatorID: deadIngestOperator, EventID: eventID},
 			AuditActor{Type: "admin", ID: deadIngestOperator})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(result.Events) != 1 {
-			t.Fatalf("apply=%t: events=%+v, want the blocked event still reported", mode, result.Events)
+			t.Fatalf("apply=%t: events=%+v", mode, result.Events)
 		}
 		found := result.Events[0]
-		if found.Requeued {
-			t.Fatalf("apply=%t: Requeued=true for an event whose replay is refused", mode)
+		if found.Requeued || !found.ReplayBlocked {
+			t.Fatalf("apply=%t: Requeued=%t ReplayBlocked=%t, want false/true", mode, found.Requeued, found.ReplayBlocked)
 		}
-		if !found.ReplayBlocked || found.ReplayScanCycleID != supersededCycleID ||
-			found.ReplayCycleStatus != "blocked" {
-			t.Fatalf("apply=%t: replay verdict=%+v, want blocked on the superseded cycle", mode, found)
-		}
-		if !strings.Contains(found.ReplayBlockedReason, supersededCycleID) ||
-			!strings.Contains(found.ReplayBlockedReason, "verifyFactBatchContextTx") {
-			t.Fatalf("apply=%t: reason=%q must name the governing cycle and the check", mode, found.ReplayBlockedReason)
+		if !strings.Contains(found.ReplayBlockedReason, "verifyFactBatchContextTx") {
+			t.Fatalf("apply=%t: reason=%q must name the check", mode, found.ReplayBlockedReason)
 		}
 		if result.TotalRequeued != 0 || result.TotalBlockedSkipped != 1 {
 			t.Fatalf("apply=%t: totals requeued=%d blocked=%d, want 0/1",
 				mode, result.TotalRequeued, result.TotalBlockedSkipped)
 		}
-		// Both mappings are reported, and exactly the blocked one is marked
-		// as the replay binding -- the published sibling must not be able to
-		// pass for the governing cycle.
-		if len(found.ScanCycles) != 2 {
-			t.Fatalf("apply=%t: scan cycles=%+v, want both mappings reported", mode, found.ScanCycles)
-		}
-		for _, cycle := range found.ScanCycles {
-			wantReplay := cycle.ScanCycleID == supersededCycleID
-			if cycle.ReplayBinding != wantReplay {
-				t.Fatalf("apply=%t: cycle %s ReplayBinding=%t, want %t",
-					mode, cycle.ScanCycleID, cycle.ReplayBinding, wantReplay)
-			}
-			if cycle.ScanCycleID == successorCycleID && cycle.CycleStatus != "published" {
-				t.Fatalf("apply=%t: successor mapping status=%q", mode, cycle.CycleStatus)
-			}
-		}
-		// Nothing was written, in either mode.
 		if after := fixture.readIngestEvent(t, "usage", eventID); after != before {
-			t.Fatalf("apply=%t: the skipped event was modified: before=%+v after=%+v", mode, before, after)
+			t.Fatalf("apply=%t: the skipped event was modified", mode)
 		}
 		if count := fixture.requeueAuditCount(t, eventID); count != 0 {
-			t.Fatalf("apply=%t: requeue audit rows=%d, want 0 for a skipped event", mode, count)
+			t.Fatalf("apply=%t: requeue audit rows=%d, want 0", mode, count)
 		}
 	}
 
 	// The override exists, is off by default, and does requeue when asked.
 	forced, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
-		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator, IncludeBlockedCycles: true},
+		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator,
+			EventID: eventID, IncludeBlockedCycles: true},
 		AuditActor{Type: "admin", ID: deadIngestOperator})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forced.TotalRequeued != 1 || forced.TotalBlockedSkipped != 0 || len(forced.Events) != 1 ||
+	if forced.TotalRequeued != 1 || forced.TotalBlockedSkipped != 0 ||
 		!forced.Events[0].Requeued || !forced.Events[0].ReplayBlocked {
-		t.Fatalf("forced result=%+v, want the blocked event requeued but still flagged", forced.Events)
+		t.Fatalf("forced result=%+v, want requeued but still flagged", forced.Events)
 	}
-	after := fixture.readIngestEvent(t, "usage", eventID)
-	if after.status != "queued" || after.attemptCount != 0 {
+	if after := fixture.readIngestEvent(t, "usage", eventID); after.status != "queued" || after.attemptCount != 0 {
 		t.Fatalf("forced apply: status=%q attempt_count=%d, want queued/0", after.status, after.attemptCount)
 	}
 	if count := fixture.requeueAuditCount(t, eventID); count != 1 {

@@ -139,6 +139,39 @@ XM-INV-DEAD-REQUEUE 的注释文本）：
 必须带 `-p 1`：`cmd/eligibility-repair` 与 `internal/postgresstore` 共用同一个
 worktree 专用库且各自 `DROP SCHEMA`。
 
+## 一处必须同步改的地方（差点漏掉）
+
+本片改了认领走哪条绑定，而
+`invoice-eligibility-repair --kind=ingest-requeue-dead` 的全部价值就在于
+**预测校验器会怎么判**。它原来自己拼了一份按 `first_batch_id` 查的 SQL——
+那是**旧**行为。本片上线后，工具会继续把那两条 usage 报成
+`replay blocked`，而认领实际会成功——**报告与运行时直接对不上**，
+也就是说我本来会给你一个错的「预期变化」。
+
+已修：`ingestRequeueDeadReplayBindingTx` 现在**直接嵌入 `claimBindingSelect`
+这个同一份 SQL 常量**，而不是重写一遍规则——两者从结构上就无法漂移。
+
+相应地，`TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked` 的前提变了
+（它用的正是生产那两条 usage 的形状，现在应当可投），拆成两个：
+
+- `TestIngestRequeueDeadRequeuesAnEventRescuedByALaterValidBinding`：生产形状
+  现在 `Requeued=true`、replay binding = 已发布的后继；**并且 apply 后真去认领一次，
+  断言 claim 带的 batch/cycle 与报告预测的逐字一致**，再用未修改的校验器
+  确认它接受。这条用例就是「预期变化」的可执行形式。
+- `TestIngestRequeueDeadSkipsWhenEveryBindingIsUnusable`：两条绑定都不可用（余额
+  快照那种）仍然跳过。
+
+**连带效果（值得单独记一笔）**：`--kind=ingest-acknowledge-unreplayable` 那道
+拒绝闸复用的是**同一个** `ingestRequeueDeadReplayBindingTx`，所以它
+**自动继承了这个修复**——无需另改一行。于是「什么算可重投」这个定义
+在**三处**（认领、重投预测、注销拒绝）只存在一份。
+
+这一点对注销尤其要紧：它是**不可逆**的操作。如果它拿的是一份已经漂移的
+副本，它会在「这条其实救得回来」的情况下放行注销——而那是没有撤回的。
+
+**教训：一个「预测另一处行为」的工具，必须与被预测的那处共用代码，
+否则它会在某次无关的改动后安静地开始说谎。**
+
 ## dry run 的预期变化
 
 本片上线后，`invoice-eligibility-repair --kind=ingest-requeue-dead` 的 dry run
