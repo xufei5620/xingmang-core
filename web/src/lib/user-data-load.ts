@@ -27,12 +27,15 @@ import type {
 // request. A request that fails contributes its name to the error line and
 // changes nothing else.
 
-export type UserDataRequestKey =
-  | "orders"
-  | "profiles"
-  | "sourceAccounts"
-  | "eligibilitySummaries"
-  | "requests";
+export const userDataRequestKeys = [
+  "orders",
+  "profiles",
+  "sourceAccounts",
+  "eligibilitySummaries",
+  "requests",
+] as const;
+
+export type UserDataRequestKey = (typeof userDataRequestKeys)[number];
 
 // The Chinese name of each panel, used in the partial-failure banner so the
 // user can tell which part of the page is stale rather than being told, with no
@@ -81,6 +84,11 @@ export interface UserDataSetters {
   setRequests(page: InvoiceRequestPage): void;
   setSummary(page: InvoiceRequestPage, availableMinor: number): void;
   setLoadError(value: string | null): void;
+  // Which requests failed, so a panel can tell "I could not read this" apart
+  // from "you have none". Without it the only signal reaching the components
+  // is a banner string, and SourceAccountStatus was reading an empty list as
+  // "this user has never bound an account".
+  setFailed(keys: UserDataRequestKey[]): void;
 }
 
 function value<T>(result: PromiseSettledResult<T>): T | undefined {
@@ -94,13 +102,7 @@ function value<T>(result: PromiseSettledResult<T>): T | undefined {
  */
 export function planUserDataLoad(results: UserDataResults): UserDataLoadPlan {
   const failed: UserDataRequestKey[] = [];
-  for (const key of [
-    "orders",
-    "profiles",
-    "sourceAccounts",
-    "eligibilitySummaries",
-    "requests",
-  ] as const) {
+  for (const key of userDataRequestKeys) {
     if (results[key].status === "rejected") failed.push(key);
   }
 
@@ -118,10 +120,84 @@ export function planUserDataLoad(results: UserDataResults): UserDataLoadPlan {
         ? summaries.reduce((total, item) => total + item.availableMinor, 0)
         : undefined,
     failed,
-    loadError: failed.length
-      ? `${failed.map((key) => userDataRequestLabels[key]).join("、")}暂时无法读取，其余数据仍是最新的。`
-      : null,
+    loadError: loadErrorFor(results, failed),
   };
+}
+
+// A rejection message is surfaced only when it is copy a person can act on.
+// The backend's own 5xx line ("开票服务暂时不可用，请稍后重试。") is exactly that,
+// and it WAS the banner body before the five requests were split apart --
+// dropping it made the banner strictly less informative than the bug it
+// replaced. But `fetch` rejects with "Failed to fetch", and the product owner
+// does not read English, so the test is the shape of the sentence rather than
+// where it came from: some Chinese, one line, bounded length.
+const readableReasonPattern = /[一-鿿]/;
+
+export function readableReason(reason: unknown): string | null {
+  const message =
+    reason instanceof Error
+      ? reason.message
+      : typeof reason === "string"
+        ? reason
+        : "";
+  const trimmed = message.trim();
+  if (!trimmed || trimmed.length > 200 || /[\r\n]/.test(trimmed)) return null;
+  return readableReasonPattern.test(trimmed) ? trimmed : null;
+}
+
+function loadErrorFor(
+  results: UserDataResults,
+  failed: UserDataRequestKey[],
+): string | null {
+  if (failed.length === 0) return null;
+  const reasons: string[] = [];
+  for (const key of failed) {
+    const result = results[key];
+    if (result.status !== "rejected") continue;
+    const reason = readableReason(result.reason);
+    if (reason && !reasons.includes(reason)) reasons.push(reason);
+  }
+  const detail = reasons.length ? `（${reasons.join("；")}）` : "";
+  // "其余数据仍是最新的" is only true when there IS a 其余. When every request
+  // failed, that sentence tells the one person who reads this page that the
+  // rest of it is fresh, at the moment when none of it is -- and the banner is
+  // the only thing on screen saying anything at all.
+  if (failed.length === userDataRequestKeys.length) {
+    return `开票数据全部读取失败，请稍后重试。${detail}`;
+  }
+  return `${failed.map((key) => userDataRequestLabels[key]).join("、")}暂时无法读取，其余数据仍是最新的。${detail}`;
+}
+
+export type SourceAccountPanelMode = "accounts" | "unavailable" | "onboarding";
+
+/**
+ * What the "已关联的平台账号" panel must render.
+ *
+ * `onboarding` is the destructive one: it walks a user through binding an
+ * account. Picking it purely on "the account list is empty" is what made the
+ * incident worse than missing data, and splitting the five loads apart only
+ * fixed half of that. It fixed a SIBLING request taking the panel down; the
+ * accounts request failing on its own produces the identical empty list on a
+ * first load, and would still have shown the wizard to someone whose bindings
+ * are verified and working.
+ *
+ * So "I could not read this" and "you have none" are different answers. Only
+ * the second one may invite the user to go and bind again.
+ */
+// Takes the whole failed-request list rather than a ready-made boolean on
+// purpose. The component that calls this has no test around it (no RTL in this
+// repo), so every line of judgement written there is a line nothing checks --
+// `failed.includes("sourceAccounts")` belongs on this side of the boundary,
+// where the mutation tests can reach it.
+export function sourceAccountPanelMode(input: {
+  accountCount: number;
+  failed: readonly UserDataRequestKey[];
+}): SourceAccountPanelMode {
+  // Last-good accounts still count as accounts: the banner already says the
+  // page is stale, and showing the list the user had a moment ago is never the
+  // dangerous direction.
+  if (input.accountCount > 0) return "accounts";
+  return input.failed.includes("sourceAccounts") ? "unavailable" : "onboarding";
 }
 
 /**
@@ -142,6 +218,7 @@ export function applyUserDataPlan(
     setters.setSummary(plan.requests, plan.summaryAvailableMinor);
   }
   setters.setLoadError(plan.loadError);
+  setters.setFailed(plan.failed);
 }
 
 /** Convenience wrapper: plan and apply in one call. */

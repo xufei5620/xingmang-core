@@ -11,6 +11,24 @@ import (
 	"invoice-system/backend/internal/eligibilitywire"
 )
 
+// lotStatusSpace is the status half of the input space: the migration CHECK's
+// values plus every status literal the code introduces, both discovered.
+//
+// It must NOT come from contract.LotEligibilityStatus. Feeding a probe the very
+// field it validates makes it agree with itself -- a synthetic status added the
+// way source_unavailable was added (one assignment in application/service.go,
+// no migration) would then be fed to no probe and declared by no gate, and
+// every test in this file would stay green on the exact shape of the incident
+// it exists for.
+func lotStatusSpace(t *testing.T) []string {
+	t.Helper()
+	space, err := eligibilitywire.LotStatusInputSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return space
+}
+
 // lotInputSpace is the cartesian product of every FundingLot field the reason
 // chain in userFundingLotDTOs actually branches on. Enumerating inputs and
 // collecting the outputs is the whole point: a hand-written table of expected
@@ -83,7 +101,7 @@ func TestUserFundingLotReasonCodeSetIsExhaustive(t *testing.T) {
 	emitted := map[string]bool{}
 	emittedStatuses := map[string]bool{}
 	pairs := map[string]map[string]bool{}
-	for _, dto := range userFundingLotDTOs(lotInputSpace(contract.LotEligibilityStatus)) {
+	for _, dto := range userFundingLotDTOs(lotInputSpace(lotStatusSpace(t))) {
 		emittedStatuses[dto.EligibilityStatus] = true
 		if pairs[dto.EligibilityStatus] == nil {
 			pairs[dto.EligibilityStatus] = map[string]bool{}
@@ -166,11 +184,7 @@ func TestUserFundingLotPendingReconciliationCarriesFiveDistinctReasons(t *testin
 // some reason code, so an unknown future status still renders with an
 // explanation rather than a blank badge.
 func TestUserFundingLotNonActiveStatusAlwaysCarriesAReason(t *testing.T) {
-	contract, err := eligibilitywire.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, dto := range userFundingLotDTOs(lotInputSpace(contract.LotEligibilityStatus)) {
+	for _, dto := range userFundingLotDTOs(lotInputSpace(lotStatusSpace(t))) {
 		if dto.EligibilityStatus != "active" && dto.ReasonCode == "" {
 			t.Fatalf("lot %s: status %q carried no reason code", dto.ID, dto.EligibilityStatus)
 		}

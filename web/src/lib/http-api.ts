@@ -594,9 +594,11 @@ const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const serviceUnitsPattern = /^(0|[1-9][0-9]{0,77})$/;
 
-function exactObjectKeys(
+// The half of the key check that must never be relaxed: it is an object, and
+// every key this client reads by name is present. A missing required key means
+// a field would silently read as `undefined` and be validated as such.
+function requiredObjectKeys(
   value: unknown,
-  allowed: readonly string[],
   required: readonly string[],
   field: string,
 ): asserts value is Record<string, unknown> {
@@ -605,11 +607,34 @@ function exactObjectKeys(
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
   }
-  const keys = Object.keys(value);
   if (
-    keys.some((key) => !allowed.includes(key)) ||
     required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
   ) {
+    throw new InvoiceApiError(`服务返回的${field}字段超出安全白名单。`, {
+      code: "INVALID_ELIGIBILITY_RESPONSE",
+    });
+  }
+}
+
+function unknownObjectKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+) {
+  return Object.keys(value).filter((key) => !allowed.includes(key));
+}
+
+// The strict form: an unknown key rejects the whole item. Still used everywhere
+// EXCEPT the user eligibility summary -- see the note above
+// mapEligibilitySummary for why that one response tolerates unknown keys and
+// what is deliberately NOT being changed here.
+function exactObjectKeys(
+  value: unknown,
+  allowed: readonly string[],
+  required: readonly string[],
+  field: string,
+): asserts value is Record<string, unknown> {
+  requiredObjectKeys(value, required, field);
+  if (unknownObjectKeys(value, allowed).length > 0) {
     throw new InvoiceApiError(`服务返回的${field}字段超出安全白名单。`, {
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
@@ -630,16 +655,28 @@ function fixedSourceLabel(source: "sub2api" | "newapi") {
   return source === "sub2api" ? "SoloV API" : "SoloV 模型平台";
 }
 
+// `unknownSink`, when supplied, collects the keys this bundle did not expect so
+// the caller can mark the row degraded instead of rejecting it. Passed only
+// from mapEligibilitySummary: these two objects are nested inside that response
+// and get the same tolerance for the same reason.
 function mapServiceUnitSummary(
   value: BackendServiceUnitSummary,
   source: "sub2api" | "newapi",
+  unknownSink?: string[],
 ): UserEligibilitySummary["noncash"] {
-  exactObjectKeys(
-    value,
-    ["service_units", "unit_code"],
-    ["service_units", "unit_code"],
-    "源服务单位",
-  );
+  if (unknownSink) {
+    requiredObjectKeys(value, ["service_units", "unit_code"], "源服务单位");
+    unknownSink.push(
+      ...unknownObjectKeys(value, ["service_units", "unit_code"]),
+    );
+  } else {
+    exactObjectKeys(
+      value,
+      ["service_units", "unit_code"],
+      ["service_units", "unit_code"],
+      "源服务单位",
+    );
+  }
   if (
     typeof value.service_units !== "string" ||
     !serviceUnitsPattern.test(value.service_units) ||
@@ -662,43 +699,42 @@ function mapServiceUnitSummary(
   return { serviceUnits: value.service_units, unitCode: expectedUnit };
 }
 
+// The key set of this ONE response is tolerant, because a strict key set is the
+// same bug as a strict enum list wearing different clothes: the backend adds a
+// field, ships one deploy ahead of this bundle, and
+// `keys.some(key => !allowed.includes(key))` rejects the whole summary request
+// -- the same red banner, from the same cause, on the same request that this
+// slice exists because of. An unknown key cannot make a displayed number wrong:
+// every field is read by name and the amount invariants below still run. So the
+// key is ignored and the row is marked degraded.
+//
+// Deliberately NOT extended to exactObjectKeys's other callers (admin account
+// ledger, payment candidates, the pagination cursor). Those are a different
+// trade: several are money DTOs where an unexpected key is better read as "this
+// is not the response I think it is", and none of them is on the user's invoice
+// page. They keep the strict key set, and the same failure mode with them --
+// backend adds a field, that list stops rendering -- is written down in the
+// handoff's risks rather than being quietly assumed away.
+const eligibilitySummaryKeys = [
+  "source_instance_id",
+  "source_type",
+  "source_name",
+  "binding_status",
+  "status",
+  "currency",
+  "available_minor",
+  "consumed_minor",
+  "unconsumed_minor",
+  "reserved_minor",
+  "issued_minor",
+  "legacy_noninvoiceable",
+  "noncash",
+  "reasons",
+] as const;
+
 function mapEligibilitySummary(value: BackendEligibilitySummary) {
-  exactObjectKeys(
-    value,
-    [
-      "source_instance_id",
-      "source_type",
-      "source_name",
-      "binding_status",
-      "status",
-      "currency",
-      "available_minor",
-      "consumed_minor",
-      "unconsumed_minor",
-      "reserved_minor",
-      "issued_minor",
-      "legacy_noninvoiceable",
-      "noncash",
-      "reasons",
-    ],
-    [
-      "source_instance_id",
-      "source_type",
-      "source_name",
-      "binding_status",
-      "status",
-      "currency",
-      "available_minor",
-      "consumed_minor",
-      "unconsumed_minor",
-      "reserved_minor",
-      "issued_minor",
-      "legacy_noninvoiceable",
-      "noncash",
-      "reasons",
-    ],
-    "开票资格摘要",
-  );
+  requiredObjectKeys(value, eligibilitySummaryKeys, "开票资格摘要");
+  const unknownKeys = unknownObjectKeys(value, eligibilitySummaryKeys);
   if (
     !uuidPattern.test(value.source_instance_id) ||
     !["sub2api", "newapi"].includes(value.source_type) ||
@@ -725,11 +761,24 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
   }
+  // status=source_unavailable MUST pair with SOURCE_NOT_READY. This used to be
+  // a hard throw here, and it was the last client-side hard refusal of a
+  // backend pairing left in this file after mapLot's equivalent was degraded
+  // (RC58: refusing a backend ordering bug on the client turns it into a blank
+  // page). It survived only because it is currently unreachable -- the summary
+  // rides COALESCE(...,'syncing') and gets no freshness override, so its status
+  // can only be one of the four persisted values. "It does not fire" is a fact
+  // about today's backend, not a property of this code, so it is now a
+  // degradation like every other pairing violation: if the summary ever does
+  // start carrying that status, the row renders with a fallback label instead
+  // of blanking the panel, and the contract probe is what goes red.
   const degraded =
     !knownSummaryStatuses.includes(value.status) ||
     !value.reasons.every((reason: string) =>
       knownSummaryReasons.includes(reason),
-    );
+    ) ||
+    (value.status === "source_unavailable" &&
+      !value.reasons.includes("SOURCE_NOT_READY"));
   const availableMinor = requireSafeMinor(value.available_minor, "可开票金额");
   const consumedMinor = requireSafeMinor(value.consumed_minor, "已消费现金金额");
   const unconsumedMinor = requireSafeMinor(
@@ -752,14 +801,22 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
       (reasons.length !== 1 ||
         value.status !== "active" ||
         value.binding_status !== "verified")) ||
-    (!ready && availableMinor !== 0) ||
-    (value.status === "source_unavailable" &&
-      !reasons.includes("SOURCE_NOT_READY"))
+    (!ready && availableMinor !== 0)
   ) {
     throw new InvoiceApiError("开票资格金额或安全状态不一致，已停止显示。", {
       code: "INCONSISTENT_ELIGIBILITY_RESPONSE",
     });
   }
+  const legacyNoninvoiceable = mapServiceUnitSummary(
+    value.legacy_noninvoiceable,
+    value.source_type,
+    unknownKeys,
+  );
+  const noncash = mapServiceUnitSummary(
+    value.noncash,
+    value.source_type,
+    unknownKeys,
+  );
   return {
     source: value.source_type,
     sourceInstanceId: value.source_instance_id,
@@ -772,13 +829,10 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
     unconsumedMinor,
     reservedMinor,
     issuedMinor,
-    legacyNoninvoiceable: mapServiceUnitSummary(
-      value.legacy_noninvoiceable,
-      value.source_type,
-    ),
-    noncash: mapServiceUnitSummary(value.noncash, value.source_type),
+    legacyNoninvoiceable,
+    noncash,
     reasons,
-    eligibilityDegraded: degraded,
+    eligibilityDegraded: degraded || unknownKeys.length > 0,
   } satisfies UserEligibilitySummary;
 }
 

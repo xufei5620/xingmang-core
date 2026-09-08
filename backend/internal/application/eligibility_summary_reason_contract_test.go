@@ -7,6 +7,22 @@ import (
 	"invoice-system/backend/internal/postgresstore"
 )
 
+// summaryStatusSpace is the status half of the input space, discovered rather
+// than read out of the contract field these probes exist to validate. The
+// summary's vocabulary is NARROWER than the funding lot's -- it rides
+// COALESCE(eas.eligibility_status,'syncing') and gets no freshness override --
+// so borrowing the lot's list would feed the decision function two statuses it
+// can never see, and borrowing contract.SummaryStatus would make the probe
+// agree with itself.
+func summaryStatusSpace(t *testing.T) []string {
+	t.Helper()
+	space, err := eligibilitywire.SummaryStatusInputSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return space
+}
+
 // summaryInputSpace enumerates every field userEligibilitySummaryReasons
 // branches on. As with the funding-lot probe, the expected reason set is
 // discovered from the real decision function rather than hand-listed -- the
@@ -66,7 +82,7 @@ func TestUserEligibilitySummaryReasonSetIsExhaustive(t *testing.T) {
 	}
 	emitted := map[string]bool{}
 	maxCount := 0
-	for _, input := range summaryInputSpace(contract.SummaryStatus) {
+	for _, input := range summaryInputSpace(summaryStatusSpace(t)) {
 		reasons, available := userEligibilitySummaryReasons(input.item, input.sourceReady)
 		if len(reasons) == 0 {
 			t.Fatalf("status %q binding %q produced no reasons at all",

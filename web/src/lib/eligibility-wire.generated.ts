@@ -34,8 +34,6 @@ export const summaryStatuses = [
   "syncing",
   "frozen",
   "not_invoiceable_pending_reconciliation",
-  "missing",
-  "source_unavailable",
 ] as const;
 
 export const summaryReasons = [

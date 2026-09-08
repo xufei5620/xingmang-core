@@ -4,6 +4,10 @@ import { InvoiceApiError } from "./api-contract";
 import {
   applyUserDataResults,
   planUserDataLoad,
+  readableReason,
+  sourceAccountPanelMode,
+  userDataRequestKeys,
+  type UserDataRequestKey,
   type UserDataResults,
   type UserDataSetters,
 } from "./user-data-load";
@@ -93,6 +97,7 @@ function makeState() {
     requests: undefined as InvoiceRequestPage | undefined,
     summaryAvailableMinor: undefined as number | undefined,
     loadError: null as string | null,
+    failed: [] as UserDataRequestKey[],
   };
   const setters: UserDataSetters = {
     setOrders: (value) => (state.orders = value),
@@ -103,6 +108,7 @@ function makeState() {
     setSummary: (_page, availableMinor) =>
       (state.summaryAvailableMinor = availableMinor),
     setLoadError: (value) => (state.loadError = value),
+    setFailed: (keys) => (state.failed = keys),
   };
   return { state, setters };
 }
@@ -131,7 +137,13 @@ describe("a failing request does not clear the panels it does not own", () => {
     expect(state.profiles).toEqual(PROFILES);
     expect(state.eligibilitySummaries).toEqual(SUMMARIES);
     expect(state.orders).toHaveLength(0);
-    expect(state.loadError).toBe("充值记录暂时无法读取，其余数据仍是最新的。");
+    // The rejection's own Chinese sentence is carried through. Splitting the
+    // five requests apart had quietly dropped it: before that, the banner body
+    // WAS the server's message, and the replacement said only which panel was
+    // stale.
+    expect(state.loadError).toBe(
+      "充值记录暂时无法读取，其余数据仍是最新的。（充值记录包含无效的资金账本状态。）",
+    );
   });
 
   it("populates the other panels on a first load when the summary request fails", () => {
@@ -162,7 +174,9 @@ describe("a failing request does not clear the panels it does not own", () => {
     expect(state.sourceAccounts).toHaveLength(2);
     expect(state.sourceAccounts).toEqual(ACCOUNTS);
     expect(state.profiles).toEqual(PROFILES);
-    expect(state.loadError).toBe("充值记录暂时无法读取，其余数据仍是最新的。");
+    expect(state.loadError).toBe(
+      "充值记录暂时无法读取，其余数据仍是最新的。（充值记录包含无效的资金账本状态。）",
+    );
   });
 
   it("keeps the connected accounts when the eligibility summary request fails", () => {
@@ -180,7 +194,7 @@ describe("a failing request does not clear the panels it does not own", () => {
     expect(state.sourceAccounts).toEqual(ACCOUNTS);
     expect(state.orders).toEqual(ORDERS);
     expect(state.loadError).toBe(
-      "开票资格摘要暂时无法读取，其余数据仍是最新的。",
+      "开票资格摘要暂时无法读取，其余数据仍是最新的。（开票资格摘要包含未识别状态，已停止显示。）",
     );
   });
 
@@ -274,5 +288,153 @@ describe("planUserDataLoad", () => {
     expect(plan.failed).toEqual([]);
     expect(plan.loadError).toBeNull();
     expect(plan.summaryAvailableMinor).toBe(12_300);
+  });
+});
+
+describe("the banner does not claim data is fresh when none of it is", () => {
+  function allFail(message: string): UserDataResults {
+    return {
+      orders: fail(message),
+      profiles: fail(message),
+      sourceAccounts: fail(message),
+      eligibilitySummaries: fail(message),
+      requests: fail(message),
+    };
+  }
+
+  // The banner is the only thing the product owner can read on a page that
+  // failed to load, and "其余数据仍是最新的" told him the rest was fresh at the
+  // moment when there was no rest. The partial-failure sentence is correct for
+  // a partial failure and false for a total one; a total one needs its own.
+  it("says everything failed, and does not promise fresh data, when all five fail", () => {
+    const plan = planUserDataLoad(allFail("开票服务暂时不可用，请稍后重试。"));
+    expect(plan.failed).toEqual([...userDataRequestKeys]);
+    expect(plan.loadError).toBe(
+      "开票数据全部读取失败，请稍后重试。（开票服务暂时不可用，请稍后重试。）",
+    );
+    expect(plan.loadError).not.toContain("其余数据仍是最新的");
+  });
+
+  it("still names the panels when only some of them fail", () => {
+    const plan = planUserDataLoad({
+      ...allOk(),
+      orders: fail("开票服务暂时不可用，请稍后重试。"),
+      profiles: fail("开票服务暂时不可用，请稍后重试。"),
+    });
+    expect(plan.loadError).toBe(
+      "充值记录、开票抬头暂时无法读取，其余数据仍是最新的。（开票服务暂时不可用，请稍后重试。）",
+    );
+  });
+
+  it("shows each distinct reason once, not once per failed request", () => {
+    const plan = planUserDataLoad({
+      ...allOk(),
+      orders: fail("开票服务暂时不可用，请稍后重试。"),
+      profiles: fail("开票服务暂时不可用，请稍后重试。"),
+      requests: fail("开票资格摘要包含未识别状态，已停止显示。"),
+    });
+    expect(plan.loadError).toBe(
+      "充值记录、开票抬头、开票申请记录暂时无法读取，其余数据仍是最新的。" +
+        "（开票服务暂时不可用，请稍后重试。；开票资格摘要包含未识别状态，已停止显示。）",
+    );
+  });
+
+  // The product owner does not read English, so an English rejection is worse
+  // than no detail: it takes up the one line he can read and says nothing to
+  // him. `fetch` produces exactly that on a dropped connection.
+  it("drops a rejection with no Chinese in it rather than showing English", () => {
+    const plan = planUserDataLoad(allFail("Failed to fetch"));
+    expect(plan.loadError).toBe("开票数据全部读取失败，请稍后重试。");
+  });
+
+  it.each([
+    ["Failed to fetch", null],
+    ["NetworkError when attempting to fetch resource.", null],
+    ["", null],
+    ["   ", null],
+    ["开票服务暂时不可用，请稍后重试。", "开票服务暂时不可用，请稍后重试。"],
+    ["  开票服务暂时不可用。  ", "开票服务暂时不可用。"],
+    ["读取失败\n堆栈信息", null],
+    [`超长${"错".repeat(300)}`, null],
+  ])("readableReason(%j) -> %j", (message, expected) => {
+    expect(readableReason(new Error(message))).toBe(expected);
+  });
+
+  it("ignores a rejection that is not an Error or a string", () => {
+    expect(readableReason({ message: "对象也不行" })).toBeNull();
+    expect(readableReason(undefined)).toBeNull();
+  });
+});
+
+describe("the accounts panel tells 'cannot read' apart from 'you have none'", () => {
+  // The half of the reported symptom that splitting the loads did NOT fix.
+  // A sibling request can no longer blank this panel -- but getSourceAccounts()
+  // failing on its own still leaves an empty list on a first load, and an empty
+  // list used to mean "show the three-step binding wizard". That invites a user
+  // whose bindings are verified to go and bind again, which is the one outcome
+  // worse than showing nothing.
+  it("shows the unavailable notice, not the wizard, when the accounts request fails on a first load", () => {
+    const { state, setters } = makeState();
+    expect(state.sourceAccounts).toHaveLength(0);
+
+    applyUserDataResults(
+      { ...allOk(), sourceAccounts: fail("开票服务暂时不可用，请稍后重试。") },
+      setters,
+    );
+
+    expect(state.sourceAccounts).toHaveLength(0);
+    expect(state.failed).toContain("sourceAccounts");
+    expect(
+      sourceAccountPanelMode({
+        accountCount: state.sourceAccounts.length,
+        failed: state.failed,
+      }),
+    ).toBe("unavailable");
+  });
+
+  it("shows the wizard only when the request succeeded and returned nothing", () => {
+    const { state, setters } = makeState();
+    applyUserDataResults({ ...allOk(), sourceAccounts: ok([]) }, setters);
+    expect(state.failed).not.toContain("sourceAccounts");
+    expect(
+      sourceAccountPanelMode({
+        accountCount: state.sourceAccounts.length,
+        failed: state.failed,
+      }),
+    ).toBe("onboarding");
+  });
+
+  it("keeps showing last-good accounts even while their request is failing", () => {
+    const { state, setters } = makeState();
+    applyUserDataResults(allOk(), setters);
+    applyUserDataResults({ ...allOk(), sourceAccounts: fail("boom") }, setters);
+    expect(
+      sourceAccountPanelMode({
+        accountCount: state.sourceAccounts.length,
+        failed: state.failed,
+      }),
+    ).toBe("accounts");
+  });
+
+  it("clears the failure marker once the accounts load again", () => {
+    const { state, setters } = makeState();
+    applyUserDataResults({ ...allOk(), sourceAccounts: fail("boom") }, setters);
+    expect(state.failed).toContain("sourceAccounts");
+    applyUserDataResults(allOk(), setters);
+    expect(state.failed).toEqual([]);
+  });
+
+  // A sibling failure must not make this panel claim it cannot read accounts
+  // it just read perfectly well.
+  it("is not marked unavailable by another request's failure", () => {
+    const { state, setters } = makeState();
+    applyUserDataResults({ ...allOk(), orders: fail("boom") }, setters);
+    expect(state.failed).toEqual(["orders"]);
+    expect(
+      sourceAccountPanelMode({
+        accountCount: state.sourceAccounts.length,
+        failed: state.failed,
+      }),
+    ).toBe("accounts");
   });
 });

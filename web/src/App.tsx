@@ -68,7 +68,11 @@ import {
   eligibilityReasonLabel,
   eligibilityStatusLabel,
 } from "./lib/eligibility-labels";
-import { applyUserDataResults } from "./lib/user-data-load";
+import {
+  applyUserDataResults,
+  sourceAccountPanelMode,
+  type UserDataRequestKey,
+} from "./lib/user-data-load";
 import {
   accountIdentityLabel,
   appendEmbeddedParams,
@@ -277,6 +281,10 @@ type AppData = {
   requests: InvoiceRequest[];
   summary: DashboardSummary | null;
   loadError: string | null;
+  // Which of the five user reads failed on the last refresh. A panel needs
+  // this to distinguish "this is empty" from "I could not read this" -- see
+  // sourceAccountPanelMode.
+  failedRequests: UserDataRequestKey[];
   refresh: () => Promise<void>;
   requestsNextCursor?: string;
   loadingMoreRequests: boolean;
@@ -332,6 +340,9 @@ function DataProvider({ children }: { children: ReactNode }) {
   const [requests, setRequests] = useState<InvoiceRequest[]>([]);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [failedRequests, setFailedRequests] = useState<UserDataRequestKey[]>(
+    [],
+  );
   const [requestsNextCursor, setRequestsNextCursor] = useState<
     string | undefined
   >();
@@ -353,6 +364,7 @@ function DataProvider({ children }: { children: ReactNode }) {
           setSummary(null);
           setRequestsNextCursor(undefined);
           setLoadError(null);
+          setFailedRequests([]);
           return;
         }
         if (location.pathname !== "/admin") {
@@ -364,6 +376,7 @@ function DataProvider({ children }: { children: ReactNode }) {
           setSummary(null);
           setRequestsNextCursor(undefined);
           setLoadError(null);
+          setFailedRequests([]);
           return;
         }
         // Platform-scoped embedded admin: wait for the platform's
@@ -383,6 +396,7 @@ function DataProvider({ children }: { children: ReactNode }) {
         setRequests(nextRequests);
         setRequestsNextCursor(requestPage.nextCursor);
         setSummary(summarizeRequests(nextRequests, 0));
+        setFailedRequests([]);
       } else {
         // Five independent reads, settled independently. Promise.all here was
         // the amplifier that turned one unrecognised enum value into a
@@ -426,6 +440,7 @@ function DataProvider({ children }: { children: ReactNode }) {
             setSummary: (page, availableMinor) =>
               setSummary(summarizeRequests(page.items, availableMinor)),
             setLoadError,
+            setFailed: setFailedRequests,
           },
         );
         return;
@@ -499,6 +514,7 @@ function DataProvider({ children }: { children: ReactNode }) {
         requests,
         summary,
         loadError,
+        failedRequests,
         refresh,
         requestsNextCursor,
         loadingMoreRequests,
@@ -869,9 +885,18 @@ function SourceBadge({ source }: { source: SourceType }) {
 }
 
 function SourceAccountStatus() {
-  const { sourceAccounts: allSourceAccounts, loading, refresh } = useData();
+  const {
+    sourceAccounts: allSourceAccounts,
+    loading,
+    refresh,
+    failedRequests,
+  } = useData();
   const embeddedPlatform = useEmbeddedPlatform();
   const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
+  const mode = sourceAccountPanelMode({
+    accountCount: sourceAccounts.length,
+    failed: failedRequests,
+  });
   if (loading) return null;
   if (
     embeddedUserMode &&
@@ -888,7 +913,9 @@ function SourceAccountStatus() {
     <section className="card source-account-card" aria-label="源平台账号连接">
       <div className="card-heading compact">
         <div>
-          <h2>{sourceAccounts.length ? "已关联的平台账号" : "关联平台账号"}</h2>
+          <h2>
+            {mode === "onboarding" ? "关联平台账号" : "已关联的平台账号"}
+          </h2>
           <p>仅展示由统一登录主体明确绑定的账号，不会按邮箱自动匹配。</p>
         </div>
         <Network size={20} />
@@ -925,7 +952,29 @@ function SourceAccountStatus() {
             </small>
           </div>
         ))}
-        {!sourceAccounts.length && (
+        {mode === "unavailable" && (
+          <div className="source-binding-empty" role="status">
+            <div className="binding-step">
+              <CircleAlert size={18} />
+              <div>
+                <strong>已关联账号暂时无法读取</strong>
+                <p>
+                  这只是本次读取失败，不代表你的绑定已失效或被撤销，也不需要重新绑定。请稍后点击下方「重试」。
+                </p>
+                <div className="binding-site-links">
+                  <button
+                    className="button button-secondary"
+                    onClick={() => void refresh()}
+                  >
+                    <RefreshCcw size={15} />
+                    重试
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {mode === "onboarding" && (
           <div className="source-binding-empty">
             <div className="binding-step">
               <span>1</span>

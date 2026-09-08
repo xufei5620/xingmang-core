@@ -28,9 +28,14 @@
     "not_invoiceable_pending_reconciliation"
   ],
   "lot_synthetic_statuses_description": [
-    "不落库、只在响应期出现的两个状态。missing 来自 postgresstore/funding.go 的",
+    "不落库、只在响应期出现的状态。missing 来自 postgresstore/funding.go 的",
     "COALESCE(eas.eligibility_status,'missing')（该 external_account 尚无资格状态行）；",
     "source_unavailable 来自 application/service.go 的来源新鲜度覆盖（五条同步流未全 fresh）。",
+    "这一组同样是被发现的、不是手列的：Go 探针用 go/ast 扫 application / postgresstore /",
+    "httpapi 三个包里对 EligibilityStatus 字段的字面量赋值与 SQL 的 COALESCE 默认值，",
+    "减去持久化集后与本组双向比对。第一版把这两个值手写在这里、又让 lot 探针从",
+    "lot_eligibility_status 取输入空间，于是「再加第三个响应期状态」——也就是 RC58 当年",
+    "加 source_unavailable 的原样形状——会让六道探针全绿。",
     "两者与 reason_code 的配对由 Go 侧 emitter 探针钉住，见 lot_status_reason_pairs。"
   ],
   "lot_synthetic_statuses": ["missing", "source_unavailable"],
@@ -96,13 +101,21 @@
     ],
     "source_unavailable": ["SOURCE_NOT_READY"]
   },
+  "summary_status_description": [
+    "/api/v1/user/eligibility-summary 的 status 能取到的全集，比 lot 的**窄**。",
+    "它走 postgresstore/eligibility_operations.go 的 COALESCE(eas.eligibility_status,'syncing')",
+    "（不是 lot 那条 'missing'），且 application/service.go 的 ListUserEligibilitySummaries",
+    "直接透传、不做来源新鲜度覆盖——所以 missing 与 source_unavailable 在摘要侧都不可达。",
+    "同样由 Go 探针发现：COALESCE 默认值与该函数内的字面量赋值一起并入持久化集后双向比对，",
+    "并断言这两个被扫描的函数名仍然存在（否则「扫到空」会与「本来就没有」无法区分）。",
+    "第一版这里是 6 个值，靠一句「summary 与 lot 是同一列」的断言维持——那句话与代码不符，",
+    "既发现不了摘要词汇表的真实漂移，还会把想改正的人挡回去。"
+  ],
   "summary_status": [
     "active",
     "syncing",
     "frozen",
-    "not_invoiceable_pending_reconciliation",
-    "missing",
-    "source_unavailable"
+    "not_invoiceable_pending_reconciliation"
   ],
   "summary_reason": [
     "BINDING_NOT_VERIFIED",

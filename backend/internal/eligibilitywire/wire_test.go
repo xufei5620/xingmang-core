@@ -3,9 +3,6 @@ package eligibilitywire
 import (
 	"flag"
 	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -66,15 +63,11 @@ func visibleEndings(value string) string {
 	return strings.ReplaceAll(value, "\r", "<CR>")
 }
 
-var (
-	checkPattern    = regexp.MustCompile(`eligibility_status\s+IN\s*\(([^)]*)\)`)
-	sqlLiteralValue = regexp.MustCompile(`'([^']*)'`)
-)
-
 // TestLotPersistedStatusesMatchLatestMigration discovers the persisted status
-// set instead of trusting a hand-kept list: it reads the newest migration that
-// (re)states source_account_eligibility_state's eligibility_status CHECK and
-// compares that constraint's literals against the contract, both ways.
+// set instead of trusting a hand-kept list: DiscoverPersistedStatuses reads the
+// newest migration that (re)states source_account_eligibility_state's
+// eligibility_status CHECK, and its literals are compared against the contract
+// both ways.
 //
 // Migration 0020 is what made this necessary -- it widened 0009's three-value
 // CHECK to four, and nothing anywhere failed when the frontend's copies of the
@@ -84,95 +77,136 @@ func TestLotPersistedStatusesMatchLatestMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir, err := MigrationsDir()
+	persisted, err := DiscoverPersistedStatuses()
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
-			names = append(names, entry.Name())
-		}
-	}
-	sort.Strings(names)
-
-	newestName := ""
-	var newestValues []string
-	// unparsedAfter records migrations newer than the one we parsed that still
-	// touch this constraint in a shape the pattern above does not recognise.
-	// Without this check a future migration written differently would leave the
-	// probe silently comparing against a stale constraint -- a gate that gives
-	// an old answer without ever going red is worse than no gate at all.
-	var unparsedAfter []string
-	for _, name := range names {
-		body, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(body)
-		if !strings.Contains(text, "source_account_eligibility_state") &&
-			!strings.Contains(text, "eligibility_status") {
-			continue
-		}
-		match := checkPattern.FindStringSubmatch(text)
-		if match == nil {
-			if newestName != "" && strings.Contains(text, "eligibility_status_check") {
-				unparsedAfter = append(unparsedAfter, name)
-			}
-			continue
-		}
-		values := []string{}
-		for _, literal := range sqlLiteralValue.FindAllStringSubmatch(match[1], -1) {
-			values = append(values, literal[1])
-		}
-		newestName, newestValues = name, values
-		unparsedAfter = nil
-	}
-	if newestName == "" {
-		t.Fatal("no migration states an eligibility_status CHECK constraint; the discovery pattern has gone stale")
-	}
-	if len(unparsedAfter) > 0 {
-		t.Fatalf("migrations %v are newer than %s and touch the eligibility_status CHECK in a shape this probe cannot parse; "+
-			"update checkPattern rather than letting the probe compare against a stale constraint",
-			unparsedAfter, newestName)
-	}
-	extra, missing := Diff(Set(newestValues), Set(contract.LotPersistedStatuses))
+	extra, missing := Diff(Set(persisted.Values), Set(contract.LotPersistedStatuses))
 	if len(extra) > 0 || len(missing) > 0 {
 		t.Fatalf("lot_persisted_statuses drifted from %s's CHECK constraint:\n"+
 			"  in the migration but not the contract: %v\n"+
 			"  in the contract but not the migration: %v\n"+
 			"update contracts/invoice-eligibility-wire.v1.json and regenerate the frontend module",
-			newestName, extra, missing)
+			persisted.Migration, extra, missing)
+	}
+}
+
+// TestLotSyntheticStatusesAreDiscovered is the half that was missing when this
+// package first shipped. The two response-time-only statuses were written into
+// the contract by hand, and the funding-lot probe then took its input space
+// from the contract -- so a THIRD synthetic status, added the same way
+// source_unavailable itself was added (one assignment in application/service.go,
+// no migration), would have been fed to no probe and declared by no gate. Every
+// probe would have stayed green on the exact shape of the incident.
+//
+// Now the synthetic set is whatever the source actually contains that the CHECK
+// constraint does not, in both directions: an undeclared literal is red, and a
+// declared value that no longer appears anywhere is red too.
+func TestLotSyntheticStatusesAreDiscovered(t *testing.T) {
+	contract, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovered, sources, err := SyntheticStatuses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra, missing := Diff(Set(discovered), Set(contract.LotSyntheticStatuses))
+	if len(extra) > 0 || len(missing) > 0 {
+		lines := make([]string, 0, len(sources))
+		for _, literal := range sources {
+			lines = append(lines, "  "+literal.String())
+		}
+		t.Fatalf("lot_synthetic_statuses drifted from the source:\n"+
+			"  introduced by code but not declared: %v\n"+
+			"  declared but no longer introduced anywhere: %v\n"+
+			"discovered literals:\n%s\n"+
+			"update contracts/invoice-eligibility-wire.v1.json and regenerate the frontend module",
+			extra, missing, strings.Join(lines, "\n"))
+	}
+	persisted, err := DiscoverPersistedStatuses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range contract.LotSyntheticStatuses {
+		if Set(persisted.Values)[value] {
+			t.Fatalf("%q is declared synthetic but %s's CHECK constraint persists it", value, persisted.Migration)
+		}
 	}
 }
 
 // TestLotEligibilityStatusIsPersistedPlusSynthetic pins the composition of the
-// wire status set: everything the CHECK constraint allows, plus exactly the two
+// wire status set: everything the CHECK constraint allows, plus exactly the
 // response-time-only values, and nothing else.
 func TestLotEligibilityStatusIsPersistedPlusSynthetic(t *testing.T) {
 	contract, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	union := Set(contract.LotPersistedStatuses)
-	for _, value := range contract.LotSyntheticStatuses {
-		if union[value] {
-			t.Fatalf("%q is listed as synthetic but the CHECK constraint persists it", value)
-		}
-		union[value] = true
+	space, err := LotStatusInputSpace()
+	if err != nil {
+		t.Fatal(err)
 	}
-	extra, missing := Diff(Set(contract.LotEligibilityStatus), union)
+	extra, missing := Diff(Set(contract.LotEligibilityStatus), Set(space))
 	if len(extra) > 0 || len(missing) > 0 {
 		t.Fatalf("lot_eligibility_status must be exactly persisted+synthetic:\n  extra: %v\n  missing: %v", extra, missing)
 	}
-	// The summary rides the same status column, so the two lists must agree.
-	extra, missing = Diff(Set(contract.SummaryStatus), Set(contract.LotEligibilityStatus))
+}
+
+// TestSummaryStatusesAreDiscovered replaces an assertion that was both
+// unfalsifiable and wrong. It used to say summary_status must EQUAL
+// lot_eligibility_status "because they describe the same column" -- so the
+// summary's own vocabulary was never discovered at all, and the stated reason
+// did not match the code: the summary rides
+// COALESCE(eas.eligibility_status,'syncing') (not 'missing') and
+// ListUserEligibilitySummaries passes the value straight through with no
+// freshness override, so `missing` and `source_unavailable` are both
+// unreachable there. Narrowing the contract to the truth left the old assertion
+// green in the wrong direction and red in the right one -- a gate arguing
+// against its own correction.
+func TestSummaryStatusesAreDiscovered(t *testing.T) {
+	contract, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	space, err := SummaryStatusInputSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra, missing := Diff(Set(contract.SummaryStatus), Set(space))
 	if len(extra) > 0 || len(missing) > 0 {
-		t.Fatalf("summary_status and lot_eligibility_status describe the same column but differ:\n  extra: %v\n  missing: %v", extra, missing)
+		t.Fatalf("summary_status drifted from what the summary path can actually produce "+
+			"(%s's COALESCE default plus any override in %s):\n"+
+			"  declared but unreachable: %v\n  reachable but undeclared: %v",
+			summaryStoreFunc, summaryServiceFunc, extra, missing)
+	}
+	// The summary is a subset of the lot vocabulary, never a superset: both
+	// read the same column, the lot path merely adds response-time values on
+	// top. If this ever fails, the two really have diverged and the frontend's
+	// shared status label table needs splitting.
+	extra, _ = Diff(Set(contract.SummaryStatus), Set(contract.LotEligibilityStatus))
+	if len(extra) > 0 {
+		t.Fatalf("summary_status has values the lot status set does not: %v", extra)
+	}
+}
+
+// TestSummaryStatusScanIsNotLookingAtNothing guards the one hand-written part
+// of the summary discovery: the two function NAMES it scopes itself to. Scoping
+// by name and finding a renamed function reads identically to "this function
+// introduces no status literals", so the scan asserts they still exist.
+func TestSummaryStatusScanIsNotLookingAtNothing(t *testing.T) {
+	scan, err := ScanStatusLiterals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{summaryStoreFunc, summaryServiceFunc} {
+		if !scan.Funcs[name] {
+			t.Fatalf("%s is not among the scanned packages' functions", name)
+		}
+	}
+	if len(scan.InFunc(summaryStoreFunc)) == 0 {
+		t.Fatalf("%s introduced no eligibility_status literal at all; it used to supply the "+
+			"COALESCE default the summary's vocabulary depends on", summaryStoreFunc)
 	}
 }
 

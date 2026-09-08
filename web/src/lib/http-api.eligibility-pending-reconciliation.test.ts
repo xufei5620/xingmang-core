@@ -341,6 +341,97 @@ describe("getUserEligibilitySummary: the auto-reconcile status", () => {
       "开票资格摘要包含未识别状态",
     );
   });
+
+  // The pairing check that used to be a hard throw here. It is unreachable
+  // today -- the summary rides COALESCE(...,'syncing') with no freshness
+  // override, so its status can only be one of the four persisted values -- and
+  // "it never fires" is a fact about the backend, not a property of this code.
+  // Left as a throw it would be one backend ordering bug away from blanking the
+  // panel, which is exactly what RC58 did with mapLot's version of it.
+  it("degrades a source_unavailable summary that lost its SOURCE_NOT_READY pairing", async () => {
+    stubFetchReturning({
+      items: [
+        {
+          ...SUMMARY_ITEM,
+          status: "source_unavailable",
+          reasons: ["PROJECTION_PENDING"],
+        },
+      ],
+    });
+    const summaries = await httpInvoiceApi.getUserEligibilitySummary();
+    expect(summaries[0].status).toBe("source_unavailable");
+    expect(summaries[0].eligibilityDegraded).toBe(true);
+    expect(summaries[0].availableMinor).toBe(0);
+  });
+
+  // Same failure mode as the enum lists, on the same request, one function
+  // away: the backend adds a field, ships a deploy ahead of this bundle, and a
+  // strict key set rejects the whole summary. Widening the enums while leaving
+  // this a hard throw would have closed the door and left the window open.
+  it("ignores a field this bundle predates instead of rejecting the summary", async () => {
+    stubFetchReturning({
+      items: [
+        { ...SUMMARY_ITEM, reconciliation_started_at: "2026-09-02T00:00:00Z" },
+      ],
+    });
+    const summaries = await httpInvoiceApi.getUserEligibilitySummary();
+    expect(summaries[0].status).toBe(PENDING);
+    expect(summaries[0].availableMinor).toBe(0);
+    expect(summaries[0].eligibilityDegraded).toBe(true);
+  });
+
+  it("ignores an unexpected field on the nested service-unit summaries too", async () => {
+    stubFetchReturning({
+      items: [
+        {
+          ...SUMMARY_ITEM,
+          noncash: {
+            service_units: "0",
+            unit_code: "SUB2_BALANCE_1E8",
+            unit_scale: "1e8",
+          },
+        },
+      ],
+    });
+    const summaries = await httpInvoiceApi.getUserEligibilitySummary();
+    expect(summaries[0].noncash.serviceUnits).toBe("0");
+    expect(summaries[0].eligibilityDegraded).toBe(true);
+  });
+
+  // Tolerating an unknown key is not the same as tolerating a missing one: a
+  // key this client reads by name and does not get would validate as
+  // `undefined` and could reach the UI as a blank amount.
+  it("still rejects a summary that is missing a field this client reads", async () => {
+    const { available_minor: _dropped, ...withoutAmount } = SUMMARY_ITEM;
+    stubFetchReturning({ items: [withoutAmount] });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "服务返回的开票资格摘要字段超出安全白名单",
+    );
+  });
+
+  it("still rejects a summary that is not an object at all", async () => {
+    stubFetchReturning({ items: ["not-an-object"] });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "服务返回的开票资格摘要格式无效",
+    );
+  });
+
+  // The tolerance is about the NAME of a key, never about the value behind a
+  // known one: an extra field must not become a way to smuggle in an amount.
+  it("still enforces the amount invariants on a response carrying unknown keys", async () => {
+    stubFetchReturning({
+      items: [
+        {
+          ...SUMMARY_ITEM,
+          reconciliation_started_at: "2026-09-02T00:00:00Z",
+          available_minor: 30_000,
+        },
+      ],
+    });
+    await expect(httpInvoiceApi.getUserEligibilitySummary()).rejects.toThrow(
+      "开票资格金额或安全状态不一致",
+    );
+  });
 });
 
 // The third crash point, which production has not hit only because there are
