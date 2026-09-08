@@ -90,7 +90,8 @@ root/KMS 值应由 `secret://archive/minio-kms` / 一次性 qualification Creden
 就满屏同步失败，什么信息也没给出。默认 `fake` 让上层（看板、告警）先跑起来，
 而默认来源标识 `sub2api-staging` 保证这批数字一眼可辨——Fake 数据绝不伪装
 成真实来源。进程启动时 `worker_started` 日志里也会带上
-`sub2api_mode` / `sub2api_source`。
+`sub2api_mode_default` / `sub2api_source`——注意是 **default**，见下面
+「别拿启动日志验证生效模式」。
 
 ### 切到 real 会发生什么
 
@@ -104,21 +105,43 @@ root/KMS 值应由 `secret://archive/minio-kms` / 一次性 qualification Creden
 不是 https、主机不在自己的 allowlist 里）则归 `internal`——运维一看 error_code
 就知道该去补配置还是去改配置。
 
-### production 环境禁止 fake（XM-0031）
+### production 禁止 fake（XM-0031；XM-CRED0 之后分两层）
 
-`XM_ENVIRONMENT=production` 且同步开启时，`XM_SUB2API_MODE=fake` 会让进程
-**启动即退出**，不是降级也不是告警。
+`XM_ENVIRONMENT=production` 且同步开启、**且这个部署没有接
+`core.connector_config`**（`Config.ConnectorConfigs == nil`）时，
+`XM_SUB2API_MODE=fake` 会让进程**启动即退出**。生产装配总是接了这张表
+（`cmd/platform-worker/main.go`），所以生产走的是第二层：**启动放行**
+（模式随时可能被后台切成 real，为一个缺省值拒绝启动没有意义），但**每一轮**
+生效模式仍是 fake 时动态工厂返回 `not_supported`（`ErrConnectorProductionFake`），
+指标写成 `status=failed`——演示数据一条都进不了生产。
 
-理由是这条默认值的失效方向：默认就是 `fake`，所以「忘了配」的结果恰好是最
-危险的那一种——构造出来的用户数、收入、余额被原样写进 `ops.metric_observation`
-与样本表，看板再以正常主数字 + 「数据新鲜」徽章呈现它们。只有让进程起不来，
-这个疏忽才必然在上线前被发现；一条启动日志会淹没在噪声里。
+两层各堵一头：启动那层堵「压根没有后台可切」的部署，每轮那层堵「有后台但
+没人去切」。理由是这条默认值的失效方向——默认就是 `fake`，「忘了配」的结果
+恰好是最危险的那一种：构造出来的用户数、收入、余额会被原样写进
+`ops.metric_observation` 与样本表，看板再以正常主数字 + 「数据新鲜」徽章
+呈现它们。
 
-生产上两个合法出路：配 `XM_SUB2API_MODE=real`（连接配置齐全就走真实客户端；缺配置
-时每周期写一条 `SyncFailed` + `last_error_code=not_supported`，那是诚实的失败，
-不是假数据），或显式 `XM_SUB2API_SYNC_ENABLED=false` 关掉这条采集链路。
+生产上两个合法出路：**在后台把 `core.connector_config` 那一行切成 `real`**
+（不重启容器即生效），或显式 `XM_SUB2API_SYNC_ENABLED=false` 关掉这条采集
+链路。`XM_SUB2API_MODE=real` 只改**缺省**：行存在时它不参与判定。
 staging / development 不受限制——真实只读凭据要一个个环境去开，这两个环境仍要靠
 Fake 把整条采集链路跑通。
+
+#### 别拿启动日志验证生效模式
+
+`worker_started` 里的 `sub2api_mode_default` / `newapi_mode_default` 是环境
+变量缺省，后台热切换之后它永远不变（进程启动那一刻还没读过库）。生效模式看
+两处，同一条日志里的 `effective_mode_log_events` 也写着这两个事件名：
+
+- 每轮的 `connector_config_applied`：`mode` + `config_source`
+  （`database` / `env`）+ `config_version`；
+- 每轮 `job_completed` 的 `sub2api_mode` / `newapi_mode`（**本轮生效**），
+  配 `sub2api_mode_source` / `newapi_mode_source`。
+
+2026-09-08 的排查里正是有人读了启动日志里的旧字段名 `sub2api_mode`，得出
+「生产在跑假数据」的错误结论，而 `core.connector_config` 两行 08-30 起就是
+`real`（`docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1）。字段改名
+加 `_default` 后缀就是为了让这种误读在字面上不成立。
 
 ### 失败也要写
 
@@ -196,8 +219,9 @@ pgx which hosts it will actually dial rather than reading the URL.
 `production` 的 fake 闸随之分两层：启动时因为模式可能随时被后台切成 real 而
 放行；但**每一轮**生效模式仍为 fake 时工厂返回 `not_supported`
 （`ErrConnectorProductionFake`），五条指标写成 `status=failed`，演示数据一条
-都写不进生产。`worker_started` 日志里的 `*_mode` 从此只是缺省值，看生效模式
-请看 `connector_config_applied`。
+都写不进生产。`worker_started` 日志里的那两个字段从此叫 `*_mode_default`，
+名字本身就说明它只是缺省值；生效模式看 `connector_config_applied` 与每轮
+`job_completed` 的 `*_mode` / `*_mode_source`。
 
 ## 保留期清理（XM-R012）
 

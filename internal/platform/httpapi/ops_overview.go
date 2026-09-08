@@ -8,6 +8,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
+	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
@@ -15,11 +16,11 @@ import (
 // The four metric keys read here are defined and written by
 // internal/platform/jobs (heartbeat.go / connector_probe.go / retention.go)
 // and registered in internal/platform/ops's whitelist (freshness.go). They
-// are repeated as literals rather than imported: httpapi already depends on
-// ops for the Store/Observation types it needs, but jobs is the worker-side
-// orchestration package (River, connectors, secrets, ...) and pulling it in
-// just for four string constants would be a real layering cost for no
-// functional benefit -- the same tradeoff ops.freshness.go itself makes for
+// are repeated as literals rather than imported even though this file now
+// does import jobs (for ResolveEffectiveMode -- see modeFor): importing a
+// package to reuse a *decision* that must not be duplicated is worth the
+// layering cost, importing it to copy four string constants is not -- the
+// same tradeoff ops.freshness.go itself makes for
 // every connector's metric key constants. ops_overview_test.go cross-checks
 // these literals against the jobs package constants so the two cannot drift
 // silently.
@@ -60,7 +61,7 @@ type OpsOverviewDeps struct {
 	// ConnectorConfigs is nil when the credentials module isn't mounted in
 	// this deployment (see Deps.Credentials in router.go) -- the
 	// sync-pipeline table then reports config_available=false and omits
-	// effective_mode, rather than guessing "fake".
+	// both effective_mode and effective_mode_source, rather than guessing.
 	ConnectorConfigs ConnectorConfigLister
 	// DB backs the database.connected probe; reuses the same Pinger and 2s
 	// timeout the /readyz handler already uses (health.go), just embedded
@@ -93,14 +94,25 @@ type opsSyncPipelineBody struct {
 	// ConfigAvailable is false only when the credentials module isn't
 	// mounted at all (ConnectorConfigs == nil) -- distinct from "mounted,
 	// but no row exists for this platform yet", which is a normal
-	// unconfigured-defaults-to-fake state (EffectiveMode is still reported
-	// as "fake" in that case, matching credentials.Store's own convention).
-	ConfigAvailable bool          `json:"config_available"`
-	EffectiveMode   string        `json:"effective_mode"`
-	ConfigUpdatedAt *string       `json:"config_updated_at"`
-	SampleMetricKey string        `json:"sample_metric_key"`
-	Source          string        `json:"source"`
-	Freshness       freshnessBody `json:"freshness"`
+	// unconfigured state. The two are told apart by EffectiveModeSource,
+	// not by squashing both into an invented "fake" (see modeFor).
+	ConfigAvailable bool `json:"config_available"`
+	// EffectiveMode is "fake" / "real" / "" -- empty means this process
+	// cannot know (EffectiveModeSource == jobs.ModeSourceUnknown), which is
+	// the honest answer when core.connector_config has no row for this
+	// platform: what runs then is decided by the *worker* process's
+	// XM_SUB2API_MODE / XM_NEWAPI_MODE, and platform-api's container does
+	// not carry those keys (it runs no sync). Clients must render the
+	// source, never assume a default.
+	EffectiveMode string `json:"effective_mode"`
+	// EffectiveModeSource is jobs.ModeSourceDatabase or
+	// jobs.ModeSourceUnknown here (never "env": this process has no
+	// connector env vars of its own to fall back to).
+	EffectiveModeSource string        `json:"effective_mode_source"`
+	ConfigUpdatedAt     *string       `json:"config_updated_at"`
+	SampleMetricKey     string        `json:"sample_metric_key"`
+	Source              string        `json:"source"`
+	Freshness           freshnessBody `json:"freshness"`
 }
 
 type opsAlertDeliveryBody struct {
@@ -193,37 +205,47 @@ func OpsOverviewHandler(deps OpsOverviewDeps) http.HandlerFunc {
 				return
 			}
 		}
-		// modeFor mirrors the worker's own convention (see
-		// credentials.Store.ListConnectorConfigs's doc comment): a platform
-		// with no row is "unconfigured", which the dynamic client factories
-		// treat as fake. Reporting anything else here would silently
-		// disagree with what the worker is actually doing.
-		modeFor := func(platform string) (mode string, updatedAt *string) {
+		// modeFor goes through the *same* resolver the worker walks every
+		// round (jobs.ResolveEffectiveMode) rather than a copy of it.
+		//
+		// With no row it does **not** answer "fake": what that round
+		// actually runs is decided by the platform-worker process's
+		// XM_SUB2API_MODE / XM_NEWAPI_MODE, and this container does not
+		// have those keys at all (platform-api runs no sync -- confirmed on
+		// production 2026-09-08). The old implementation hardcoded "fake"
+		// here, which happened to be right only because production's env
+		// default also happened to be fake; it was the third of the three
+		// disagreeing answers in that incident's report (§三.1). Passing an
+		// empty processDefault makes the resolver say "unknown", which is
+		// the only thing this process can honestly say.
+		modeFor := func(platform string) (jobs.EffectiveConnectorConfig, *string) {
 			for _, c := range connectorConfigs {
 				if c.Platform == platform {
 					stamp := c.UpdatedAt.UTC().Format(time.RFC3339)
-					return c.Mode, &stamp
+					row := &jobs.ConnectorConfig{Platform: c.Platform, Mode: c.Mode}
+					return jobs.ResolveEffectiveMode(platform, row, ""), &stamp
 				}
 			}
-			return "fake", nil
+			return jobs.ResolveEffectiveMode(platform, nil, ""), nil
 		}
 
 		syncPipeline := func(kind, platform, sampleMetricKey string) opsSyncPipelineBody {
-			var mode string
+			var eff jobs.EffectiveConnectorConfig
 			var updatedAt *string
 			if configAvailable {
-				mode, updatedAt = modeFor(platform)
+				eff, updatedAt = modeFor(platform)
 			}
 			sample := metricBody(sampleMetricKey)
 			return opsSyncPipelineBody{
-				Kind:            kind,
-				Platform:        platform,
-				ConfigAvailable: configAvailable,
-				EffectiveMode:   mode,
-				ConfigUpdatedAt: updatedAt,
-				SampleMetricKey: sampleMetricKey,
-				Source:          sample.Source,
-				Freshness:       sample.Freshness,
+				Kind:                kind,
+				Platform:            platform,
+				ConfigAvailable:     configAvailable,
+				EffectiveMode:       eff.Mode,
+				EffectiveModeSource: eff.Source,
+				ConfigUpdatedAt:     updatedAt,
+				SampleMetricKey:     sampleMetricKey,
+				Source:              sample.Source,
+				Freshness:           sample.Freshness,
 			}
 		}
 

@@ -153,7 +153,6 @@ func TestNewAPISyncPostgresIntegration(t *testing.T) {
 	failing := NewNewAPISyncWorker(NewAPISyncOptions{
 		Environment: environment,
 		InstanceID:  source,
-		Mode:        NewAPIModeReal,
 		Store:       store,
 		NewClient:   NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{}),
 	})

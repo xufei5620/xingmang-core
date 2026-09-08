@@ -201,23 +201,17 @@ func main() {
 	}
 	// 启动时就把采集配置摊开：运维必须能一眼看出这个进程写进看板的数字
 	// 是 Fake 产的还是真实上游来的，而不是等发现数字不对再回来翻配置。
-	logger.InfoContext(ctx, "worker_started", "event", "worker_started", "module", "platform.worker",
+	startup := []any{
+		"event", "worker_started", "module", "platform.worker",
 		"environment", config.Environment, "principal_id", "worker:platform",
-		// XM-CRED0：下面的 *_mode / endpoint 等只是环境变量给的**缺省**；
-		// 生效配置每轮从 core.connector_config 读，变化时另有
-		// connector_config_applied 日志。secret_root 只打路径，不打内容。
-		"connector_config_source", "database",
+		// secret_root 只打路径，不打内容。
 		"secret_root", config.SecretRoot,
-		"sub2api_sync_enabled", config.Sub2APISyncEnabled,
-		"sub2api_mode", string(config.Sub2APIMode),
-		"sub2api_source", config.Sub2APIInstanceID,
-		"sub2api_sync_interval", config.Sub2APISyncInterval.String(),
-		// NewAPI 同理（XM-0035）：运维必须能一眼看出这批数字是 Fake 产的
-		// 还是真实上游来的，而不是等发现数字不对再回来翻配置。
-		"newapi_sync_enabled", config.NewAPISyncEnabled,
-		"newapi_mode", string(config.NewAPIMode),
-		"newapi_source", config.NewAPIInstanceID,
-		"newapi_sync_interval", config.NewAPISyncInterval.String(),
+	}
+	// 接入模式那几个字段抽在 connectorModeStartupAttrs 里，为的是能被测到
+	// （XM-OPS-TRUTH）：*_mode_default 是缺省、不是生效值，这件事必须有一条
+	// 测试钉住，否则下一次改名又会悄悄把它变回一个说谎的字段。
+	startup = append(startup, connectorModeStartupAttrs(config)...)
+	startup = append(startup,
 		// 成本采集同理（XM-0037b）。多一条 secrets_configured：real 模式还需要
 		// 一个能解析**登记簿里那些引用**的 SecretProvider，而那些引用在进程
 		// 启动时还不知道（它们在库里，由 Action 维护），所以现阶段它必然是
@@ -260,6 +254,7 @@ func main() {
 		"assurance_probe_global_enabled", config.AssuranceProbeGlobalEnabled,
 		"assurance_probe_daily_budget", config.AssuranceProbeDailyBudget,
 		"assurance_probe_secrets_configured", config.AssuranceProbeSecrets != nil)
+	logger.InfoContext(ctx, "worker_started", startup...)
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

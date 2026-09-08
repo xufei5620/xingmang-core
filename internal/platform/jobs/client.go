@@ -884,10 +884,12 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.Sub2APIInstanceID,
-			Mode:             cfg.Sub2APIMode,
 			ExpectedInterval: cfg.Sub2APISyncInterval,
 			Store:            ops.NewStore(pool),
 			NewClient:        cfg.sub2apiClientFactory(),
+			// 与 Sub2APIRealConfig.Timeout 同一个数：客户端拿它约束一次请求，
+			// 任务拿它推导一组与一轮的墙钟上限（sub2apiReadBudget）。
+			RequestTimeout: cfg.Sub2APIRequestTimeout,
 		}))
 		sub2apiPeriodic, err := newManifestPeriodicJob(
 			Sub2APISyncJobKind, cfg.Sub2APISyncInterval, cfg.Sub2APISyncRunOnStart,
@@ -911,10 +913,11 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.NewAPIInstanceID,
-			Mode:             cfg.NewAPIMode,
 			ExpectedInterval: cfg.NewAPISyncInterval,
 			Store:            ops.NewStore(pool),
 			NewClient:        cfg.newapiClientFactory(),
+			// 见上面 Sub2API 的同一处：单次超时同时是读取预算的推导基数。
+			RequestTimeout: cfg.NewAPIRequestTimeout,
 		}))
 		newapiPeriodic, err := newManifestPeriodicJob(
 			NewAPISyncJobKind, cfg.NewAPISyncInterval, cfg.NewAPISyncRunOnStart,
@@ -1174,7 +1177,11 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			// probeReadClient structurally, so this is a pure narrowing, not
 			// a behavior change.
 			Sub2APINewClient: func(ctx context.Context) (probeReadClient, error) {
-				client, err := sub2apiFactory(ctx)
+				// 丢掉工厂回传的 EffectiveConnectorConfig：探针只回答
+				// 「上游还在不在、版本是多少」，模式由同步任务的
+				// job_completed 负责说（XM-OPS-TRUTH），这里再打一份只会
+				// 多一个可能漂开的副本。
+				client, _, err := sub2apiFactory(ctx)
 				if err != nil {
 					return nil, err
 				}
@@ -1182,7 +1189,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			},
 			NewAPISource: cfg.NewAPIInstanceID,
 			NewAPINewClient: func(ctx context.Context) (probeReadClient, error) {
-				client, err := newapiFactory(ctx)
+				client, _, err := newapiFactory(ctx)
 				if err != nil {
 					return nil, err
 				}

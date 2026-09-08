@@ -124,12 +124,27 @@ var contractMetricKeys = []string{
 	sub2api.MetricUsersTotal,
 }
 
+// sub2apiEnvFakeConfig 是「这个部署没有后台行，按 env 缺省 fake 跑」的生效
+// 配置，等价于静态工厂 NewSub2APIClientFactory(Sub2APIModeFake, …) 回传的那份。
+var sub2apiEnvFakeConfig = EffectiveConnectorConfig{
+	Platform: ConnectorPlatformSub2API,
+	Mode:     string(Sub2APIModeFake),
+	Source:   ModeSourceEnv,
+}
+
+// fakeFactory 造一个 Fake 客户端，并报「env 缺省 fake 即本轮生效」。
 func fakeFactory(opts sub2api.FakeOptions) Sub2APIClientFactory {
+	return fakeFactoryWithConfig(opts, sub2apiEnvFakeConfig)
+}
+
+// fakeFactoryWithConfig 让测试指定工厂回传的**本轮生效配置**，
+// 理由见 newapiFakeFactoryWithConfig。
+func fakeFactoryWithConfig(opts sub2api.FakeOptions, eff EffectiveConnectorConfig) Sub2APIClientFactory {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return fixedNow }
 	}
-	return func(context.Context) (sub2api.ReadClientV2, error) {
-		return sub2api.NewFake(opts), nil
+	return func(context.Context) (sub2api.ReadClientV2, EffectiveConnectorConfig, error) {
+		return sub2api.NewFake(opts), eff, nil
 	}
 }
 
@@ -139,7 +154,6 @@ func newTestSyncWorker(store ObservationStore, factory Sub2APIClientFactory, out
 		Logger:      logger,
 		Environment: "staging",
 		InstanceID:  DefaultSub2APIInstanceID,
-		Mode:        Sub2APIModeFake,
 		Store:       store,
 		NewClient:   factory,
 		Now:         func() time.Time { return fixedNow },
@@ -310,7 +324,6 @@ func TestSub2APISyncRealModeWithoutConfigRecordsFailure(t *testing.T) {
 	worker := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
-		Mode:        Sub2APIModeReal,
 		Store:       store,
 		NewClient:   factory,
 		Now:         func() time.Time { return fixedNow },
@@ -338,7 +351,7 @@ func TestSub2APISyncRealModeWithoutConfigRecordsFailure(t *testing.T) {
 }
 
 func TestSub2APIClientFactoryRealErrorIsClassified(t *testing.T) {
-	_, err := NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{})(context.Background())
+	_, _, err := NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{})(context.Background())
 	if err == nil {
 		t.Fatal("配置未就绪的 real 模式必须返回错误")
 	}
@@ -362,13 +375,21 @@ func TestSub2APIClientFactoryRealErrorIsClassified(t *testing.T) {
 		t.Fatalf("对外错误文本 = %q，不该带配置细节", got)
 	}
 
-	client, err := NewSub2APIClientFactory(Sub2APIModeFake, Sub2APIRealConfig{})(context.Background())
+	client, fakeEff, err := NewSub2APIClientFactory(Sub2APIModeFake, Sub2APIRealConfig{})(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("fake 模式应构造成功: client=%v err=%v", client, err)
 	}
+	if fakeEff.Mode != "fake" || fakeEff.Source != ModeSourceEnv || fakeEff.Platform != ConnectorPlatformSub2API {
+		t.Fatalf("静态工厂的生效配置 = %+v, want platform=sub2api mode=fake source=env", fakeEff)
+	}
 
-	if _, err := NewSub2APIClientFactory(Sub2APIMode("wat"), Sub2APIRealConfig{})(context.Background()); connector.KindOf(err) != connector.KindInternal {
+	_, bogusEff, err := NewSub2APIClientFactory(Sub2APIMode("wat"), Sub2APIRealConfig{})(context.Background())
+	if connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("未知模式应归为 internal, got %v", err)
+	}
+	// 模式定不下来时生效配置必须说「不知道」，不能回一个 mode="wat"。
+	if bogusEff.Mode != "" || bogusEff.Source != ModeSourceUnknown {
+		t.Fatalf("未知模式的生效配置 = %+v, want mode=\"\" source=unknown", bogusEff)
 	}
 }
 
@@ -391,7 +412,7 @@ func TestSub2APIClientFactoryRealBuildsClient(t *testing.T) {
 		Timeout:         DefaultSub2APIRequestTimeout,
 		Secrets:         provider,
 	}
-	client, err := NewSub2APIClientFactory(Sub2APIModeReal, cfg)(context.Background())
+	client, _, err := NewSub2APIClientFactory(Sub2APIModeReal, cfg)(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("配置齐全时应造出真实客户端: client=%v err=%v", client, err)
 	}
@@ -401,7 +422,7 @@ func TestSub2APIClientFactoryRealBuildsClient(t *testing.T) {
 	// 就知道该去补配置还是去改配置。
 	bad := cfg
 	bad.Endpoint = "http://api.example.test"
-	if _, err := NewSub2APIClientFactory(Sub2APIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
+	if _, _, err := NewSub2APIClientFactory(Sub2APIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("配错的连接配置应归 internal, got %v (%v)", connector.KindOf(err), err)
 	}
 }
@@ -424,7 +445,6 @@ func TestSub2APISyncFailurePreservesLastSuccess(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
 		InstanceID:  DefaultSub2APIInstanceID,
-		Mode:        Sub2APIModeFake,
 		Store:       store,
 		NewClient:   fakeFactory(sub2api.FakeOptions{FailWith: connector.KindUnavailable}),
 		Now:         func() time.Time { return later },
@@ -509,11 +529,11 @@ func (c partialFailClient) ChannelDirectory(ctx context.Context) (sub2api.Manage
 func TestSub2APISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (sub2api.ReadClientV2, error) {
+	factory := func(context.Context) (sub2api.ReadClientV2, EffectiveConnectorConfig, error) {
 		return partialFailClient{
 			PaymentsReadClient: sub2api.NewFake(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
 			balancesErr:        connector.NewError(connector.KindRateLimited, "sub2api.channels.balance_read", nil),
-		}, nil
+		}, sub2apiEnvFakeConfig, nil
 	}
 	worker := newTestSyncWorker(store, factory, &logs)
 	if err := worker.Work(context.Background(), syncJob()); err != nil {
@@ -624,7 +644,6 @@ func TestSub2APISyncAppendsSampleForEveryObservation(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
 		InstanceID:  DefaultSub2APIInstanceID,
-		Mode:        Sub2APIModeFake,
 		Store:       store,
 		NewClient:   fakeFactory(sub2api.FakeOptions{FailWith: connector.KindUnavailable}),
 		Now:         func() time.Time { return later },
@@ -691,7 +710,6 @@ func TestSub2APISyncRetryIsCleanReplay(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
 		InstanceID:  DefaultSub2APIInstanceID,
-		Mode:        Sub2APIModeFake,
 		Store:       store,
 		NewClient:   fakeFactory(sub2api.FakeOptions{}),
 		Now:         func() time.Time { return later },

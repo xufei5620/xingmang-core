@@ -150,7 +150,6 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	failing := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Environment: environment,
 		InstanceID:  source,
-		Mode:        Sub2APIModeReal,
 		Store:       store,
 		NewClient:   NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{}),
 	})

@@ -72,6 +72,62 @@ func (c *ConnectorConfig) clone() *ConnectorConfig {
 	return &cp
 }
 
+// EffectiveConnectorConfig 是「这个平台此刻按什么在跑」的唯一答案。
+//
+// worker 每轮同步解析一次，后台 /ops/overview 每次请求解析一次，两边都必须
+// 经过 ResolveEffectiveMode——不许任何一方再写第二个 if。2026-09-08 的排查里
+// 同一个问题在系统里有三个互不一致的答案（作业日志打 env 缺省、ops_overview
+// 无行时硬答 fake、动态工厂每轮真解析），这个类型存在的意义就是把它们合成一个。
+type EffectiveConnectorConfig struct {
+	Platform string
+	// Mode 是本轮生效的模式；空串表示**不知道**（见 ModeSourceUnknown）。
+	Mode string
+	// Source 是 ModeSource* 之一：这个答案是怎么来的。
+	Source string
+	// Version 是 core.connector_config 的行版本；非 database 来源时为 0。
+	Version       int
+	EndpointHost  string
+	CredentialRef string
+	AllowlistSize int
+}
+
+const (
+	// ModeSourceDatabase：core.connector_config 里有这一行，模式以行为准。
+	ModeSourceDatabase = "database"
+	// ModeSourceEnv：库里没有这一行（或行里那一格留空），按调用方进程的
+	// 环境变量缺省跑。
+	ModeSourceEnv = "env"
+	// ModeSourceUnknown：库里没有这一行，**而调用方看不到那个缺省**。
+	//
+	// platform-api 容器没有 XM_SUB2API_* / XM_NEWAPI_*（它不跑同步），所以它
+	// 对「没有行」这种情况只能回答不知道。凭空答 fake 正是 2026-09-08 排查里
+	// 那第三套猜法（ops_overview.go 的旧 modeFor），它靠的是「生产 env 缺省
+	// 恰好也是 fake」这个别处的事实。
+	ModeSourceUnknown = "unknown"
+)
+
+// ResolveEffectiveMode 是生效模式的唯一判定。
+//
+// row 为 nil 表示库里没有这一行。processDefault 为空串表示「调用方不知道
+// 进程缺省」；此时没有行就是未知，而不是 fake。
+//
+// 行存在但 mode 为空串同样落到缺省一侧——与 overrideConnectorConfig 的
+// 逐字段口径一致（行里留空的那一格用 env）。
+func ResolveEffectiveMode(platform string, row *ConnectorConfig, processDefault string) EffectiveConnectorConfig {
+	if row != nil {
+		if mode := strings.TrimSpace(row.Mode); mode != "" {
+			return EffectiveConnectorConfig{
+				Platform: platform, Mode: mode,
+				Source: ModeSourceDatabase, Version: row.Version,
+			}
+		}
+	}
+	if def := strings.TrimSpace(processDefault); def != "" {
+		return EffectiveConnectorConfig{Platform: platform, Mode: def, Source: ModeSourceEnv}
+	}
+	return EffectiveConnectorConfig{Platform: platform, Mode: "", Source: ModeSourceUnknown}
+}
+
 // ConnectorConfigSource 提供某平台在某环境下的接入配置。
 //
 // 没有这一行时返回 (nil, nil)——那是「没在后台配过」的正常状态，不是错误；
@@ -257,12 +313,13 @@ func (r *connectorConfigResolver) load(ctx context.Context) *ConnectorConfig {
 
 // logApplied 在生效配置变化时打一条 info。endpoint 只打主机、凭据只打引用：
 // 两者都不是秘密，但完整 URL 里可能带路径细节，主机足够定位问题。
-func (r *connectorConfigResolver) logApplied(ctx context.Context, fromRow *ConnectorConfig, mode, endpoint, credentialRef string, allowlistSize int) {
-	source, version := "env", 0
-	if fromRow != nil {
-		source, version = "database", fromRow.Version
-	}
-	fingerprint := fmt.Sprintf("%s|%d|%s|%s|%s|%d", source, version, mode, endpoint, credentialRef, allowlistSize)
+//
+// 入参就是 ResolveEffectiveMode 的返回值，本函数**不重算** source / version：
+// 重算等于在这里长出第二个判定点，而这一片存在的理由正是消灭那些判定点。
+func (r *connectorConfigResolver) logApplied(ctx context.Context, eff EffectiveConnectorConfig) {
+	source, version, mode := eff.Source, eff.Version, eff.Mode
+	fingerprint := fmt.Sprintf("%s|%d|%s|%s|%s|%d",
+		source, version, mode, eff.EndpointHost, eff.CredentialRef, eff.AllowlistSize)
 	r.mu.Lock()
 	changed := fingerprint != r.lastApplied
 	r.lastApplied = fingerprint
@@ -279,9 +336,9 @@ func (r *connectorConfigResolver) logApplied(ctx context.Context, fromRow *Conne
 		slog.String("config_source", source),
 		slog.Int("config_version", version),
 		slog.String("mode", mode),
-		slog.String("endpoint_host", endpointHost(endpoint)),
-		slog.String("credential_ref", credentialRef),
-		slog.Int("allowlist_size", allowlistSize))
+		slog.String("endpoint_host", eff.EndpointHost),
+		slog.String("credential_ref", eff.CredentialRef),
+		slog.Int("allowlist_size", eff.AllowlistSize))
 }
 
 // endpointHost 只取 URL 的主机部分用于日志；解析不出来就打空串，不打原文。
@@ -360,22 +417,39 @@ func NewDynamicSub2APIClientFactory(opts Sub2APIDynamicOptions) Sub2APIClientFac
 		return NewSub2APIClientFactory(opts.DefaultMode, opts.Defaults)
 	}
 	resolver := newConnectorConfigResolver(opts.Source, opts.Logger, ConnectorPlatformSub2API, opts.Defaults.Environment)
-	return func(ctx context.Context) (sub2api.ReadClientV2, error) {
-		mode, cfg := opts.DefaultMode, opts.Defaults
+	return func(ctx context.Context) (sub2api.ReadClientV2, EffectiveConnectorConfig, error) {
+		cfg := opts.Defaults
 		row := resolver.load(ctx)
+		// 生效模式只由 ResolveEffectiveMode 判定；这里不再写第二个 if。
+		// worker 进程看得见自己的 env 缺省，所以 processDefault 传得出来。
+		eff := ResolveEffectiveMode(ConnectorPlatformSub2API, row, string(opts.DefaultMode))
+		if eff.Source == ModeSourceUnknown {
+			// 库里没有行、进程也没有缺省：这一轮真的不知道该按什么跑。
+			// 归 internal 而不是悄悄按 fake——后者会让「装配漏了模式」表现成
+			// 一批看起来正常的演示数字（旧实现在这条路上返回的也是 internal）。
+			return nil, eff, connector.NewError(connector.KindInternal, "sub2api.client.mode",
+				errors.New("sub2api 生效模式未知：core.connector_config 没有这一行，进程也没有缺省模式"))
+		}
+		mode, err := ParseSub2APIMode(eff.Mode)
+		if err != nil {
+			return nil, EffectiveConnectorConfig{Platform: ConnectorPlatformSub2API, Source: ModeSourceUnknown},
+				connector.NewError(connector.KindInternal, "sub2api.client.mode", err)
+		}
 		if row != nil {
-			parsed, err := ParseSub2APIMode(row.Mode)
-			if err != nil {
-				return nil, connector.NewError(connector.KindInternal, "sub2api.client.mode", err)
-			}
-			mode = parsed
 			overrideConnectorConfig(row, &cfg.Endpoint, &cfg.TargetAllowlist, &cfg.CredentialRef)
 		}
-		resolver.logApplied(ctx, row, string(mode), cfg.Endpoint, cfg.CredentialRef, len(cfg.TargetAllowlist))
+		// ParseSub2APIMode 把空串归一成 fake：解析后回填，日志里的模式与真正
+		// 构造客户端用的那一个必须逐字相同。
+		eff.Mode = string(mode)
+		eff.EndpointHost = endpointHost(cfg.Endpoint)
+		eff.CredentialRef = cfg.CredentialRef
+		eff.AllowlistSize = len(cfg.TargetAllowlist)
+		resolver.logApplied(ctx, eff)
 		if mode == Sub2APIModeFake && cfg.Environment == "production" {
-			return nil, connector.NewError(connector.KindNotSupported, "sub2api.client.mode", ErrConnectorProductionFake)
+			return nil, eff, connector.NewError(connector.KindNotSupported, "sub2api.client.mode", ErrConnectorProductionFake)
 		}
-		return NewSub2APIClientFactory(mode, cfg)(ctx)
+		client, _, err := NewSub2APIClientFactory(mode, cfg)(ctx)
+		return client, eff, err
 	}
 }
 
@@ -393,21 +467,31 @@ func NewDynamicNewAPIClientFactory(opts NewAPIDynamicOptions) NewAPIClientFactor
 		return NewNewAPIClientFactory(opts.DefaultMode, opts.Defaults)
 	}
 	resolver := newConnectorConfigResolver(opts.Source, opts.Logger, ConnectorPlatformNewAPI, opts.Defaults.Environment)
-	return func(ctx context.Context) (newapi.ReadClientV2, error) {
-		mode, cfg := opts.DefaultMode, opts.Defaults
+	return func(ctx context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error) {
+		cfg := opts.Defaults
 		row := resolver.load(ctx)
+		eff := ResolveEffectiveMode(ConnectorPlatformNewAPI, row, string(opts.DefaultMode))
+		if eff.Source == ModeSourceUnknown {
+			return nil, eff, connector.NewError(connector.KindInternal, "newapi.client.mode",
+				errors.New("newapi 生效模式未知：core.connector_config 没有这一行，进程也没有缺省模式"))
+		}
+		mode, err := ParseNewAPIMode(eff.Mode)
+		if err != nil {
+			return nil, EffectiveConnectorConfig{Platform: ConnectorPlatformNewAPI, Source: ModeSourceUnknown},
+				connector.NewError(connector.KindInternal, "newapi.client.mode", err)
+		}
 		if row != nil {
-			parsed, err := ParseNewAPIMode(row.Mode)
-			if err != nil {
-				return nil, connector.NewError(connector.KindInternal, "newapi.client.mode", err)
-			}
-			mode = parsed
 			overrideConnectorConfig(row, &cfg.Endpoint, &cfg.TargetAllowlist, &cfg.CredentialRef)
 		}
-		resolver.logApplied(ctx, row, string(mode), cfg.Endpoint, cfg.CredentialRef, len(cfg.TargetAllowlist))
+		eff.Mode = string(mode)
+		eff.EndpointHost = endpointHost(cfg.Endpoint)
+		eff.CredentialRef = cfg.CredentialRef
+		eff.AllowlistSize = len(cfg.TargetAllowlist)
+		resolver.logApplied(ctx, eff)
 		if mode == NewAPIModeFake && cfg.Environment == "production" {
-			return nil, connector.NewError(connector.KindNotSupported, "newapi.client.mode", ErrConnectorProductionFake)
+			return nil, eff, connector.NewError(connector.KindNotSupported, "newapi.client.mode", ErrConnectorProductionFake)
 		}
-		return NewNewAPIClientFactory(mode, cfg)(ctx)
+		client, _, err := NewNewAPIClientFactory(mode, cfg)(ctx)
+		return client, eff, err
 	}
 }

@@ -119,14 +119,15 @@ type decodedOpsMetric struct {
 }
 
 type decodedOpsSync struct {
-	Kind            string           `json:"kind"`
-	Platform        string           `json:"platform"`
-	ConfigAvailable bool             `json:"config_available"`
-	EffectiveMode   string           `json:"effective_mode"`
-	ConfigUpdatedAt *string          `json:"config_updated_at"`
-	SampleMetricKey string           `json:"sample_metric_key"`
-	Source          string           `json:"source"`
-	Freshness       decodedFreshness `json:"freshness"`
+	Kind                string           `json:"kind"`
+	Platform            string           `json:"platform"`
+	ConfigAvailable     bool             `json:"config_available"`
+	EffectiveMode       string           `json:"effective_mode"`
+	EffectiveModeSource string           `json:"effective_mode_source"`
+	ConfigUpdatedAt     *string          `json:"config_updated_at"`
+	SampleMetricKey     string           `json:"sample_metric_key"`
+	Source              string           `json:"source"`
+	Freshness           decodedFreshness `json:"freshness"`
 }
 
 func decodeOpsOverview(t *testing.T, rec *httptest.ResponseRecorder) decodedOpsOverview {
@@ -199,24 +200,49 @@ func TestOpsOverviewConnectorConfigsNilMeansConfigUnavailable(t *testing.T) {
 		if p.EffectiveMode != "" {
 			t.Fatalf("%s effective_mode = %q, want empty when config unavailable", p.Platform, p.EffectiveMode)
 		}
+		if p.EffectiveModeSource != "" {
+			t.Fatalf("%s effective_mode_source = %q, want empty when config unavailable", p.Platform, p.EffectiveModeSource)
+		}
 	}
 }
 
-func TestOpsOverviewConnectorConfigsMissingRowDefaultsToFake(t *testing.T) {
+// TestOpsOverviewMissingRowIsUnknownNotFake replaces the old
+// "...MissingRowDefaultsToFake": answering "fake" here was the third of the
+// three disagreeing answers in the 2026-09-08 alert-storm report (§三.1).
+//
+// With no row, what actually runs is decided by the platform-worker
+// process's XM_SUB2API_MODE / XM_NEWAPI_MODE, and platform-api's container
+// carries neither key. The old answer was right only because production's
+// env default happened to also be fake -- it stood on a fact from
+// somewhere else (memory: 条件恰好为真≠条件正确).
+func TestOpsOverviewMissingRowIsUnknownNotFake(t *testing.T) {
 	configs := &fakeConnectorConfigLister{items: nil}
 	h := testRouterWithOpsOverview(t, &fakeMetricLister{}, configs, nil, AlertDeliveryStatus{})
 	rec := opsOverviewGet(t, h)
 	got := decodeOpsOverview(t, rec)
 	for _, p := range got.SyncPipelines {
+		// config_available and "no row for this platform" stay two different
+		// facts: the module IS mounted, it just has nothing to say yet.
 		if !p.ConfigAvailable {
 			t.Fatalf("%s config_available = false, want true when ConnectorConfigs is set", p.Platform)
 		}
-		if p.EffectiveMode != "fake" {
-			t.Fatalf("%s effective_mode = %q, want fake (unconfigured platforms default to fake, matching the worker's own convention)", p.Platform, p.EffectiveMode)
+		if p.EffectiveMode != "" {
+			t.Fatalf("%s effective_mode = %q, want empty (this process cannot know)", p.Platform, p.EffectiveMode)
+		}
+		if p.EffectiveMode == "fake" {
+			t.Fatalf("%s effective_mode = fake -- that is the guess this slice removed", p.Platform)
+		}
+		if p.EffectiveModeSource != jobs.ModeSourceUnknown {
+			t.Fatalf("%s effective_mode_source = %q, want %q", p.Platform, p.EffectiveModeSource, jobs.ModeSourceUnknown)
 		}
 		if p.ConfigUpdatedAt != nil {
 			t.Fatalf("%s config_updated_at = %v, want nil (no row exists)", p.Platform, p.ConfigUpdatedAt)
 		}
+	}
+	// Guard the empty-string assertion above against the field simply being
+	// deleted, which would make it vacuously true (memory: 缺席型断言要做变异验证).
+	if !strings.Contains(rec.Body.String(), `"effective_mode_source"`) {
+		t.Fatalf("response has no effective_mode_source field at all: %s", rec.Body.String())
 	}
 	if configs.gotEnv != "development" {
 		t.Fatalf("connector configs queried for env %q, want development", configs.gotEnv)
@@ -240,6 +266,9 @@ func TestOpsOverviewConnectorConfigsRowReportsRealMode(t *testing.T) {
 	}
 	if sub2api.EffectiveMode != "real" {
 		t.Fatalf("sub2api effective_mode = %q, want real", sub2api.EffectiveMode)
+	}
+	if sub2api.EffectiveModeSource != jobs.ModeSourceDatabase {
+		t.Fatalf("sub2api effective_mode_source = %q, want %q", sub2api.EffectiveModeSource, jobs.ModeSourceDatabase)
 	}
 	if sub2api.ConfigUpdatedAt == nil || *sub2api.ConfigUpdatedAt != updated.Format(time.RFC3339) {
 		t.Fatalf("sub2api config_updated_at = %v, want %s", sub2api.ConfigUpdatedAt, updated.Format(time.RFC3339))
