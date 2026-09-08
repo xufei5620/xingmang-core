@@ -41,7 +41,9 @@ RC105 的 L0 让认领按「时间合法 > 状态合法 > 首批次」排序，�
   `go test -p 1 -count=1 ./...` **退出 0，29 个包 ok**（`postgresstore` 254.8s、`application` 27.5s、
   `eligibility-repair` 16.1s）；`go vet ./...` 0；`check-no-secrets.ps1` 0。
 - 发布身份改名后 `scripts/test-release-image-gate.ps1` exit 0。
-- `verify.ps1` 完整源码门禁：**运行中**（`logs/detached-runs/rc105-gate-20260908T135252Z-e9aa`），结果见末尾补记。
+- `verify.ps1` 完整源码门禁：**exit 0**（`logs/detached-runs/rc105-gate-20260908T135252Z-e9aa`，
+  含隔离 PostgreSQL 集成测试与 PG15/PG18 来源契约、Sub2API v0.1.179 契约快照、New API 快照，
+  `All local verification gates passed`）。
 - 镜像门禁 / 产物校验 / 签名：待做。
 
 ## 顺序（对照 RC104 的教训）
