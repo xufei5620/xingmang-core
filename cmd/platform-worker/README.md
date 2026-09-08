@@ -143,6 +143,49 @@ Fake 把整条采集链路跑通。
 `real`（`docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1）。字段改名
 加 `_default` 后缀就是为了让这种误读在字面上不成立。
 
+`connector_config_source` 同一行里说的是「这个进程的生效模式由谁决定」：
+接了 `core.connector_config` 的部署（生产装配无条件接）打 `database`，
+只有静态工厂那条路（`ConnectorConfigs == nil`）打 `env`。它是从装配推导的，
+不是写死的字面量——否则后一种部署里它会一直宣称 `database`，而每轮
+`job_completed` 打的却是 `*_mode_source=env`。
+
+### maintenance 队列的槽位是算出来的
+
+启动日志里有一条 `queue_slots`：
+
+```json
+{"event":"queue_slots","queue":"maintenance","max_workers":4,
+ "fastest_cadence_seconds":60,"slow_job_threshold_seconds":60,
+ "slow_job_count":3,"slow_job_kinds":["finance_cost_sync","newapi_sync","sub2api_sync"]}
+```
+
+`maintenance` 队列上跑着心跳、告警评估、留存清理、两条同步采集、成本采集。
+它过去是**单槽**（`MaxWorkers` 默认 1，没有环境变量能覆盖），而 XM-OPS-TRUTH
+把 `newapi_sync` 的执行期限抬到 120s、`sub2api_sync` 抬到 100s——单槽意味着
+上游一变慢，这两个任务就稳定占着唯一的槽，把 60 秒节拍的心跳与告警评估挤到
+下一轮。**告警引擎的节拍反而在故障期间变松**，正好是最不该发生的时候。
+
+现在槽位 = 慢任务个数 + 1（慢任务全在跑时仍留一个槽给快节拍的任务）。
+「慢任务」是数出来的：这个部署启用了哪些任务（同一套 `XM_*_ENABLED` /
+`XM_*_INTERVAL` 解析）× 每个 Worker 自己声明的 `Timeout()`，判据是队列里
+最快的那个节拍与 River 默认 1 分钟里更小的那一个。关掉一条采集链路，槽位会
+自己少一个；将来谁再声明一个更长的执行期限，槽位会自己多一个。
+
+`XM_MAX_WORKERS` 之类的通用旋钮仍是下限：调大它不会被这里调小。
+
+**副作用要知道**：`maintenance` 上不同种类的任务从此可能**同时**跑。
+
+同一种任务的两轮要重叠，得先有「一轮的执行期限 ≥ 它自己的周期」。三个慢任务
+都不满足（120s/100s/120s 对 300s 周期，`TestSlowMaintenanceJobsCannotOverlapThemselves`
+钉住这条）。满足的只有心跳与告警评估（60s 期限对 60s 周期），而它们与顺序
+相关的写在库层各有闸：审计链走 `pg_advisory_xact_lock`（`db/queries/audit.sql`
+的 `LockAuditChain`），告警投递走 `FOR UPDATE SKIP LOCKED`
+（`db/queries/alerts.sql`）。
+
+连接池按 `pgxpool` 默认 `MaxConns`（`max(4, CPU 核数)`）配，并发变高时可能
+出现短暂的连接等待——同步任务的大部分时间花在上游 HTTP 上、并不握着连接，
+但真正需要时应显式设池大小，见 handoff 的 follow_ups。
+
 ### 失败也要写
 
 上游读取失败时，任务**仍然**为每个指标写一条观测：`status=failed` +

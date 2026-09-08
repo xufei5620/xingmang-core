@@ -855,10 +855,14 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	workers := river.NewWorkers()
+	// timeouts 在注册点收集每个 Worker 声明的执行期限，maintenance 队列的槽位
+	// 由它推导（见 queue_slots.go）。注册一定要走 addWorker，别直接调
+	// river.AddWorker——那样这个 kind 的期限收不到，槽位会按少一个慢任务算。
+	timeouts := jobTimeouts{}
 	// XM-OPS0: WithObservations lets the ops overview query answer "is the
 	// worker alive" from the same freshness model as everything else,
 	// instead of a bespoke liveness probe.
-	river.AddWorker(workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment).
+	addWorker(timeouts, workers, NewHeartbeatWorker(cfg.Logger, cfg.Environment).
 		WithObservations(ops.NewStore(pool), cfg.HeartbeatInterval))
 
 	heartbeat, err := newManifestPeriodicJob(
@@ -880,7 +884,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	if cfg.Sub2APISyncEnabled {
 		// 仓储在这里从既有的连接池构造：任务只依赖 ObservationStore 接口，
 		// 换成内存实现就能在没有库的机器上跑完整条失败路径的单元测试。
-		river.AddWorker(workers, NewSub2APISyncWorker(Sub2APISyncOptions{
+		addWorker(timeouts, workers, NewSub2APISyncWorker(Sub2APISyncOptions{
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.Sub2APIInstanceID,
@@ -909,7 +913,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 与 Sub2API 同样的装配方式：仓储在这里从既有连接池构造，任务只依赖
 		// ObservationStore 接口，换成内存实现就能在没有库的机器上跑完整条
 		// 失败路径的单元测试。
-		river.AddWorker(workers, NewNewAPISyncWorker(NewAPISyncOptions{
+		addWorker(timeouts, workers, NewNewAPISyncWorker(NewAPISyncOptions{
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.NewAPIInstanceID,
@@ -941,7 +945,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 台账仓储拿的是**同一个时钟**：「今日可覆盖、过去冻结」（§5.3）的
 		// 判据与业务日切分必须来自同一个 now，否则跨零点那一瞬会出现
 		// 「按 A 时钟算是今天、按 B 时钟算是昨天」的写入，然后被冻结纪律拒掉。
-		river.AddWorker(workers, NewFinanceCollectWorker(FinanceCollectOptions{
+		addWorker(timeouts, workers, NewFinanceCollectWorker(FinanceCollectOptions{
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.FinanceCollectInstanceID,
@@ -997,7 +1001,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// **审计事件不在这里**：审计链一条都不删（宪法 11 条 append-only，
 		// 删中间任意一条都会断链，而且库层规则会让 DELETE 静默空转）。
 		// 理由完整写在 retention.go 的文件头。
-		river.AddWorker(workers, NewRetentionWorker(RetentionOptions{
+		addWorker(timeouts, workers, NewRetentionWorker(RetentionOptions{
 			Logger:              cfg.Logger,
 			Environment:         cfg.Environment,
 			Samples:             ops.NewStore(pool),
@@ -1027,7 +1031,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	// 只看开关的话，一个没接审批中心的进程会每 5 分钟写一条「队列长度 0」的
 	// 观测——那条观测会让「审批中心已经在跑」看起来成立，而实际上没有。
 	if cfg.ApprovalExpireEnabled && cfg.Approvals != nil {
-		river.AddWorker(workers, NewApprovalExpireWorker(ApprovalExpireOptions{
+		addWorker(timeouts, workers, NewApprovalExpireWorker(ApprovalExpireOptions{
 			Logger:      cfg.Logger,
 			Environment: cfg.Environment,
 			Approvals:   cfg.Approvals,
@@ -1097,7 +1101,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			evaluator = alerts.NewEvaluator(
 				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), ruleConfig)
 		}
-		river.AddWorker(workers, NewAlertEvaluateWorker(AlertEvaluateOptions{
+		addWorker(timeouts, workers, NewAlertEvaluateWorker(AlertEvaluateOptions{
 			Logger:      cfg.Logger,
 			Environment: cfg.Environment,
 			Reconciler: alerts.NewReconciler(alerts.ReconcilerOptions{
@@ -1124,7 +1128,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	if cfg.ReqlogMetricsMode == ReqlogMetricsModeFile {
 		// 仓储在这里从既有连接池构造：任务只依赖 ObservationStore 接口，
 		// 与 sub2api_sync/newapi_sync 同一条装配纪律。
-		river.AddWorker(workers, NewReqlogMetricsWorker(ReqlogMetricsOptions{
+		addWorker(timeouts, workers, NewReqlogMetricsWorker(ReqlogMetricsOptions{
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			DataDir:          cfg.ReqlogMetricsDataDir,
@@ -1167,7 +1171,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// from what the sync jobs are already doing.
 		sub2apiFactory := cfg.sub2apiClientFactory()
 		newapiFactory := cfg.newapiClientFactory()
-		river.AddWorker(workers, NewConnectorProbeWorker(ConnectorProbeOptions{
+		addWorker(timeouts, workers, NewConnectorProbeWorker(ConnectorProbeOptions{
 			Logger:        cfg.Logger,
 			Environment:   cfg.Environment,
 			Store:         ops.NewStore(pool),
@@ -1212,7 +1216,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	if cfg.CardSyncEnabled {
-		river.AddWorker(workers, NewCardSyncWorker(cfg.Logger, cfg.CardSyncer))
+		addWorker(timeouts, workers, NewCardSyncWorker(cfg.Logger, cfg.CardSyncer))
 		cardPeriodic, err := newManifestPeriodicJob(
 			CardSyncJobKind, cfg.CardSyncInterval, cfg.CardSyncRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
@@ -1228,7 +1232,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	if cfg.SMSProbeEnabled {
-		river.AddWorker(workers, NewSMSProbeWorker(cfg.Logger, cfg.SMSProber))
+		addWorker(timeouts, workers, NewSMSProbeWorker(cfg.Logger, cfg.SMSProber))
 		smsPeriodic, err := newManifestPeriodicJob(
 			SMSProbeJobKind, cfg.SMSProbeInterval, cfg.SMSProbeRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {
@@ -1247,7 +1251,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		// 仓储在这里从既有连接池构造，同 Sub2API/NewAPI 的理由：任务只依赖
 		// ObservationStore 接口。客户端工厂只在 mode=file 时才真的打开
 		// usage.sqlite——validate() 已经保证 Enabled 时 mode 只能是 file。
-		river.AddWorker(workers, NewCPASyncWorker(CPASyncOptions{
+		addWorker(timeouts, workers, NewCPASyncWorker(CPASyncOptions{
 			Logger:           cfg.Logger,
 			Environment:      cfg.Environment,
 			InstanceID:       cfg.CPAInstanceID,
@@ -1285,7 +1289,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	if err != nil {
 		return nil, err
 	}
-	river.AddWorker(workers, NewAssuranceProbeWorker(AssuranceProbeOptions{
+	addWorker(timeouts, workers, NewAssuranceProbeWorker(AssuranceProbeOptions{
 		Logger:                  cfg.Logger,
 		Environment:             cfg.Environment,
 		Store:                   assuranceStore,
@@ -1293,13 +1297,19 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 		ProbeSecrets:            cfg.AssuranceProbeSecrets,
 	}))
 
+	// maintenance 队列的槽位由「这个部署启用了哪些任务 + 它们各自声明的执行
+	// 期限」推导，不再跟着 cfg.MaxWorkers 一起是 1：慢任务占满单槽会把 60s
+	// 节拍的心跳与告警评估挤到下一轮，而那恰恰发生在最需要它们的故障期。
+	// 完整理由见 queue_slots.go 顶部。
+	queues, slotPlan, err := riverQueueConfigs(cfg, assurance.QueueProbe, timeouts)
+	if err != nil {
+		return nil, err
+	}
+	logQueueSlots(cfg.Logger, cfg.Environment, slotPlan, queues)
+
 	return river.NewClient(riverpgxv5.New(pool), &river.Config{
-		Logger: cfg.Logger,
-		Queues: map[string]river.QueueConfig{
-			river.QueueDefault:   {MaxWorkers: cfg.MaxWorkers},
-			QueueMaintenance:     {MaxWorkers: cfg.MaxWorkers},
-			assurance.QueueProbe: {MaxWorkers: cfg.MaxWorkers},
-		},
+		Logger:       cfg.Logger,
+		Queues:       queues,
 		Workers:      workers,
 		PeriodicJobs: periodic,
 	})

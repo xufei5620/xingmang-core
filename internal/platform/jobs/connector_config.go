@@ -72,12 +72,33 @@ func (c *ConnectorConfig) clone() *ConnectorConfig {
 	return &cp
 }
 
-// EffectiveConnectorConfig 是「这个平台此刻按什么在跑」的唯一答案。
+// EffectiveConnectorConfig 是**同步采集这条链路**上「这个平台此刻按什么在跑」
+// 的答案。
 //
-// worker 每轮同步解析一次，后台 /ops/overview 每次请求解析一次，两边都必须
-// 经过 ResolveEffectiveMode——不许任何一方再写第二个 if。2026-09-08 的排查里
-// 同一个问题在系统里有三个互不一致的答案（作业日志打 env 缺省、ops_overview
-// 无行时硬答 fake、动态工厂每轮真解析），这个类型存在的意义就是把它们合成一个。
+// 覆盖范围要说准，不然它自己就成了一句会过期的话：
+//
+//	进来的：worker 每轮同步（动态工厂，connector_config.go 的两个闭包）、
+//	        后台 /ops/overview 的 modeFor（httpapi/ops_overview.go）。
+//	        这两处必须经过 ResolveEffectiveMode——不许任何一方再写第二个 if。
+//	没进来的（XM-OPS-TRUTH 之后仍各写各的，共三处）：
+//	        cmd/platform-api/platformpayments.go 的 resolveSub2API 与 resolveNewAPI、
+//	        cmd/platform-api/platformusers.go 的 dynamicUsersClient.resolve。
+//
+// 没进来的那几处**不是漏网**，是另一个问题：它们回答的是「platform-api 这次
+// 请求用哪个客户端」，无行时回落的是它们自己的进程缺省
+// （XM_PLATFORM_PAYMENTS_MODE / XM_PLATFORM_USERS_MODE），不是 worker 的
+// XM_SUB2API_MODE。同一个平台，/ops/overview 可以答 unknown 而逐笔订单页按
+// XM_PLATFORM_PAYMENTS_MODE 走 real——两个答案都对，因为问的不是同一个问题。
+//
+// 它们与本解析器唯一会分叉的地方是「行在、但 mode 是空串」：ParseSub2APIMode
+// 把空串归一成 fake，本解析器落到缺省一侧。今天这条分叉打不出来，因为
+// core.connector_config.mode 有 CHECK (mode IN ('fake','real'))（迁移 000020），
+// 空串进不了表——**这是靠迁移那条约束成立的，不是靠这几段代码自己成立的**。
+// 哪天放宽那条 CHECK，这几处会静静地给出不同答案。
+//
+// 2026-09-08 的排查里同一个问题在系统里有三个互不一致的答案（作业日志打 env
+// 缺省、ops_overview 无行时硬答 fake、动态工厂每轮真解析），这个类型存在的
+// 意义是把**那三个**合成一个，不是把全平台每一处模式判定都收进来。
 type EffectiveConnectorConfig struct {
 	Platform string
 	// Mode 是本轮生效的模式；空串表示**不知道**（见 ModeSourceUnknown）。

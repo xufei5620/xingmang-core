@@ -2,8 +2,10 @@
 
 - **status**: ready-for-review（分支内交付，未推 GitHub、未部署）
 - **branch**: `ai/claude/XM-OPS-TRUTH`（起点 e4f7dcf）
-- **commit**: `f802ab7`（32 files changed, +2638 / -287）
-- **时间**: 开始 2026-09-08T16:15:41Z，结束 2026-09-08T17:05Z（约 50 分钟）
+- **commit**: `f802ab7`（实现，32 files changed, +2638 / -287）→ `1f7ca20`（回填 SHA）
+  → `REVIEW_SHA`（审稿四条阻塞级问题的处置，见「审稿处置」一节；追加提交，未 amend）
+- **时间**: 第一轮 2026-09-08T16:15:41Z – 17:05Z（约 50 分钟）；
+  审稿处置轮 2026-09-08T17:33:58Z – 18:0XZ
 - **需求来源**: `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1、三·2、二表第一行
 - **旧账**: `docs/handoffs/ACCEPTANCE-LOG.md:88`（作业日志打 env 兜底值）、`:82`/`:86`
   （verify-real-mode.sh 应改读 `connector_config_applied`）——本片一并还掉
@@ -37,6 +39,86 @@ handoff 二表第一行描述的正是这个形态。现在每组各有 `单次�
 **3. 六处过期文档 + 验收脚本。** brief 说三处，实际六处；另有 `verify-real-mode.sh`
 与三个 fixture 会被改名直接打红，必须同一个提交落地。
 
+**4.（审稿处置轮）`maintenance` 队列不再是单槽，`worker_started` 整条可测，
+「唯一判定点」的措辞收窄到它真正覆盖的范围。** 详见下面「审稿处置」。
+
+---
+
+## 审稿处置（四条阻塞级问题，逐条）
+
+### A. `maintenance` 单槽会被抬高的执行期限占满（major）
+
+**问题**：`QueueMaintenance` 的槽位一直是 `cfg.MaxWorkers`，而 `DefaultMaxWorkers = 1`
+且全仓没有任何 env / compose 覆盖点——生产恒为 1。心跳、告警评估、留存清理、两条
+同步采集、成本采集全挤在这一个槽上。本片把 `newapi_sync` 的执行期限从 River 默认的
+60s 抬到 120s、`sub2api_sync` 抬到 100s：最坏情况下一个 300s 周期里
+`newapi(120) + sub2api(100) + finance(120) = 340s`，**超过一个周期**，排在后面的
+60 秒节拍任务（心跳、告警评估）被推迟数分钟。一个为「让观测说真话」而做的改动，
+不该让故障期的观测变差。
+
+**处置**（新文件 `internal/platform/jobs/queue_slots.go`）：
+
+- 槽位 = 慢任务个数 + 1（慢任务全在跑时仍留一个槽给快节拍的任务）。
+- 慢任务是**数**出来的，不是手列的：
+  (1) 这个部署启用了哪些 maintenance 任务、周期多少——走 `effectiveJobConfig`，
+  与 `BuildEffectiveManifest` / `/ops` 那张部署态时刻表同一段每任务解析；
+  (2) 每个 Worker 声明的 `Timeout()`——在**真正的注册点**收集（`addWorker` 取代
+  `river.AddWorker`），不是另开一份名单。
+- 判据 = 队列最快节拍与 River 默认 1 分钟里**更小的那一个**（`slowJobThreshold`）：
+  节拍那一头挡「能占过一个节拍的任务」，默认期限那一头挡「把常住人口也算成慢任务、
+  于是每个任务一个槽」。取小者，永不少开槽。
+- `cfg.MaxWorkers` 仍是下限：调大它的部署不会被这里调小。
+- 新增启动日志 `queue_slots`，`max_workers` **直接从交给 River 的那张 map 里取**，
+  测试断言这一行等于断言了那张 map。
+
+默认部署下：节拍 60s、慢任务 3 个（`newapi_sync` / `sub2api_sync` /
+`finance_cost_sync`）、槽位 4。关掉一条链路槽位自己少一个。
+
+**副作用（已知并已守）**：不同种类的任务从此可能同时跑。同一种任务的两轮要重叠，
+得先有「执行期限 ≥ 自己的周期」——三个慢任务都不满足（120/100/120 对 300s），
+`TestSlowMaintenanceJobsCannotOverlapThemselves` 钉住这条；满足的只有心跳与告警评估
+（60s 对 60s），它们与顺序相关的写在库层各有闸（`LockAuditChain` 的
+`pg_advisory_xact_lock`、告警投递的 `FOR UPDATE SKIP LOCKED`）。连接池见 risks 8。
+
+### B. `connector_config_source` 是写死的 `"database"`（major）
+
+`connectorModeStartupAttrs` 原先把它写成字面量，不看 `config.ConnectorConfigs`。
+`ConnectorConfigs == nil` 的部署走静态工厂、每轮按 env 解析、`job_completed` 打
+`*_mode_source=env`，而 `worker_started` 仍宣称 `database`。今天为真只因为生产装配
+无条件设了 `ConnectorConfigs`——靠别处事实成立的判断就是静默债，而本片存在的全部理由
+正是消灭这种副本。**处置**：改成 `connectorConfigSourceLabel(config)`（`nil` → `env`），
+词表与 `jobs.ModeSource*` 同一套，好让启动日志与每轮 `job_completed` 直接对读。
+测试两个装配各一个子例，外加一条「两者必须不相等」——写死成任何常量都过不去。
+
+### C. 缺席断言钉在半成品上（major）
+
+`worker_started` 的属性此前只有接入模式那一小段抽进了 `connectorModeStartupAttrs`，
+其余仍内联在 `main()`。于是「不许再出现裸键 `sub2api_mode`」这条缺席断言钉的是辅助
+函数的返回值，而不是打出去的那一行：在 `main()` 的切片里加回裸键，全套门禁一条都不红。
+
+**处置**：整条属性搬进 `workerStartupAttrs(config)`，`main()` 只剩一句
+`logger.InfoContext(ctx, "worker_started", workerStartupAttrs(config)...)`；缺席与在场
+断言都跑在完整属性集上。**闸的范围也改成发现来的**：不再手写
+`{"sub2api","newapi"}`，而是遍历 `credentials.Platforms`（与迁移 000020 的 CHECK 同源）
+——加第三个平台时这条闸会自己红。`finance_collect_mode` / `audit_archive_mode` /
+`reqlog_metrics_mode` 这些裸 `_mode` 键**不在**范围内，它们本来就是生效值。
+变异 M17（在 `workerStartupAttrs` 的尾段加回裸键）双向变红。
+
+### D.「唯一判定点」的措辞比事实大（major）
+
+`EffectiveConnectorConfig` 的注释写着「不许任何一方再写第二个 if」，但同一个
+platform-api 进程里还有三处各写各的：`platformpayments.go` 的 `resolveSub2API` /
+`resolveNewAPI`、`platformusers.go` 的 `dynamicUsersClient.resolve`。
+
+**处置：收窄措辞，逐处点名，不合并**（reviewer 给的方案 b）。理由：那三处回答的是
+**另一个问题**——「platform-api 这次请求用哪个客户端」，无行时回落的是它们自己的
+进程缺省（`XM_PLATFORM_PAYMENTS_MODE` / `XM_PLATFORM_USERS_MODE`），不是 worker 的
+`XM_SUB2API_MODE`。把它们并进来会造出一个假的统一。唯一真会分叉的地方是「行在、
+但 mode 是空串」（`ParseSub2APIMode("")` → fake vs 本解析器落到缺省侧），而
+`core.connector_config.mode` 有 `CHECK (mode IN ('fake','real'))`（迁移 000020），
+空串进不了表——**这是靠迁移那条约束成立的，不是靠这几段代码自己成立的**，注释里
+写明了这一点。合并那三处会改动另外两个切片的端点语义，属于越权，列进 follow_ups 7。
+
 ---
 
 ## files_changed
@@ -51,8 +133,12 @@ handoff 二表第一行描述的正是这个形态。现在每组各有 `单次�
 | `internal/platform/jobs/cpa_sync.go` | 只加 `cpa_mode_source="env"` + 一段说明。**不接解析器**——见下面 owner_decisions |
 | `internal/platform/jobs/client.go` | 两个 worker 去掉 `Mode:`、加 `RequestTimeout:`；探针工厂适配新签名（`_` 占位） |
 | `internal/platform/httpapi/ops_overview.go` | `modeFor` 改走 `jobs.ResolveEffectiveMode`，无行时不再硬答 `"fake"`；响应新增 `effective_mode_source` |
-| `cmd/platform-worker/main.go` | `worker_started` 的接入模式字段抽成 `connectorModeStartupAttrs`（可测） |
-| `cmd/platform-worker/startup_log.go` | **新增**：`*_mode_default` 改名 + `effective_mode_log_events` |
+| `cmd/platform-worker/main.go` | `worker_started` **整条**属性搬进 `workerStartupAttrs`，`main()` 只剩一句打印（审稿 C） |
+| `cmd/platform-worker/startup_log.go` | **新增**：`workerStartupAttrs`（全量）+ `connectorModeStartupAttrs`（`*_mode_default` 改名、`effective_mode_log_events`）+ `connectorConfigSourceLabel`（审稿 B） |
+| `internal/platform/jobs/queue_slots.go` | **新增**（审稿 A）：`jobTimeouts` / `addWorker` / `slowJobThreshold` / `maintenanceQueueSlots` / `riverQueueConfigs` / `logQueueSlots` |
+| `internal/platform/jobs/client.go`（审稿轮） | 13 处 `river.AddWorker` → `addWorker(timeouts, …)`；`Queues` 改由 `riverQueueConfigs` 生成；新增 `queue_slots` 启动日志 |
+| `internal/platform/jobs/connector_config.go`（审稿轮） | `EffectiveConnectorConfig` 的文档收窄到真实覆盖范围，逐处点名未收编的三处（审稿 D） |
+| `cmd/platform-worker/README.md`（审稿轮） | 新增「maintenance 队列的槽位是算出来的」小节；`connector_config_source` 的推导说明 |
 | `cmd/platform-api/platformpayments.go` | 两处 `_` 占位（签名变更的机械改动，不在本片所有权内，已说明） |
 
 ### 门禁与 fixture
@@ -131,6 +217,8 @@ handoff 二表第一行描述的正是这个形态。现在每组各有 `单次�
 | `upstream_read` | 全部 | **新增事件**，每组读取一条 |
 | `worker_started` | `sub2api_mode` / `newapi_mode` | **改名** → `*_mode_default` |
 | 同上 | `effective_mode_log_events` | 新增：`"connector_config_applied,job_completed"` |
+| 同上 | `connector_config_source` | 语义变更：从写死的 `"database"` 改为按装配推导（`database` / `env`） |
+| `queue_slots` | 全部 | **新增事件**（审稿 A）：`queue` / `max_workers` / `fastest_cadence_seconds` / `slow_job_threshold_seconds` / `slow_job_count` / `slow_job_kinds`，每次 `NewClient` 打一条 |
 
 ---
 
@@ -142,13 +230,17 @@ env -u HTTP_PROXY … go test -p 1 -count=1 \
   ./internal/platform/jobs/ ./internal/platform/httpapi/ \
   ./cmd/platform-worker/ ./cmd/platform-api/
 ```
-→ 四个包全 ok（jobs 7.971s / httpapi 1.148s / platform-worker 0.105s / platform-api 0.082s）
+→ 四个包全 ok。第一轮：jobs 7.971s / httpapi 1.148s / platform-worker 0.105s /
+platform-api 0.082s。审稿处置轮复跑：jobs 7.237s / platform-worker 0.086s /
+httpapi 1.157s / platform-api 0.083s（含 jobs 的全部集成测试，测试库
+`xm_test_wt_xm_ops_truth`）。
 
 ```
 env -u … go vet ./internal/platform/jobs/ ./internal/platform/httpapi/ \
   ./cmd/platform-worker/ ./cmd/platform-api/     → 无输出
 gofmt -l <同四目录>                                → 无输出
 bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK（29 条全 ok）
+bash scripts/check-governance.sh                  → exit 0（审稿处置轮补跑）
 ```
 
 ### 新增测试清单
@@ -174,11 +266,21 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
 | `TestOpsOverviewAbstainsWhereWorkerFallsBackToEnv` | 无行时 API 弃权而不是猜 |
 | `TestOpsOverviewBothPipelinesUseTheResolver` | 两条流水线各自判定 |
 | `TestOpsOverviewMissingRowIsUnknownNotFake` | 替换旧的 `...MissingRowDefaultsToFake` |
-| `TestWorkerStartupLogNamesDefaultsAsDefaults` / `TestStartupDefaultsRenameIsTwoWay` | 改名双向 |
+| `TestWorkerStartupLogNamesDefaultsAsDefaults` / `TestStartupDefaultsRenameIsTwoWay` | 改名双向；审稿轮改为跑在**完整**属性集上，范围取自 `credentials.Platforms` |
+| `TestStartupConnectorConfigSourceFollowsAssembly` | 审稿 B：接与不接 `core.connector_config` 必须给出**不同**答案 |
+| `TestMaintenanceQueueSlotsLeavesRoomForTheFastestCadence` | 审稿 A：默认部署槽位 4 > `MaxWorkers` |
+| `TestMaintenanceQueueSlotsFollowsDeployment`（4 子例） | 关链路→槽位少、`MaxWorkers` 只是下限 |
+| `TestMaintenanceQueueSlotsThresholdFollowsCadence` | 判据跟着节拍走，不是写死的 1 分钟 |
+| `TestMaintenanceQueueSlotsDiscoverNewSlowJobs` | 范围是数出来的：多一个慢任务，槽位自己 +1 |
+| `TestSlowMaintenanceJobsCannotOverlapThemselves` | 多槽的副作用闸：慢任务的期限必须 < 自己的周期 |
+| `TestNewClientWiresDerivedMaintenanceSlots` | 从最外层打进来，读交给 River 的那张队列 map |
+| `TestWorkersRegisterThroughAddWorker` | `client.go` 里不许再出现 `river.AddWorker(` |
 
 ---
 
-## 变异表（16 条，逐条改 → 跑 → 记录 → 还原 → 复跑）
+## 变异表（23 条，逐条改 → 跑 → 记录 → 还原 → 复跑）
+
+M1–M16 是第一轮，M17–M23 是审稿处置轮。
 
 | # | 变异 | 结果 | 变红的测试 |
 |---|---|---|---|
@@ -198,8 +300,17 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
 | M14 | `sub2api_sync.go` job_completed 打 env 缺省 | 🔴 | `Sub2APISyncLogsEffectiveModeNotEnvDefault` 3 子例 |
 | M15 | 删掉 `cpa_mode_source` | 🔴 | `CPASyncLogsModeSourceEnv` |
 | M16 | `verify-real-mode.sh` 不再比对 `connector_config_applied` 的 mode | 🔴 | 部署门禁 `VERIFY-REAL-MODE-TEST-FAILED`（被 `config_source` 子闸抓住，两个子闸互相独立） |
+| M17 | 在 `workerStartupAttrs` 的**尾段**（原先内联在 `main()` 的那半截）加回裸键 `sub2api_mode` / `newapi_mode` | 🔴 | `WorkerStartupLogNamesDefaultsAsDefaults`（缺席）+ `StartupDefaultsRenameIsTwoWay`（双向）——这正是审稿 C 说旧闸抓不到的那条 |
+| M18 | `connector_config_source` 改回写死的 `"database"` | 🔴 | `StartupConnectorConfigSourceFollowsAssembly` 的 `env` 子例 + 「两者必须不相等」那条 |
+| M19 | `maintenanceQueueSlots` 不再按慢任务加槽（槽位恒为 `cfg.MaxWorkers`） | 🔴 | 4 条槽位测试 + `NewClientWiresDerivedMaintenanceSlots` |
+| M20 | `riverQueueConfigs` 里 maintenance 用回 `cfg.MaxWorkers`（改动前的状态） | 🔴 | `NewClientWiresDerivedMaintenanceSlots`（槽位 1，want 4） |
+| M21 | `newapi_sync` 的 Worker 改回 `river.AddWorker` 直接注册 | 🔴 | `NewClientWiresDerivedMaintenanceSlots`（`slow_job_kinds` 少一个）+ `WorkersRegisterThroughAddWorker` |
+| M22 | `slowJobThreshold` 写死成 `riverDefaultJobTimeout`（忽略节拍） | 🔴 | `MaintenanceQueueSlotsThresholdFollowsCadence` |
+| M23 | `newapiSyncJobTimeout` 抬到 320s（超过 300s 周期） | 🔴 | `SlowMaintenanceJobsCannotOverlapThemselves` + `SyncJobTimeoutsCoverTheReadBudget` |
 
 每条变异后都已还原并复跑到全绿；仓库里已 grep 确认无 `MUTATION` 残留。
+M19 在实现改用 `effectiveJobConfig`（而不是 `EffectiveJobSchedules`）之后**重跑过一次**，
+仍然全红。
 
 **缺席型断言的变异证据**（memory「缺席型断言要做变异验证」）：
 - 「日志里不该出现相反的模式值」→ M1 让它红
@@ -250,6 +361,26 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
    → fake）。与 `overrideConnectorConfig` 的逐字段口径一致：行里留空的那一格用 env。
    库有 CHECK，实践中不可达。
 
+### 审稿处置轮追加的决定
+
+9. **`maintenance` 队列改用「慢任务 + 1」的推导槽位，而不是新开一个队列。**
+   reviewer 给了两个方案。新开队列要动 `contracts/jobs/cluster-jobs.v1.json`
+   （冻结契约里三行的 `queue` 值）、`query_store.go` 的队列深度视图清单，还会让一个
+   新队列名出现在后台「后台任务」页上——那需要中文文案，而 `web/` 由
+   XM-WORKBENCH-TRUTH 并行做、不在本片所有权内。抬槽位只动
+   `internal/platform/jobs/*`（本片所有权内），且顺带覆盖 `finance_cost_sync`
+   这个本片没碰、但同样会独占单槽 120s 的任务。代价是引入跨任务并发，见 risks 8。
+
+10. **判据取「节拍」与「River 默认 1 分钟」中更小的那一个。**
+    只按节拍算的话，`>=` 才是严格正确的（期限正好等于节拍也会漏一拍），但那会把每个
+    默认期限的任务都算成慢任务，等于每个任务一个槽。只按默认期限算的话，把节拍调到
+    30s 的部署就守不住。取小者永不少开槽，两头都挡住。
+
+11. **不改 `pgxpool` 的池大小。** 并发从 1 升到 4 会增加连接压力（默认
+    `MaxConns = max(4, CPU 核数)`），但同步任务的大部分时间花在上游 HTTP 上、并不
+    握着连接，而显式设池大小要动 `cmd/platform-worker/main.go` 的连接串解析与
+    compose 变量——属于另一件事。列进 follow_ups 6，请负责人决定是否单开。
+
 ---
 
 ## deviations（与 brief / 测试计划的偏离，边做边记）
@@ -279,15 +410,31 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
    `cmd/platform-worker/README.md:93`），外加脚本 + 4 个 fixture。
 
 7. **`cmd/platform-worker/main.go` 抽了一个 `connectorModeStartupAttrs`**：不抽的话
-   `worker_started` 内联在 `main()` 里，测试一条都伸不进去。
+   `worker_started` 内联在 `main()` 里，测试一条都伸不进去。审稿轮进一步把**整条**
+   属性搬进 `workerStartupAttrs`——只抽一半等于把闸架在半成品上。
+
+8. **（审稿轮）本片改了 `internal/platform/jobs/client.go` 的队列装配。**
+   派工的文件所有权包含 `internal/platform/jobs/*`，但队列槽位不在 brief 的三条
+   任务里；这是审稿指出的、由本片的期限改动直接引发的后果，所以在本片处置而不是
+   另开一片。没有动 `contracts/jobs/cluster-jobs.v1.json`、没有动任何任务的 `queue`
+   取值、没有新增队列。
+
+9. **（审稿轮）`maintenanceQueueSlots` 走 `effectiveJobConfig` 而不是
+   `EffectiveJobSchedules`。** 后者会对**每一个**已注册任务校验周期为正，包括这个
+   部署没启用、因此手写 `Config` 字面量里根本没填周期的那些——集成测试正是这样构造
+   `Config` 的（`TestSub2APISyncPostgresIntegration` 第一次跑就红在
+   `approval_expire interval must be positive`）。一个「算槽位」的函数不许改变谁能
+   启动，所以只借用每任务解析那一段。
 
 ---
 
 ## not_run
 
 - 全量 `go test ./...`（按派工由主控者跑）
-- `bash scripts/check-governance.sh`（未跑，本片没动契约/依赖/前端）
 - 前端 `pnpm` 系列（本片不改 `web/`）
+- **真实并发下的 `maintenance` 队列行为**：槽位 4 的效果只在单元测试与推导层面验证过
+  （交给 River 的那张 map + 慢任务不许自重叠的闸），没有起一个真 worker 去观察四个
+  任务同时跑。风险与已有的库层闸见 risks 8。
 - 任何生产/服务器动作：未 ssh、未连生产库、未查看任何密钥文件、未推 GitHub、未部署
 
 ---
@@ -325,6 +472,18 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
    启动时才拿得到。脚本已经是从 `worker_started_at` 起取日志，成立。但如果将来有人把
    `*_SYNC_RUN_ON_START` 关掉，这条会变成假红——已记在 follow_ups。
 
+8. **（审稿轮）`maintenance` 队列从 1 槽变 4 槽，是一次并发语义变更。**
+   不同种类的任务可能同时跑。已守住的部分：慢任务不可能与自己重叠
+   （期限 < 周期，有测试）；心跳与告警评估这两个期限等于周期的任务，其与顺序相关的
+   写在库层各有闸（审计链 `pg_advisory_xact_lock`、告警投递 `FOR UPDATE SKIP LOCKED`）。
+   **没验的部分**：没有起真 worker 观察四个任务同时跑；`pgxpool` 默认
+   `MaxConns = max(4, CPU 核数)`，并发变高时可能出现短暂的连接等待（同步任务大部分
+   时间在等上游 HTTP、并不握着连接，但这是推理不是实测）。若要保守，可临时把
+   `cfg.MaxWorkers` 之外的推导关掉——但那等于退回单槽，把审稿 A 的问题放回去。
+
+9. **`queue_slots` 是每次 `NewClient` 打一条的新事件。** 巡检脚本按事件名 grep 时
+   会多出一行；`verify-real-mode.sh` 不消费它，已跑过部署门禁确认无影响。
+
 ---
 
 ## follow_ups
@@ -343,7 +502,22 @@ bash tests/deploy/verify-real-mode.test.sh        → VERIFY-REAL-MODE-TEST-OK�
    需要负责人拍板。
 5. **告警语义（防抖、连续失败计数被成功清零、`fire_count` 当成「次数」显示）**属于
    子片 B，本片按派工**未动** `internal/platform/alerts/rules.go`。
-6. **`rules.go` 的规则注册点**（给 XM-CARD-VISIBILITY）：本片**一行都没改**
+6. **（审稿轮）显式设 worker 的 `pgxpool` 池大小。** `maintenance` 并发从 1 升到 4
+   之后，默认 `MaxConns = max(4, CPU 核数)` 可能偏紧（River 自己还要连接跑领导者选举
+   与通知）。要改得动 `cmd/platform-worker/main.go` 的连接串解析与 compose 变量，
+   属于另一件事。（风险 8）
+7. **（审稿轮）platform-api 里另外三处模式判定**：`platformpayments.go` 的
+   `resolveSub2API` / `resolveNewAPI`、`platformusers.go` 的
+   `dynamicUsersClient.resolve`。它们回答的是另一个问题（这次请求用哪个客户端），
+   无行时回落各自的 `XM_PLATFORM_*_MODE`，本片刻意**没有**合并——合并会改动另外两个
+   切片的端点语义。唯一真会分叉的点是「行在、mode 为空串」，今天靠迁移 000020 的
+   `CHECK (mode IN ('fake','real'))` 不可达；**放宽那条 CHECK 的人必须回来看这三处**。
+   已写进 `EffectiveConnectorConfig` 的文档注释。（审稿 D）
+8. **（审稿轮）`RegisteredPeriodicJobSpecs` 的 `Queue` 全是 `maintenance`。**
+   把重上游读取的任务真正分到独立队列仍然是更干净的形态，但要同步改
+   `contracts/jobs/cluster-jobs.v1.json`（冻结契约）、`query_store.go` 的队列深度视图
+   清单，并给新队列名配中文文案（`web/`，不在本片所有权内）。建议单开。
+9. **`rules.go` 的规则注册点**（给 XM-CARD-VISIBILITY）：本片**一行都没改**
    `internal/platform/alerts/rules.go`。注册点是 `func Rules(cfg RuleConfig) []Rule`
    （`internal/platform/alerts/rules.go:261`）返回的那个切片字面量——在末尾追加一条
    `Rule{...}` 即可（顺序稳定，文档与测试逐条比对）。本片与它无冲突。
