@@ -172,6 +172,109 @@ worktree 专用库且各自 `DROP SCHEMA`。
 **教训：一个「预测另一处行为」的工具，必须与被预测的那处共用代码，
 否则它会在某次无关的改动后安静地开始说谎。**
 
+## 与并行切片的合并要点（四片都动了 `source_sync.go`）
+
+**这一节写给做合并的人，不是写给评审的人。** 行号是本片合入后的状态，仅供定位，
+**以函数名与常量名为准**。
+
+### ⚠️ 最要紧的一条：`claimBindingSelect` 被另一个文件引用
+
+`claimBindingSelect`（`source_sync.go:601`）不只被 `ClaimUnprocessedSourceEvents`
+用，它**同时被 `postgresstore/ingest_requeue_dead_repair.go` 的
+`ingestRequeueDeadReplayBindingTx` 直接嵌入**。这是刻意的：那个函数的职责就是
+**预测认领会把什么交给 `verifyFactBatchContextTx`**，所以它必须与认领共用同一段
+SQL，而不是复述规则。
+
+**手工解冲突时这条最容易掉，而且有两种掉法，危险程度差很多：**
+
+| 掉法 | 后果 | 会不会被发现 |
+| --- | --- | --- |
+| 把常量**删掉或改名** | `ingest_requeue_dead_repair.go` 编译不过 | **会**——但报错在**另一个文件**里，解 `source_sync.go` 冲突的人不会在自己的 diff 里看到 |
+| 常量留着，但把 `ClaimUnprocessedSourceEvents` 的 `FROM` 退回原来那句 `JOIN source_ingest_batches sib ... ON sib.batch_id=sie.first_batch_id` | **编译完全通过**（Go 不报未使用的包级常量），预测与运行时**静默重新分叉** | **只有测试会**——见下 |
+
+第二种是真正危险的那种：它不炸编译、不炸大多数用例，只是让修复工具重新开始说谎。
+**唯一的护栏是 `TestClaimBinding*` 四条**，它们断言认领实际携带的
+`BatchID`/`ScanCycleID`，而不是断言 SQL 长什么样。
+
+另外，`--kind=ingest-acknowledge-unreplayable` 的拒绝闸复用同一个解析器。它是
+**不可逆**操作，一份漂移的副本会在「其实救得回来」时放行注销。
+
+### 四片各自的落点（`source_sync.go`）
+
+| 切片 | 落点 | 与本片是否相邻 |
+| --- | --- | --- |
+| **本片（DEAD-REQUEUE / CLAIM-BINDING）** | 新常量 `claimBindingSelect` 601-637；`ClaimUnprocessedSourceEvents` 的 `FROM` 一行 659 | —— |
+| **READYZ-DETAIL** | 常量块（`sourceEventDeadThreshold` 等）；`ClaimUnprocessedSourceEvents` 的 **`WHERE` 谓词**（`attempt_count < $3`）；`MarkSourceEventFailed` 函数体 | **同一个函数，但不同子句**：我改 `FROM`，他改 `WHERE`，中间隔着几行 |
+| **SER-RETRY** | 新函数 `IsTransientContentionError`；`MarkSourceEventBusy` 签名加 `reason`（本片合入后在 898 行一带） | 不相邻，隔着 `MarkSourceEventFailed`/`MarkSourceEventWaitingDependency` 约 240 行 |
+
+### ✅ 已实测，不是推断
+
+用 `git merge-tree --write-tree`（只读三方合并，不碰任何工作树）对本片 HEAD 分别
+与两片做了真实合并：
+
+```bash
+git merge-tree --write-tree ai/claude/XM-INV-DEAD-REQUEUE ai/claude/XM-INV-READYZ-DETAIL  # exit 0
+git merge-tree --write-tree ai/claude/XM-INV-DEAD-REQUEUE ai/claude/XM-INV-SER-RETRY      # exit 0
+```
+
+两边**都无冲突**。并且把与 READYZ-DETAIL 的合并结果树整棵导出到临时目录、**真的
+编译并跑了两片的用例**：
+
+```bash
+git archive <merged-tree> | tar -x -C <scratch>
+cd <scratch>/backend && go build ./...   # OK
+INVOICE_TEST_DATABASE_URL=... go test -p 1 ./internal/postgresstore/ ./internal/application/ \
+  -count=1 -v -run 'TestClaimBinding|TestIngestRequeueDead|TestAcknowledgeUnreplayable|TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate|TestSourceProjectionWorkerLogsAnErrorOnlyWhenTheEventActuallyDies|TestDeadUsageEventWithoutPersistedFactStillFreezesViaApplicationLayerAccountHint|TestDeadAndRetryableProjectionFailuresAreDistinguishableByLevel'
+```
+
+**24 条 `--- PASS`，零 FAIL**（本片 20 条 ＋ READYZ-DETAIL 的 4 条守卫）。
+我用 `-v` 数了 PASS 行并逐条核对了 READYZ-DETAIL 那四条的名字——**一个匹配不到
+任何用例的 `-run` 正则同样会打印 `ok`**，所以「跑了」这件事必须自己证明。
+
+合并后的那句查询同时保住了两片的改动，长这样：
+
+```go
+FROM source_ingest_events sie JOIN source_instances si ON si.id=sie.source_instance_id` +
+    claimBindingSelect + `
+WHERE (
+    (sie.processing_status IN ('queued','failed') AND sie.attempt_count < $3 AND sie.next_attempt_at <= $1)
+```
+
+—— 本片的 `FROM` 与 READYZ-DETAIL 的 `$3`（`sourceEventDeadThreshold`）并存。
+
+**注意：SER-RETRY 的 `source_sync.go` 改动目前还没提交**（在它工作树里是未提交
+状态），所以上面对 SER-RETRY 的合并测试只覆盖了它已提交的部分。它提交之后建议
+重跑一次那条 `merge-tree`。
+
+### 合并顺序
+
+**无偏好，三种顺序都可以。** 本片在 `source_sync.go` 里是「在
+`ClaimUnprocessedSourceEvents` 之前插入一个常量、并改它 `FROM` 的一行」，属于纯插入
+＋单行替换，无论排在谁之后 rebase 都干净。
+
+**但有一条真实依赖**：本片的 `0031_claim_binding_index.sql`。开票仓库的迁移工具
+**只记一个版本号，不是已应用集合**，所以并行分支各自加迁移会静默缺号且退出码 0。
+合入时若另一片也带了 `0031`，**后合的那一片必须往后挪号**，并同步改
+`internal/migrate/migrate_test.go` 里的排除表。
+（2026-09-08 核查：全部 53 个分支与 14 个工作树的工作区都没有占用 `0031`；
+核查脚本本身跑过阳性对照。）
+
+### 无论谁后合，后合的一方跑这一条
+
+```bash
+INVOICE_TEST_DATABASE_URL=... go test -p 1 ./internal/postgresstore/ ./internal/application/ \
+  -count=1 -run 'TestClaimBinding|TestIngestRequeueDead|TestAcknowledgeUnreplayable|TestSourceEventDeadThresholdGovernsBothTheGradeAndTheClaimPredicate'
+```
+
+**这条命令我实跑过**（就是上面那次合并树验证），不是照着别处抄的。
+
+- 前三组覆盖本片：认领选哪条绑定、重投预测与运行时是否一致、注销的拒绝闸。
+- 第四条是 READYZ-DETAIL 的守卫，覆盖同一个函数的 `WHERE` 谓词——**本片改的是同一个
+  查询的 `FROM`，所以它必须一起绿**。
+
+`-p 1` 不能省：`cmd/eligibility-repair` 与 `internal/postgresstore` 共用同一个
+worktree 专用测试库，各自都会 `DROP SCHEMA`。
+
 ## dry run 的预期变化
 
 本片上线后，`invoice-eligibility-repair --kind=ingest-requeue-dead` 的 dry run
