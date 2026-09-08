@@ -7,6 +7,7 @@ implemented，**已在分支内提交、未推送、未部署**。全部本地�
 ## branch / commit / base
 
 - branch: `ai/claude/XM-EXT-PUBLISHING`
+- commit: `7cdbef4`
 - worktree: `K:/星芒统一控制平台/wt-XM-EXT-PUBLISHING`
 - base: `8c446e5`（`feat(admin-web): 订阅批次与代理资产的退款、终止四个入口`）
 - 只动了本 worktree 下的文件；没有碰 `K:/发票/`、其它 `wt-*`、以及
