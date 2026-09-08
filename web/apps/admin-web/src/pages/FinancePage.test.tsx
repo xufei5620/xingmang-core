@@ -351,10 +351,17 @@ describe("后端还不存在的三格：蓝图 + 一句「今天为什么填不�
     expect(screen.getByRole("columnheader", { name: "支付金额" })).toBeTruthy();
   });
 
-  it("异常与冻结：两条阻塞都说出来（没有来源，且执行入口未解锁）", async () => {
+  // XM-UPSTREAM-DETAIL-COPY：这一格以前说「需 Action Advanced Controls
+  // （Foundation-B / XM-0030）接入后内核才放行」。XM-0030 已启用（platform-api
+  // 无条件 WithApprovalGateway），内核对 L3/L4 现在落审批单而不是拒绝执行——
+  // 那句话把人指向一件已经完成的事，而真正的阻塞（Action 根本没注册）被它盖住了。
+  it("异常与冻结：两条阻塞都说出来（没有来源，且退款/补单 Action 根本没注册）", async () => {
     renderFinance("/finance?sub=exceptions");
     expect(await screen.findByText("「异常与冻结」尚未接入")).toBeTruthy();
-    expect(screen.getByText(/Advanced Controls（Foundation-B \/ XM-0030）/)).toBeTruthy();
+    expect(screen.getByText(/客户支付侧一个都没有/)).toBeTruthy();
+    expect(screen.getByText(/审批中心（XM-0030）已启用/)).toBeTruthy();
+    // 缺席断言，已做变异验证（把旧那句加回 PENDING_TAB_COPY.exceptions 后本行转红）
+    expect(screen.queryByText(/需 Action Advanced Controls/)).toBeNull();
   });
 });
 
@@ -403,7 +410,15 @@ describe("财务配置：已冻结的决定，不是查询结果", () => {
       "对账纠正",
     ]);
     expect(within(table).getAllByText("锁定")).toHaveLength(3);
-    expect(within(table).getByText(/ADVANCED_CONTROLS_REQUIRED/)).toBeTruthy();
+    // 三条都指向同一个真正的阻塞：客户支付侧一个 Action 都没注册。
+    // 以前这三格里有两格写着「Foundation-A 阶段内核不放行」，第三格写着
+    // 「内核在没接审批中心时对 L2 及以上一律拒绝执行」——审批中心接上之后，
+    // 前者是假的，后者虽然字面还成立，但摆在解锁条件清单里就是在指错方向。
+    expect(within(table).getAllByText(/客户支付侧/)).toHaveLength(3);
+    expect(within(table).getByText(/审批中心（XM-0030）已启用/)).toBeTruthy();
+    // 缺席断言，已做变异验证（把 Foundation-A 那两句加回 WRITE_FEATURE_LOCKS
+    // 后本行转红）。上面已 await 到表格并断言过三行的正向内容，不会假绿。
+    expect(within(table).queryByText(/Foundation-A 阶段内核不放行/)).toBeNull();
     // 锁定项不出现执行入口：整页除了页头的「刷新」不该有任何动作按钮
     expect(screen.getAllByRole("button").map((button) => button.textContent)).toEqual(["刷新"]);
   });

@@ -256,8 +256,10 @@ export interface RunwayAttentionItem {
 /** 从上游摘要里挑出触发了可用天数档位的行，**最紧的排最前**。
  *
  *  只挑这一类：「需要处理」在原型里还有对账差异、契约状态、待审批合并三类，
- *  那三类今天一个数据源都没有（对账域不存在、开票按 CR-0005 刻意不接、
- *  审批链随 Foundation-B）。拿别的数据凑行数会让这张卡看起来是全的。 */
+ *  那三类今天都进不了这张卡（对账域不存在、开票按 CR-0005 刻意不接、审批中心
+ *  已启用但这张卡还没读它，而 /api/v1/approvals 也不支持按 action_id 筛选,
+ *  「只要财务相关的那些单」今天得整条队列拉回来自己过滤）。拿别的数据凑行数
+ *  会让这张卡看起来是全的——逐字同 FinancePage 上那张卡的落款，两处不各写一份。 */
 export function runwayAttentionItems(
   upstreams: readonly UpstreamSummary[],
 ): RunwayAttentionItem[] {

@@ -14,6 +14,7 @@ import {
   listChannelSummaries,
   listUpstreamSummaries,
   platformHasRefunds,
+  UPSTREAM_SUMMARY_QUERY,
   type Money,
   type RunwayCoverage,
 } from "../api/finance";
@@ -457,7 +458,10 @@ function CostSection({ systemType, label }: { systemType: PaymentsPlatform; labe
  *  状态、待审批合并）一个数据源都没有，拿别的数据凑行数会让这张卡看起来是全的。 */
 function AttentionCard() {
   const upstreamQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    // 与同屏的 FinanceSummaryCards 共用一份缓存，但 key 走 api/finance 导出的
+    // 常量而不是字面量数组：这份数据的 key 曾经分叉成两种写法，前缀匹配的失效
+    // 谁都碰不到谁（原委见常量处；护栏是 src/upstreamSummaryCache.test.tsx）
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
   const upstreams = upstreamQuery.data?.items ?? [];
@@ -522,7 +526,8 @@ function AttentionCard() {
       <p className="text-xs text-fg-muted">
         这张卡今天只收一类事项：可用天数告警档位（/finance/upstreams/summary 的 runway 与
         runway_thresholds）。原型里的另外三类——对账差异、开票契约状态、待审批合并——
-        一个数据源都没有（对账域不存在；开票按 CR-0005 刻意不接；审批链随 Foundation-B），
+        一个数据源都没有（对账域不存在；开票按 CR-0005 刻意不接；审批中心已启用但这张卡还没读它，
+        而且 /api/v1/approvals 不支持按 action_id 前缀筛选，「只要财务相关的那些单」今天得整条队列拉回来自己过滤），
         所以这一屏不等于「今天全部要处理的事」。
       </p>
     </section>
@@ -580,21 +585,21 @@ const WRITE_FEATURE_LOCKS: readonly WriteFeatureLock[] = [
     feature: "退款",
     conditions: [
       "等 M3 支付接入：connectors/payment/ 今天是空目录（只有 .gitkeep），平台没有任何支付 Connector",
-      "等 Action Advanced Controls：按 ADR-003 退款属 L4，内核在没接审批中心时对 L2 及以上一律拒绝执行（ADVANCED_CONTROLS_REQUIRED）",
+      "等一个退款 Action 被注册：平台上已注册的 finance Action 全在上游成本侧，客户支付侧一个都没有。审批中心（XM-0030）已启用，L4 现在会落成审批单而不是被拒绝执行——所以内核不再是这件事的阻塞点",
     ],
   },
   {
     feature: "补单",
     conditions: [
       "等 M3 支付接入：补单要先有支付通道与逐笔订单的写路径",
-      "等 Action Advanced Controls：按 ADR-003 属 L3/L4，Foundation-A 阶段内核不放行",
+      "等一个补单 Action 被注册：同退款，客户支付侧的写入口一个都没有注册",
     ],
   },
   {
     feature: "对账纠正",
     conditions: [
       "等对账域建立：finance schema 里没有对账批次表，路由表里也没有对账端点，没有可纠正的对象",
-      "等 Action Advanced Controls：按 ADR-003 属 L3/L4，Foundation-A 阶段内核不放行",
+      "等一个对账纠正 Action 被注册：同上，客户支付侧的写入口一个都没有注册",
     ],
   },
 ];
@@ -685,7 +690,7 @@ const PENDING_TAB_COPY: Readonly<Record<string, string>> = {
   reconciliation:
     "对账批次比对平台金额与支付金额；差异不自动抹平，逐条要求解释。今天平台没有对账域：finance schema 里没有对账批次表，路由表里也没有对账端点，随 M3 上线。",
   exceptions:
-    "退款冻结、订单状态不一致等异常的协同处理。今天既没有异常来源（无异常表、无端点），执行入口也未解锁——退款与补单按 ADR-003 属 L3/L4，需 Action Advanced Controls（Foundation-B / XM-0030）接入后内核才放行。",
+    "退款冻结、订单状态不一致等异常的协同处理。今天既没有异常来源（无异常表、无端点），执行入口也没有：退款与补单按 ADR-003 属 L3/L4，而平台已注册的 finance Action 全在上游成本侧，客户支付侧一个都没有。审批中心（XM-0030）已启用，L3/L4 现在会落成审批单——等的不是它，是那几个 Action 本身。",
 };
 
 /** 后端不存在的三格：先压一句「今天为什么填不了」，再照原样渲染蓝图。

@@ -25,6 +25,7 @@ import {
   type MetricItem,
   type ServiceItem,
 } from "../api/platform";
+import { APPROVAL_QUEUE_PATH } from "../components/ActionResultNote";
 import { ApiStateView } from "../components/ApiStateView";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
 import {
@@ -36,7 +37,9 @@ import {
   workItemsFromAlerts,
   workItemsFromApprovals,
   workItemsFromJobRuns,
+  approvalsDueSoonCount,
   ACTIVE_ALERTS_LIMIT,
+  APPROVAL_DUE_WINDOW_HOURS,
   RECOVERED_WINDOW_HOURS,
   WORK_APPROVALS_LIMIT,
   WORK_CATEGORIES,
@@ -153,6 +156,10 @@ export function OverviewPage() {
         <TileRow
           alerts={alerts}
           recent={recent}
+          approvals={pendingApprovals}
+          approvalsPending={approvalsQuery.isPending}
+          approvalsError={approvalsQuery.error}
+          approvalsTruncated={approvalsQuery.data?.truncated === true}
           now={now}
           truncated={recent.length >= RECENT_ALERTS_LIMIT}
           pending={alertsQuery.isPending}
@@ -243,6 +250,10 @@ function Card({
 function TileRow({
   alerts,
   recent,
+  approvals,
+  approvalsPending,
+  approvalsError,
+  approvalsTruncated,
   now,
   truncated,
   pending,
@@ -251,6 +262,10 @@ function TileRow({
 }: {
   alerts: AlertItem[];
   recent: AlertItem[];
+  approvals: ApprovalItem[];
+  approvalsPending: boolean;
+  approvalsError: unknown;
+  approvalsTruncated: boolean;
   now: Date;
   truncated: boolean;
   pending: boolean;
@@ -259,6 +274,11 @@ function TileRow({
 }) {
   const urgent = urgentCount(alerts);
   const recovered = recentlyRecoveredCount(recent, now);
+  // 「审批到期」跟着**它自己那条 query** 降级：审批端点没挂载或没权限时显示
+  // 「—」而不是 0——0 会被读成「没有快到期的单」，而事实是我们没读到。
+  // 与 WorkList 里「待审批」那一类同一条纪律，不因为它在格子里就省掉。
+  const approvalsUnavailable = Boolean(approvalsError) || approvalsPending;
+  const dueSoon = approvalsDueSoonCount(approvals, now);
 
   return (
     <ApiStateView isPending={pending} error={error} onRetry={onRetry}>
@@ -273,15 +293,40 @@ function TileRow({
             </Link>
           }
         />
-        {/* 「今日到期」与「阻塞」在原型里数的是审批、重试、轮换与财务冻结——
-            这四样今天一个都还没有查询端点。显示 0 会被读成「今天没有到期项」,
-            所以显示「—」并说明什么上线之后它才有数 */}
+        {/* 这一格原型里叫「今日到期」，数的是审批 + 重试 + 轮换到期三样，副行
+            写着「随 Foundation-B 与后台任务页上线」——那两样今天都在了（审批中心
+            XM-0030 已启用，/jobs 与 /jobs/runs 更早），所以那句话是错的。但三样
+            合成一个数同样是错的：重试不是一条截止线（工作台只查已放弃的任务,
+            它们已经不会再试），轮换到期则一个数都算不出来（凭据模型没有到期
+            字段）。合计里少一样，得到的是一个恒偏低、又与正确值长得一样的数。
+            所以收窄成「审批到期」——数一件有真正截止时刻的事，并且对它是完整的；
+            另外两样各自在同一屏的「失败任务」与「即将到期」两类里说清楚。
+            口径见 lib/workbench 的 approvalsDueSoonCount */}
         <StatTile
-          label="今日到期"
-          value="—"
-          unavailable
-          note="审批、重试与轮换到期；随 Foundation-B 与后台任务页上线"
-          status={<Badge tone="neutral">未接入</Badge>}
+          label="审批到期"
+          value={approvalsUnavailable ? "—" : String(dueSoon)}
+          {...(approvalsUnavailable
+            ? {
+                unavailable: true,
+                status: (
+                  <Badge tone="neutral">{approvalsError ? "读不到" : "加载中"}</Badge>
+                ),
+              }
+            : {})}
+          note={
+            approvalsError
+              ? "审批队列读不到（端点未挂载或缺 approval.read），这一格不拿 0 冒充「没有快到期的单」"
+              : approvalsPending
+                ? "正在读审批队列"
+                : `${APPROVAL_DUE_WINDOW_HOURS} 小时内到期的待审批单（已过期的不算，那些已经批不动了）${
+                    approvalsTruncated ? `；取满 ${WORK_APPROVALS_LIMIT} 条上限，可能少算` : ""
+                  }`
+          }
+          link={
+            <Link to={APPROVAL_QUEUE_PATH} className="text-xs font-medium text-accent hover:underline">
+              查看审批队列 →
+            </Link>
+          }
         />
         <StatTile
           label="阻塞"

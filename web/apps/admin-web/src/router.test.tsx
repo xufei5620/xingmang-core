@@ -868,7 +868,11 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     for (const block of ["我的待处理", "运营焦点", "最近活动", "平台状态矩阵"]) {
       expect(screen.getByRole("heading", { name: block, level: 3 })).not.toBeNull();
     }
-    for (const tile of ["紧急", "今日到期", "阻塞", "最近恢复"]) {
+    // 「今日到期」2026-09-08 收窄成「审批到期」：原型那一格数的是审批 + 重试 +
+    // 轮换到期，而重试不是一条截止线、轮换到期一个数都算不出来——合成一个数
+    // 会得到一个恒偏低、又与正确值长得一样的读数（见 lib/workbench 的
+    // approvalsDueSoonCount）。
+    for (const tile of ["紧急", "审批到期", "阻塞", "最近恢复"]) {
       expect(screen.getByRole("heading", { name: tile, level: 3 })).not.toBeNull();
     }
   });
@@ -899,14 +903,69 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(within(urgent as HTMLElement).getByRole("link", { name: /查看全部告警/ })).not.toBeNull();
   });
 
-  it("没有数据源的两格显示「—」并标「未接入」，不显示 0", async () => {
-    // 0 会被读成「今天没有到期项」，而事实是这条线还没接
+  it("「阻塞」没有数据源，显示「—」并标「未接入」，不显示 0", async () => {
+    // 0 会被读成「今天没有阻塞」，而事实是这条线还没接（M3 支付未接入，
+    // connectors/payment/ 里只有 .gitkeep）
     renderRoute("/dashboard");
-    const due = (await screen.findByRole("heading", { name: "今日到期", level: 3 })).closest(
+    const blocked = (await screen.findByRole("heading", { name: "阻塞", level: 3 })).closest(
       "article",
     ) as HTMLElement;
+    expect(within(blocked).getByText("—")).not.toBeNull();
+    expect(within(blocked).getByText("未接入")).not.toBeNull();
+    expect(within(blocked).queryByText("0")).toBeNull();
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一格以前叫「今日到期」，副行写着「随 Foundation-B
+  // 与后台任务页上线」——两样今天都在了，那句话把人指向已经到货的东西。
+  it("「审批到期」数的是窗口内到期、且此刻还批得动的待审批单", async () => {
+    const now = Date.now();
+    const iso = (offsetMs: number) => new Date(now + offsetMs).toISOString();
+    const approval = (id: string, expiresAt: string, over: Record<string, unknown> = {}) => ({
+      id, action_id: "registry.connector.create", action_version: "1", risk_level: "L2",
+      params: {}, params_hash: "h", requester_id: "ops-1", requester_type: "HUMAN",
+      reason: "上线新连接器", status: "PENDING", created_at: iso(-3600_000), expires_at: expiresAt,
+      decisions: [], votes_required: 2, votes_cast: 0,
+      privileged_vote_required: false, privileged_vote_cast: false, ...over,
+    });
+    stubFetch((url) =>
+      url.startsWith("/api/v1/approvals")
+        ? fakeResponse(200, {
+            items: [
+              // 数：2 小时后到期
+              approval("a-soon", iso(2 * 3600_000)),
+              // 数：23 小时后，仍在 24 小时窗口内
+              approval("a-edge", iso(23 * 3600_000)),
+              // 不数：36 小时后到期，还不急
+              approval("a-later", iso(36 * 3600_000)),
+              // 不数：库里仍是 PENDING，但按 expires_at 已经过期，谁也批不动了
+              approval("a-expired", iso(-60_000)),
+            ],
+            limit: 50,
+            truncated: false,
+          })
+        : okHandler(url),
+    );
+    renderRoute("/dashboard");
+    const due = (await screen.findByRole("heading", { name: "审批到期", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(due).getByText("2")).not.toBeNull();
+    expect(within(due).getByText(/24 小时内到期的待审批单/)).not.toBeNull();
+    expect(within(due).getByRole("link", { name: /查看审批队列/ })).not.toBeNull();
+    // 缺席断言，已做变异验证（把 isEffectivelyExpired 那道过滤去掉后本行转红，
+    // 计数会变成 3）。上面已 await 到真读数「2」，不会在渲染前假绿。
+    expect(within(due).queryByText("未接入")).toBeNull();
+  });
+
+  it("审批端点读不到时「审批到期」显示「—」，不拿 0 冒充「没有快到期的单」", async () => {
+    // okHandler 不挂载 /api/v1/approvals：裸 404 会被 listApprovals 翻成
+    // FeatureNotMountedError。这一格必须跟着它自己那条 query 降级。
+    renderRoute("/dashboard");
+    const due = (await screen.findByRole("heading", { name: "审批到期", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    await waitFor(() => expect(within(due).getByText("读不到")).not.toBeNull());
     expect(within(due).getByText("—")).not.toBeNull();
-    expect(within(due).getByText("未接入")).not.toBeNull();
     expect(within(due).queryByText("0")).toBeNull();
   });
 
@@ -1548,8 +1607,12 @@ describe("登记服务（写路径）", () => {
 
   it("环境取自身份且只读，不做成可选下拉", async () => {
     stubFetch(okHandler);
-    await openDialog();
-    const env = screen.getByLabelText("环境") as HTMLInputElement;
+    const dialog = await openDialog();
+    // **在对话框内查**，不用全局 screen：资源目录页有一个叫「环境」的子页签
+    // （navigation.ts 冻结的六格之一），Radix 会用触发器的文字给对应的
+    // tabpanel 挂 aria-labelledby，于是全局查「环境」会同时命中那个面板。
+    // 这一条断言的对象本来就是对话框里那个字段，scoped 查询也更贴近本意。
+    const env = dialog.getByLabelText("环境") as HTMLInputElement;
     // servicesBody 里那条记录是 development
     expect(env.value).toBe("development");
     expect(env.readOnly).toBe(true);
@@ -2654,6 +2717,18 @@ describe("设置页", () => {
     renderRoute("/settings");
     expect(await screen.findByRole("link", { name: /打开告警与故障规则/ })).not.toBeNull();
     expect(screen.queryByLabelText("Critical 天数")).toBeNull();
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一句以前写着「写入仍需 Foundation-B / C3c 的
+  // 审批链」。审批中心（XM-0030）已启用，L2 会落成审批单而不是被拒——真正缺的
+  // 是那条写路径：全仓没有注册任何写 R5 阈值的 Action。
+  it("阈值写入的阻塞说的是「没有那条 Action」，不是「审批链还没上线」", async () => {
+    renderRoute("/settings");
+    expect(await screen.findByText(/阈值写入还没有注册对应的 Action/)).not.toBeNull();
+    expect(screen.getByText(/审批中心（XM-0030）已启用/)).not.toBeNull();
+    // 缺席断言，已做变异验证（把旧那句加回 SettingsPage 后本行转红）。
+    // 上面已 await 到新措辞，不会在渲染前假绿。
+    expect(screen.queryByText(/写入仍需 Foundation-B/)).toBeNull();
   });
 
   it("设置里的凭据子页显示安全管理边界，并提供返回设置入口", async () => {

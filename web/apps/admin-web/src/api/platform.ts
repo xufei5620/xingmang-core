@@ -68,6 +68,114 @@ export async function listMetrics(
   return body.items ?? [];
 }
 
+// --- 资源目录的另外两张表（XM-READONLY-QUERIES）---
+
+/** `GET /api/v1/connectors` 的一条记录（httpapi/registry_catalog.go connectorItem）。
+ *
+ *  **没有 environment 字段**：core.connector 是全平台一份的类型目录，
+ *  不按环境分（与 ServiceItem / ConnectionItem 不同）。 */
+export interface ConnectorItem {
+  id: string;
+  key: string;
+  version: string;
+  contract_version: string;
+  connection_schema_path: string;
+  target_allowlist: string[];
+  /** 读写能力分两列：ADR-004 的「写能力必须配 Kill Switch」是按集合下的约束。 */
+  read_capabilities: string[];
+  write_capabilities: string[];
+  /** 空数组 = 没有声明兼容版本，**不是**「兼容所有版本」。 */
+  supported_upstream_versions: string[];
+  compatibility_test_path: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `GET /api/v1/connections` 的一条记录（httpapi/registry_catalog.go connectionItem）。 */
+export interface ConnectionItem {
+  id: string;
+  connector_id: string;
+  service_id: string;
+  environment: string;
+  /** 引用不是凭据（ADR-014：`secret://<scope>/<name>`）；明文永远不经过端点。 */
+  credential_ref: string;
+  target_allowlist: string[];
+  granted_capabilities: string[];
+  /** 空串 = 未配置。含写能力的连接必须配（ADR-004），空串意味着这是纯读连接。 */
+  kill_switch: string;
+  status: string;
+  detected_upstream_version: string;
+  version_fingerprint: string;
+  /** null = **从未核验过**，与「核验过但很久以前」不是一回事。 */
+  last_verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 列出全部已登记的连接器类型版本。
+ *
+ *  **不传 environment**：端点不按环境筛（见 ConnectorItem）。传了也只会被
+ *  后端当成跨环境判定的输入，而这里根本没有那一步。 */
+export async function listConnectors(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ConnectorItem[]> {
+  const body = await client.get<ListResponse<ConnectorItem>>("/api/v1/connectors", {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+/** 列出某环境下的全部连接。environment 的传法与 listServices 一致。 */
+export async function listConnections(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+  config: PlatformApiConfig = appApiConfig,
+): Promise<ConnectionItem[]> {
+  const body = await client.get<ListResponse<ConnectionItem>>("/api/v1/connections", {
+    searchParams: envParams(config),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+// --- 数据库变更（XM-READONLY-QUERIES）---
+
+/** `GET /api/v1/ops/migrations` 的一条记录。 */
+export interface MigrationItem {
+  version: number;
+  name: string;
+  applied: boolean;
+  /** 有没有配套的 down 脚本。**不等于「可以回滚」**：迁移是 forward-only
+   *  （规格 §5.7），down 脚本存在只是让退路有据可查。 */
+  has_down: boolean;
+}
+
+/** `GET /api/v1/ops/migrations` 的响应（httpapi/migrations.go migrationsResponse）。 */
+export interface MigrationsReport {
+  /** 库自己记着的版本号；0 = 一条都没跑过。 */
+  applied_version: number;
+  /** 上一次迁移跑到一半失败了。服务照常起、端点照常回 200，只有这一位说得出来。 */
+  dirty: boolean;
+  /** 二进制里带着、库里还没应用的脚本数。> 0 = 镜像更新了而迁移没跑。 */
+  ahead: number;
+  items: MigrationItem[];
+}
+
+/** 读迁移状态（需 ops.read）。
+ *
+ *  读不到时后端**报错而不是回一个「版本 0」**（httpapi/migrations.go）：
+ *  一句「一条迁移都没应用」比一个错误难查得多。所以这里也不做任何兜底，
+ *  失败原样抛给 ApiStateView。 */
+export function getMigrations(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<MigrationsReport> {
+  return client.get<MigrationsReport>("/api/v1/ops/migrations", {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
 /** 服务采集的新鲜度阈值（秒）。
  *
  *  services 端点只给 observed_at / stale_seconds，没有阈值——registry 里就没有

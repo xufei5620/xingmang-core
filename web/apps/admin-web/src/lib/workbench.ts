@@ -11,6 +11,23 @@ import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms
 /** 「最近恢复」的回看窗口（原型副标题逐字：「最近 24 小时」）。 */
 export const RECOVERED_WINDOW_HOURS = 24;
 
+/** 「审批到期」这一格向前看多久。
+ *
+ *  用滚动 24 小时而不是「今天」：审批单的 `expires_at` 是一个时刻，而「今天」
+ *  要先定按哪个时区切日（宪法 14 条）。这一格没有业务日语义可依，硬挑一个时区
+ *  会让同一批单在两台机器上数出不同的结果——同「最近恢复」那格的窗口口径。 */
+export const APPROVAL_DUE_WINDOW_HOURS = 24;
+
+/** 「凭据到期」今天缺的是什么。**抽成一份给两处共用**。
+ *
+ *  这句话有过两份副本：`WORK_CATEGORIES.expiring` 与 `focusRows()` 的「安全」行。
+ *  上一次订正只改了前者，于是首屏那一行继续写着「随『人员与权限』页上线」——
+ *  而 `/identity` 早就建成了，那句话把人指向一个根本不缺的东西。共用一份之后，
+ *  下一次订正不可能只改一半。 */
+const CREDENTIAL_EXPIRY_GAP =
+  "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，" +
+  "不记录签发与轮换到期。";
+
 /** 待处理事项的分类（原型运营工作台的筛选条，逐字按顺序）。
  *
  *  分类是 IA，先按原型定下来；每一类今天有没有数据源是另一回事，由 `source`
@@ -68,9 +85,7 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
     // 真正的缺口在更下面一层：**凭据模型里根本没有到期这个概念**——
     // secrets.CredentialRef 只有 scope/name 两个字段，全仓找不到任何
     // ExpiresAt / RotatedAt。没有到期时间，就没有「即将到期」可算。
-    blockedBy:
-      "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，" +
-      "不记录签发与轮换到期。要先给凭据加到期元数据，这一格才有得算。",
+    blockedBy: `${CREDENTIAL_EXPIRY_GAP}要先给凭据加到期元数据，这一格才有得算。`,
   },
   {
     id: "changes",
@@ -287,6 +302,37 @@ export function urgentCount(alerts: readonly AlertItem[]): number {
   return alerts.filter((a) => a.status !== "RESOLVED" && a.severity === "critical").length;
 }
 
+/** 顶部四格里「审批到期」的口径：`APPROVAL_DUE_WINDOW_HOURS` 内到期的待审批单。
+ *
+ *  ## 这一格为什么只数审批
+ *
+ *  它以前叫「今日到期」，数的是原型说的**审批 + 重试 + 轮换到期**三样，副行写着
+ *  「随 Foundation-B 与后台任务页上线」。那句话今天是错的（审批中心 XM-0030 已
+ *  启用，后台任务页与 /jobs/runs 也早就在），但把三样合成一个数同样是错的：
+ *
+ *  - **重试不是到期。** 后台任务的 `scheduled_at` 是「下一次什么时候再试」，不是
+ *    一条截止线；而且工作台只查 `state=discarded`——那些已经把重试用尽了，根本
+ *    没有未来时刻可数。已放弃的任务在同一屏的「失败任务」一类里逐条列着。
+ *  - **轮换到期今天一个数都算不出来**（见 CREDENTIAL_EXPIRY_GAP）。把它算进合计
+ *    等于让这个数**恒偏低**，而偏低的数与正确的数长得一模一样。
+ *
+ *  所以这一格收窄成「审批到期」：数一件有真正截止时刻的事，并且对这件事是完整的。
+ *
+ *  ## 已过期的不算
+ *
+ *  与 `workItemsFromApprovals` 同一条判据（`isEffectivelyExpired`）：库里的 status
+ *  会滞后于 `expires_at`，而一张已经过期的单谁也批不动了——把它算进「快到期了，
+ *  去看一眼」的计数里，只会让人白跑一趟。`expires_at` 解析不出来的同样不算：
+ *  我们无法断言它什么时候到期，就不能替它断言「快到了」。 */
+export function approvalsDueSoonCount(items: readonly ApprovalItem[], now: Date): number {
+  const until = now.getTime() + APPROVAL_DUE_WINDOW_HOURS * 3600 * 1000;
+  return items.filter((item) => {
+    if (item.status !== "PENDING" || isEffectivelyExpired(item, now)) return false;
+    const at = Date.parse(item.expires_at);
+    return Number.isFinite(at) && at <= until;
+  }).length;
+}
+
 /** 顶部四格里「最近恢复」的口径：近 24 小时内自动恢复的告警。 */
 export function recentlyRecoveredCount(alerts: readonly AlertItem[], now: Date): number {
   const since = now.getTime() - RECOVERED_WINDOW_HOURS * 3600 * 1000;
@@ -335,7 +381,13 @@ export function focusRows(alerts: readonly AlertItem[]): FocusRow[] {
       domain: "安全",
       tone: "neutral",
       state: "未接入",
-      detail: "凭据到期与权限异常随「人员与权限」页上线",
+      // 这一行以前写着「随『人员与权限』页上线」，而 /identity 早已建成——
+      // 一句指错方向的话比没有话更坏：它让人去等一个已经到货的东西。两件事
+      // 各有各的缺口，都不在页面上：凭据到期缺的是数据模型（同上面的
+      // WORK_CATEGORIES.expiring，共用 CREDENTIAL_EXPIRY_GAP 一份文案），
+      // 权限异常缺的是判定规则——员工账号有角色，但全仓没有任何一处算过
+      // 「哪个角色组合算异常」，没有规则就没有异常可报。
+      detail: `${CREDENTIAL_EXPIRY_GAP}权限异常则还没有判定规则：员工账号与角色读得到，但没有任何一条规则说什么算异常。`,
     },
   ];
 }

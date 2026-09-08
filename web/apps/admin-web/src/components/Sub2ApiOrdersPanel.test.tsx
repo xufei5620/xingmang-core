@@ -244,5 +244,40 @@ describe("本区间汇总（XM-PAY-STATUS-ROLLUP）", () => {
     expect(within(summary).getByText("4")).toBeTruthy();
     expect(within(summary).getByText("—")).toBeTruthy();
     expect(within(summary).queryByText("¥0.00")).toBeNull();
+    // 「—」旁边要说清是哪一种给不出：上游没给，不是币种不一致。
+    expect(within(summary).getByText("上游没有给出金额（不是 0）")).toBeTruthy();
+  });
+
+  // 同一个桶里出现两种币种时 fail closed（XM-SUB2API-RECENT-EVENTS 把这条
+  // 纪律补进共用的 rollupPaymentStatuses，「资金概览」的「最近事件」四行
+  // 与这张表因此走同一条判据）。
+  it("同一个桶里两种币种时不给合计，也不做隐式换算", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          response(
+            200,
+            page([order()], {
+              stats_by_status: {
+                PAID: { count: 3, amount: { minor_units: "30000", currency: "CNY" } },
+                SUCCESS: { count: 2, amount: { minor_units: "20000", currency: "USD" } },
+              },
+            }),
+          ),
+        ),
+      ),
+    );
+
+    renderPanel();
+
+    const summary = (await screen.findByRole("heading", { name: "本区间汇总", level: 3 })).closest(
+      "section",
+    ) as HTMLElement;
+    expect(within(summary).getByText("5")).toBeTruthy();
+    expect(within(summary).getByText("币种不一致（CNY、USD），合计给不出")).toBeTruthy();
+    // 相加会得到 50000 分；无论标成哪种币种都是隐式换算的结果。
+    expect(within(summary).queryByText("¥500.00")).toBeNull();
+    expect(within(summary).queryByText("$500.00")).toBeNull();
   });
 });
