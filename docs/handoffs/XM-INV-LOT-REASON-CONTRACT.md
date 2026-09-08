@@ -453,7 +453,8 @@ context 里的列表传进去」这一处。**这一处仍然是裸的**，见 r
 - 第一轮实现：`a3d7a84c36805820448fed1b2c42a0a1bca045c2`（父提交 `a265b90` =
   RC105 生产提交）。16 files changed, 2454 insertions(+), 176 deletions(-)。
 - 第一轮哈希回填：`3db69940958bc55e86428012a2af4d91608fda23`（`docs`）。
-- **第二轮复审整改：见本文件末尾追加的哈希（提交后回填）。** 按要求是在
-  `3db6994` 之上**追加提交**，没有 amend / rebase。
+- **第二轮复审整改：`d558fe0`**（父提交 `3db6994`）。12 files changed,
+  1410 insertions(+), 185 deletions(-)。按要求是**追加提交**，没有 amend / rebase。
+  本文件的哈希回填是紧随其后的 `docs` 提交，因为哈希在提交前不存在。
 
 分支 `ai/claude/XM-INV-LOT-REASON-CONTRACT`，worktree `K:/发票/wt-XM-INV-FE-REASONS`。
