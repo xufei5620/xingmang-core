@@ -3,9 +3,9 @@
 - **status**: ready-for-review（分支内交付，未推 GitHub、未部署）
 - **branch**: `ai/claude/XM-OPS-TRUTH`（起点 e4f7dcf）
 - **commit**: `f802ab7`（实现，32 files changed, +2638 / -287）→ `1f7ca20`（回填 SHA）
-  → `REVIEW_SHA`（审稿四条阻塞级问题的处置，见「审稿处置」一节；追加提交，未 amend）
+  → `1221a62`（审稿四条阻塞级问题的处置，见「审稿处置」一节；追加提交，未 amend）
 - **时间**: 第一轮 2026-09-08T16:15:41Z – 17:05Z（约 50 分钟）；
-  审稿处置轮 2026-09-08T17:33:58Z – 18:0XZ
+  审稿处置轮 2026-09-08T17:33:58Z – 2026-09-08T18:12Z（约 38 分钟）
 - **需求来源**: `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1、三·2、二表第一行
 - **旧账**: `docs/handoffs/ACCEPTANCE-LOG.md:88`（作业日志打 env 兜底值）、`:82`/`:86`
   （verify-real-mode.sh 应改读 `connector_config_applied`）——本片一并还掉
