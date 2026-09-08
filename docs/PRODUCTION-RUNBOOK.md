@@ -2091,10 +2091,32 @@ claimed again** — `Dead` drops to zero, `/readyz` stops reporting
 `source_ingest_dead_events` and starts failing on pending age instead, and the
 work still never runs. That state is worse than not repairing at all.
 
-**Read `cycle_status` in the dry-run report before applying.** Rows whose
-cycle is `blocked` must not be requeued: `verifyFactBatchContextTx` rejects
-their facts, so they burn another retry round and die again. `published` is
-safe. `processing` is fine but holds that stream's watermark until it drains.
+**Read `cycle_status` in the dry-run report before applying.**
+`verifyFactBatchContextTx` (`postgresstore/consumption.go`) looks the event up
+by the exact `(event_id, batch_id, scan_cycle_id)` triple and accepts only
+`receiving`, `processing` or `published`; anything else is `ErrConflict`.
+`published` is safe, `processing` is fine but holds that stream's watermark
+until it drains, and **`blocked` must not be requeued** — the facts are
+rejected, so the event burns another retry round and dies again.
+
+> **`blocked` does not mean "try again later".** Nothing about waiting changes
+> a cycle's status. A dead event bound to a blocked cycle **cannot be
+> recovered by requeueing at all**, now or later. The options are to resolve
+> the cycle itself first, or to accept that this event's data is lost and
+> resolve its eligibility freeze through the normal path
+> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
+> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
+> "to see" costs a retry round and leaves everything exactly as it was.
+
+**As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
+the repair against production found all three dead events bound to blocked
+cycles — `e58b9430` (balances) and `b1de0e2b` (usage, shared by two events).
+Those cycles were superseded on 09-07 when the collection agent restarted.
+That is `supersede` working as designed, but note the consequence: **once it
+terminates a cycle, events still incomplete on that cycle can never be
+reprojected.** Expect this shape after any agent restart that supersedes a
+cycle with unfinished events on it, and check `cycle_status` first rather than
+reaching for `--apply`.
 
 The repair deliberately leaves eligibility freezes alone. The scan-cycle
 completeness filter is `NOT (status IN ('failed','dead') AND ef.id IS NOT
