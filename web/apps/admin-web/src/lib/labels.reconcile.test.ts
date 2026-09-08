@@ -807,24 +807,250 @@ describe("告警计数：界面上的「评估 N 轮」要与后端的评估周�
     expect(FIRE_COUNT_HEADER).toBe("评估轮次");
   });
 
-  it("界面上不再有把它说成「次数 / 命中」的地方", () => {
-    // 同一句话曾有五份措辞不同的副本（工作台待办、告警中心的列与表格说明、
-    // 平台告警面板的列与表格说明、平台概览那一栏），于是同一个数在三个页面
-    // 上有三种叫法。这一条跨文件 grep，防的是「只改了工作台」。
-    const srcRoot = new URL("../", import.meta.url);
-    const suspects = [
-      "pages/AlertsPage.tsx",
-      "components/PlatformAlertsPanel.tsx",
-      "lib/overview.ts",
-      "lib/workbench.ts",
-    ];
-    for (const relative of suspects) {
-      const text = readFileSync(new URL(relative, srcRoot), "utf8");
-      // 只看真正渲染出来的字面量：注释里复述那句旧话是允许的（本片正是
-      // 靠注释记录它为什么错），所以先把 // 与 /** */ 剥掉
-      const code = text.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/\/\/[^\n]*/g, "");
-      expect(code, relative).not.toMatch(/命中\s*\$\{|命中 \d+ 次|"次数"/);
+});
+
+// --- 界面文案的跨文件扫描：范围要发现，不要手列 ----------------------------
+
+/** 所有会渲染到界面的源码文件（发现式，不是一张名单）。
+ *
+ *  **为什么不能是名单。** 这条门禁最初写成 `suspects = [四个文件]`，于是它
+ *  真正保护的是「这四个文件里」，而不是测试名承诺的「界面上」。评审当场种了
+ *  两份副本证明这个洞：一份进 pages/OverviewPage.tsx，一份进
+ *  components/AlertNotifyDeliveries.tsx，两个都不在名单上，门禁全绿。今天四个
+ *  消费方恰好齐全，所以它「碰巧」是对的；下一个渲染这个数的组件天生豁免——
+ *  「闸的范围要发现不要手列」，一字不差的旧账。
+ *
+ *  两个包都扫：admin-web 是页面，ui-admin 是它用的那套组件，两边都会把字
+ *  渲染出去。
+ *
+ *  排除 `*.test.*`：判据反向验证必须能逐字写出那句旧话，否则门禁会把证明
+ *  自己有效的证据也判成违规。 */
+const UI_SOURCE_ROOTS = ["web/apps/admin-web/src/", "web/packages/ui-admin/src/"] as const;
+
+function uiSourceFiles(): { path: string; code: string }[] {
+  const out: { path: string; code: string }[] = [];
+  for (const root of UI_SOURCE_ROOTS) {
+    const dirUrl = new URL(root, REPO_ROOT);
+    // 一次递归列完。子目录自己也在返回值里，但目录名不以 .ts/.tsx 结尾，
+    // 下一行就把它们滤掉了。
+    for (const entry of readdirSync(dirUrl, { recursive: true })) {
+      const relative = entry.split("\\").join("/");
+      if (!/\.tsx?$/.test(relative)) continue;
+      if (relative.includes(".test.") || relative.endsWith(".d.ts")) continue;
+      const text = readFileSync(new URL(relative, dirUrl), "utf8");
+      // 注释里复述那句旧话是允许的——本片正是靠注释记录它当初为什么错。
+      // `(?<!:)`：别把 https:// 后面的半行正文当注释剥掉，那会**藏起**违规。
+      const code = text
+        .replaceAll(/\/\*[\s\S]*?\*\//g, "")
+        .replaceAll(/(?<!:)\/\/[^\n]*/g, "");
+      out.push({ path: `${root}${relative}`, code });
     }
+  }
+  return out;
+}
+
+/** 把 `fire_count` 说成「次数 / 命中」的那几种写法。
+ *
+ *  **不依赖引号。** 旧版本只认双引号包着的 `"次数"`，于是模板串、单引号、
+ *  JSX 正文里的同一个词全部绕过——评审把 AlertsPage 那句 caption 从
+ *  `${FIRE_COUNT_HEADER}与投递结果` 改回「次数与投递结果」，全量 2170 个用例
+ *  照样全绿，而那是真的会渲染出去的表格说明。 */
+const FIRE_COUNT_MISNOMERS: readonly { readonly re: RegExp; readonly why: string }[] = [
+  {
+    // 「次数」单独成词。仓库里合法的用法一律带前缀（最大重试次数 / 登录失败
+    // 次数 / 调用次数 / 往返次数），所以「前面不是汉字」正是这句旧话的指纹。
+    re: /(?<![一-鿿])次数/,
+    why: "「次数」单独出现",
+  },
+  { re: /命中次数/, why: "「命中次数」" },
+  { re: /重复命中/, why: "「重复命中」" },
+  {
+    // 「命中 N 次」「命中 ${x} 次」。合法的「命中」都是动词（规则命中后、
+    // 缓存命中、命中演示实例），后面不会紧跟一个数。
+    re: /命中\s*[\d$]/,
+    why: "「命中 N 次」",
+  },
+];
+
+/** 把 `fire_count` 直接拼进文案的地方。
+ *
+ *  措辞门禁挡不住 `` 触发 ${alert.fire_count} 次 `` ——那句话里既没有「次数」
+ *  也没有「命中」，而它恰恰是本片修掉的那句原话。所以另立一条：这个数只许经
+ *  `describeFireCount` 一处出场，别处只能拿它排序、比较，不能拼进字里。 */
+const RAW_FIRE_COUNT_RENDER: readonly { readonly re: RegExp; readonly why: string }[] = [
+  { re: /\$\{\s*[A-Za-z_$][\w$]*(?:\.[\w$]+)*\.fire_count\s*\}/, why: "直接把 fire_count 拼进文案" },
+];
+
+/** 措辞门禁的豁免清单。**今天是空的，而且只减不增。**
+ *
+ *  下面那条断言把它逐字钉死：要往里加一条，就必须改测试、留下痕迹、说清理由。 */
+const FIRE_COUNT_WORDING_EXEMPTIONS: readonly string[] = [];
+
+/** 「直接拼 fire_count」的豁免：只有措辞的唯一来源那一处。 */
+const RAW_FIRE_COUNT_EXEMPTIONS: readonly string[] = ["web/apps/admin-web/src/api/alerts.ts"];
+
+function scanUiSources(
+  files: readonly { path: string; code: string }[],
+  patterns: readonly { readonly re: RegExp; readonly why: string }[],
+  exemptions: readonly string[] = [],
+): string[] {
+  const hits: string[] = [];
+  for (const file of files) {
+    if (exemptions.includes(file.path)) continue;
+    for (const { re, why } of patterns) {
+      // 每次新建一个带 g 的正则：共用实例会把 lastIndex 带到下一个文件，
+      // 于是「第二个文件的违规」会被静默跳过。
+      for (const m of file.code.matchAll(new RegExp(re.source, "g"))) {
+        const line = file.code.slice(0, m.index).split("\n").length;
+        hits.push(`${file.path}:${line} ${why}`);
+      }
+    }
+  }
+  return hits;
+}
+
+describe("界面上不再有把 fire_count 说成「次数 / 命中」的地方", () => {
+  const files = uiSourceFiles();
+  const paths = files.map((f) => f.path);
+
+  it("扫描范围是走出来的，不是列出来的", () => {
+    // 抽空会让下面每一条恒真——这是这类门禁最典型的假绿，先证明真的走遍了。
+    expect(files.length).toBeGreaterThanOrEqual(180);
+    // 正向锚点：五个已知消费方都在里面
+    for (const p of [
+      "web/apps/admin-web/src/api/alerts.ts",
+      "web/apps/admin-web/src/lib/workbench.ts",
+      "web/apps/admin-web/src/lib/overview.ts",
+      "web/apps/admin-web/src/pages/AlertsPage.tsx",
+      "web/apps/admin-web/src/components/PlatformAlertsPanel.tsx",
+    ]) {
+      expect(paths).toContain(p);
+    }
+    // 评审种副本的那两个文件当初都不在名单上。它们现在必须在范围里，否则
+    // 这次修的只是正则，范围那半个洞还留着。
+    expect(paths).toContain("web/apps/admin-web/src/pages/OverviewPage.tsx");
+    expect(paths).toContain("web/apps/admin-web/src/components/AlertNotifyDeliveries.tsx");
+    // 组件包也在范围里：字最终是它渲染出去的
+    expect(paths.some((p) => p.startsWith("web/packages/ui-admin/src/"))).toBe(true);
+    // 测试文件不在范围里（判据反向验证要逐字写出那句旧话）
+    expect(paths.filter((p) => p.includes(".test."))).toEqual([]);
+  });
+
+  it("剥注释真的生效：注释里复述旧话不算违规，正文里算", () => {
+    // api/alerts.ts 的注释里逐字留着「被去重合并掉的命中次数（含首次）」——
+    // 那是本片记录「它当初为什么错」的地方。少了这一条，上面那条「一条都
+    // 没有」可能只是因为剥注释顺手把正文也剥没了。
+    const raw = readFileSync(new URL("web/apps/admin-web/src/api/alerts.ts", REPO_ROOT), "utf8");
+    expect(raw).toContain("命中次数");
+    expect(files.find((f) => f.path === "web/apps/admin-web/src/api/alerts.ts")?.code).not.toContain(
+      "命中次数",
+    );
+  });
+
+  it("扫出来一条都没有", () => {
+    expect(scanUiSources(files, FIRE_COUNT_MISNOMERS, FIRE_COUNT_WORDING_EXEMPTIONS)).toEqual([]);
+  });
+
+  it("fire_count 只经 describeFireCount 一处出场，别处不拼进文案", () => {
+    expect(scanUiSources(files, RAW_FIRE_COUNT_RENDER, RAW_FIRE_COUNT_EXEMPTIONS)).toEqual([]);
+  });
+
+  it("豁免清单只减不增，而且每一条今天都还需要", () => {
+    // 三条规矩缺一不可：清单逐字钉死（要加就得改这条断言），里面的路径今天
+    // 还在，**并且**去掉豁免后它真的仍会被扫出来。第三条最容易漏——一条已经
+    // 补齐的豁免留在清单里，就是一个永远不会红的洞。
+    // 第三条红了，通常说明那一处已经不再需要豁免：把清单里那一行删掉即可，
+    // 那正是这张清单唯一允许的方向。
+    expect(FIRE_COUNT_WORDING_EXEMPTIONS).toEqual([]);
+    expect(RAW_FIRE_COUNT_EXEMPTIONS).toEqual(["web/apps/admin-web/src/api/alerts.ts"]);
+    for (const exempt of RAW_FIRE_COUNT_EXEMPTIONS) {
+      expect(paths).toContain(exempt);
+      const file = files.find((f) => f.path === exempt);
+      expect(scanUiSources(file ? [file] : [], RAW_FIRE_COUNT_RENDER)).not.toEqual([]);
+    }
+  });
+
+  describe("判据反向验证：把旧话种回去，门禁必须红", () => {
+    // 合成文件走同一条流水线（同本文件既有的合成 Go 源码那一节）。路径都
+    // **不在**豁免清单上，其中前两个正是评审当初种副本的那两个文件。
+    const planted: readonly { readonly path: string; readonly code: string }[] = [
+      {
+        path: "web/apps/admin-web/src/pages/OverviewPage.tsx",
+        code: '<FormField label="次数" note="命中 3 次" />',
+      },
+      {
+        path: "web/apps/admin-web/src/components/AlertNotifyDeliveries.tsx",
+        code: '<li>{"次数"}：含首次及被去重合并的重复命中。</li>',
+      },
+      {
+        path: "web/apps/admin-web/src/pages/AlertsPage.tsx",
+        code: "caption={`告警列表：严重度、状态、首次与最近发现、次数与投递结果`}",
+      },
+      {
+        path: "web/apps/admin-web/src/components/PlatformAlertsPanel.tsx",
+        code: "caption={`${label} 告警：持续时长、次数及投递结果`}",
+      },
+      {
+        path: "web/packages/ui-admin/src/AlertCountBadge.tsx",
+        code: "<span title='含首次及被去重合并的重复命中'>{n}</span>",
+      },
+    ];
+    for (const file of planted) {
+      it(`${file.path} 里的副本会被扫出来`, () => {
+        expect(
+          scanUiSources([file], FIRE_COUNT_MISNOMERS, FIRE_COUNT_WORDING_EXEMPTIONS),
+        ).not.toEqual([]);
+      });
+    }
+
+    it("合法用法不会被误判——否则下一个人会把这条门禁调松", () => {
+      // 这一条与上面成对：只有「该红的红、不该红的不红」两半都在，门禁才
+      // 既有牙齿又留得住。四条都是仓库里今天真实存在的句子。
+      const legit = [
+        {
+          path: "web/apps/admin-web/src/pages/JobsPage.tsx",
+          code: 'note="已达最大重试次数并放弃，需要人工检查"',
+        },
+        {
+          path: "web/apps/admin-web/src/components/RequestsPanel.tsx",
+          code: 'headerTitle: "输入 Token / 输出 Token；缓存命中作为次级证据"',
+        },
+        {
+          path: "web/apps/admin-web/src/lib/alerts.ts",
+          code: 'hint: "此刻正在压着告警：命中的规则不会投递"',
+        },
+        {
+          path: "web/apps/admin-web/src/components/SMSQuotaPanel.tsx",
+          code: 'hint="按号数算，不是调用次数。0 = 一次都不许。"',
+        },
+      ];
+      expect(scanUiSources(legit, FIRE_COUNT_MISNOMERS)).toEqual([]);
+    });
+
+    it("把 fire_count 直接拼进文案会被扫出来", () => {
+      // 本片修掉的那句原话。措辞门禁挡不住它——它既没有「次数」也没有「命中」。
+      const revert = {
+        path: "web/apps/admin-web/src/lib/workbench.ts",
+        code: "due: `触发 ${alert.fire_count} 次`,",
+      };
+      expect(scanUiSources([revert], RAW_FIRE_COUNT_RENDER, RAW_FIRE_COUNT_EXEMPTIONS)).not.toEqual(
+        [],
+      );
+    });
+
+    it("拿它排序、比较不算「拼进文案」", () => {
+      const legit = [
+        {
+          path: "web/apps/admin-web/src/pages/AlertsPage.tsx",
+          code: "value: (alert) => alert.fire_count,",
+        },
+        {
+          path: "web/apps/admin-web/src/lib/overview.ts",
+          code: "detail: `${a.fire_count > 1 ? extra : ''}`,",
+        },
+      ];
+      expect(scanUiSources(legit, RAW_FIRE_COUNT_RENDER)).toEqual([]);
+    });
   });
 });
 

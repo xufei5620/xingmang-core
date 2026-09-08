@@ -362,7 +362,12 @@ describe("失败任务：只收已放弃的后台任务", () => {
     );
     // 最早的那一条另设一个时刻，好证明「最近 / 最早」两个数不是同一个
     const oldest = run({ id: 999, kind: "card_sync", finalized_at: "2026-08-28T08:00:00Z" });
-    const mixed = [...many, oldest, run({ id: 7, kind: "sub2api_sync" })];
+    // **别的 kind 排在数组最前面**，这是刻意的：/jobs/runs 按放弃时刻倒序
+    // 返回，只要有一条别的 kind 在那 288 条 card_sync 之后被放弃，取回的
+    // 20 条里它就排第一。若夹具照着期望顺序摆，「条数多的排最前」这条规则
+    // 会靠分组的插入顺序恰好成立——把排序整段删掉测试照样绿（条件恰好为真
+    // ≠ 条件正确）。
+    const mixed = [run({ id: 7, kind: "sub2api_sync" }), ...many, oldest];
 
     it("一个 kind 一行，不是一条一行", () => {
       const items = workItemsFromJobRuns(mixed, NOW);
@@ -384,6 +389,41 @@ describe("失败任务：只收已放弃的后台任务", () => {
       // 夹具里两种 kind 同属 default 队列：按队列合并会把它们并成一行
       const items = workItemsFromJobRuns(mixed, NOW);
       expect(items.map((i) => i.id)).toEqual(["job-kind-card_sync", "job-7"]);
+    });
+
+    // 「条数多的排最前」是本片要修的那个症状本身（大堆把真正要处理的东西挤
+    // 出首屏）。它必须自己为自己负责：两个取数方向都钉，否则删掉排序也绿。
+    it("条数多的排最前，与取数顺序无关", () => {
+      const other = run({ id: 7, kind: "sub2api_sync" });
+      expect(workItemsFromJobRuns([other, ...many], NOW).map((i) => i.id)).toEqual([
+        "job-kind-card_sync",
+        "job-7",
+      ]);
+      expect(workItemsFromJobRuns([...many, other], NOW).map((i) => i.id)).toEqual([
+        "job-kind-card_sync",
+        "job-7",
+      ]);
+    });
+
+    it("条数相同时保持取数顺序，不自己再排一遍", () => {
+      // 服务端已按放弃时刻倒序给了，这里不该把它打乱：同样两条，谁先被放弃
+      // 谁在上面。这一条钉的是 sort 里那个 `|| a.index - b.index`。
+      const cards = [
+        run({ id: 1, kind: "card_sync" }),
+        run({ id: 2, kind: "card_sync" }),
+      ];
+      const syncs = [
+        run({ id: 3, kind: "sub2api_sync" }),
+        run({ id: 4, kind: "sub2api_sync" }),
+      ];
+      expect(workItemsFromJobRuns([...syncs, ...cards], NOW).map((i) => i.id)).toEqual([
+        "job-kind-sub2api_sync",
+        "job-kind-card_sync",
+      ]);
+      expect(workItemsFromJobRuns([...cards, ...syncs], NOW).map((i) => i.id)).toEqual([
+        "job-kind-card_sync",
+        "job-kind-sub2api_sync",
+      ]);
     });
 
     it("只有一条时逐字保持原样，不出现「×1」这种噪声", () => {
