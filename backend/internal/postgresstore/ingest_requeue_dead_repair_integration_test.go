@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,6 +93,55 @@ func (f deadIngestFixture) commitEvents(t *testing.T, stream, cycleID string, ev
 	t.Helper()
 	ceiling := time.Now().UTC().Truncate(time.Microsecond)
 	return f.chain.commit(t, f.store, f.ctx, f.sourceID, stream, cycleID, ceiling, events)
+}
+
+// commitSupersedingCycle commits a brand-new scan cycle through the real
+// CommitSourceBatch path with the Now/StaleActiveScanCycleMaxAge fields set
+// so supersedeStaleActiveScanCycleTx (XM-INV-SCAN-CYCLE-SUPERSEDE) fires and
+// marks the stream's current active cycle 'blocked' -- exactly what an agent
+// restart does in production. Passing an event a previous cycle already
+// carried reproduces the other half of that shape: agent event ids are
+// deterministic (agents/sourceagent/batch.go's deterministicUUID), so
+// CommitSourceBatch finds the row, leaves it exactly as it is -- dead
+// included -- and only adds a fresh mapping row under the new cycle.
+func (f deadIngestFixture) commitSupersedingCycle(t *testing.T, stream, cycleID string, events []SourceBatchEvent) {
+	t.Helper()
+	f.chain.sequence[stream]++
+	sequence := f.chain.sequence[stream]
+	batchID := fmt.Sprintf("87%06d-0000-4000-8000-%012d", sequence, sequence)
+	bodyHash := testHash(stream + cycleID + fmt.Sprint(sequence))
+	ceiling := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
+	input := SourceBatchInput{
+		SchemaVersion: "3.0", SourceInstanceID: f.sourceID, StreamID: stream,
+		BatchID: batchID, Sequence: sequence, BodyHash: bodyHash,
+		PreviousBatchHash: f.chain.hash[stream], SigningKeyID: "test-key",
+		SourceRuntimeVersion: "v3-test", SourceAgentVersion: "v3-agent-test",
+		SourceCapturedAt: ceiling, ProjectionStatus: "healthy",
+		StreamWatermarkAt: ceiling, SourceCursor: fmt.Sprintf("%s:%d", stream, sequence),
+		ScanCeilingAt: ceiling, ScanCeilingCursor: "ceiling:" + cycleID,
+		ScanCycleID: cycleID, ScanComplete: true, Events: events,
+		Actor: AuditActor{Type: "source_connector", ID: f.sourceID, Reason: "dead requeue supersede fixture"},
+		// One hour "later" than the cycle it supersedes, against a one-minute
+		// staleness budget, so the existing active cycle is unambiguously
+		// stale by economicRescanActivityWithinWindow's own test.
+		Now: time.Now().UTC().Add(time.Hour), StaleActiveScanCycleMaxAge: time.Minute,
+	}
+	// The balances stream carries a signed snapshot id and row count, and
+	// validateSourceBatch rejects a v3 balances batch without them. Derived
+	// exactly as v3TestChain.commitPageWithSnapshotRows does, so the count
+	// matches what tryPublishEconomicScanCyclesTx compares it against.
+	if stream == "balances" {
+		input.ScanSnapshotID = testHash(cycleID)
+		for _, event := range events {
+			if event.EntityType == "balance_checkpoint" {
+				input.ScanSnapshotRowCount++
+			}
+		}
+	}
+	if _, err := f.store.CommitSourceBatch(f.ctx, input); err != nil {
+		t.Fatalf("commit superseding %s cycle: %v", stream, err)
+	}
+	f.chain.hash[stream] = bodyHash
 }
 
 // newDeadIngestEvent builds one batch event with a deterministic, distinct
@@ -281,8 +331,12 @@ func TestIngestRequeueDeadDryRunWritesNothing(t *testing.T) {
 			found.CreatedAt, found.DeadSince)
 	}
 	if len(found.ScanCycles) != 1 || found.ScanCycles[0].ScanCycleID != cycleID ||
-		found.ScanCycles[0].CycleStatus != "processing" {
-		t.Fatalf("dry run must report the event's scan cycles: %+v", found.ScanCycles)
+		found.ScanCycles[0].CycleStatus != "processing" || !found.ScanCycles[0].ReplayBinding {
+		t.Fatalf("dry run must report the event's scan cycles and mark the replay one: %+v", found.ScanCycles)
+	}
+	if found.ReplayScanCycleID != cycleID || found.ReplayCycleStatus != "processing" ||
+		found.ReplayBatchID == "" || found.ReplayBlocked || found.ReplayBlockedReason != "" {
+		t.Fatalf("dry run must resolve the replay binding and find it acceptable: %+v", found)
 	}
 	if len(found.OpenFreezes) != 1 || found.OpenFreezes[0].FreezeID != freezeID ||
 		found.OpenFreezes[0].ExternalAccountID != fixture.accountID ||
@@ -660,6 +714,192 @@ func TestIngestRequeueDeadNarrowsByEventAndByAccount(t *testing.T) {
 	}
 	if len(other.Events) != 0 {
 		t.Fatalf("--account for an unrelated account found %+v", other.Events)
+	}
+}
+
+// TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked reproduces the
+// exact production shape found on 2026-09-08: an agent restart superseded the
+// cycle a dead event's own first_batch_id belongs to (so that cycle is now
+// 'blocked'), and the agent's next scan re-delivered the identical
+// deterministic event id under a cycle that went on to publish.
+//
+// The event therefore has two mappings, one 'blocked' and one 'published' --
+// but ClaimUnprocessedSourceEvents joins sie.first_batch_id, so a replay is
+// verified against the blocked one and verifyFactBatchContextTx refuses it.
+// The repair must reach that verdict itself: report both mappings, mark which
+// one governs, and requeue nothing.
+func TestIngestRequeueDeadSkipsEventsWhoseReplayCycleIsBlocked(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "usage")
+	const eventID = "88000000-0000-4000-8000-0000000000a1"
+	const supersededCycleID = "89000000-0000-4000-8000-0000000000a1"
+	const successorCycleID = "89000000-0000-4000-8000-0000000000a2"
+	event := newDeadIngestEvent(eventID, "usage_event")
+	fixture.commitEvents(t, "usage", supersededCycleID, []SourceBatchEvent{event})
+	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+	fixture.freezeOverEvent(t, eventID, "usage_event")
+	// The agent restarts, abandons its cycle, and rescans: the stale cycle is
+	// superseded to 'blocked' and the same event id is re-delivered under the
+	// successor, which publishes because the dead event's own open freeze
+	// counts it complete.
+	fixture.commitSupersedingCycle(t, "usage", successorCycleID, []SourceBatchEvent{event})
+	if status := fixture.cycleStatus(t, "usage", supersededCycleID); status != "blocked" {
+		t.Fatalf("superseded cycle status=%q, want blocked", status)
+	}
+	if status := fixture.cycleStatus(t, "usage", successorCycleID); status != "published" {
+		t.Fatalf("successor cycle status=%q, want published", status)
+	}
+	before := fixture.readIngestEvent(t, "usage", eventID)
+	if before.status != "dead" {
+		t.Fatalf("re-delivery must not revive the dead row: status=%q", before.status)
+	}
+
+	for _, mode := range []bool{false, true} {
+		result, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+			IngestRequeueDeadRepairInput{Apply: mode, OperatorID: deadIngestOperator},
+			AuditActor{Type: "admin", ID: deadIngestOperator})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Events) != 1 {
+			t.Fatalf("apply=%t: events=%+v, want the blocked event still reported", mode, result.Events)
+		}
+		found := result.Events[0]
+		if found.Requeued {
+			t.Fatalf("apply=%t: Requeued=true for an event whose replay is refused", mode)
+		}
+		if !found.ReplayBlocked || found.ReplayScanCycleID != supersededCycleID ||
+			found.ReplayCycleStatus != "blocked" {
+			t.Fatalf("apply=%t: replay verdict=%+v, want blocked on the superseded cycle", mode, found)
+		}
+		if !strings.Contains(found.ReplayBlockedReason, supersededCycleID) ||
+			!strings.Contains(found.ReplayBlockedReason, "verifyFactBatchContextTx") {
+			t.Fatalf("apply=%t: reason=%q must name the governing cycle and the check", mode, found.ReplayBlockedReason)
+		}
+		if result.TotalRequeued != 0 || result.TotalBlockedSkipped != 1 {
+			t.Fatalf("apply=%t: totals requeued=%d blocked=%d, want 0/1",
+				mode, result.TotalRequeued, result.TotalBlockedSkipped)
+		}
+		// Both mappings are reported, and exactly the blocked one is marked
+		// as the replay binding -- the published sibling must not be able to
+		// pass for the governing cycle.
+		if len(found.ScanCycles) != 2 {
+			t.Fatalf("apply=%t: scan cycles=%+v, want both mappings reported", mode, found.ScanCycles)
+		}
+		for _, cycle := range found.ScanCycles {
+			wantReplay := cycle.ScanCycleID == supersededCycleID
+			if cycle.ReplayBinding != wantReplay {
+				t.Fatalf("apply=%t: cycle %s ReplayBinding=%t, want %t",
+					mode, cycle.ScanCycleID, cycle.ReplayBinding, wantReplay)
+			}
+			if cycle.ScanCycleID == successorCycleID && cycle.CycleStatus != "published" {
+				t.Fatalf("apply=%t: successor mapping status=%q", mode, cycle.CycleStatus)
+			}
+		}
+		// Nothing was written, in either mode.
+		if after := fixture.readIngestEvent(t, "usage", eventID); after != before {
+			t.Fatalf("apply=%t: the skipped event was modified: before=%+v after=%+v", mode, before, after)
+		}
+		if count := fixture.requeueAuditCount(t, eventID); count != 0 {
+			t.Fatalf("apply=%t: requeue audit rows=%d, want 0 for a skipped event", mode, count)
+		}
+	}
+
+	// The override exists, is off by default, and does requeue when asked.
+	forced, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator, IncludeBlockedCycles: true},
+		AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forced.TotalRequeued != 1 || forced.TotalBlockedSkipped != 0 || len(forced.Events) != 1 ||
+		!forced.Events[0].Requeued || !forced.Events[0].ReplayBlocked {
+		t.Fatalf("forced result=%+v, want the blocked event requeued but still flagged", forced.Events)
+	}
+	after := fixture.readIngestEvent(t, "usage", eventID)
+	if after.status != "queued" || after.attemptCount != 0 {
+		t.Fatalf("forced apply: status=%q attempt_count=%d, want queued/0", after.status, after.attemptCount)
+	}
+	if count := fixture.requeueAuditCount(t, eventID); count != 1 {
+		t.Fatalf("forced apply: requeue audit rows=%d, want 1", count)
+	}
+}
+
+// TestIngestRequeueDeadBlocksAnEventWithNoReplayBinding covers the other
+// verdict verifyFactBatchContextTx can reach on the replay path: an economic
+// v3 event whose first_batch_id carries no scan-cycle mapping for it at all
+// gets ErrForbidden, not ErrConflict, and is equally unreplayable.
+func TestIngestRequeueDeadBlocksAnEventWithNoReplayBinding(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "usage")
+	const eventID = "88000000-0000-4000-8000-0000000000a3"
+	fixture.commitEvents(t, "usage", "89000000-0000-4000-8000-0000000000a3",
+		[]SourceBatchEvent{newDeadIngestEvent(eventID, "usage_event")})
+	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+	// Drop only the cycle-event mapping, leaving the batch and the cycle
+	// themselves intact -- the exact shape verifyFactBatchContextTx's
+	// ErrNoRows/ErrForbidden branch describes.
+	if _, err := fixture.store.pool.Exec(fixture.ctx, `DELETE FROM source_economic_scan_cycle_events
+		WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		fixture.sourceID, eventID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator},
+		AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Events) != 1 || result.Events[0].Requeued || !result.Events[0].ReplayBlocked ||
+		result.TotalBlockedSkipped != 1 {
+		t.Fatalf("result=%+v, want the unbound event reported and skipped", result.Events)
+	}
+	if !strings.Contains(result.Events[0].ReplayBlockedReason, "ErrForbidden") {
+		t.Fatalf("reason=%q, want it to name the verifier's own outcome", result.Events[0].ReplayBlockedReason)
+	}
+	if after := fixture.readIngestEvent(t, "usage", eventID); after.status != "dead" {
+		t.Fatalf("skipped event status=%q, want dead", after.status)
+	}
+
+}
+
+// TestIngestRequeueDeadBlocksAnEventWhoseBindingPayloadHashDiverges covers
+// the verifier's third condition. It is defensive rather than reachable
+// through the real ingest path -- CommitSourceBatch refuses a batch whose
+// event payload hash differs from the stored row's, and writes the mapping
+// from that same value -- so the divergence is written directly. Covered so
+// the branch is not dead-untested and its reason stays distinct from the
+// other two.
+//
+// It gets its own fixture on purpose: the sibling test's dead event has no
+// freeze, so its scan cycle never becomes complete and never publishes, and a
+// second cycle on the same stream is rejected by
+// source_economic_one_active_scan_cycle. (Found by the full suite, not by
+// reasoning -- the first draft appended this case to that test and failed
+// with "stream already has an active scan cycle".)
+func TestIngestRequeueDeadBlocksAnEventWhoseBindingPayloadHashDiverges(t *testing.T) {
+	fixture := seedDeadIngestFixture(t, "usage")
+	const eventID = "88000000-0000-4000-8000-0000000000a4"
+	fixture.commitEvents(t, "usage", "89000000-0000-4000-8000-0000000000a4",
+		[]SourceBatchEvent{newDeadIngestEvent(eventID, "usage_event")})
+	fixture.killEvent(t, "usage", eventID, 20*time.Hour)
+	if _, err := fixture.store.pool.Exec(fixture.ctx, `UPDATE source_economic_scan_cycle_events
+		SET payload_hash=$3 WHERE source_instance_id=$1 AND stream_id='usage' AND event_id=$2`,
+		fixture.sourceID, eventID, testHash("a-different-payload")); err != nil {
+		t.Fatal(err)
+	}
+
+	drifted, err := fixture.store.RepairIngestRequeueDead(fixture.ctx,
+		IngestRequeueDeadRepairInput{Apply: true, OperatorID: deadIngestOperator, EventID: eventID},
+		AuditActor{Type: "admin", ID: deadIngestOperator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drifted.Events) != 1 || drifted.Events[0].Requeued || !drifted.Events[0].ReplayBlocked ||
+		!strings.Contains(drifted.Events[0].ReplayBlockedReason, "payload_hash") {
+		t.Fatalf("payload-hash divergence result=%+v", drifted.Events)
+	}
+	if after := fixture.readIngestEvent(t, "usage", eventID); after.status != "dead" {
+		t.Fatalf("skipped event status=%q, want dead", after.status)
 	}
 }
 

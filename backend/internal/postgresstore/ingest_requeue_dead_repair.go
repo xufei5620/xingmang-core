@@ -48,18 +48,20 @@ import (
 //     ProjectionRequeueDeadRepairInput's own "never touches
 //     eligibility_freezes" contract.
 //
-//   - It never touches source_economic_scan_cycles. A cycle that already
-//     published is never re-evaluated (tryPublishEconomicScanCyclesTx selects
-//     only cycle_status='processing', and no code path moves a row back out
-//     of 'published'), and a requeued event's fact is still accepted on its
-//     way in: verifyFactBatchContextTx explicitly admits 'published'
+//   - It never touches source_economic_scan_cycles -- it reads them, and
+//     refuses to act when they say the replay cannot succeed. A cycle that
+//     already published is never re-evaluated (tryPublishEconomicScanCyclesTx
+//     selects only cycle_status='processing', and no code path moves a row
+//     back out of 'published'), and a requeued event's fact is still accepted
+//     on its way in: verifyFactBatchContextTx explicitly admits 'published'
 //     alongside 'receiving'/'processing'. The fact then lands as a *late*
 //     fact under the account's finalized_through, which observeEligibilityFact
 //     already has a designed path for (reprojectEligibilityTx). A cycle still
 //     in 'processing', by contrast, does go back to incomplete for as long as
 //     the requeued event is un-terminal -- correct, and self-healing in both
-//     directions -- so ScanCycles below reports every cycle each candidate is
-//     mapped to, with its current status, in dry-run mode too.
+//     directions. A cycle in any other status means the fact is refused on
+//     arrival, so the event is reported and skipped rather than requeued --
+//     see ReplayBlocked, and IncludeBlockedCycles to override.
 //
 //   - It never touches created_at. SourceIngestHealth.OldestPending and the
 //     readiness query both age a pending event from created_at, so a
@@ -97,19 +99,46 @@ type IngestRequeueDeadRepairInput struct {
 	// layer never resolved an account to hint with) is invisible to this
 	// filter. Run without --account, or narrow with EventID, to see those.
 	AccountID string
+	// IncludeBlockedCycles forces the run to requeue events whose replay
+	// binding is one verifyFactBatchContextTx will reject (see
+	// ReplayBlocked). Those events are skipped by default in both modes,
+	// because requeuing them cannot succeed: the fact is refused on arrival,
+	// so the event spends all eight attempts and dies again, landing exactly
+	// where it started. This flag exists only so an operator who has decided
+	// to spend that ladder deliberately can; it is never how such an event
+	// gets fixed. Fixing it means giving it a valid binding, which is
+	// upstream of this tool.
+	IncludeBlockedCycles bool
 }
+
+// ingestReplayableCycleStatuses is verifyFactBatchContextTx's own accepted
+// set, restated here because this repair's whole job is to predict that
+// function's verdict before spending a retry ladder discovering it. Keep the
+// two in step: consumption.go's
+// `cycleStatus != "receiving" && cycleStatus != "processing" && cycleStatus != "published"`
+// is the authority.
+var ingestReplayableCycleStatuses = map[string]bool{"receiving": true, "processing": true, "published": true}
 
 // IngestRequeueDeadScanCycle is one economic scan cycle a candidate event is
 // mapped to (source_economic_scan_cycle_events), with that cycle's current
-// status. Reported in both modes because it is the single piece of context
-// that decides whether a requeue is a no-op for cycle publication
-// ('published' -- never re-evaluated), a temporary hold ('processing' -- the
-// event counts as incomplete again until it terminates), or futile
-// ('blocked' -- verifyFactBatchContextTx rejects the fact outright, so the
-// requeued event will spend its whole retry ladder and die again).
+// status and the batch the mapping came in on.
+//
+// An event can be mapped to several cycles, and only one of them is the one
+// a replay actually travels through -- see ReplayBinding. That distinction is
+// not cosmetic: on 2026-09-08 a production dry run listed a 'published' cycle
+// beside a 'blocked' one for the same event, and only the blocked one was on
+// the replay path (the published mapping came in on a later batch, which
+// ClaimUnprocessedSourceEvents never looks at because it joins
+// sie.first_batch_id). Reporting the list without saying which entry governs
+// invites exactly the wrong conclusion.
 type IngestRequeueDeadScanCycle struct {
 	ScanCycleID string
 	CycleStatus string
+	BatchID     string
+	// ReplayBinding marks the single mapping a replay of this event would be
+	// verified against: the one whose batch is the event's own
+	// first_batch_id.
+	ReplayBinding bool
 }
 
 // IngestRequeueDeadFreeze is one still-open eligibility_freezes row
@@ -155,8 +184,30 @@ type IngestRequeueDeadRepairEvent struct {
 	HasCatchupKey bool
 	ScanCycles    []IngestRequeueDeadScanCycle
 	OpenFreezes   []IngestRequeueDeadFreeze
+	// ReplayBatchID/ReplayScanCycleID/ReplayCycleStatus describe the exact
+	// binding a replay of this event would be verified against, reproducing
+	// what the runtime actually does rather than approximating it:
+	// ClaimUnprocessedSourceEvents joins source_ingest_batches on
+	// sie.first_batch_id and hands that batch's id and scan_cycle_id to the
+	// application layer, which passes them to verifyFactBatchContextTx, which
+	// looks the mapping up by the exact (event_id, batch_id, scan_cycle_id)
+	// triple. A later batch that re-delivered the same event under a
+	// healthier cycle is *not* on this path. Empty when the event has no v3
+	// economic binding at all (see ReplayBlocked).
+	ReplayBatchID     string
+	ReplayScanCycleID string
+	ReplayCycleStatus string
+	// ReplayBlocked is true when verifyFactBatchContextTx would reject this
+	// event's replay outright, so requeuing it can only burn its retry ladder
+	// and die again. Such an event is reported but not requeued unless the
+	// caller sets IncludeBlockedCycles. ReplayBlockedReason says which of the
+	// verifier's conditions fails, in its own terms.
+	ReplayBlocked       bool
+	ReplayBlockedReason string
 	// Requeued is true once this row was (apply) or would be (dry run) reset
-	// to processing_status='queued'/attempt_count=0/next_attempt_at=now.
+	// to processing_status='queued'/attempt_count=0/next_attempt_at=now. It
+	// is false for a skipped ReplayBlocked event -- the summary's own
+	// verdict, so nobody has to cross-reference a runbook to reach it.
 	Requeued bool
 }
 
@@ -183,10 +234,15 @@ type IngestRequeueDeadRepairEventError struct {
 // IngestRequeueDeadRepairResult is the repair's full summary, printable
 // as-is by the CLI in both dry-run and apply modes.
 type IngestRequeueDeadRepairResult struct {
-	Applied       bool
-	Events        []IngestRequeueDeadRepairEvent
-	Errors        []IngestRequeueDeadRepairEventError
-	TotalRequeued int
+	Applied bool
+	Events  []IngestRequeueDeadRepairEvent
+	Errors  []IngestRequeueDeadRepairEventError
+	// TotalRequeued counts only events actually requeued (apply) or that
+	// would be (dry run). TotalBlockedSkipped counts events left alone
+	// because their replay binding would be rejected. The two are reported
+	// separately so "3 found" can never be read as "3 requeued".
+	TotalRequeued       int
+	TotalBlockedSkipped int
 }
 
 // RepairIngestRequeueDead lists every source_ingest_events row currently
@@ -243,8 +299,11 @@ func (s *Store) RepairIngestRequeueDead(ctx context.Context, in IngestRequeueDea
 			continue
 		}
 		result.Events = append(result.Events, event)
-		if event.Requeued {
+		switch {
+		case event.Requeued:
 			result.TotalRequeued++
+		case event.ReplayBlocked:
+			result.TotalBlockedSkipped++
 		}
 	}
 	sort.Slice(result.Events, func(i, j int) bool { return result.Events[i].Key() < result.Events[j].Key() })
@@ -329,11 +388,23 @@ func (s *Store) repairIngestRequeueDeadEvent(ctx context.Context, candidate Inge
 		row.ProcessingError = *processingError
 	}
 	row.HasCatchupKey = catchupKey != nil
-	if row.ScanCycles, err = ingestRequeueDeadScanCyclesTx(ctx, tx, candidate); err != nil {
+	if err = ingestRequeueDeadReplayBindingTx(ctx, tx, &row); err != nil {
+		return IngestRequeueDeadRepairEvent{}, err
+	}
+	if row.ScanCycles, err = ingestRequeueDeadScanCyclesTx(ctx, tx, candidate, row.ReplayBatchID); err != nil {
 		return IngestRequeueDeadRepairEvent{}, err
 	}
 	if row.OpenFreezes, err = ingestRequeueDeadOpenFreezesTx(ctx, tx, row.PayloadHash); err != nil {
 		return IngestRequeueDeadRepairEvent{}, err
+	}
+
+	if row.ReplayBlocked && !in.IncludeBlockedCycles {
+		// The verdict is the tool's, not the reader's: a replay that
+		// verifyFactBatchContextTx will refuse can only burn eight attempts
+		// and die again, so it is reported with its reason and left alone in
+		// both modes. Requeued stays false, which is what the summary prints
+		// and what TotalRequeued counts.
+		return row, nil
 	}
 
 	if !in.Apply {
@@ -386,14 +457,86 @@ func (s *Store) repairIngestRequeueDeadEvent(ctx context.Context, candidate Inge
 	return row, nil
 }
 
+// ingestRequeueDeadReplayBindingTx reproduces, as a prediction, the exact
+// path a replay of this event travels:
+//
+//   - ClaimUnprocessedSourceEvents joins source_ingest_batches on
+//     sie.first_batch_id and puts that batch's batch_id, scan_cycle_id,
+//     schema_version and scan_ceiling_at on the claim;
+//   - the application layer passes BatchID/ScanCycleID straight through to
+//     ObserveUsageEvent/ObserveBalanceCheckpoint/...;
+//   - verifyFactBatchContextTx looks the mapping up by the exact
+//     (event_id, batch_id, scan_cycle_id) triple, requires the batch to be
+//     schema_version='3.0', requires m.payload_hash to equal the event's own
+//     payload hash, and accepts the cycle only in
+//     ingestReplayableCycleStatuses.
+//
+// Everything the verifier checks is therefore knowable before spending a
+// retry ladder finding out, and this function checks it. The gate applies
+// only to the four economic streams (validEconomicStream) delivered on a v3
+// batch -- an identities-stream event never reaches verifyFactBatchContextTx
+// at all and is freely replayable.
+func ingestRequeueDeadReplayBindingTx(ctx context.Context, tx pgx.Tx, row *IngestRequeueDeadRepairEvent) error {
+	var schemaVersion, batchID string
+	var mappingPayloadHash, cycleID, cycleStatus *string
+	err := tx.QueryRow(ctx, `
+		SELECT b.schema_version,b.batch_id::text,m.payload_hash,
+			c.scan_cycle_id::text,c.cycle_status
+		FROM source_ingest_events sie
+		JOIN source_ingest_batches b ON b.source_instance_id=sie.source_instance_id
+			AND b.stream_id=sie.stream_id AND b.batch_id=sie.first_batch_id
+		LEFT JOIN source_economic_scan_cycle_events m ON m.source_instance_id=sie.source_instance_id
+			AND m.stream_id=sie.stream_id AND m.event_id=sie.event_id
+			AND m.batch_id=b.batch_id AND m.scan_cycle_id=b.scan_cycle_id
+		LEFT JOIN source_economic_scan_cycles c ON c.source_instance_id=m.source_instance_id
+			AND c.stream_id=m.stream_id AND c.scan_cycle_id=m.scan_cycle_id
+		WHERE sie.source_instance_id=$1 AND sie.stream_id=$2 AND sie.event_id=$3`,
+		row.SourceInstanceID, row.StreamID, row.EventID).Scan(
+		&schemaVersion, &batchID, &mappingPayloadHash, &cycleID, &cycleStatus)
+	if err != nil {
+		return err
+	}
+	row.ReplayBatchID = batchID
+	if cycleID != nil {
+		row.ReplayScanCycleID = *cycleID
+	}
+	if cycleStatus != nil {
+		row.ReplayCycleStatus = *cycleStatus
+	}
+	if !validEconomicStream(row.StreamID) || schemaVersion != "3.0" {
+		// No economic fact context is ever verified for this event.
+		return nil
+	}
+	switch {
+	case cycleStatus == nil:
+		row.ReplayBlocked = true
+		row.ReplayBlockedReason = "the event's first_batch_id (" + batchID +
+			") carries no scan-cycle binding for it; verifyFactBatchContextTx would return ErrForbidden"
+	case mappingPayloadHash == nil || *mappingPayloadHash != row.PayloadHash:
+		row.ReplayBlocked = true
+		row.ReplayBlockedReason = "the replay binding's payload_hash does not match the event's; verifyFactBatchContextTx would return ErrConflict"
+	case !ingestReplayableCycleStatuses[*cycleStatus]:
+		row.ReplayBlocked = true
+		row.ReplayBlockedReason = "replay scan cycle " + row.ReplayScanCycleID + " is '" + *cycleStatus +
+			"'; verifyFactBatchContextTx accepts only receiving/processing/published, so every attempt would be refused"
+	}
+	return nil
+}
+
 // ingestRequeueDeadScanCyclesTx lists every economic scan cycle this event is
-// mapped to. An event can appear in more than one cycle (a rescan re-sends
-// the same event_id under a new scan_cycle_id, and CommitSourceBatch inserts
-// the mapping unconditionally while inserting the event row only once), so
-// this returns all of them rather than assuming a single owner.
-func ingestRequeueDeadScanCyclesTx(ctx context.Context, tx pgx.Tx, candidate IngestRequeueDeadRepairEvent) ([]IngestRequeueDeadScanCycle, error) {
+// mapped to, flagging the one on the replay path. An event can appear in more
+// than one cycle: agent event ids are deterministic
+// (agents/sourceagent/batch.go's deterministicUUID over
+// source/entity/external id/operation/payload hash), so a rescan re-delivers
+// the identical event id, and CommitSourceBatch then inserts a fresh mapping
+// row under the new cycle while deliberately leaving the existing ingest row
+// -- dead included -- untouched. The extra mappings are real evidence and
+// worth reporting, but only replayBatchID's is the one a replay is verified
+// against.
+func ingestRequeueDeadScanCyclesTx(ctx context.Context, tx pgx.Tx, candidate IngestRequeueDeadRepairEvent,
+	replayBatchID string) ([]IngestRequeueDeadScanCycle, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT c.scan_cycle_id::text,c.cycle_status
+		SELECT c.scan_cycle_id::text,c.cycle_status,m.batch_id::text
 		FROM source_economic_scan_cycle_events m
 		JOIN source_economic_scan_cycles c ON c.source_instance_id=m.source_instance_id
 			AND c.stream_id=m.stream_id AND c.scan_cycle_id=m.scan_cycle_id
@@ -406,9 +549,10 @@ func ingestRequeueDeadScanCyclesTx(ctx context.Context, tx pgx.Tx, candidate Ing
 	cycles := make([]IngestRequeueDeadScanCycle, 0)
 	for rows.Next() {
 		var cycle IngestRequeueDeadScanCycle
-		if err = rows.Scan(&cycle.ScanCycleID, &cycle.CycleStatus); err != nil {
+		if err = rows.Scan(&cycle.ScanCycleID, &cycle.CycleStatus, &cycle.BatchID); err != nil {
 			return nil, err
 		}
+		cycle.ReplayBinding = replayBatchID != "" && cycle.BatchID == replayBatchID
 		cycles = append(cycles, cycle)
 	}
 	return cycles, rows.Err()

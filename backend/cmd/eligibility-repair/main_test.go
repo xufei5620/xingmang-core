@@ -134,7 +134,7 @@ func TestRunDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPreAnchorUsage, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPreAnchorUsage, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -153,7 +153,7 @@ func TestRunBalanceAnchorDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) 
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceAnchor, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceAnchor, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -172,7 +172,7 @@ func TestRunBalanceBlipDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceBlip, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindBalanceBlip, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -192,7 +192,7 @@ func TestRunQueueNarrowDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindQueueNarrow, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindQueueNarrow, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -212,7 +212,7 @@ func TestRunProjectionRequeueDeadDryRunAgainstEmptyDatabaseReportsNothing(t *tes
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindProjectionRequeueDead, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindProjectionRequeueDead, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
@@ -231,37 +231,43 @@ func TestRunIngestRequeueDeadDryRunAgainstEmptyDatabaseReportsNothing(t *testing
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindIngestRequeueDead, "", "", &out); err != nil {
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindIngestRequeueDead, repairFilters{}, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := out.String()
 	if !strings.Contains(printed, "XM-INV-DEAD-REQUEUE") || !strings.Contains(printed, "DRY RUN") {
 		t.Fatalf("dry run output missing expected banner: %s", printed)
 	}
-	if !strings.Contains(printed, "events affected: 0") || !strings.Contains(printed, "total requeued: 0") {
-		t.Fatalf("dry run against an empty database found work: %s", printed)
+	for _, want := range []string{"events affected: 0", "total requeued: 0", "not requeued (replay blocked): 0"} {
+		if !strings.Contains(printed, want) {
+			t.Fatalf("dry run against an empty database is missing %q: %s", want, printed)
+		}
 	}
 }
 
-// TestRunNarrowingFlagsRejectedForWrongKind confirms --event/--account fail
-// closed rather than being silently ignored when the chosen --kind does not
-// implement them: an operator narrowing to three reviewed rows who mistypes
-// --kind must not instead get an unnarrowed run across every dead row.
+// TestRunNarrowingFlagsRejectedForWrongKind confirms --event/--account/
+// --include-blocked-cycles fail closed rather than being silently ignored
+// when the chosen --kind does not implement them: an operator narrowing to
+// three reviewed rows who mistypes --kind must not instead get an unnarrowed
+// run across every dead row.
 func TestRunNarrowingFlagsRejectedForWrongKind(t *testing.T) {
 	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 	const someUUID = "40000000-0000-4000-8000-000000000001"
-	for _, testCase := range []struct{ name, kind, accountID, eventID string }{
-		{"event with projection kind", kindProjectionRequeueDead, "", someUUID},
-		{"event with pre-anchor kind", kindPreAnchorUsage, "", someUUID},
-		{"account with queue-narrow kind", kindQueueNarrow, someUUID, ""},
+	for _, testCase := range []struct {
+		name, kind string
+		filters    repairFilters
+	}{
+		{"event with projection kind", kindProjectionRequeueDead, repairFilters{eventID: someUUID}},
+		{"event with pre-anchor kind", kindPreAnchorUsage, repairFilters{eventID: someUUID}},
+		{"account with queue-narrow kind", kindQueueNarrow, repairFilters{accountID: someUUID}},
+		{"include-blocked-cycles with projection kind", kindProjectionRequeueDead, repairFilters{includeBlockedCycles: true}},
 	} {
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", testCase.kind,
-			testCase.accountID, testCase.eventID, &out)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", testCase.kind, testCase.filters, &out)
 		cancel()
 		if err == nil {
-			t.Fatalf("%s: --kind=%s accepted a narrowing flag it ignores", testCase.name, testCase.kind)
+			t.Fatalf("%s: --kind=%s accepted a flag it ignores", testCase.name, testCase.kind)
 		}
 		if out.Len() != 0 {
 			t.Fatalf("%s: rejected invocation still printed output: %s", testCase.name, out.String())
@@ -269,19 +275,53 @@ func TestRunNarrowingFlagsRejectedForWrongKind(t *testing.T) {
 	}
 	// Control: the kinds that do implement each flag must still accept it,
 	// so the rejection above cannot pass by rejecting everything.
-	for _, testCase := range []struct{ name, kind, accountID, eventID string }{
-		{"account with projection kind", kindProjectionRequeueDead, someUUID, ""},
-		{"account with ingest kind", kindIngestRequeueDead, someUUID, ""},
-		{"event with ingest kind", kindIngestRequeueDead, "", someUUID},
+	for _, testCase := range []struct {
+		name, kind string
+		filters    repairFilters
+	}{
+		{"account with projection kind", kindProjectionRequeueDead, repairFilters{accountID: someUUID}},
+		{"account with ingest kind", kindIngestRequeueDead, repairFilters{accountID: someUUID}},
+		{"event with ingest kind", kindIngestRequeueDead, repairFilters{eventID: someUUID}},
+		{"include-blocked-cycles with ingest kind", kindIngestRequeueDead, repairFilters{includeBlockedCycles: true}},
 	} {
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", testCase.kind,
-			testCase.accountID, testCase.eventID, &out)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", testCase.kind, testCase.filters, &out)
 		cancel()
 		if err != nil {
-			t.Fatalf("%s: --kind=%s rejected a narrowing flag it implements: %v", testCase.name, testCase.kind, err)
+			t.Fatalf("%s: --kind=%s rejected a flag it implements: %v", testCase.name, testCase.kind, err)
 		}
+	}
+}
+
+// TestRunAcknowledgeUnreplayableRequiresAnEvent pins the guardrail that
+// matters most for this kind: it writes off customer data as permanently
+// lost, so it is never allowed to run unnarrowed. Omitting --event must fail
+// closed rather than defaulting to "every unreplayable event".
+func TestRunAcknowledgeUnreplayableRequiresAnEvent(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "",
+		kindIngestAcknowledgeUnreplayable, repairFilters{}, &out)
+	if err == nil {
+		t.Fatal("--kind=ingest-acknowledge-unreplayable ran without --event")
+	}
+	if !strings.Contains(err.Error(), "--event is required") {
+		t.Fatalf("error=%v, want it to name the missing flag", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("rejected invocation still printed output: %s", out.String())
+	}
+
+	// --account is meaningless here and must not be accepted as a substitute
+	// for naming the event.
+	var accountOut bytes.Buffer
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "",
+		kindIngestAcknowledgeUnreplayable,
+		repairFilters{accountID: "40000000-0000-4000-8000-000000000001"}, &accountOut); err == nil {
+		t.Fatal("--account was accepted for the acknowledge kind")
 	}
 }
 
@@ -292,7 +332,7 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", "unknown-kind", "", "", &out)
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", "unknown-kind", repairFilters{}, &out)
 	if err == nil {
 		t.Fatal("unknown --kind was accepted")
 	}
@@ -310,7 +350,7 @@ func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
 		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, "", "", &out)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, repairFilters{}, &out)
 		cancel()
 		if err == nil {
 			t.Fatalf("--apply without --operator-id was accepted for --kind=%s", kind)

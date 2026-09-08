@@ -40,9 +40,12 @@
 //     consecutive attempts) back to 'queued'/attempt_count=0 so the source
 //     processor claims it again. Deliberately never touches
 //     eligibility_freezes or source_economic_scan_cycles -- it reports both
-//     instead. Optional --event narrows to exactly one ingest event id (the
-//     exact, recommended form for a reviewed set of rows); optional
-//     --account narrows via the event's own open freezes. See
+//     instead, and skips (never silently requeues) an event whose replay the
+//     economic fact-context check would refuse, since that can only burn
+//     eight attempts and die again. Optional --event narrows to exactly one
+//     ingest event id (the exact, recommended form for a reviewed set of
+//     rows); optional --account narrows via the event's own open freezes;
+//     --include-blocked-cycles overrides the skip. See
 //     docs/handoffs/XM-INV-DEAD-REQUEUE.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
@@ -81,6 +84,11 @@ const (
 	kindProjectionRequeueDead = "projection-requeue-dead"
 	kindIngestRequeueDead     = "ingest-requeue-dead"
 
+	// kindIngestAcknowledgeUnreplayable is deliberately its own kind rather
+	// than a flag on ingest-requeue-dead: it writes off customer data that
+	// can never be recovered, which is a different decision from retrying.
+	kindIngestAcknowledgeUnreplayable = "ingest-acknowledge-unreplayable"
+
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
 	balanceBlipFixedResolutionNote    = "balance blip credit reversed by XM-INV-BALANCE-BLIP repair"
@@ -98,6 +106,7 @@ func main() {
 	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING), or ingest-requeue-dead (XM-INV-DEAD-REQUEUE)")
 	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead and ingest-requeue-dead only; empty means every dead row)")
 	eventID := flag.String("event", "", "optional source_ingest_events event id filter (ingest-requeue-dead only; empty means every dead ingest event)")
+	includeBlockedCycles := flag.Bool("include-blocked-cycles", false, "ingest-requeue-dead only: also requeue events whose replay the economic fact-context check would refuse (skipped by default -- such a requeue can only burn eight attempts and die again)")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		slog.Error("eligibility-repair does not accept positional arguments")
@@ -112,25 +121,49 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, *accountID, *eventID, os.Stdout); err != nil {
+	filters := repairFilters{accountID: *accountID, eventID: *eventID, includeBlockedCycles: *includeBlockedCycles}
+	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, filters, os.Stdout); err != nil {
 		slog.Error("eligibility-repair failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind, accountID, eventID string, out io.Writer) error {
+// repairFilters groups the narrowing/override flags that only some kinds
+// implement, so adding one does not lengthen run's positional argument list
+// again -- and so a caller cannot silently transpose two same-typed
+// arguments.
+type repairFilters struct {
+	accountID            string
+	eventID              string
+	includeBlockedCycles bool
+}
+
+func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, filters repairFilters, out io.Writer) error {
 	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow &&
-		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
-		return fmt.Errorf("unknown --kind %q, want %q, %q, %q, %q, %q, %q or %q", kind, kindPreAnchorUsage, kindBalanceAnchor,
-			kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead, kindIngestRequeueDead)
+		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead &&
+		kind != kindIngestAcknowledgeUnreplayable {
+		return fmt.Errorf("unknown --kind %q, want one of %q, %q, %q, %q, %q, %q, %q, %q", kind, kindPreAnchorUsage,
+			kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead,
+			kindIngestRequeueDead, kindIngestAcknowledgeUnreplayable)
 	}
-	// A narrowing flag that the chosen --kind ignores is rejected rather than
-	// silently dropped: an operator who meant to touch three named rows and
-	// mistyped --kind must not instead run unnarrowed across every dead row.
-	if eventID != "" && kind != kindIngestRequeueDead {
-		return fmt.Errorf("--event is only valid with --kind=%s", kindIngestRequeueDead)
+	// A narrowing or override flag that the chosen --kind ignores is rejected
+	// rather than silently dropped: an operator who meant to touch three
+	// named rows and mistyped --kind must not instead run unnarrowed across
+	// every dead row.
+	if filters.eventID != "" && kind != kindIngestRequeueDead && kind != kindIngestAcknowledgeUnreplayable {
+		return fmt.Errorf("--event is only valid with --kind=%s or --kind=%s", kindIngestRequeueDead, kindIngestAcknowledgeUnreplayable)
 	}
-	if accountID != "" && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
+	// Acknowledging a fact as permanently lost is never done in bulk.
+	if kind == kindIngestAcknowledgeUnreplayable && filters.eventID == "" {
+		return fmt.Errorf("--event is required with --kind=%s: this disposition is applied one reviewed event at a time", kindIngestAcknowledgeUnreplayable)
+	}
+	if filters.accountID != "" && kind == kindIngestAcknowledgeUnreplayable {
+		return fmt.Errorf("--account is not valid with --kind=%s; name the event with --event", kindIngestAcknowledgeUnreplayable)
+	}
+	if filters.includeBlockedCycles && kind != kindIngestRequeueDead {
+		return fmt.Errorf("--include-blocked-cycles is only valid with --kind=%s", kindIngestRequeueDead)
+	}
+	if filters.accountID != "" && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
 		return fmt.Errorf("--account is only valid with --kind=%s or --kind=%s", kindProjectionRequeueDead, kindIngestRequeueDead)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
@@ -170,10 +203,13 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 		return runPolicyStartReanchor(ctx, store, apply, operatorID, out)
 	}
 	if kind == kindProjectionRequeueDead {
-		return runProjectionRequeueDead(ctx, store, apply, operatorID, accountID, out)
+		return runProjectionRequeueDead(ctx, store, apply, operatorID, filters.accountID, out)
 	}
 	if kind == kindIngestRequeueDead {
-		return runIngestRequeueDead(ctx, store, apply, operatorID, accountID, eventID, out)
+		return runIngestRequeueDead(ctx, store, apply, operatorID, filters, out)
+	}
+	if kind == kindIngestAcknowledgeUnreplayable {
+		return runIngestAcknowledgeUnreplayable(ctx, store, apply, operatorID, filters.eventID, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -277,7 +313,7 @@ func runProjectionRequeueDead(ctx context.Context, store *postgresstore.Store, a
 	return nil
 }
 
-func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID, accountID, eventID string, out io.Writer) error {
+func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, filters repairFilters, out io.Writer) error {
 	// Like projection-requeue-dead, this repair resolves no freeze, so there
 	// is no encrypted resolution note or evidence to prepare here. Unlike it,
 	// that is not merely "nothing to resolve": see
@@ -285,13 +321,33 @@ func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply
 	// leaving eligibility_freezes standing is what keeps the failure mode of
 	// a second death no worse than today's.
 	in := postgresstore.IngestRequeueDeadRepairInput{Apply: apply, OperatorID: operatorID,
-		AccountID: accountID, EventID: eventID}
+		AccountID: filters.accountID, EventID: filters.eventID,
+		IncludeBlockedCycles: filters.includeBlockedCycles}
 	result, err := store.RepairIngestRequeueDead(ctx, in, postgresstore.AuditActor{
 		Type: "admin", ID: operatorID, Reason: "XM-INV-DEAD-REQUEUE repair tool " + modeLabel(apply)})
 	if err != nil {
 		return fmt.Errorf("repair ingest requeue dead: %w", err)
 	}
 	printIngestRequeueDeadSummary(out, result)
+	return nil
+}
+
+func runIngestAcknowledgeUnreplayable(ctx context.Context, store *postgresstore.Store, apply bool,
+	operatorID, eventID string, out io.Writer) error {
+	result, err := store.AcknowledgeUnreplayableIngestEvent(ctx,
+		postgresstore.IngestAcknowledgeUnreplayableInput{Apply: apply, OperatorID: operatorID, EventID: eventID},
+		postgresstore.AuditActor{Type: "admin", ID: operatorID,
+			Reason: "XM-INV-DEAD-REQUEUE unreplayable acknowledgement " + modeLabel(apply)})
+	if err != nil {
+		// The event detail is still worth printing on a refusal: the most
+		// likely refusal is "this one is replayable after all", and the
+		// operator needs to see which binding makes it so.
+		if result.Event.EventID != "" {
+			printIngestEventDetail(out, result.Event)
+		}
+		return fmt.Errorf("acknowledge unreplayable ingest event: %w", err)
+	}
+	printIngestAcknowledgeUnreplayableSummary(out, result)
 	return nil
 }
 
@@ -465,38 +521,24 @@ func printIngestRequeueDeadSummary(out io.Writer, result postgresstore.IngestReq
 		mode = "APPLIED"
 	}
 	fmt.Fprintf(out, "eligibility-repair XM-INV-DEAD-REQUEUE: %s\n\n", mode)
-	fmt.Fprintf(out, "%-38s %-10s %-18s %8s %21s %8s\n", "EVENT", "STREAM", "ENTITY", "ATTEMPTS", "DEAD_SINCE", "REQUEUED")
+	fmt.Fprintf(out, "%-38s %-10s %-18s %8s %21s %s\n", "EVENT", "STREAM", "ENTITY", "ATTEMPTS", "DEAD_SINCE", "REQUEUED")
 	for _, event := range result.Events {
-		fmt.Fprintf(out, "%-38s %-10s %-18s %8d %21s %8t\n", event.EventID, event.StreamID,
-			event.EntityType, event.PreviousAttempts, formatRepairTime(event.DeadSince), event.Requeued)
-		fmt.Fprintf(out, "  source=%s operation=%s created_at=%s catchup_key=%t\n",
-			event.SourceInstanceID, event.Operation, formatRepairTime(event.CreatedAt), event.HasCatchupKey)
-		fmt.Fprintf(out, "  payload_hash=%s\n", event.PayloadHash)
-		if event.ProcessingError != "" {
-			fmt.Fprintf(out, "  processing_error: %s\n", event.ProcessingError)
+		// The REQUEUED column carries the tool's own verdict, never a value
+		// the reader has to combine with a runbook rule to interpret.
+		verdict := fmt.Sprintf("%t", event.Requeued)
+		if event.ReplayBlocked {
+			verdict = fmt.Sprintf("%t (replay blocked)", event.Requeued)
 		}
-		// Scan cycles and freezes are reported, never modified. 'published'
-		// is a no-op for cycle publication (a published cycle is never
-		// re-evaluated), 'processing' means this requeue holds that cycle
-		// open until the event terminates again, and 'blocked' means
-		// verifyFactBatchContextTx will reject the fact so the requeued
-		// event spends its whole ladder and dies again. Read this before
-		// applying.
-		for _, cycle := range event.ScanCycles {
-			fmt.Fprintf(out, "  scan_cycle: %s cycle_status=%s\n", cycle.ScanCycleID, cycle.CycleStatus)
-		}
-		if len(event.ScanCycles) == 0 {
-			fmt.Fprintf(out, "  scan_cycle: (none -- not mapped to a schema v3 economic cycle)\n")
-		}
-		for _, freeze := range event.OpenFreezes {
-			fmt.Fprintf(out, "  open_freeze: %s account=%s reason=%s (left open on purpose)\n",
-				freeze.FreezeID, freeze.ExternalAccountID, freeze.FreezeReason)
-		}
-		if len(event.OpenFreezes) == 0 {
-			fmt.Fprintf(out, "  open_freeze: (none correlated to this payload hash)\n")
+		fmt.Fprintf(out, "%-38s %-10s %-18s %8d %21s %s\n", event.EventID, event.StreamID,
+			event.EntityType, event.PreviousAttempts, formatRepairTime(event.DeadSince), verdict)
+		printIngestEventDetail(out, event)
+		if event.ReplayBlocked {
+			fmt.Fprintf(out, "  NOT REQUEUED: %s\n", event.ReplayBlockedReason)
+			fmt.Fprintf(out, "  (requeuing anyway would spend 8 attempts and re-die; --include-blocked-cycles overrides)\n")
 		}
 	}
 	fmt.Fprintf(out, "\ntotal requeued: %d\n", result.TotalRequeued)
+	fmt.Fprintf(out, "not requeued (replay blocked): %d\n", result.TotalBlockedSkipped)
 	fmt.Fprintf(out, "events affected: %d\n", len(result.Events))
 	if len(result.Errors) > 0 {
 		fmt.Fprintf(out, "\nEVENT ERRORS (not applied, other events still processed):\n")
@@ -504,6 +546,70 @@ func printIngestRequeueDeadSummary(out io.Writer, result postgresstore.IngestReq
 			fmt.Fprintf(out, "%-60s %s\n", eventErr.EventKey, eventErr.Message)
 		}
 	}
+}
+
+// printIngestEventDetail prints the evidence block for one dead ingest
+// event: what it is, which binding governs a replay, every other binding it
+// holds, and the freezes still standing over it. Shared by both ingest kinds
+// on purpose -- deciding to requeue an event and deciding to write its fact
+// off need exactly the same facts in front of the operator.
+func printIngestEventDetail(out io.Writer, event postgresstore.IngestRequeueDeadRepairEvent) {
+	fmt.Fprintf(out, "  source=%s stream=%s entity=%s operation=%s\n",
+		event.SourceInstanceID, event.StreamID, event.EntityType, event.Operation)
+	fmt.Fprintf(out, "  created_at=%s dead_since=%s attempts=%d catchup_key=%t\n",
+		formatRepairTime(event.CreatedAt), formatRepairTime(event.DeadSince),
+		event.PreviousAttempts, event.HasCatchupKey)
+	fmt.Fprintf(out, "  payload_hash=%s\n", event.PayloadHash)
+	if event.ProcessingError != "" {
+		fmt.Fprintf(out, "  processing_error: %s\n", event.ProcessingError)
+	}
+	// The replay binding is the only cycle that governs: it is the
+	// (event, batch, cycle) triple verifyFactBatchContextTx is handed. Other
+	// mappings exist when a later rescan re-delivered the same deterministic
+	// event id, and are printed as evidence -- but a healthy cycle among them
+	// does not make the event replayable.
+	if event.ReplayScanCycleID == "" {
+		fmt.Fprintf(out, "  replay_binding: (none -- not a v3 economic fact; no cycle gate applies)\n")
+	} else {
+		fmt.Fprintf(out, "  replay_binding: cycle=%s cycle_status=%s batch=%s\n",
+			event.ReplayScanCycleID, event.ReplayCycleStatus, event.ReplayBatchID)
+	}
+	for _, cycle := range event.ScanCycles {
+		role := "other binding, NOT used by replay"
+		if cycle.ReplayBinding {
+			role = "replay binding"
+		}
+		fmt.Fprintf(out, "  scan_cycle: %s cycle_status=%-10s batch=%s (%s)\n",
+			cycle.ScanCycleID, cycle.CycleStatus, cycle.BatchID, role)
+	}
+	if len(event.ScanCycles) == 0 {
+		fmt.Fprintf(out, "  scan_cycle: (none -- not mapped to a schema v3 economic cycle)\n")
+	}
+	for _, freeze := range event.OpenFreezes {
+		fmt.Fprintf(out, "  open_freeze: %s account=%s reason=%s (left open on purpose)\n",
+			freeze.FreezeID, freeze.ExternalAccountID, freeze.FreezeReason)
+	}
+	if len(event.OpenFreezes) == 0 {
+		fmt.Fprintf(out, "  open_freeze: (none correlated to this payload hash)\n")
+	}
+}
+
+func printIngestAcknowledgeUnreplayableSummary(out io.Writer, result postgresstore.IngestAcknowledgeUnreplayableResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-DEAD-REQUEUE acknowledge-unreplayable: %s\n\n", mode)
+	fmt.Fprintf(out, "EVENT %s\n", result.Event.EventID)
+	printIngestEventDetail(out, result.Event)
+	fmt.Fprintf(out, "  unreplayable because: %s\n", result.Event.ReplayBlockedReason)
+	fmt.Fprintf(out, "\nacknowledged: %t\n", result.Acknowledged)
+	// Said plainly, because this is the point of the operation and the point
+	// an operator must be able to defend afterwards.
+	fmt.Fprintf(out, "the event is closed as processing_status='processed' / processing_error='%s'.\n",
+		"UNREPLAYABLE_BINDING")
+	fmt.Fprintf(out, "NO fact is written: this records that the fact will never be applied, not that it was.\n")
+	fmt.Fprintf(out, "open freezes are left exactly as they are; resolve them through the admin path.\n")
 }
 
 // formatRepairTime renders a timestamp for the summary table above, leaving
