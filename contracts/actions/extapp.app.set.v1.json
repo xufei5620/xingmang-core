@@ -1,0 +1,65 @@
+{
+  "id": "extapp.app.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "extapp.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "app_id": {
+      "type": "string",
+      "required": false
+    },
+    "app_key": {
+      "type": "string",
+      "required": true
+    },
+    "display_name": {
+      "type": "string",
+      "required": true
+    },
+    "owner": {
+      "type": "string",
+      "required": true
+    },
+    "primary_domain": {
+      "type": "string",
+      "required": false
+    },
+    "auth_mode": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "dev-header",
+        "oidc",
+        "local"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "planned",
+        "active",
+        "retired"
+      ]
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-EXT-APP：前端应用登记簿（ADMIN-IA §5.4「应用与配置 → 应用目录」）。「应用」= 平台自己纳管的前端站点（§5.4.1：admin-web、console 这类我们自己部署的前端），不是被管平台的前端，也不是页面搭建器的应用。只做记录：不请求站点、不解析域名、不查证书，status 是登记簿口径不是探活结果。app_id 留空 = 新登记，填了 = 改这一条（整行替换）。app_key 是稳定标识，规则与 core.service.instance_id 相同（小写字母数字与连字符，不以连字符开头，最长 64）。primary_domain 是主机名（admin.solov.cc）不是 URL——这条形态要求顺带挡掉了 https://user:pass@host 这类把凭据写进地址的写法。auth_mode 三个取值逐字取自 deploy/docker/web-app-config.sh 的 XM_WEB_AUTH_MODE，留空 = 未登记。environment 不是参数：取自调用者身份（宪法 15 条），一条登记也不能换环境。风险等级 L1 的依据：ADR-003 风险等级表「修改低风险平台配置」，与同类登记簿写操作 server.asset.set@1 / finance.upstream_account.set@1 同档——一次只写一行，不批量、不启停、不触碰任何第三方系统，改错了改回来即可。若将来这张表开始驱动线上行为（例如按登记生成 nginx vhost），定级必须重评。"
+}

@@ -53,6 +53,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { ChangesPage } from "./pages/ChangesPage";
 import { DesignPage } from "./pages/DesignPage";
+import { ExtAppPage } from "./pages/ExtAppPage";
 import { FinancePage } from "./pages/FinancePage";
 import { OpsPage } from "./pages/OpsPage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -401,6 +402,13 @@ export const routes = [
               { path: "finance", Component: FinancePage },
               { path: "changes", Component: ChangesPage },
               { path: "design", Component: DesignPage },
+              // XM-EXT-APP（2026-09-08）：产品负责人推翻了 ADMIN-IA §5.4
+              // 「扩展能力四页只读蓝图、不得因此提前建后端」对这一页的适用，
+              // 于是它的 built 翻成了 true，也就掉出了 placeholderRoutes
+              // （那份只收 !item.built）。不在这里补显式路由的话，侧栏上有
+              // 条目、点进去落到最后的 `*` 兜底 404——与上面那三页、以及
+              // XM-OPS-TAILS0 记录过的 /jobs 那次缺口一模一样。
+              { path: "ext/app", Component: ExtAppPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

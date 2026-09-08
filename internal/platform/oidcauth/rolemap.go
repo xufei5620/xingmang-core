@@ -164,6 +164,16 @@ func DefaultRoleScopeMap() map[string][]string {
 			// resolver_test 的 TestDefaultRoleScopeMapIsConservative 断言
 			// admin 含它、staff 不含它。
 			"server.manage",
+			// XM-EXT-APP（2026-09-08）：前端应用登记簿的写权限。与
+			// server.manage 同一档、同一条理由——登记的是我们自己部署的
+			// 前端站点的域名/负责人/登录方式/状态与「哪次发布上了哪个版本」，
+			// 全是纯记录字段：**不触碰任何第三方系统、不影响任何成本或收入
+			// 归属、也不会让任何站点发生变化**（平台没有发布通道，发布是
+			// Platform Lifecycle Operation），改错了改回来即可。
+			//
+			// 不给 staff：staff 依然不该有任何 .manage 能力
+			// （见 TestDefaultRoleScopeMapIsConservative 对 staff 的断言）。
+			"extapp.manage",
 			// XM-ASSURE1-core（渠道主动探测/检测任务）：declare/cancel/run 三个
 			// L1 Action 与 finance.upstream_account.manage 等同一档——纯配置写
 			// / 触发一次受多重闸约束的探测批次，进 admin。**probe.kill_switch

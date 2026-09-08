@@ -25,6 +25,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
+	"github.com/xufei5620/xingmang-platform/internal/platform/extapp"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
@@ -138,6 +139,20 @@ func main() {
 	// 进程，会让运维在真要登记一台新机器的时候才发现保存键点不动。
 	serverStore := server.NewStore(pool)
 	if err := server.RegisterActions(actionRegistry, serverStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 前端应用登记簿的写操作（登记/修改/下线站点、记录一次已发生的发布）
+	// 同样必须经 Action 内核（宪法 2 条 / ADR-003）。
+	//
+	// **注意 extapp.release.record 记录的是已经发生的发布，它不发布任何东西**：
+	// 发布与回滚是 Platform Lifecycle Operation（宪法 2、3 条），走版本化脚本
+	// + 人工批准，这里没有、也不该有那条通道。
+	// 注册失败即拒绝启动——一个「应用与配置页有按钮但后端没注册动作」的进程，
+	// 会让人在真要登记一个新站点的时候才发现保存键点不动。
+	extAppStore := extapp.NewStore(pool)
+	if err := extapp.RegisterActions(actionRegistry, extAppStore); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -570,6 +585,8 @@ func main() {
 		ServerSuppliers:    serverStore,
 		ServerDomains:      serverStore,
 		ServerServiceNotes: serverStore,
+		ExtApps:            extAppStore,
+		ExtAppReleases:     extAppStore,
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。

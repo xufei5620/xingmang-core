@@ -1,0 +1,55 @@
+{
+  "id": "extapp.release.record",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "extapp.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "app_id": {
+      "type": "string",
+      "required": true
+    },
+    "version": {
+      "type": "string",
+      "required": true
+    },
+    "released_by": {
+      "type": "string",
+      "required": true
+    },
+    "commit_sha": {
+      "type": "string",
+      "required": false
+    },
+    "kind": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "deploy",
+        "rollback"
+      ]
+    },
+    "released_at": {
+      "type": "string",
+      "required": false
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-EXT-APP：记录一次**已经发生**的前端发布（ADMIN-IA §5.4「应用与配置 → 版本与发布」）。⚠️ 这个动作不发布任何东西：平台没有、也不会有发布或回滚端点，发布与迁移是 Platform Lifecycle Operation（宪法 2、3 条 / ADR-003），走版本化脚本 + 人工批准，不经 Action 通道。那为什么它是 Action？因为「往登记簿里加一行」是一次平台配置写操作，而所有平台配置写操作必须经 Action（宪法 2 条）。被记录的那次发布不经 Action，记录这件事必须经 Action——两件事共用「发布」两个字，不是同一件事。风险等级 L1：写一行历史记录，不改变任何运行中的东西，与本包另外两个动作同档。kind=rollback 时 version 记的是**回滚到的那个版本**（回滚同样是让某个版本上线），不是被回滚掉的那个。released_at 留空 = 现在；补记历史发布时给一个 RFC3339 时刻，必须带时区（不带时区的时刻会被当成另一个时刻且不报错）。released_by 是执行那次发布的人，可能不是来登记的人——登记者由审计链的 actor 记录。compensation_mode 是 MANUAL 而不是 AUTOMATIC：**本包不提供删除发布记录的动作**，一条能被删掉的历史记录不是历史记录；记错了的补救是再记一条正确的，两条都留在簿上，谁在什么时候记的由审计链回答。库层有 (app_id, version, released_at) 唯一索引，挡住表单双击与补记时抄两遍。"
+}

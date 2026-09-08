@@ -678,6 +678,16 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if slices.Contains(staff, "server.manage") {
 		t.Fatal("staff 默认不该含 server.manage：写权限只给 admin 与显式授权角色")
 	}
+	// XM-EXT-APP：前端应用登记簿同上一条同一档——纯记录字段，且平台没有
+	// 发布通道（发布是 Platform Lifecycle Operation），改这张表不会让任何
+	// 站点发生变化。方向同样是 admin 含、staff 不含。
+	if !slices.Contains(admin, "extapp.manage") {
+		t.Fatal("admin 应含 extapp.manage：前端应用登记簿是纯记录字段，" +
+			"与 server.manage 同一档；不给的话这个功能对唯一的管理员也是 403")
+	}
+	if slices.Contains(staff, "extapp.manage") {
+		t.Fatal("staff 默认不该含 extapp.manage：写权限只给 admin 与显式授权角色")
+	}
 	if slices.Contains(admin, "request.content.read") {
 		t.Fatal("admin 默认**不该**含 request.content.read：" +
 			"用户与模型的完整对话要显式授权给客诉/风控岗，" +
