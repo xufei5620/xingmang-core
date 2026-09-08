@@ -205,6 +205,15 @@ const JOB_KIND_LABELS: Readonly<Record<string, string>> = {
   reqlog_metrics: "请求量指标聚合",
   connector_probe: "连接器健康探测",
   cpa_sync: "CPA 用量同步",
+  // XM-I18N-LABELS：又漏了四个。前三个都在 jobs/client.go 里注册成了周期任务
+  // （approval_expire / card_sync / sms_probe），第四个的 kind 常量不在 jobs
+  // 包里而在 assurance 包（assurance/job_args.go），所以按目录找的人都会漏掉它。
+  // 这次把「漏没漏」交给门禁：labels.reconcile.test.ts 递归扫 internal/platform
+  // 下全部 `XxxJobKind = "…"`，少一个就红。
+  approval_expire: "审批单过期清理",
+  card_sync: "卡片数据同步",
+  sms_probe: "接码服务探测",
+  assurance_probe: "保障探针",
 };
 
 /** 把 job kind 翻成中文名；未知 kind 原样返回。 */

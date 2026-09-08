@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { listMetricHistory, METRIC_HISTORY_HOURS, type MetricItem } from "../api/platform";
 import { ApiError } from "../api/client";
 import { metricLabel, toSparkSamples } from "../lib/metrics";
+import { errorCodeNote } from "../lib/labels";
 
 function Note({ children }: { children: string }) {
   return <p className="text-xs text-fg-muted">{children}</p>;
@@ -57,7 +58,7 @@ export function MetricSparkline({
   if (query.error) {
     const err = query.error;
     // 把错误码留在悬停里：不打扰正常阅读，但报障时能直接说清是哪一类失败
-    const detail = err instanceof ApiError ? `${err.message}（错误码 ${err.code}）` : String(err);
+    const detail = err instanceof ApiError ? `${err.message}（${errorCodeNote(err.code)}）` : String(err);
     return (
       <>
         <p className="text-xs text-fg-muted" title={detail}>

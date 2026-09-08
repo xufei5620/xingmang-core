@@ -245,12 +245,19 @@ export function createSilence(
   );
 }
 
-/** 第一批规则的键与中文名（Go 侧 alerts/rules.go 的 RuleKeys）。
+/** 全部规则的键与中文名（Go 侧 alerts/rules.go 的 Rules，label 逐字取自
+ *  那边每条规则的 Title）。
  *
  *  前端重复这份清单，是为了让静默对话框的下拉框有可选项——后端没有
  *  「列出规则」的端点（Foundation-A 不值得为一个静态清单开一条 API）。
- *  重复的代价由 alerts.test.ts 里那条断言兜住：它对着后端错误文案里
- *  列出的键做形态校验，键名改了会在集成测试里显形。
+ *
+ *  重复就会分叉，而且**已经分叉过一次**：后端在 XM-0033 之后陆续加了
+ *  upstream.version.changed / upstream.runway.low / approval.pending.too_long
+ *  三条，这份清单一直停在最早的五条——于是那三类告警在界面上只显示原始
+ *  英文键，静默对话框里也根本选不到它们（运营想压住「审批单挂太久」的刷屏
+ *  只能整个环境全局静默）。XM-I18N-LABELS 补齐，并把「不许再分叉」变成门禁：
+ *  labels.reconcile.test.ts 直接读 rules.go，键少一条、多一条、或者中文名与
+ *  后端 Title 不一致，那条测试都会红。
  *
  *  拼错的 rule_key 会被后端当场拒绝（它会静默零条告警，而创建者以为
  *  已经静默了），所以这里给的是下拉而不是自由输入。 */
@@ -260,6 +267,9 @@ export const ALERT_RULES: { key: string; label: string }[] = [
   { key: "metric.sync.consecutive_failed", label: "同步连续失败" },
   { key: "channel.token.invalid", label: "渠道 token 失效" },
   { key: "channel.balance.low", label: "渠道余额不足" },
+  { key: "upstream.version.changed", label: "上游版本变化" },
+  { key: "upstream.runway.low", label: "上游可用天数不足" },
+  { key: "approval.pending.too_long", label: "审批单挂太久" },
 ];
 
 /** 把规则键翻成中文名；未知键原样返回。

@@ -13,6 +13,7 @@ import { safeNextPath } from "../auth/oidc";
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import { loginReasonMessage, oidc } from "../auth/session";
 import { TotpVerifyForm } from "../components/TotpVerifyForm";
+import { errorCodeNote } from "../lib/labels";
 
 /** 登录页（XM-AUTH1 起 oidc/dev-header 两态；XM-LOGIN 加入 local）。
  *
@@ -44,7 +45,7 @@ function localLoginErrorMessage(cause: unknown): string {
       case "RATE_LIMITED":
         return "尝试过于频繁，请稍后重试。";
       default:
-        return `${cause.message}（错误码 ${cause.code}）`;
+        return `${cause.message}（${errorCodeNote(cause.code)}）`;
     }
   }
   return cause instanceof Error ? cause.message : "登录失败，请重试。";
@@ -67,7 +68,7 @@ function totpLoginErrorMessage(cause: unknown): { message: string; expired: bool
       case "RATE_LIMITED":
         return { message: "尝试过于频繁，请稍后重试。", expired: false };
       default:
-        return { message: `${cause.message}（错误码 ${cause.code}）`, expired: false };
+        return { message: `${cause.message}（${errorCodeNote(cause.code)}）`, expired: false };
     }
   }
   return { message: cause instanceof Error ? cause.message : "验证失败，请重试。", expired: false };

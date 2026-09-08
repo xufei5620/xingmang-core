@@ -8,7 +8,7 @@ import {
   PageState,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
-import { Badge, Button, Input, Select, Tabs, type BadgeTone } from "@xingmang/ui-primitives";
+import { Badge, Button, Input, Select, Tabs } from "@xingmang/ui-primitives";
 import { useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import {
@@ -23,23 +23,25 @@ import {
 } from "../api/actions";
 import { ApiStateView } from "../components/ApiStateView";
 import { ApprovalQueue } from "../components/ApprovalQueue";
+import { RiskBadge } from "../components/RiskBadge";
+import {
+  actionRunStatus,
+  errorCodeHint,
+  errorCodeNote,
+  principalTypeHint,
+  principalTypeText,
+  RISK_LEVELS,
+  riskLevelText,
+} from "../lib/labels";
 
 const ACTIONS_SUB_TABS = (navItemByPath("/actions")?.item.subTabs ?? []).map(
   (tab) => [tab.id, tab.label] as const,
 );
 const DEFAULT_SUB_TAB = "catalog";
 
-const RISK_LEVEL_TONE: Readonly<Record<string, BadgeTone>> = {
-  L0: "neutral",
-  L1: "info",
-  L2: "warning",
-  L3: "warning",
-  L4: "danger",
-};
-
-function riskTone(level: string): BadgeTone {
-  return RISK_LEVEL_TONE[level] ?? "neutral";
-}
+/** 等级筛选下拉的选项。与列的 value 用同一个函数算，两边一定对得上；
+ *  写死一份「L0 最低风险」的字面量清单迟早与 riskLevelText 分叉。 */
+const RISK_FILTER_OPTIONS = ["L0", "L1", "L2", "L3", "L4"].map(riskLevelText);
 
 /** 操作与审批页（ADMIN-IA §2.2 `g/actions`：操作目录 / 待审批 / 执行记录 /
  *  风险与启用条件）。
@@ -167,7 +169,7 @@ function ActionCatalogTab() {
           rows={query.data ?? []}
           rowKey={(row) => `${row.id}@${row.version}`}
           searchable
-          filters={[{ columnId: "risk", label: "风险等级", options: ["L0", "L1", "L2", "L3", "L4"] }]}
+          filters={[{ columnId: "risk", label: "风险等级", options: RISK_FILTER_OPTIONS }]}
           emptyState={
             <PageState
               kind="empty"
@@ -197,8 +199,10 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
   {
     id: "risk",
     header: "风险等级",
-    value: (row) => row.risk_level,
-    cell: (row) => <Badge tone={riskTone(row.risk_level)}>{row.risk_level}</Badge>,
+    // value 带上中文：它同时是搜索文本与筛选比较值，只放 `L2` 的话
+    // 搜「高风险」搜不到，而筛选下拉里也只能摆一串读不懂的字母。
+    value: (row) => riskLevelText(row.risk_level),
+    cell: (row) => <RiskBadge level={row.risk_level} />,
   },
   {
     id: "permission",
@@ -214,7 +218,10 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
   {
     id: "principalTypes",
     header: "允许身份类型",
-    cell: (row) => (row.principal_types.length > 0 ? row.principal_types.join(" / ") : "—"),
+    cell: (row) =>
+      row.principal_types.length > 0
+        ? row.principal_types.map(principalTypeText).join(" / ")
+        : "—",
   },
   {
     id: "executable",
@@ -452,11 +459,13 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
   {
     id: "principal",
     header: "身份",
-    value: (row) => `${row.principal_id} ${row.principal_type}`,
+    value: (row) => `${row.principal_id} ${principalTypeText(row.principal_type)}`,
     cell: (row) => (
       <span>
         <span className="font-medium">{row.principal_id}</span>
-        <p className="text-xs text-fg-muted">{row.principal_type}</p>
+        <p className="text-xs text-fg-muted" title={principalTypeHint(row.principal_type)}>
+          {principalTypeText(row.principal_type)}
+        </p>
       </span>
     ),
   },
@@ -469,8 +478,8 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
   {
     id: "risk",
     header: "风险等级",
-    value: (row) => row.risk_level,
-    cell: (row) => <Badge tone={riskTone(row.risk_level)}>{row.risk_level}</Badge>,
+    value: (row) => riskLevelText(row.risk_level),
+    cell: (row) => <RiskBadge level={row.risk_level} />,
   },
   {
     id: "status",
@@ -480,10 +489,21 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
     sortAs: (row) => row.status,
     cell: (row) => (
       <span className="flex flex-col gap-0.5">
-        <Badge tone={row.status === "succeeded" ? "success" : "danger"}>
-          {row.status === "succeeded" ? "成功" : "失败"}
+        {/* 查表而不是二选一：后端将来加第三个状态时，二选一会把它显示成
+            「失败」——那不是翻译不到位，是说了一句假话。认不出来就原样显示。 */}
+        <Badge
+          tone={row.status === "succeeded" ? "success" : "danger"}
+          title={actionRunStatus(row.status)?.hint}
+        >
+          {actionRunStatus(row.status)?.label ?? row.status}
         </Badge>
-        {row.error_code ? <span className="font-mono text-xs text-danger">{row.error_code}</span> : null}
+        {row.error_code ? (
+          // 中文在前、原码在括号里：这一列的原码是拿去 grep 服务端日志的，
+          // 一个字都不能改（withCode 保证不认识的码原样吐出来）。
+          <span className="text-xs text-danger" title={errorCodeHint(row.error_code)}>
+            {errorCodeNote(row.error_code)}
+          </span>
+        ) : null}
       </span>
     ),
   },
@@ -595,9 +615,12 @@ function DetailField({ label, value, mono }: { label: string; value: string; mon
 // 风险与启用条件
 // ---------------------------------------------------------------------------
 
-interface RiskLevelInfo {
+interface RiskLevelRow {
   level: string;
+  /** 该等级的中文名（「中风险」），来自 lib/labels.ts。 */
+  label: string;
   examples: string;
+  /** ADR-003 表里的「基础控制」一栏。 */
   controls: string;
   /** 该等级能不能被**直接**执行（L0/L1 能；L2 及以上不能，见
    *  action.RiskLevel.RequiresAdvancedControls）。纯展示用的静态治理事实，
@@ -611,36 +634,35 @@ interface RiskLevelInfo {
    *  blocked_reason（httpapi.ListActionsHandler 的 approvalsWired 分支），
    *  显示在「操作目录」的「可执行」列里，本页不猜。 */
   directlyExecutable: boolean;
+  /** 要几票、能不能自批、多久过期——一句话，来自 approval.DefaultPolicy()。 */
+  approvalHint: string;
 }
 
-/** ADR-003（docs/adr/ADR-003-Action唯一写入口.md）的风险等级表，逐字对齐。 */
-const RISK_LEVELS: readonly RiskLevelInfo[] = [
-  { level: "L0", examples: "保存个人视图、低影响偏好", controls: "权限 + 基础审计", directlyExecutable: true },
-  {
-    level: "L1",
-    examples: "修改低风险平台配置、确认普通告警",
-    controls: "权限 + 审计；按需幂等",
-    directlyExecutable: true,
-  },
-  {
-    level: "L2",
-    examples: "批量配置、启停低风险资源",
-    controls: "预览 + 幂等 + 写后确认 + 完整审计",
-    directlyExecutable: false,
-  },
-  {
-    level: "L3",
-    examples: "服务切换、账号批量导入、敏感配置",
-    controls: "人工批准 + MFA + 冷却 + 补偿",
-    directlyExecutable: false,
-  },
-  {
-    level: "L4",
-    examples: "退款、生产基础设施高影响动作、开票关键动作",
-    controls: "双人审批目标；单人阶段 Break-glass",
-    directlyExecutable: false,
-  },
-];
+/** ADR-003 表里那一栏「基础控制」。
+ *
+ *  只有它留在本页：等级、中文名、典型场景、要不要先落审批单都改由
+ *  lib/labels.ts 提供（那一份对着后端 risk.go 与 approval.DefaultPolicy()
+ *  有对账测试）。基础控制是治理文档的话，后端代码里没有对应事实，
+ *  没有可对账的对象，所以留在这里并注明出处。 */
+const RISK_CONTROLS: Readonly<Record<string, string>> = {
+  L0: "权限 + 基础审计",
+  L1: "权限 + 审计；按需幂等",
+  L2: "预览 + 幂等 + 写后确认 + 完整审计",
+  L3: "人工批准 + MFA + 冷却 + 补偿",
+  L4: "双人审批目标；单人阶段 Break-glass",
+};
+
+/** ADR-003（docs/adr/ADR-003-Action唯一写入口.md）的风险等级表。 */
+const RISK_LEVEL_ROWS: readonly RiskLevelRow[] = Object.entries(RISK_LEVELS)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([level, meaning]) => ({
+    level,
+    label: meaning.label,
+    examples: meaning.examples,
+    controls: RISK_CONTROLS[level] ?? "—",
+    directlyExecutable: !meaning.requiresApproval,
+    approvalHint: meaning.hint,
+  }));
 
 /** 风险与启用条件：ADR-003 的静态治理表 + 操作目录的实时统计。
  *
@@ -668,24 +690,28 @@ function ActionRiskConditionsTab() {
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         <div className="overflow-x-auto rounded-lg border border-edge">
           <table className="w-full min-w-[640px] text-left text-xs">
-            <caption className="sr-only">风险等级、例子、基础控制、已注册数量与可执行数量</caption>
+            <caption className="sr-only">风险等级、例子、基础控制、审批条件、已注册数量与可执行数量</caption>
             <thead className="bg-surface-muted text-fg-muted">
               <tr>
                 <th className="px-3 py-2 font-medium">等级</th>
                 <th className="px-3 py-2 font-medium">例子</th>
                 <th className="px-3 py-2 font-medium">基础控制</th>
+                <th className="px-3 py-2 font-medium">审批条件</th>
                 <th className="px-3 py-2 text-right font-medium">已注册</th>
                 <th className="px-3 py-2 text-right font-medium">可执行</th>
               </tr>
             </thead>
             <tbody>
-              {RISK_LEVELS.map((r) => (
+              {RISK_LEVEL_ROWS.map((r) => (
                 <tr key={r.level} className="border-t border-edge">
                   <td className="px-3 py-2">
-                    <Badge tone={riskTone(r.level)}>{r.level}</Badge>
+                    <RiskBadge level={r.level} />
                   </td>
                   <td className="px-3 py-2 text-fg-muted">{r.examples}</td>
                   <td className="px-3 py-2 text-fg-muted">{r.controls}</td>
+                  {/* 票数、能不能自批、多久过期取自 approval.DefaultPolicy()，
+                      不是这一页自己写的数字（见 lib/labels.ts 的对账测试）。 */}
+                  <td className="px-3 py-2 text-fg-muted">{r.approvalHint}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-fg">{countByLevel(r.level)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-fg">
                     {executableByLevel(r.level)}

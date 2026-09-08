@@ -16,6 +16,7 @@ import { FINANCE_READ_PERMISSION } from "../api/finance";
 import { stepUpTotp } from "../auth/localSession";
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import { TotpVerifyForm } from "./TotpVerifyForm";
+import { errorCodeNote } from "../lib/labels";
 
 /** CR-0005 平台线 g：开票控制台嵌入的三个位置。Sub2API / NewAPI 各自的
  *  「支付与财务 → 开票」按平台过滤；`global` 是治理「跨平台财务 → 开票集成」，
@@ -108,7 +109,7 @@ function stepUpErrorMessage(cause: unknown): { message: string; expired: boolean
       case "RATE_LIMITED":
         return { message: "尝试过于频繁，请稍后重试。", expired: false };
       default:
-        return { message: `${cause.message}（错误码 ${cause.code}）`, expired: false };
+        return { message: `${cause.message}（${errorCodeNote(cause.code)}）`, expired: false };
     }
   }
   return { message: cause instanceof Error ? cause.message : "验证失败，请重试。", expired: false };

@@ -19,6 +19,7 @@ import {
   type ChainLink,
 } from "../lib/audit";
 import { Link, useSearchParams } from "react-router";
+import { errorCodeHint, errorCodeNote, principalTypeHint, principalTypeText } from "../lib/labels";
 
 const AUDIT_SUB_TABS = (navItemByPath("/audit")?.item.subTabs ?? []).map(
   (tab) => [tab.id, tab.label] as const,
@@ -198,11 +199,15 @@ const AUDIT_COLUMNS: DataTableColumn<AuditRowModel>[] = [
   {
     id: "principal",
     header: "主体",
-    value: ({ row }) => `${row.principalId} ${row.principalType}`,
+    value: ({ row }) => `${row.principalId} ${principalTypeText(row.principalType)}`,
     cell: ({ row }) => (
       <>
         <span className="font-medium">{row.principalId}</span>
-        {row.principalType ? <p className="text-xs text-fg-muted">{row.principalType}</p> : null}
+        {row.principalType ? (
+          <p className="text-xs text-fg-muted" title={principalTypeHint(row.principalType)}>
+            {principalTypeText(row.principalType)}
+          </p>
+        ) : null}
       </>
     ),
   },
@@ -235,11 +240,16 @@ const AUDIT_COLUMNS: DataTableColumn<AuditRowModel>[] = [
   {
     id: "result",
     header: "结果",
-    value: ({ row }) => `${row.resultLabel} ${row.errorCode}`,
+    value: ({ row }) => `${row.resultLabel} ${row.errorCode ? errorCodeNote(row.errorCode) : ""}`,
     cell: ({ row }) => (
       <>
         <Badge tone={row.resultTone}>{row.resultLabel}</Badge>
-        {row.errorCode ? <p className="font-mono text-xs text-danger">{row.errorCode}</p> : null}
+        {row.errorCode ? (
+          // 中文在前、原码逐字保留：审计页的错误码正是拿去对服务端日志的那一个。
+          <p className="text-xs text-danger" title={errorCodeHint(row.errorCode)}>
+            {errorCodeNote(row.errorCode)}
+          </p>
+        ) : null}
       </>
     ),
   },

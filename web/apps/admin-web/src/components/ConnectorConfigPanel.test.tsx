@@ -212,7 +212,7 @@ describe("设置 · 接入模式", () => {
     renderPanel();
 
     expect(await screen.findByText("加载失败")).toBeTruthy();
-    expect(screen.getByText(/数据库不可用（错误码 INTERNAL）/)).toBeTruthy();
+    expect(screen.getByText(/数据库不可用（服务端内部错误，错误码 INTERNAL）/)).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Sub2API", level: 3 })).toBeNull();
   });
 });

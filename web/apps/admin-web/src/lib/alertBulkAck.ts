@@ -9,6 +9,7 @@
 import { ACKNOWLEDGE_PERMISSION, type AlertItem } from "../api/alerts";
 import { ApiError } from "../api/client";
 import { canAcknowledge, describeStatus } from "./alerts";
+import { errorCodeNote } from "./labels";
 
 /** 确认成功的一条。
  *
@@ -105,7 +106,7 @@ export function planBulkAcknowledge(
  *  批量场景下「有几条失败了」最常见的成因就是它。 */
 export function describeAckFailure(error: unknown): string {
   if (error instanceof ApiError) {
-    const parts = [`${error.message}（错误码 ${error.code}）`];
+    const parts = [`${error.message}（${errorCodeNote(error.code)}）`];
     if (error.status === 403) {
       parts.push(`需要权限 ${error.missingScope ?? ACKNOWLEDGE_PERMISSION}`);
     }

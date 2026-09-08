@@ -103,7 +103,7 @@ describe("describeAckFailure", () => {
     const error = new ApiError(403, "PERMISSION_DENIED", "缺少权限 alerts.alert.manage", "req-9");
 
     expect(describeAckFailure(error)).toBe(
-      "缺少权限 alerts.alert.manage（错误码 PERMISSION_DENIED），需要权限 alerts.alert.manage，request_id=req-9",
+      "缺少权限 alerts.alert.manage（权限不足，错误码 PERMISSION_DENIED），需要权限 alerts.alert.manage，request_id=req-9",
     );
   });
 
@@ -111,13 +111,13 @@ describe("describeAckFailure", () => {
     const error = new ApiError(409, "CONFLICT", "该告警已不可确认", "req-7");
 
     expect(describeAckFailure(error)).toBe(
-      "该告警已不可确认（错误码 CONFLICT），request_id=req-7",
+      "该告警已不可确认（状态冲突，错误码 CONFLICT），request_id=req-7",
     );
   });
 
   it("没有 request_id 时不留一个空的 request_id=", () => {
     expect(describeAckFailure(new ApiError(500, "INTERNAL", "服务端错误"))).toBe(
-      "服务端错误（错误码 INTERNAL）",
+      "服务端错误（服务端内部错误，错误码 INTERNAL）",
     );
   });
 

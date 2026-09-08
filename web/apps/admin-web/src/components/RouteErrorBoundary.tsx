@@ -1,6 +1,7 @@
 import { PageHeader, PageState } from "@xingmang/ui-admin";
 import { isRouteErrorResponse, useLocation, useRouteError } from "react-router";
 import { NotFoundView } from "../pages/NotFoundPage";
+import { httpStatusText } from "../lib/labels";
 
 /** 页面级错误兜底。
  *
@@ -25,7 +26,9 @@ export function RouteErrorBoundary() {
     error instanceof Error
       ? error.message
       : isRouteErrorResponse(error)
-        ? `${error.status} ${error.statusText}`
+        ? // 状态码在前、中文补在后面，statusText 原样跟着：那是服务端自己写的
+          // reason-phrase，改它等于改证据。
+          `${httpStatusText(error.status)}${error.statusText ? ` ${error.statusText}` : ""}`
         : "未知错误";
 
   return (

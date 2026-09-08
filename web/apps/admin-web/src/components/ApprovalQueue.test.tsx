@@ -311,4 +311,70 @@ describe("审批队列", () => {
       expect(urls.some((u) => u.includes("status=EXECUTED"))).toBe(true);
     });
   });
+  // --- 中文对照（XM-I18N-LABELS）-------------------------------------------
+
+  it("风险等级徽章带中文，原始等级串仍逐字在最前面", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(fakeResponse(listBody([approval({ risk_level: "L4" })])))),
+    );
+    renderQueue();
+    await screen.findByText("上游换域名，需要重新登记");
+
+    // 「L4」三个字符说不出这一级有多重；中文补上，但 L4 本身一个字符不改——
+    // 运维查 ADR-003、跟人开口说的都是那个串。
+    const badge = screen.getByText("L4 最高风险");
+    expect(badge.textContent).toContain("L4");
+    // 票数、能不能自批、多久过期挂在悬停里（数字来自 approval.DefaultPolicy()）。
+    expect(badge.getAttribute("title")).toMatch(/2 票/);
+    expect(badge.getAttribute("title")).toMatch(/4 小时/);
+  });
+
+  it("认不出来的风险等级原样显示，不兜底成某个已知等级", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(fakeResponse(listBody([approval({ risk_level: "L9" })])))),
+    );
+    renderQueue();
+    // 先拿到正向锚点：卡片确实渲染出来了，下面的缺席断言才有意义。
+    await screen.findByText("上游换域名，需要重新登记");
+
+    const heading = screen.getAllByRole("heading", { level: 3 })[0];
+    expect(heading?.textContent).toContain("L9");
+    // 缺席：不能给它安上任何一个已知等级的中文名——把一个更危险的新等级
+    // 显示成较轻的那个，比不翻译危险得多。
+    expect(heading?.textContent).not.toMatch(/最低风险|低风险|中风险|高风险|最高风险/);
+  });
+
+  it("提交人类别有中文，原码留在括号里", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(fakeResponse(listBody([approval({ requester_type: "HUMAN" })])))),
+    );
+    renderQueue();
+    await screen.findByText("上游换域名，需要重新登记");
+    fireEvent.click(screen.getByRole("button", { name: "详情" }));
+    const dialog = within(await screen.findByRole("dialog"));
+    expect(dialog.getByText("人（HUMAN）")).not.toBeNull();
+  });
+
+  it("状态徽章与筛选下拉出自同一份对照表：徽章「已批准」，下拉「已批准（待执行）」", async () => {
+    // 这两处曾经各自写死一份，措辞已经分叉。现在限定语由对照表的 note 承载，
+    // 徽章取短名、下拉取全名——**同一条记录的两种渲染**，不是两份表。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(fakeResponse(listBody([approval({ status: "APPROVED" })])))),
+    );
+    renderQueue();
+    await screen.findByText("上游换域名，需要重新登记");
+
+    const badge = screen.getAllByText("已批准")[0];
+    expect(badge).toBeDefined();
+    // 「已批准」很容易被读成「这件事做完了」，所以悬停必须说清动作还没发生。
+    expect(badge?.getAttribute("title")).toMatch(/还没有发生/);
+
+    const trigger = screen.getByRole("combobox", { name: "按状态筛选审批单" });
+    fireEvent.keyDown(trigger, { key: "Enter" });
+    expect(await screen.findByRole("option", { name: "已批准（待执行）" })).not.toBeNull();
+  });
 });

@@ -7,6 +7,7 @@ import { confirmTotp, enrollTotp, type EnrollTotpResult } from "../api/totp";
 import { cachedLocalUser, setCachedLocalUser, type LocalUser } from "../auth/localSession";
 import { safeNextPath } from "../auth/oidc";
 import { validateTotpCode } from "../lib/totpForm";
+import { errorCodeNote } from "../lib/labels";
 
 /** 密码只在浏览器剪贴板 API 存在时尝试复制；不存在（旧浏览器、非安全上下文、
  *  测试环境）就什么也不做——内容已经显示在屏幕上，人仍能手动选中复制。
@@ -189,7 +190,7 @@ function EnrollFlow({ user, onEnrolled }: { user: LocalUser; onEnrolled: (user: 
         <div className="flex flex-col gap-3">
           <p role="alert" className="text-xs text-danger">
             {loadError instanceof ApiError
-              ? `${loadError.message}（错误码 ${loadError.code}）`
+              ? `${loadError.message}（${errorCodeNote(loadError.code)}）`
               : "生成密钥失败，请重试。"}
           </p>
           <Button type="button" size="sm" onClick={() => void startEnroll()}>
@@ -307,7 +308,7 @@ function ConfirmStep({
         {error ? (
           <p role="alert" className="text-xs text-danger">
             {error instanceof ApiError
-              ? `${error.message}（错误码 ${error.code}）`
+              ? `${error.message}（${errorCodeNote(error.code)}）`
               : error instanceof Error
                 ? error.message
                 : "验证失败，请重试。"}

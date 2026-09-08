@@ -18,28 +18,32 @@ import {
   displayStatus,
   groupByRisk,
   paramRows,
+  statusFullLabel,
+  statusHint,
   statusLabel,
   statusTone,
   voteProgress,
 } from "../lib/approvals";
+import { APPROVAL_VERDICTS, principalTypeHint, principalTypeText } from "../lib/labels";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ApiStateView } from "./ApiStateView";
-
-const RISK_TONE: Readonly<Record<string, "warning" | "danger" | "neutral">> = {
-  L2: "warning",
-  L3: "warning",
-  L4: "danger",
-};
+import { RiskBadge } from "./RiskBadge";
 
 const STATUS_FILTER_ALL = "all";
+/** 筛选项由**同一份**对照表生成，不再手抄一遍。
+ *
+ *  顺序照队列里最常用到最少用：先看要处理的，再看已经落定的。 */
+const STATUS_FILTER_ORDER: ApprovalStatus[] = [
+  "PENDING",
+  "APPROVED",
+  "EXECUTED",
+  "REJECTED",
+  "EXPIRED",
+  "CANCELLED",
+];
 const STATUS_FILTER_OPTIONS = [
   { value: STATUS_FILTER_ALL, label: "全部状态" },
-  { value: "PENDING", label: "待审批" },
-  { value: "APPROVED", label: "已批准（待执行）" },
-  { value: "EXECUTED", label: "已执行" },
-  { value: "REJECTED", label: "已驳回" },
-  { value: "EXPIRED", label: "已过期" },
-  { value: "CANCELLED", label: "已撤回" },
+  ...STATUS_FILTER_ORDER.map((status) => ({ value: status, label: statusFullLabel(status) })),
 ];
 
 /** 审批队列（操作与审批页「待审批」子页签，XM-0030b-ui）。
@@ -109,7 +113,7 @@ export function ApprovalQueue() {
             {groups.map((group) => (
               <section key={group.riskLevel} className="flex flex-col gap-2">
                 <h3 className="flex items-center gap-2 text-sm font-medium text-fg">
-                  <Badge tone={RISK_TONE[group.riskLevel] ?? "neutral"}>{group.riskLevel}</Badge>
+                  <RiskBadge level={group.riskLevel} />
                   <span>{group.items.length} 张</span>
                 </h3>
                 <ul className="flex flex-col gap-2">
@@ -151,7 +155,9 @@ function ApprovalCard({
         <span className="font-mono text-xs [overflow-wrap:anywhere]">
           {item.action_id}@{item.action_version}
         </span>
-        <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
+        <Badge tone={statusTone(status)} title={statusHint(status)}>
+          {statusLabel(status)}
+        </Badge>
         <ApprovalDetailDialog
           item={item}
           now={now}
@@ -210,7 +216,9 @@ function ApprovalDetailDialog({
         <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
           <dt className="text-fg-muted">状态</dt>
           <dd>
-            <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
+            <Badge tone={statusTone(status)} title={statusHint(status)}>
+              {statusLabel(status)}
+            </Badge>
             {status !== item.status ? (
               // 库里说 PENDING、其实已经过期。说出这个差别，否则人会以为
               // 「还能批」而实际上服务端在执行那一刻会拒。
@@ -221,11 +229,15 @@ function ApprovalDetailDialog({
           </dd>
           <dt className="text-fg-muted">风险等级</dt>
           <dd>
-            <Badge tone={RISK_TONE[item.risk_level] ?? "neutral"}>{item.risk_level}</Badge>
+            <RiskBadge level={item.risk_level} />
           </dd>
           <dt className="text-fg-muted">提交人</dt>
           <dd>
-            {item.requester_id}（{item.requester_type}）
+            {item.requester_id}（
+            <span title={principalTypeHint(item.requester_type)}>
+              {principalTypeText(item.requester_type)}
+            </span>
+            ）
           </dd>
           <dt className="text-fg-muted">理由</dt>
           <dd>{item.reason}</dd>
@@ -270,8 +282,11 @@ function ApprovalDetailDialog({
             <ul className="flex flex-col gap-1">
               {item.decisions.map((d) => (
                 <li key={`${d.approver_id}-${d.created_at}`} className="text-xs">
-                  <Badge tone={d.verdict === "APPROVE" ? "success" : "danger"}>
-                    {d.verdict === "APPROVE" ? "同意" : "驳回"}
+                  <Badge
+                    tone={d.verdict === "APPROVE" ? "success" : "danger"}
+                    title={APPROVAL_VERDICTS[d.verdict]?.hint}
+                  >
+                    {APPROVAL_VERDICTS[d.verdict]?.label ?? d.verdict}
                   </Badge>{" "}
                   {d.approver_id}
                   {d.privileged ? "（特权票）" : ""} · {formatLocalTimestamp(d.created_at)}

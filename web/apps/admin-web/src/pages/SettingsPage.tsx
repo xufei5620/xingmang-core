@@ -3,6 +3,7 @@ import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import { appApiConfig } from "../api/config";
+import { principalTypeHint, principalTypeText } from "../lib/labels";
 import { CredentialsPage } from "./CredentialsPage";
 
 /** 设置：平台治理段里「管平台自己」的那一页（ADMIN-IA 一、平台治理）。
@@ -111,7 +112,9 @@ function IdentitySection() {
           <dt className="text-fg-muted">主体 ID</dt>
           <dd className="font-mono text-fg">{principalId || "—"}</dd>
           <dt className="text-fg-muted">主体类型</dt>
-          <dd className="text-fg">{principalType}</dd>
+          <dd className="text-fg" title={principalTypeHint(principalType)}>
+            {principalTypeText(principalType)}
+          </dd>
           <dt className="text-fg-muted">请求 scope</dt>
           <dd className="flex flex-wrap gap-1">
             {scopes.length === 0 ? (

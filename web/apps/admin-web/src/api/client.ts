@@ -1,6 +1,7 @@
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import { oidcBearerProvider, onLocalSessionLoss } from "../auth/session";
 import { appApiConfig, type PlatformApiConfig } from "./config";
+import { httpStatusText } from "../lib/labels";
 
 /** 网络层根本没通（DNS/连接/CORS/离线）时用的伪状态码。
  *  用 0 而不是编一个 5xx：区分「服务端拒绝了」和「压根没到服务端」，
@@ -182,7 +183,10 @@ async function toApiError(response: Response): Promise<ApiError> {
     body = null;
   }
   const code = body?.error?.code ?? UNKNOWN_CODE;
-  const message = body?.error?.message ?? `请求失败（HTTP ${response.status}）`;
+  // 兜底文案带上状态码的中文：这一句正是「响应不是平台错误包」时人唯一
+  // 能看到的东西，而 404 / 502 这些数字对读不懂英文的人也说不出所以然。
+  // 状态码本身逐字保留在前面（httpStatusText 的形制）。
+  const message = body?.error?.message ?? `请求失败（${httpStatusText(response.status)}）`;
   return new ApiError(response.status, code, message, body?.error?.request_id ?? "");
 }
 

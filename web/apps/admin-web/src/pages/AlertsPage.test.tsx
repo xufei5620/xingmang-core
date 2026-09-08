@@ -154,7 +154,7 @@ describe("批量确认（XM-ALERTS-GAPS）", () => {
     // 失败的那条要能被指认出来，且原因逐字可读
     expect(
       screen.getByText(
-        "乙告警：缺少权限 alerts.alert.manage（错误码 PERMISSION_DENIED），需要权限 alerts.alert.manage，request_id=req-9",
+        "乙告警：缺少权限 alerts.alert.manage（权限不足，错误码 PERMISSION_DENIED），需要权限 alerts.alert.manage，request_id=req-9",
       ),
     ).not.toBeNull();
     // 一条失败不中断后面的：第三条仍然发了、也成了

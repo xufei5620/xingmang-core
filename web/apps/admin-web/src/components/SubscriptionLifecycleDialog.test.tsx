@@ -474,7 +474,7 @@ describe("订阅批次与代理资产的退款 / 终止入口", () => {
 
     expect(
       await dialog.findByText(
-        "不允许跨环境操作成本登记簿：调用者身份属于 development（错误码 PERMISSION_DENIED）",
+        "不允许跨环境操作成本登记簿：调用者身份属于 development（权限不足，错误码 PERMISSION_DENIED）",
       ),
     ).toBeTruthy();
     expect(dialog.getByText("request_id: req-env-9")).toBeTruthy();
@@ -501,7 +501,7 @@ describe("订阅批次与代理资产的退款 / 终止入口", () => {
 
     expect(
       await dialog.findByText(
-        "终止日 2026-09-15 必须落在有效期 2026-08-01..2026-08-31 内（错误码 INVALID_PARAMS）",
+        "终止日 2026-09-15 必须落在有效期 2026-08-01..2026-08-31 内（参数不合法，错误码 INVALID_PARAMS）",
       ),
     ).toBeTruthy();
   });
@@ -517,7 +517,7 @@ describe("订阅批次与代理资产的退款 / 终止入口", () => {
     fireEvent.click(dialog.getByRole("button", { name: "提交退款登记" }));
 
     expect(
-      await dialog.findByText("这笔批次正在被另一处改写，请稍后重试（错误码 CONFLICT）"),
+      await dialog.findByText("这笔批次正在被另一处改写，请稍后重试（状态冲突，错误码 CONFLICT）"),
     ).toBeTruthy();
     expect(dialog.queryByText(/操作失败/)).toBeNull();
   });

@@ -1,5 +1,6 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import type { ApprovalItem, ApprovalStatus } from "../api/approvals";
+import { APPROVAL_STATUSES, fullLabel, riskLevelText } from "./labels";
 
 /** 审批队列的纯逻辑：分组、票数措辞、过期判定、可用动作。
  *
@@ -66,15 +67,6 @@ export function displayStatus(item: ApprovalItem, now: Date): ApprovalStatus {
   return isEffectivelyExpired(item, now) ? "EXPIRED" : item.status;
 }
 
-const STATUS_LABEL: Readonly<Record<ApprovalStatus, string>> = {
-  PENDING: "待审批",
-  APPROVED: "已批准",
-  REJECTED: "已驳回",
-  EXECUTED: "已执行",
-  EXPIRED: "已过期",
-  CANCELLED: "已撤回",
-};
-
 const STATUS_TONE: Readonly<Record<ApprovalStatus, BadgeTone>> = {
   PENDING: "warning",
   APPROVED: "info",
@@ -84,8 +76,23 @@ const STATUS_TONE: Readonly<Record<ApprovalStatus, BadgeTone>> = {
   CANCELLED: "neutral",
 };
 
+/** 状态的中文名（短），供徽章与行内文字使用。
+ *
+ *  中文来自 lib/labels.ts 那一份**唯一**的对照表：这里曾经自带一份、
+ *  ApprovalQueue 的筛选下拉又自带一份，两份的「已批准」措辞已经分叉。 */
 export function statusLabel(status: ApprovalStatus): string {
-  return STATUS_LABEL[status] ?? status;
+  return APPROVAL_STATUSES[status]?.label ?? status;
+}
+
+/** 状态的完整中文名，带限定语，如「已批准（待执行）」。筛选下拉用它。 */
+export function statusFullLabel(status: ApprovalStatus): string {
+  const meaning = APPROVAL_STATUSES[status];
+  return meaning ? fullLabel(meaning) : status;
+}
+
+/** 悬停解释；不认识的状态返回空串。 */
+export function statusHint(status: ApprovalStatus): string {
+  return APPROVAL_STATUSES[status]?.hint ?? "";
 }
 
 export function statusTone(status: ApprovalStatus): BadgeTone {
@@ -164,7 +171,9 @@ export function abilitiesFor(
       reason = "你已经在这张单上投过票了";
     } else if (isRequester && item.risk_level !== "L2") {
       // L3 及以上不许自批；L2 可以——单票即自批，等级本意如此。
-      reason = `${item.risk_level} 不允许提交人给自己的单投票`;
+      // 等级带上中文名：`L3` 三个字符说不出「这一级有多重」，而这句话正是
+      // 在解释「为什么偏偏你不能投」。原始等级串仍在，且在最前面。
+      reason = `${riskLevelText(item.risk_level)}不允许提交人给自己的单投票`;
     }
   }
 
