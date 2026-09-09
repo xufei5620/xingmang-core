@@ -4581,8 +4581,17 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		// an account not currently in that state.
 		return advancePendingReconciliationMatchTx(ctx, tx, accountID, actor)
 	}
-	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) error {
-		_, execErr := tx.Exec(ctx, `
+	// synthesizeUnknownPositive reports whether it actually inserted. The
+	// blip-confirmation path below needs to know: its rollback deletes the
+	// tentative credit, and "the tentative credit" means the row this
+	// transaction just wrote -- never a pre-existing row that happens to sit
+	// on the same synthetic event id. ON CONFLICT DO NOTHING makes those two
+	// things different, and an older row is not tentative at all: projections
+	// since have allocated consumption against it, and deleting it is refused
+	// by consumption_allocations' own FK RESTRICT -- which fails the whole
+	// account's projection job, on every retry, until it goes dead.
+	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) (bool, error) {
+		command, execErr := tx.Exec(ctx, `
 			INSERT INTO source_credit_events(
 				id,source_instance_id,external_account_id,external_event_id,external_credit_id,
 				event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
@@ -4595,7 +4604,10 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			"unknown-positive:"+item.id, intervalStart.UTC(), amount.String(),
 			account.UnitCode, account.ManifestHash, account.ConfigurationHash,
 			item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
-		return execErr
+		if execErr != nil {
+			return false, execErr
+		}
+		return command.RowsAffected() == 1, nil
 	}
 
 	// pending holds a checkpoint/proof whose positive difference was not
@@ -4634,8 +4646,9 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// so recomputing its trust interval now would give the
 				// identical answer anyway), then rebuild -- not trust
 				// algebra -- to actually verify it.
-				if err = synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference); err != nil {
-					return err
+				inserted, synthErr := synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference)
+				if synthErr != nil {
+					return synthErr
 				}
 				confirmProjection, confirmErr := buildEligibilityProjectionTx(ctx, tx, account, item.asOf)
 				if confirmErr != nil {
@@ -4676,14 +4689,31 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// difference/balanceNegative are unchanged since the top of
 				// this iteration -- the deferred item's credit never
 				// affected them; they were computed before it existed.
-				if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
-					return err
-				}
-				if _, err = tx.Exec(ctx, `
-					DELETE FROM source_credit_events
-					WHERE source_instance_id=$1 AND external_event_id=$2 AND credit_kind='UNKNOWN_POSITIVE'`,
-					account.SourceInstanceID, "unknown-positive:"+pending.item.externalEventID); err != nil {
-					return err
+				// Only what this transaction wrote. When the insert above was a
+				// no-op -- a credit already occupied that synthetic event id --
+				// there is no tentative credit to undo, and the row that is
+				// there is an older synthesis that projections have since
+				// allocated consumption against. Deleting it is refused by
+				// consumption_allocations' FK RESTRICT (SQLSTATE 23001), which
+				// fails the whole account's projection job on every retry until
+				// the failure grading gives up on it. RC108's shadow evaluation
+				// hit exactly that on a production account with 8,336
+				// allocations against four such credits.
+				//
+				// Not deleting it changes nothing else: the rebuild already
+				// proved the ledger does not reconcile with that credit in
+				// place, which is why this branch is running, and the deferred
+				// item is recorded ignored either way.
+				if inserted {
+					if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
+						return err
+					}
+					if _, err = tx.Exec(ctx, `
+						DELETE FROM source_credit_events
+						WHERE source_instance_id=$1 AND external_event_id=$2 AND credit_kind='UNKNOWN_POSITIVE'`,
+						account.SourceInstanceID, "unknown-positive:"+pending.item.externalEventID); err != nil {
+						return err
+					}
 				}
 				if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
 					return err
@@ -4693,6 +4723,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					"confirming_item_key":       item.key,
 					"confirming_raw_difference": difference.String(),
 					"reconciliation_residual":   confirmDifference.String(),
+					"tentative_credit_written":  inserted,
 				}); err != nil {
 					return err
 				}
@@ -4810,8 +4841,8 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					// XM-INV-ANCHOR-BALANCE's own tests require this exact
 					// behavior to keep working unchanged.
 					status = "positive_classified_non_cash"
-					if err = synthesizeUnknownPositive(item, intervalStart, difference); err != nil {
-						return err
+					if _, synthErr := synthesizeUnknownPositive(item, intervalStart, difference); synthErr != nil {
+						return synthErr
 					}
 				} else {
 					// XM-INV-BALANCE-BLIP: a positive difference on an

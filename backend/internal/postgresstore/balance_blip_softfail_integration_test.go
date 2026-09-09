@@ -216,10 +216,13 @@ func TestBalanceBlipConfirmationThatCannotSynthesiseIsSoftfailedNotErrored(t *te
 		t.Fatalf("cp3 evaluation rows=%d, want 0 (must be the new pending blip, not yet resolved)", cp3Rows)
 	}
 
-	// The rollback removes the blocking row along with the tentative credit
-	// it stood in for -- only the fixture's own anchor credit remains.
-	if count := countUnknownPositiveCredits(t, store, ctx, accountID); count != 1 {
-		t.Fatalf("UNKNOWN_POSITIVE credit count=%d, want 1 (the anchor's only)", count)
+	// The blocking row survives: the rollback undoes the credit this run
+	// wrote, and this run wrote none (that is why the confirmation could not
+	// reconcile). Deleting a row it did not write is how RC108's shadow
+	// evaluation failed an account's projection outright -- older syntheses
+	// have consumption allocated against them, and that FK is RESTRICT.
+	if count := countUnknownPositiveCredits(t, store, ctx, accountID); count != 2 {
+		t.Fatalf("UNKNOWN_POSITIVE credit count=%d, want 2 (the anchor's, plus the pre-existing row this run must not delete)", count)
 	}
 	if count := openFreezeCount(t, store, ctx, accountID); count != 0 {
 		t.Fatalf("open freeze count=%d, want 0 (still within the rebaseline cap)", count)
@@ -334,9 +337,12 @@ func TestBalanceBlipSoftfailRebaselineCapEscalatesToSourceGapFreeze(t *testing.T
 		t.Fatalf("%s status=%q, want source_gap_frozen (the escalation)", cp5.checkpointID, cp5Status)
 	}
 
-	// No credit ever survives -- every tentative one was rolled back.
-	if count := countUnknownPositiveCredits(t, store, ctx, accountID); count != 1 {
-		t.Fatalf("UNKNOWN_POSITIVE credit count=%d, want 1 (the anchor's only)", count)
+	// No credit this run wrote survives -- every tentative one was rolled
+	// back. The three pre-existing blockers stay: they are not this run's to
+	// remove, and deleting an already-allocated synthesis raises the FK
+	// RESTRICT that failed a whole account in RC108's shadow evaluation.
+	if count := countUnknownPositiveCredits(t, store, ctx, accountID); count != 4 {
+		t.Fatalf("UNKNOWN_POSITIVE credit count=%d, want 4 (the anchor's plus three pre-existing blockers)", count)
 	}
 	// Exactly one open freeze: the escalation's own SOURCE_GAP.
 	if count := openFreezeCount(t, store, ctx, accountID); count != 1 {
@@ -450,4 +456,113 @@ func TestBalanceBlipSoftfailBatchStillProcessesHealthyAccount(t *testing.T) {
 	if remainingJobs != 0 {
 		t.Fatalf("remaining eligibility_projection_jobs rows=%d, want 0 (both succeeded)", remainingJobs)
 	}
+}
+
+// TestBlipRollbackNeverDeletesACreditItDidNotWrite reproduces the failure that
+// made RC108's shadow evaluation not_ready, on the production shape that
+// caused it.
+//
+// The softfail rollback deletes "the tentative credit" by its synthetic event
+// id. When the synthesis was a no-op -- ON CONFLICT DO NOTHING, because an
+// older synthesis already occupies that id -- the row it deleted was not
+// tentative at all: projections since then have allocated consumption against
+// it, and consumption_allocations' FK is RESTRICT. The delete raises SQLSTATE
+// 23001, which fails the whole account's projection job, on every retry, until
+// the failure grading marks it dead.
+//
+// Production account 40bd883d carried four such credits with 8,336 allocations
+// between them; the shadow run cleared its evaluations, replayed them, and hit
+// this on the first one.
+func TestBlipRollbackNeverDeletesACreditItDidNotWrite(t *testing.T) {
+	store, ctx, sourceID, accountID, manifestHash, configHash, anchorAt, _ := newBalanceBlipFixture(t)
+
+	usageAt := anchorAt.Add(time.Minute)
+	insertUsageEventDirect(t, store, ctx, sourceID, accountID, "fk-usage-a",
+		usageAt, "1200", 1, manifestHash, configHash)
+	// The older synthesis, on the id cp2's confirmation would use. Zero units
+	// so it changes no arithmetic -- what it changes is that the tentative
+	// insert becomes a no-op and the rollback would target this row.
+	insertBlockingSynthesizedCredit(t, store, ctx, sourceID, accountID, "fk-cp2",
+		anchorAt, 10, manifestHash, configHash)
+
+	cp2At := anchorAt.Add(10 * time.Minute)
+	cp2ID := insertReconciliationCheckpoint(t, store, ctx, sourceID, accountID, "fk-cp2",
+		cp2At, "300", 2, manifestHash, configHash)
+	cp3At := anchorAt.Add(20 * time.Minute)
+	insertReconciliationCheckpoint(t, store, ctx, sourceID, accountID, "fk-cp3",
+		cp3At, "300", 3, manifestHash, configHash)
+
+	// An allocation referencing that credit, the way a projection round leaves
+	// one behind. This is what turns the delete into a constraint violation.
+	var creditID, usageID string
+	if err := store.pool.QueryRow(ctx, `SELECT id::text FROM source_credit_events
+		WHERE external_account_id=$1 AND external_event_id=$2`,
+		accountID, "unknown-positive:fk-cp2-event").Scan(&creditID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.pool.QueryRow(ctx, `SELECT id::text FROM source_usage_events
+		WHERE external_account_id=$1 AND external_usage_id='fk-usage-a'`, accountID).Scan(&usageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO consumption_allocations(id,usage_event_id,credit_event_id,
+			allocation_order,service_units,cash_minor_delta,projection_version)
+		VALUES($1,$2,$3::uuid,1,1,0,1)`,
+		randomUUID(), usageID, creditID); err != nil {
+		t.Fatalf("seed the allocation that makes the credit undeletable: %v", err)
+	}
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, cp3At.Add(time.Minute),
+		AuditActor{Type: "system", ID: "test-worker"}); err != nil {
+		t.Fatalf("the rollback tried to delete an allocated credit and failed the whole job: %v", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// The older credit and its allocation are untouched -- the rollback had
+	// nothing of its own to undo.
+	var credits, allocations int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM source_credit_events
+		WHERE external_account_id=$1 AND external_event_id=$2`,
+		accountID, "unknown-positive:fk-cp2-event").Scan(&credits); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM consumption_allocations
+		WHERE credit_event_id=$1::uuid`, creditID).Scan(&allocations); err != nil {
+		t.Fatal(err)
+	}
+	if credits != 1 || allocations != 1 {
+		t.Fatalf("pre-existing credit rows=%d allocations=%d, want 1/1 (neither is this run's to remove)",
+			credits, allocations)
+	}
+	// And the outcome is the ordinary softfail: the deferred item is ignored,
+	// with the audit row saying no tentative credit was written.
+	if status, _, _ := f0Evaluation(t, store, ctx, cp2ID); status != "positive_blip_ignored" {
+		t.Fatalf("cp2 status=%q, want positive_blip_ignored", status)
+	}
+	var rebaselines int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='eligibility.balance_blip.rebaselined' AND object_id=$1`, cp2ID).Scan(&rebaselines); err != nil {
+		t.Fatal(err)
+	}
+	if rebaselines != 1 {
+		t.Fatalf("rebaselined audits=%d, want 1", rebaselines)
+	}
+}
+
+func f0Evaluation(t *testing.T, store *Store, ctx context.Context, checkpointID string) (status, expected, difference string) {
+	t.Helper()
+	if err := store.pool.QueryRow(ctx, `
+		SELECT evaluation_status,expected_service_units::text,difference_service_units::text
+		FROM balance_checkpoint_evaluations WHERE checkpoint_id=$1`, checkpointID).Scan(
+		&status, &expected, &difference); err != nil {
+		t.Fatal(err)
+	}
+	return status, expected, difference
 }

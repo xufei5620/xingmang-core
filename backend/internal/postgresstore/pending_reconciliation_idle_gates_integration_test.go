@@ -2,6 +2,7 @@ package postgresstore
 
 import (
 	"bytes"
+	"context"
 	"testing"
 	"time"
 )
@@ -435,4 +436,114 @@ func (f *idlePendingFixture) insertUnevaluatedCheckpointAt(t *testing.T, checkpo
 		testHash(checkpointID)); err != nil {
 		t.Fatalf("insert %s checkpoint at %s: %v", kind, asOf.UTC(), err)
 	}
+}
+
+// TestRehearsalReplayKeepsTheStreakAndOnlyTheWindowDecides reproduces, on the
+// shape of production account acdcdce9, why RC108's shadow evaluation left it
+// in not_invoiceable_pending_reconciliation -- and separates the two
+// explanations that were on the table.
+//
+// The rehearsal clears every evaluation (--reevaluate-evidence) and replays
+// them. The first question was whether that replay drops the consecutive-match
+// streak to zero, which the M3 gate would then refuse. It does not: the replay
+// is deterministic and ends on the same item production ended on, so the
+// streak comes back to exactly what it was.
+//
+// What actually stopped it is the window. The rehearsal's own report shows
+// requested_through == finalized_through for both pending accounts, and a
+// window of zero width contains no scan cycle, so the derivation has nothing
+// to derive from. That is a property of how the rehearsal was invoked, not of
+// the candidate: production's finalization pass always asks for
+// min(watermarks) - delay, which moves ahead of finalized_through every time a
+// cycle publishes.
+func TestRehearsalReplayKeepsTheStreakAndOnlyTheWindowDecides(t *testing.T) {
+	f := newIdlePendingFixture(t)
+	before := readPendingReconciliation(t, f.store, f.ctx, f.accountID)
+	if before.consecutiveMatches != pendingReconciliationIdleMinMatches {
+		t.Fatalf("fixture: want a streak of %d, got %+v", pendingReconciliationIdleMinMatches, before)
+	}
+
+	// --reevaluate-evidence: drop every evaluation at or above the anchor
+	// floor and let the evaluator judge the same evidence again.
+	cleared := f.clearEvaluations(t)
+	if cleared == 0 {
+		t.Fatal("fixture: nothing was cleared, so the replay proves nothing")
+	}
+	f.project(t, f.lastEvidenceAt.Add(time.Minute))
+
+	after := readPendingReconciliation(t, f.store, f.ctx, f.accountID)
+	if after.status != "not_invoiceable_pending_reconciliation" {
+		t.Fatalf("the replay must land back in the same state: %+v", after)
+	}
+	if after.consecutiveMatches != before.consecutiveMatches {
+		t.Fatalf("streak after replaying %d evaluations=%d, want %d -- a replay that ends on the same "+
+			"item ends on the same streak, so the M3 gate is not what held this account",
+			cleared, after.consecutiveMatches, before.consecutiveMatches)
+	}
+
+	// A zero-width window, which is what the rehearsal actually asked for:
+	// requested_through == finalized_through.
+	carryAt := f.lastEvidenceAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 995, carryAt)
+	proofsBefore := f.proofCount(t)
+	finalized := f.finalizedThrough(t)
+	if _, err := f.store.pool.Exec(f.ctx, `
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		VALUES($1,$2,'queued',now())`, f.accountID, finalized); err != nil {
+		t.Fatal(err)
+	}
+	f.processJobs(t)
+	if got := f.proofCount(t); got != proofsBefore {
+		t.Fatalf("proofs=%d, want %d: a zero-width window contains no cycle to derive from", got, proofsBefore)
+	}
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.status != "not_invoiceable_pending_reconciliation" {
+		t.Fatalf("nothing should have moved: %+v", row)
+	}
+
+	// The same account, same evidence, same streak -- with the window a real
+	// finalization pass would have asked for. This is the only difference.
+	f.runFinalize(t, carryAt.Add(time.Minute))
+	f.processJobs(t)
+	if got := f.proofCount(t); got != proofsBefore+1 {
+		t.Fatalf("proofs=%d, want %d: with a real window the derivation happens", got, proofsBefore+1)
+	}
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.status != "active" {
+		t.Fatalf("the account should have exited once the window was real: %+v", row)
+	}
+}
+
+// clearEvaluations is deploy/rehearsal's --reevaluate-evidence, in miniature:
+// drop this account's evaluation rows so the evaluator has to judge the same
+// evidence again. Returns how many were dropped.
+func (f *idlePendingFixture) clearEvaluations(t *testing.T) int64 {
+	t.Helper()
+	// Evaluation rows are immutable under triggers; the rehearsal lifts them
+	// for its own transaction with session_replication_role, exactly as
+	// EligibilityShadowReevaluateEvidence does.
+	tx, err := f.store.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err = tx.Exec(f.ctx, `SET LOCAL session_replication_role='replica'`); err != nil {
+		t.Fatal(err)
+	}
+	checkpoints, err := tx.Exec(f.ctx, `
+		DELETE FROM balance_checkpoint_evaluations evaluation
+		USING balance_reconciliation_checkpoints checkpoint
+		WHERE checkpoint.id=evaluation.checkpoint_id AND checkpoint.external_account_id=$1`, f.accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofs, err := tx.Exec(f.ctx, `
+		DELETE FROM balance_carry_forward_evaluations evaluation
+		USING balance_carry_forward_proofs proof
+		WHERE proof.id=evaluation.proof_id AND proof.external_account_id=$1`, f.accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	return checkpoints.RowsAffected() + proofs.RowsAffected()
 }

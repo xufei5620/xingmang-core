@@ -128,6 +128,8 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M34 | 未评估计数去掉锚前下界 | 锚前用例 | 红（owed=1，闲置派生被永久关死） |
 | M35 | 未评估计数改用窗口上界 | 「最新证据还不可终局」用例 | 红（账号被放出去） |
 | M36 | 加一个既不进清单也不进手册的 blocker | 发现式同源用例 | 红 |
+| M37 | softfail 回滚去掉 `inserted` 守卫（删不属于自己的额度） | FK 复现用例 | 红，**报出与影子评估一模一样的错误串**（SQLSTATE 23001） |
+| M38 | 派生候选查询去掉窗口上界 | 零宽窗口用例 | 红（零宽也派生了） |
 
 M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
 漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
@@ -171,6 +173,9 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **终审 major 2 + 3 minor 修复后** `go vet ./...` | 12:56:10 | 12:56:12 | 2s |
 | **终审 major 2 + 3 minor 修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **12:56:12** | **13:03:33** | **7m21s，exit 0，30 包全 ok** |
 | **终审 major 2 + 3 minor 修复后** `check-no-secrets.ps1` | 13:03:33 | 13:03:34 | exit 0 |
+| **RC108 影子复盘修复后** `go vet ./...` | 14:08:42 | 14:08:43 | 1s |
+| **RC108 影子复盘修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **14:08:43** | **14:17:37** | **8m54s，exit 0，30 包全 ok** |
+| **RC108 影子复盘修复后** `check-no-secrets.ps1` | 14:17:37 | 14:17:38 | exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
@@ -209,8 +214,13 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
   bash deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rc108 \
     --reproject-all \
     --reevaluate-evidence \
-    --finalization-window --finalization-window-lag 1h --finalization-window-provable
+    --finalization-window --finalization-window-provable
 ```
+
+> **不要加 `--finalization-window-lag 1h`。** 上一版本节推荐过它，RC108 的影子评估就是
+> 因此判 not_ready 的——这是我写错的，改正见 §8.7。lag 是给「落后好几天」的追赶窗口用的；
+> 12 与 34 的 finalized_through 只落后水位约 20 分钟，减去 15 分钟延迟再减 1 小时就落到
+> finalized_through 之下，`GREATEST` 把窗口压成零宽，什么也派生不了。
 
 每个参数为什么在这里：
 
@@ -219,7 +229,7 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
 | `--reproject-all` | 另外两个开关都要求它；也是「这次真的跑过账号」的前提（`AccountsProjected==0` 直接判 not_ready） |
 | `--reevaluate-evidence` | 唯一能让 C5 的新分类器重判既有检查点的开关；不给它，C5 在影子上根本没被执行 |
 | `--finalization-window` | 给 C1/C2 一个非零窗口；不给它，闲置派生一次都不会发生 |
-| `--finalization-window-lag 1h` | 冻结副本上贴着前沿的事实其水位晚于窗口末端，结转证明在那里永远 pend（生产靠下一次更宽的窗口收敛）；1h 是脚本注释自己给的经验值 |
+| ~~`--finalization-window-lag 1h`~~ | **删掉**。见 §8.7：对落后仅 20 分钟的账号，1h 的 lag 直接把窗口压成零宽。只有当账号落后天级（追赶窗口）时才考虑它，且取值必须小于「水位 − 延迟 − finalized_through」 |
 | `--finalization-window-provable` | 把每个窗口砍到「窗口内每条事实都已被看见」的那个已发布 balances 天花板，正是 `ensureBalanceCarryForwardProofTx` 需要的 |
 
 **判据一（自动，必要不充分）**：`verdict=ready`、退出码 0。但要知道它只检查三件事
@@ -592,3 +602,88 @@ matched 评估可以**，等下一张真实检查点。变异 M33 把它降成 N
 
 无论选哪条，判据是同一个：处置前后账号的 `ExpectedBalance − UnallocatedUnits` 不变，
 且 `funding_lots` 的现金口径一分不动（合成额度从来不进现金池，不产生 `cash_minor_delta`）。
+
+---
+
+## 9. RC108 影子评估 not_ready 的两个根因（2026-09-09 复盘）
+
+影子评估（备份 `invoice-20260909T080659Z`、tools 0.1.0-rc108）判 not_ready，报告
+`H:\temp\claude\rc108-shadow-eval.json`：`verdict_reason` 是「the candidate produced
+projection errors」，一条 round error，用户 12 未退出。两件事互相独立。
+
+### 9.1 用户 34 的 PROJECTION_FAILED：softfail 回滚删了不属于它的额度（**代码缺陷，已修**）
+
+```
+ERROR: update or delete on table "source_credit_events" violates RESTRICT setting of
+foreign key constraint "consumption_allocations_credit_event_id_fkey" (SQLSTATE 23001)
+```
+
+**机制已在本地逐字复现**（`TestBlipRollbackNeverDeletesACreditItDidNotWrite`，变异 M37 把
+守卫去掉后报出**一模一样的错误串**）：
+
+1. `--reevaluate-evidence` 清了评估行，但**没有**删旧的合成额度（这正是我 §4.1 列的伪象 1）；
+2. 重判到同一张检查点，防抖确认要合成——`external_event_id` 与历史合成同键，
+   `ON CONFLICT DO NOTHING` 把它挡住（§8.1 路径 A）；
+3. 于是 `confirmDifference ≠ 0`，走 softfail 回滚；
+4. 回滚按 `external_event_id` 去 `DELETE`，删到的是**那条旧额度**——它已被
+   `consumption_allocations` 引用（34 的四条合计 8,336 条分配），FK 是 RESTRICT；
+5. 整个账号的投影作业失败，且每次重试都失败，直到失败分级把它打成 dead。
+
+回答复审的三问：
+
+**(a) 生产（不重判旧检查点）能否到达？** 能，但需要一次「删掉评估行」的人工修复做前提。
+新证据的 `external_event_id` 是新的，不会撞键；只有当某一项的评估行被删掉、该项重新变成待
+评估时，才会再次尝试用同一个键合成。会删评估行的是
+`RepairBalanceAnchorEligibility`（`--kind=balance-anchor`）。所以：**没有修复介入时到不了；
+跑过 balance-anchor 之后就到得了**，而那正是 34 这类账号将来可能要跑的。**C5 本身不改
+`external_event_id` 的构成**（仍是 `unknown-positive:` + 该项的 external_event_id），所以
+C5 没有引入新的撞键面，但它把更多账号推进正向确认路径，等于放大了这条路径的曝光。
+
+**(b) 「暂定额度没有分配引用」在什么情况下不成立？** 只要那条额度不是本事务刚写的。同一事务
+内不会：确认重建走的是 `buildEligibilityProjectionTx`（纯内存），不写
+`consumption_allocations`；作业里的 `reprojectEligibilityTx` 跑在评估**之前**，那时额度还不
+存在。**不成立的情形是额度更老**——它经历过至少一轮 `reprojectEligibilityTx`，分配已经写下。
+
+**修法**：`synthesizeUnknownPositive` 现在返回是否真的插入了；回滚只在 `inserted` 时执行。
+「撤销暂定额度」的语义本来就是「撤销本事务刚写的那一条」，而不是「删掉这个键上的任何行」。
+不删也不影响别的：重建已经证明带着那条额度账本对不平（否则不会进这个分支），延后项无论如何
+都记为 `positive_blip_ignored`；审计里新增 `tentative_credit_written` 字段说明当次有没有真的
+写过。
+
+**(c) 影子怎么跑才不撞伪象**：这次的答案是**两条都做，但优先级不同**。
+- 本片已修的是代码缺陷，修完之后即使撞上伪象也只是「合成没发生、判 ignored」，不会再让作业
+  失败。**这是主修法。**
+- 伪象本身仍在：`--reevaluate-evidence` 只清评估行，不清合成额度与其分配，所以重放出来的
+  合成结果与生产不会一一对应。建议在 rehearsal 步骤里补一条「同时清掉
+  `credit_kind='UNKNOWN_POSITIVE'` 的合成额度及其 `consumption_allocations`」——但那要动
+  `eligibility-shadow`，**不在本片范围**，列为 follow_up。在它落地之前，判据里要写明：34 的
+  合成额度数量在影子上与生产不可比。
+
+### 9.2 用户 12 没退出：窗口被 `--finalization-window-lag 1h` 压成零宽（**我的跑法写错了，不是代码缺陷**）
+
+报告里两个 pending 账号的 `requested_through` 都**恰等于**各自的 `finalized_through`
+（`2026-09-09T07:46:06.055197Z`）。这是零宽窗口，`(finalized_through, requested]` 里不可能有
+任何周期，闲置派生因此没有候选。
+
+算术（`EnqueueEligibilityShadowFinalizationWindow`）：
+`bound = GREATEST(finalized_through, cutover_at, min(水位) − 延迟 − lag)`。
+备份时刻 08:06:59Z，`finalized_through` 07:46:06，延迟 900s，lag 3600s →
+`08:06 − 15min − 60min = 06:51 < 07:46` → `bound = finalized_through`；`provable` 再在
+`(finalized_through, bound]` 这个空区间里找不到天花板，`COALESCE` 回落到
+`finalized_through`。**lag 是给落后天级的追赶窗口用的，12 只落后约 20 分钟，1h 的 lag 直接
+把窗口清零。§4.1 里推荐 1h 是我写错的，已改。**
+
+**连击不是原因，已在本地证伪**（`TestRehearsalReplayKeepsTheStreakAndOnlyTheWindowDecides`）：
+清掉全部评估行再重放，连击回到重放前的同一个值——重放是确定性的，结束在同一项上就结束在同一个
+连击上。12 的最后一张证据（09-06 11:29:30Z）生产判 matched，重放后仍是 matched，所以
+`cm=1 ≥ 门槛 1`，M3 的闸不会挡它。同一条用例接着证明：零宽窗口 → 一张证明也不派生、状态不动；
+换成一次真实 finalize 会请求的窗口 → 派生发生、账号退出 `active`。变异 M38（去掉派生候选查询
+的窗口上界）让「零宽不派生」那条断言变红，说明它不是恒真。
+
+**是影子专有还是生产也会？影子专有。** 生产的 finalize 用
+`GREATEST(cutover_at, min(水位) − 延迟)`，没有 lag、没有 provable 裁剪；水位每分钟随周期发布
+前移，所以窗口对活着的源恒为正宽。12 在生产上的路径仍是 §7 写的那条。
+
+**重跑的判据**：按 §4.1 改正后的命令（去掉 lag）跑，然后确认
+`pending_accounts[].requested_through` **严格大于**对应账号的 `finalized_through`——这一条要
+在看 diff 之前先看，它为零宽时整份报告对 C1/C2 没有信息量。
