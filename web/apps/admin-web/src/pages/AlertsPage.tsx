@@ -13,14 +13,23 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
+  alertAgeAnchor,
+  describeFireCount,
+  estimatedPrefix,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
   listAlerts,
   listAlertsPage,
   ruleLabel,
   type AlertItem,
 } from "../api/alerts";
 import { AcknowledgeAlertButton } from "../components/AcknowledgeAlertButton";
+import { AlertNotifyDeliveries } from "../components/AlertNotifyDeliveries";
+import { AlertSilences } from "../components/AlertSilences";
 import { ApiStateView } from "../components/ApiStateView";
+import { BulkAckReceipt, BulkAcknowledgeAlerts } from "../components/BulkAcknowledgeAlerts";
 import { CreateSilenceDialog } from "../components/CreateSilenceDialog";
+import type { BulkAckSummary } from "../lib/alertBulkAck";
 import {
   describeNotifyStatus,
   describeSeverity,
@@ -75,7 +84,14 @@ export function AlertsPage() {
       items={ALERT_SUB_TABS.map(([value, label]) => ({
         value,
         label,
-        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : (
+        content: value === "alerts" ? <AlertsListPage /> : value === "rules" ? <AlertRulesPage /> : value === "notifications" ? <AlertNotifyDeliveries /> : value === "silences" ? <AlertSilences /> : (
+          // 「故障事件」仍是占位，且必须保持占位：Incident 对象今天不在平台里，
+          // 拿告警凑数就是把活跃告警误当成故障事件。
+          //
+          // 「暂停告警」曾经和它一起挂在这里，理由是「静默记录没有列表端点」。
+          // XM-SILENCE-LIST 把端点补上了（GET /api/v1/alerts/silences），
+          // 那条理由不再成立，于是它搬去了 AlertSilences。故障事件没有跟着搬，
+          // 因为它缺的不是端点而是对象本身。
           <section>
             <PageHeader title={label} description="该子页尚未接入稳定的数据源。" />
             <PageState kind="unavailable" title={`「${label}」尚未接入`} description="当前不会把其它告警数据误归类到这里。" />
@@ -89,6 +105,9 @@ export function AlertsPage() {
 function AlertsListPage() {
   const [scope, setScope] = useState<Scope>("active");
   const [notice, setNotice] = useState<string | null>(null);
+  // 批量回执单独一份状态，不塞进 notice：它是结构化的（成功名单 + 失败名单 +
+  // 跳过名单），压成一行字就丢掉了「哪几条、为什么」——那正是它的全部内容。
+  const [bulkSummary, setBulkSummary] = useState<BulkAckSummary | null>(null);
 
   const query = useQuery({
     queryKey: [ALERTS_QUERY_KEY, scope],
@@ -103,8 +122,17 @@ function AlertsListPage() {
   };
   useAutoRefresh(refresh);
 
+  // 两种回执互斥地显示：单条确认之后还挂着一张上一次批量的名单，会让人
+  // 分不清刚才那一下到底做了什么。后写的那个说了算，另一个清掉。
   const afterWrite = (message: string) => {
+    setBulkSummary(null);
     setNotice(message);
+    refresh();
+  };
+
+  const afterBulk = (summary: BulkAckSummary) => {
+    setNotice(null);
+    setBulkSummary(summary);
     refresh();
   };
 
@@ -116,7 +144,12 @@ function AlertsListPage() {
           请用状态页签或时间范围收窄之后再看。
         </p>
       ) : null}
-      <AlertsTable items={query.data?.items ?? []} scope={scope} onAcknowledged={afterWrite} />
+      <AlertsTable
+        items={query.data?.items ?? []}
+        scope={scope}
+        onAcknowledged={afterWrite}
+        onBulkAcknowledged={afterBulk}
+      />
     </ApiStateView>
   );
 
@@ -148,6 +181,10 @@ function AlertsListPage() {
           {notice}
         </p>
       ) : null}
+
+      {/* 批量回执放在页级而不是选择条里：选择条会随「清除选择」一起消失，
+          而那一下会把刚拿到的 run_id 名单一并带走。 */}
+      {bulkSummary ? <BulkAckReceipt summary={bulkSummary} /> : null}
 
       {/* 表格作为两个页签共用的 content：只有一个 useQuery，切页签换的是它的
           查询参数，而不是再开一条并行的数据流。Radix 只挂载当前页签的内容，
@@ -227,32 +264,60 @@ function alertColumns(
       header: "首次 / 最近",
       // 排序按「最近」：人找的是「还在响的」，不是「最早开始的」
       value: (alert) => alert.last_seen_at,
-      cell: (alert) => (
+      cell: (alert) => {
+        // 「首次」是 first_opened_at，**不是 opened_at**：告警恢复后再次触发会
+        // 新开一行、opened_at 归零，于是抖动型告警在这里显示的「首次」一直是
+        // 最近那一次。兜底与「约」的判据统一走 api/alerts 的 alertAgeAnchor，
+        // 四处不各写一套。
+        const age = alertAgeAnchor(alert);
+        return (
         <>
           {/* 两个时刻都显示：只有一个就答不出「这个问题持续了多久」，
               而那正是判断要不要升级处理的第一个依据。 */}
-          <span className="block text-xs text-fg-muted">
-            首次 {formatUtcTimestamp(alert.opened_at)}
+          <span className="block text-xs text-fg-muted" title={age.hint ?? undefined}>
+            首次 {estimatedPrefix(age)}
+            {formatUtcTimestamp(age.since)}
           </span>
           <span className="block text-xs text-fg-muted">
             最近 {formatUtcTimestamp(alert.last_seen_at)}
           </span>
+          {/* 确认时刻在场才显示：它回答「我确认之后它还在不在响」——「最近」晚于
+              「确认」就是还在。null 表示没人确认过，不拿零值时间冒充 */}
+          {alert.acknowledged_at ? (
+            <span className="block text-xs text-fg-muted">
+              确认 {formatUtcTimestamp(alert.acknowledged_at)}
+            </span>
+          ) : null}
           {alert.resolved_at ? (
             <span className="block text-xs text-fg-muted">
               恢复 {formatUtcTimestamp(alert.resolved_at)}
             </span>
           ) : null}
         </>
-      ),
+        );
+      },
     },
     {
       id: "fireCount",
-      header: "次数",
+      // 这一列以前叫「次数」，悬停说的是「被去重合并掉的命中次数（含首次）」
+      // ——两句都不对：fire_count 数的是每 60 秒重评一轮、条件仍成立就 +1 的
+      // 轮数（见 api/alerts 的 fire_count 契约注释）。措辞与工作台待办、平台
+      // 告警面板共用 FIRE_COUNT_HEADER / FIRE_COUNT_MEANING 一份。
+      header: FIRE_COUNT_HEADER,
       numeric: true,
       value: (alert) => alert.fire_count,
-      cell: (alert) => (
-        <span title="被去重合并掉的命中次数（含首次）">{alert.fire_count}</span>
-      ),
+      cell: (alert) => {
+        // 格子里只放数字：这是一列右对齐 tabular-nums 的数字列，表头已经写着
+        // 「评估轮次」，再写一遍「评估 N 轮」既重复又对不齐。整句退到悬停里
+        // （trigger_count 到位后格子写「M / N」，悬停说清哪个是触发、哪个是评估：
+        // 它们是不同的事实，「触发几次」替代不了「已经这样多少轮」）。
+        const counts = describeFireCount(alert);
+        return (
+          <span title={`${counts.combined}。${FIRE_COUNT_MEANING}`} className="block">
+            {counts.figure}
+          </span>
+        );
+      },
     },
     {
       id: "notify",
@@ -297,14 +362,16 @@ function AlertsTable({
   items,
   scope,
   onAcknowledged,
+  onBulkAcknowledged,
 }: {
   items: AlertItem[];
   scope: Scope;
   onAcknowledged: (message: string) => void;
+  onBulkAcknowledged: (summary: BulkAckSummary) => void;
 }) {
   return (
     <DataTableV2
-      caption="告警列表：严重度、状态、首次与最近发现、命中次数与投递结果"
+      caption={`告警列表：严重度、状态、首次与最近发现、${FIRE_COUNT_HEADER}与投递结果`}
       columns={alertColumns(onAcknowledged)}
       // 默认顺序仍是「最严重的在最上面」：DataTableV2 不排序时保持入参顺序
       rows={sortForDisplay(items)}
@@ -317,13 +384,10 @@ function AlertsTable({
       ]}
       selectable
       bulkActions={(keys) => (
-        // **只统计，不执行**：批量确认是写操作，得走 Action 且 L2 以上要审批
-        // （宪法 2、3 条）。在这里放一个能直接点的「批量确认」，等于绕过审批，
-        // 所以这一格只说明它现在还不能做什么
-        <span className="text-fg-muted">
-          已选中 {keys.length} 条；批量确认随 Foundation-B（XM-0030）上线——
-          写操作只走 Action，这里不执行任何真实操作。
-        </span>
+        // 批量确认走的仍是 alerts.alert.acknowledge@1（宪法 2 条：写操作只经
+        // Action），只是循环调 N 次。它**不需要审批**——那个 Action 声明的是
+        // L0（internal/platform/alerts/actions.go），单条确认一直可用就是证据。
+        <BulkAcknowledgeAlerts selectedKeys={keys} items={items} onCompleted={onBulkAcknowledged} />
       )}
       emptyState={
         <PageState

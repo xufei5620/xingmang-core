@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/xufei5620/xingmang-platform/connectors/infini"
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
 )
 
 // CardRef 是「哪个账号的哪张卡」。
@@ -100,38 +101,77 @@ func NewSyncer(accounts []Account, store SyncStore, opts SyncOptions) *Syncer {
 	return s
 }
 
-// RunOnce 跑一轮同步。
+// RunOnce 跑一轮同步，返回按账号/步骤拆开的结果。
 //
-// 错误处理的纪律：上游读不到时**返回错误让作业重试，但绝不动台账状态**。
-// 把「我查不到」当成「它没发生」，正是可能开出第二张卡的那条路。
-func (s *Syncer) RunOnce(ctx context.Context) error {
+// 错误处理的纪律：上游读不到时**绝不动台账状态**。把「我查不到」当成
+// 「它没发生」，正是可能开出第二张卡的那条路。
+//
+// 返回的 error **只在整轮全砸了时才非 nil**（XM-CARD-VISIBILITY）。
+// 此前是「六步里砸一步整轮就报错」，于是一个账号的批量查状态被上游拒，
+// 会让另一个账号刚刚成功的发现与刷新一起被判失败、被 River 重试三次、
+// 最后落一条 discarded——2026-09-08 的 24 小时里这样烧掉了 288 个作业，
+// 而卡状态其实一直在被兜底路径正常刷新。部分成功的细节在 RoundResult 里，
+// 由作业写进日志与 ops 观测，而不是靠一个二值的成败。
+func (s *Syncer) RunOnce(ctx context.Context) (RoundResult, error) {
+	var res RoundResult
+
+	// 暂停开关**每轮只读一次**：读六次的话它可以在一轮中间被翻转，
+	// 留下「前三步做了、后三步跳过」的结果，那种结果最难解释。
+	paused, err := s.store.PausedAccounts(ctx)
+	if err != nil {
+		// 读不到就让整轮失败，**不回落到「当作没暂停」**。回落会在一次
+		// 数据库抖动里重新把请求打向一个被人为停掉的上游，而且这件事在
+		// 任何地方都看不见。这里是判断 fail closed，不是同步 fail closed。
+		wrapped := fmt.Errorf("读取账号同步开关: %w", err)
+		res.fail("", "account_sync_pause", wrapped)
+		return res, wrapped
+	}
+
 	var errs []error
 
-	if err := s.reconcileOperations(ctx); err != nil {
+	if err := s.reconcileOperations(ctx, paused, &res); err != nil {
 		errs = append(errs, fmt.Errorf("对账未收敛的操作: %w", err))
 	}
 	// 发现排在刷新之前：这一轮新拉进来的卡，同一轮里就能拿到状态与明文，
 	// 不用等下一个周期。
-	if err := s.discoverCards(ctx); err != nil {
+	if err := s.discoverCards(ctx, paused, &res); err != nil {
 		errs = append(errs, fmt.Errorf("发现卡片: %w", err))
 	}
-	if err := s.refreshTrackedCards(ctx); err != nil {
+	if err := s.refreshTrackedCards(ctx, paused, &res); err != nil {
 		errs = append(errs, fmt.Errorf("刷新卡状态: %w", err))
 	}
 	// 拉明文排在刷新卡状态**之后**：刚推进到 active 的卡在同一轮里就能被拉到，
 	// 不用等下一个周期。
-	if err := s.fetchMissingSecrets(ctx); err != nil {
+	if err := s.fetchMissingSecrets(ctx, paused, &res); err != nil {
 		errs = append(errs, fmt.Errorf("拉取卡面明文: %w", err))
 	}
 	if s.opts.SyncTransactions {
-		if err := s.syncTransactions(ctx); err != nil {
+		if err := s.syncTransactions(ctx, paused, &res); err != nil {
 			errs = append(errs, fmt.Errorf("同步流水: %w", err))
 		}
 	}
-	if err := s.advanceWithdrawals(ctx); err != nil {
+	if err := s.advanceWithdrawals(ctx, paused, &res); err != nil {
 		errs = append(errs, fmt.Errorf("推进提现: %w", err))
 	}
-	return errors.Join(errs...)
+
+	joined := errors.Join(errs...)
+	if joined == nil || res.AnySucceeded() {
+		// 部分成功不是作业失败。它仍然全部记在 RoundResult 里，
+		// 由 cards.sync.failed 告警按「同一账号同一步骤连续 N 轮」把持续
+		// 失败挑出来——那条告警不是可选的后续，它是这次改动的另一半：
+		// 少了它，这里就把一个吵闹但真实的信号换成了一个安静的盲区。
+		return res, nil
+	}
+	return res, joined
+}
+
+// pausedFor 返回该账号的暂停记录；未暂停时第二个返回值为 false。
+func pausedFor(paused map[string]AccountSyncPause, account string) (AccountSyncPause, bool) {
+	p, ok := paused[account]
+	if !ok || !p.Paused {
+		return AccountSyncPause{}, false
+	}
+	return p, true
 }
 
 // advanceWithdrawals 把未收敛的提现查一遍上游，推进到终态。
@@ -140,32 +180,48 @@ func (s *Syncer) RunOnce(ctx context.Context) error {
 //
 // 逐笔的失败只收集不中断：一笔查不动不该让后面几笔也停在 pending，
 // 而「钱到底转出去没有」是最不该被一次网络抖动推迟的那个答案。
-func (s *Syncer) advanceWithdrawals(ctx context.Context) error {
+func (s *Syncer) advanceWithdrawals(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	svc := s.opts.Withdrawals
 	if svc == nil {
 		return nil
 	}
 	open, err := svc.OpenWithdrawals(ctx)
 	if err != nil {
+		res.fail("", StepWithdrawals, err)
 		return err
 	}
+	tally := newStepTally(StepWithdrawals)
+	defer tally.flush(res)
+
 	var errs []error
 	for _, w := range open {
-		if err := svc.RefreshWithdraw(ctx, w.Account, w.RequestID); err != nil {
-			errs = append(errs, fmt.Errorf("提现 %s: %w", w.RequestID, err))
+		if p, ok := pausedFor(paused, w.Account); ok {
+			tally.markSkip(w.Account, pauseSkipReason(p))
+			continue
 		}
+		if err := svc.RefreshWithdraw(ctx, w.Account, w.RequestID); err != nil {
+			wrapped := fmt.Errorf("提现 %s: %w", w.RequestID, err)
+			tally.markErr(w.Account, wrapped)
+			errs = append(errs, wrapped)
+			continue
+		}
+		tally.markOK(w.Account)
 	}
 	return errors.Join(errs...)
 }
 
 // reconcileOperations 处理未收敛的操作。
-func (s *Syncer) reconcileOperations(ctx context.Context) error {
+func (s *Syncer) reconcileOperations(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	ops, err := s.store.UnresolvedOperations(ctx)
 	if err != nil {
+		res.fail("", StepReconcile, err)
 		return err
 	}
 
 	now := s.opts.Now()
+	tally := newStepTally(StepReconcile)
+	defer tally.flush(res)
+
 	var errs []error
 	for _, op := range ops {
 		// 只有开卡需要 alias 对账：其余操作要么天然幂等，要么它们的
@@ -174,14 +230,23 @@ func (s *Syncer) reconcileOperations(ctx context.Context) error {
 			continue
 		}
 
+		// 暂停的账号连对账都不做：对账要打上游，而暂停的语义正是
+		// 「这一轮别碰这个账号的上游」。
+		if p, ok := pausedFor(paused, op.Account); ok {
+			tally.markSkip(op.Account, pauseSkipReason(p))
+			continue
+		}
+
 		acct, ok := s.accounts[op.Account]
 		if !ok {
 			// 台账里有一笔操作，但它的账号已经不在配置里了。
 			// **不能当成「查不到卡」处理**——那会让它超宽限期后被判成
 			// 需人工，而真正的原因是配置被改掉了，两者的处置完全不同。
-			errs = append(errs, fmt.Errorf(
+			unconfigured := fmt.Errorf(
 				"操作 %s 的账号 %q 未配置，无法对账（配置被改动过？）",
-				op.IdempotencyKey, op.Account))
+				op.IdempotencyKey, op.Account)
+			tally.markErr(op.Account, unconfigured)
+			errs = append(errs, unconfigured)
 			continue
 		}
 
@@ -190,15 +255,20 @@ func (s *Syncer) reconcileOperations(ctx context.Context) error {
 		page, err := acct.Client.ListCards(ctx, infini.ListCardsQuery{Alias: op.Alias})
 		if err != nil {
 			// 读不到就下一轮再来，**不动台账**。
-			errs = append(errs, fmt.Errorf("账号 %s 按 alias %s 查卡: %w",
-				acct.ID, op.Alias, err))
+			wrapped := fmt.Errorf("账号 %s 按 alias %s 查卡: %w",
+				acct.ID, op.Alias, err)
+			tally.markErr(op.Account, wrapped)
+			errs = append(errs, wrapped)
 			continue
 		}
 
 		decision := ReconcileIssue(op, page.Cards, now, s.opts.UnknownGrace)
 		if err := s.applyDecision(ctx, op, decision, page.Cards); err != nil {
+			tally.markErr(op.Account, err)
 			errs = append(errs, err)
+			continue
 		}
+		tally.markOK(op.Account)
 	}
 	return errors.Join(errs...)
 }
@@ -262,9 +332,10 @@ const discoveryMaxPages = 50
 // 只对**没见过的**卡写投影，已知的交给 refreshTrackedCards：那条路径带着
 // 批量状态查询与明文补拉，这里重复写一遍只会把归属信息（用途、绑定账号）
 // 覆盖成空。
-func (s *Syncer) discoverCards(ctx context.Context) error {
+func (s *Syncer) discoverCards(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	known, err := s.store.TrackedCards(ctx)
 	if err != nil {
+		res.fail("", StepDiscover, err)
 		return err
 	}
 	seen := make(map[string]bool, len(known))
@@ -272,30 +343,42 @@ func (s *Syncer) discoverCards(ctx context.Context) error {
 		seen[ref.Account+"/"+ref.CardID] = true
 	}
 
+	tally := newStepTally(StepDiscover)
+	defer tally.flush(res)
+
 	var errs []error
 	for _, id := range s.order {
+		if p, ok := pausedFor(paused, id); ok {
+			tally.markSkip(id, pauseSkipReason(p))
+			continue
+		}
 		acct := s.accounts[id]
 		for page := 1; page <= discoveryMaxPages; page++ {
-			res, err := acct.Client.ListCards(ctx, infini.ListCardsQuery{
+			listed, err := acct.Client.ListCards(ctx, infini.ListCardsQuery{
 				Page: page, PageSize: discoveryPageSize,
 			})
 			if err != nil {
-				errs = append(errs, fmt.Errorf("账号 %s 列卡（第 %d 页）: %w", id, page, err))
+				wrapped := fmt.Errorf("账号 %s 列卡（第 %d 页）: %w", id, page, err)
+				tally.markErr(id, wrapped)
+				errs = append(errs, wrapped)
 				break
 			}
-			for _, c := range res.Cards {
+			tally.markOK(id)
+			for _, c := range listed.Cards {
 				if seen[id+"/"+c.ID] {
 					continue
 				}
 				// 归属留空：这张卡是在上游建的，平台这边还没人给它登记用途。
 				// 页面上会显示成「—」，而那正是实情。
 				if err := s.store.UpsertCard(ctx, id, c, CardAttribution{}); err != nil {
-					errs = append(errs, fmt.Errorf("落新发现的卡 %s: %w", c.ID, err))
+					wrapped := fmt.Errorf("落新发现的卡 %s: %w", c.ID, err)
+					tally.markErr(id, wrapped)
+					errs = append(errs, wrapped)
 					continue
 				}
 				seen[id+"/"+c.ID] = true
 			}
-			if len(res.Cards) == 0 || (res.TotalPages > 0 && page >= res.TotalPages) {
+			if len(listed.Cards) == 0 || (listed.TotalPages > 0 && page >= listed.TotalPages) {
 				break
 			}
 		}
@@ -306,12 +389,17 @@ func (s *Syncer) discoverCards(ctx context.Context) error {
 // refreshTrackedCards 刷新投影里每张卡的状态。
 //
 // 这也是异步开卡的轮询路径：申请单出来时卡是 init，靠这里推进到 active。
-// batchStatusChunk 是一次批量状态查询的卡数上限（上游文档：1~100）。
-const batchStatusChunk = 100
-
-func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
+//
+// 一次批量状态查询的卡数上限用 infini.BatchStatusMax，**不在这里再写一个
+// 100**（XM-CARD-VISIBILITY）：此前这里有个 batchStatusChunk = 100，与连接器
+// 的上限是同一个数却各写一份，改一处不会有任何测试发红——领域层漂到 150
+// 之后每一批都会被连接器本地拒掉，而日志上看起来像上游出了问题。
+// 上面的 discoveryPageSize 也是 100，但那是**另一个数**（列表翻页大小），
+// 不要顺手合并。
+func (s *Syncer) refreshTrackedCards(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	refs, err := s.store.TrackedCards(ctx)
 	if err != nil {
+		res.fail("", StepBatchStatus, err)
 		return err
 	}
 
@@ -322,23 +410,46 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 		byAccount[ref.Account] = append(byAccount[ref.Account], ref.CardID)
 	}
 
+	// defer 是后进先出：先声明 fallback 的 defer，批量那条才会排在结果前面。
+	fallbackTally := newStepTally(StepBatchStatusFallback)
+	defer fallbackTally.flush(res)
+	batchTally := newStepTally(StepBatchStatus)
+	defer batchTally.flush(res)
+
+	skipped := make(map[string]bool, len(s.accounts))
+
 	var errs []error
 	for _, account := range s.order {
+		if p, ok := pausedFor(paused, account); ok {
+			skipped[account] = true
+			batchTally.markSkip(account, pauseSkipReason(p))
+			continue
+		}
 		ids := byAccount[account]
 		if len(ids) == 0 {
 			continue
 		}
 		acct := s.accounts[account]
 		statuses := make(map[string]string, len(ids))
-		for start := 0; start < len(ids); start += batchStatusChunk {
-			end := start + batchStatusChunk
+		for start := 0; start < len(ids); start += infini.BatchStatusMax {
+			end := start + infini.BatchStatusMax
 			if end > len(ids) {
 				end = len(ids)
 			}
 			got, err := acct.Client.BatchCardStatus(ctx, ids[start:end])
 			if err != nil {
 				// 一批失败不该让其余批次与其余账号一起报废。
-				errs = append(errs, fmt.Errorf("账号 %s 批量查状态: %w", account, err))
+				wrapped := fmt.Errorf("账号 %s 批量查状态: %w", account, err)
+				batchTally.markErr(account, wrapped)
+				errs = append(errs, wrapped)
+				if !retryableKind(connector.KindOf(err)) {
+					// 上游明确拒绝（或认证/IP 问题）时，**这个账号的后续批次
+					// 一批都不再发**：再发 100 张不是一个不同的请求，
+					// 它注定被同样地拒掉，白烧配额还在日志里多出几条看起来
+					// 像上游故障的记录。只中断这个账号——保住既有的
+					// 「一批失败不该让其余账号报废」。
+					break
+				}
 				continue
 			}
 			for id, status := range got {
@@ -349,9 +460,13 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 	}
 
 	// 账号没配的卡单独报错：这类错误此前也报，保持不变。
+	// 也记进结果——否则「整轮只有这一类错误」时，AllFailed 会因为它不在
+	// 任何一条 StepOutcome 里而算出 false，把一次配置事故判成成功。
 	for _, ref := range refs {
 		if _, ok := s.accounts[ref.Account]; !ok {
-			errs = append(errs, fmt.Errorf("卡 %s 的账号 %q 未配置", ref.CardID, ref.Account))
+			unconfigured := fmt.Errorf("卡 %s 的账号 %q 未配置", ref.CardID, ref.Account)
+			batchTally.markErr(ref.Account, unconfigured)
+			errs = append(errs, unconfigured)
 		}
 	}
 
@@ -362,6 +477,9 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 	// 把批量省下的调用又花回去了。余额变化会伴随状态之外的事件（充值、
 	// 消费），那条路由回调与资金操作各自触发定向刷新，不靠这一轮兜底。
 	for _, ref := range refs {
+		if skipped[ref.Account] {
+			continue // 账号被暂停，上面已经记过一条 skipped
+		}
 		acct, ok := s.accounts[ref.Account]
 		if !ok {
 			continue // 上面已经报过
@@ -370,15 +488,26 @@ func (s *Syncer) refreshTrackedCards(ctx context.Context) error {
 		if !seen {
 			// 批量结果里没有这张卡：可能那一批失败了，也可能上游不认识它。
 			// 退回单查，让它自己报错——静默跳过会让一张卡永远不再刷新。
+			//
+			// 这条兜底**行为一个字都没改**，只是把它的成果记下来
+			// （XM-CARD-VISIBILITY）：2026-09-08 那次风暴里它一直在正常工作，
+			// 卡状态其实被刷新着，红的只是作业状态，而没有任何地方看得出来。
+			// 「批量红了但兜底接住了」与「两条都断了」的处置完全不同——
+			// 前者不该叫人起床。
 			if err := s.refreshOneCard(ctx, acct, ref); err != nil {
+				fallbackTally.markErr(ref.Account, err)
 				errs = append(errs, err)
+				continue
 			}
+			fallbackTally.markOK(ref.Account)
+			fallbackTally.addRecovered(ref.Account, 1)
 			continue
 		}
 		if current, err := s.store.CardStatusOf(ctx, ref.Account, ref.CardID); err == nil && current == status {
 			continue
 		}
 		if err := s.refreshOneCard(ctx, acct, ref); err != nil {
+			batchTally.markErr(ref.Account, err)
 			errs = append(errs, err)
 		}
 	}
@@ -402,14 +531,22 @@ func (s *Syncer) refreshOneCard(ctx context.Context, acct Account, ref CardRef) 
 // 产品负责人 2026-09-04 决定卡面明文落库，而上游的列表接口只给 mask——
 // 明文只能从 reveal 来。这一步刻意做成「一次性」：拉到就不再拉，
 // 卡号在卡的生命周期内不变。
-func (s *Syncer) fetchMissingSecrets(ctx context.Context) error {
+func (s *Syncer) fetchMissingSecrets(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	refs, err := s.store.CardsMissingSecrets(ctx)
 	if err != nil {
+		res.fail("", StepFetchSecrets, err)
 		return err
 	}
 
+	tally := newStepTally(StepFetchSecrets)
+	defer tally.flush(res)
+
 	var errs []error
 	for _, ref := range refs {
+		if p, ok := pausedFor(paused, ref.Account); ok {
+			tally.markSkip(ref.Account, pauseSkipReason(p))
+			continue
+		}
 		acct, ok := s.accounts[ref.Account]
 		if !ok {
 			continue // refreshTrackedCards 已经报过这个账号缺配置
@@ -418,36 +555,56 @@ func (s *Syncer) fetchMissingSecrets(ctx context.Context) error {
 		if err != nil {
 			// 单张卡拉失败不该让整轮报废：卡状态刷新是独立的一件事，
 			// 而下一轮还会再试这一张。
-			errs = append(errs, fmt.Errorf("账号 %s 拉卡 %s 的明文: %w", ref.Account, ref.CardID, err))
+			wrapped := fmt.Errorf("账号 %s 拉卡 %s 的明文: %w", ref.Account, ref.CardID, err)
+			tally.markErr(ref.Account, wrapped)
+			errs = append(errs, wrapped)
 			continue
 		}
 		if err := s.store.StoreCardSecrets(ctx, ref.Account, ref.CardID, revealed); err != nil {
-			errs = append(errs, fmt.Errorf("落卡面明文 %s: %w", ref.CardID, err))
+			wrapped := fmt.Errorf("落卡面明文 %s: %w", ref.CardID, err)
+			tally.markErr(ref.Account, wrapped)
+			errs = append(errs, wrapped)
+			continue
 		}
+		tally.markOK(ref.Account)
 	}
 	return errors.Join(errs...)
 }
 
-func (s *Syncer) syncTransactions(ctx context.Context) error {
+func (s *Syncer) syncTransactions(ctx context.Context, paused map[string]AccountSyncPause, res *RoundResult) error {
 	refs, err := s.store.TrackedCards(ctx)
 	if err != nil {
+		res.fail("", StepTransactions, err)
 		return err
 	}
 
+	tally := newStepTally(StepTransactions)
+	defer tally.flush(res)
+
 	var errs []error
 	for _, ref := range refs {
+		if p, ok := pausedFor(paused, ref.Account); ok {
+			tally.markSkip(ref.Account, pauseSkipReason(p))
+			continue
+		}
 		acct, ok := s.accounts[ref.Account]
 		if !ok {
 			continue // 上面 refreshTrackedCards 已经报过这个账号缺配置
 		}
 		page, err := acct.Client.CardTransactions(ctx, ref.CardID, 1, transactionPageSize)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("账号 %s 查流水 %s: %w", ref.Account, ref.CardID, err))
+			wrapped := fmt.Errorf("账号 %s 查流水 %s: %w", ref.Account, ref.CardID, err)
+			tally.markErr(ref.Account, wrapped)
+			errs = append(errs, wrapped)
 			continue
 		}
 		if err := s.store.UpsertTransactions(ctx, ref.Account, ref.CardID, page.Transactions); err != nil {
-			errs = append(errs, fmt.Errorf("落流水 %s: %w", ref.CardID, err))
+			wrapped := fmt.Errorf("落流水 %s: %w", ref.CardID, err)
+			tally.markErr(ref.Account, wrapped)
+			errs = append(errs, wrapped)
+			continue
 		}
+		tally.markOK(ref.Account)
 	}
 	return errors.Join(errs...)
 }

@@ -1,0 +1,393 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { OpsOverview } from "../api/ops";
+import { ChangesPage } from "./ChangesPage";
+
+function fakeResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status < 400,
+    status,
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(typeof body === "string" ? body : JSON.stringify(body)),
+  } as unknown as Response;
+}
+
+/** chi 对没有挂载的路由回**纯文本** 404，解析不出 `error.code`——
+ *  api/client.ts 的 looksLikeUnmountedRoute 靠这层结构差异判「整组端点不存在」。
+ *  逐字模拟它，否则测的就不是真实的「这套后台没接审批中心」形态。 */
+function bareNotFound(): Response {
+  return {
+    ok: false,
+    status: 404,
+    json: () => Promise.reject(new Error("not json")),
+    text: () => Promise.resolve("404 page not found"),
+  } as unknown as Response;
+}
+
+const FRESHNESS = {
+  state: "fresh" as const,
+  staleness_seconds: 5,
+  threshold_seconds: 120,
+  is_partial: false,
+  observed_at: "2026-09-07T03:04:05Z",
+  last_success: "2026-09-07T03:04:05Z",
+  last_error_code: "",
+};
+
+/** build 三行按生产真实形状造：BUILD_VERSION 被 deploy-local.sh 写成**环境名**
+ *  （`export BUILD_VERSION="$expected_environment"`），不是语义化版本号。
+ *  fixture 若写成 "1.2.3"，「别把它当版本号」这条断言就测不到真实场景。 */
+function opsOverview(build?: Partial<OpsOverview["build"]>): OpsOverview {
+  return {
+    build: { version: "production", commit: "9f3c1ab", environment: "production", ...build },
+    worker_heartbeat: {
+      metric_key: "platform.heartbeat",
+      source: "platform-worker",
+      value: {},
+      freshness: FRESHNESS,
+    },
+    sync_pipelines: [],
+    connector_health: [],
+    alert_delivery: { telegram_configured: true, webhook_configured: false },
+    retention: {
+      metric_key: "platform.retention.last_run",
+      source: "platform-worker",
+      value: {},
+      freshness: FRESHNESS,
+    },
+    database: { connected: true },
+    failed_jobs_by_kind: [],
+    failed_jobs_status: "ok",
+    failed_jobs_window_hours: 24,
+  };
+}
+
+function approvalListBody() {
+  return { items: [], limit: 1, truncated: false };
+}
+
+/** GET /api/v1/ops/migrations 的响应（httpapi/migrations.go migrationsResponse）。
+ *
+ *  默认造一套「全部已应用、不脏」的形状——那是健康部署的样子。
+ *  dirty 与 ahead 两条异常路径各自在用例里覆写。 */
+function migrationsBody(overrides: Record<string, unknown> = {}) {
+  return {
+    applied_version: 2,
+    dirty: false,
+    ahead: 0,
+    items: [
+      { version: 1, name: "init_core_registry", applied: true, has_down: true },
+      { version: 2, name: "init_action", applied: true, has_down: true },
+    ],
+    ...overrides,
+  };
+}
+
+/** 按 URL 路由的 fetch 桩：这一页不同子页签打不同端点，一个恒定返回的桩会让
+ *  「哪一格发了哪个请求」测不出来。 */
+function stubFetch(handler: (url: string) => Response) {
+  const fetchImpl = vi.fn((input: string) => Promise.resolve(handler(input)));
+  vi.stubGlobal("fetch", fetchImpl);
+  return fetchImpl;
+}
+
+function defaultHandler(url: string): Response {
+  if (url.includes("/api/v1/approvals")) return fakeResponse(approvalListBody());
+  if (url.includes("/api/v1/ops/migrations")) return fakeResponse(migrationsBody());
+  if (url.includes("/api/v1/ops/overview")) return fakeResponse(opsOverview());
+  throw new Error(`测试没有为这个地址准备响应：${url}`);
+}
+
+function renderChanges(initialEntry = "/changes") {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <ChangesPage />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
+function urls(fetchImpl: ReturnType<typeof stubFetch>): string {
+  return JSON.stringify(fetchImpl.mock.calls);
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("版本与发布页", () => {
+  it("五格页签都在，默认落在变更单", async () => {
+    stubFetch(defaultHandler);
+    renderChanges();
+
+    for (const label of [
+      "变更单",
+      "发布与回滚",
+      "自动测试与质量",
+      "发布包与安全检查",
+      "数据库变更",
+    ]) {
+      expect(screen.getByRole("tab", { name: label })).toBeTruthy();
+    }
+    expect(screen.getByRole("tab", { name: "变更单", selected: true })).toBeTruthy();
+    expect(await screen.findByText(/审批中心已在本环境启用/)).toBeTruthy();
+  });
+
+  it("变更单格只探审批中心通不通：打的是 approvals、不打 ops，也不显示队列条数", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges();
+
+    await screen.findByText(/审批中心已在本环境启用/);
+    // 只发一次请求，且是审批中心的探测（limit=1）。用「只发了一次」这个正向
+    // 断言代替「没打 ops/overview」的缺席断言：后者在页面整体渲染失败时也会绿。
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
+    expect(urls(fetchImpl)).toContain("/api/v1/approvals?limit=1");
+    expect(
+      screen.getByText(/这一页因此不复制队列，也不显示待审批条数/),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: /待审批/ }).getAttribute("href")).toBe(
+      "/actions?sub=pending",
+    );
+  });
+
+  it("变更单格说清审批中心管的是 Action 执行审批，不是这一格的变更单台账", async () => {
+    stubFetch(defaultHandler);
+    renderChanges("/changes?sub=requests");
+
+    expect(await screen.findByText(/XM-0030 · 2026-09-07 在本后台启用/)).toBeTruthy();
+    expect(screen.getByText(/它回答的是「这一次写操作要不要放行」/)).toBeTruthy();
+    expect(
+      screen.getByText(/所以审批中心接上并不等于这一格接上了——它覆盖的是审批链，不覆盖变更单台账/),
+    ).toBeTruthy();
+    // 落款说清「在等什么」：等的是产品负责人裁定，不是排期。
+    expect(screen.getByText(/待产品负责人裁定——这一格等的是那个裁定，不是排期/)).toBeTruthy();
+  });
+
+  it("审批中心没挂载时说的是「这个部署还停在接上之前」，不说已启用", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/approvals")) return bareNotFound();
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=requests");
+
+    expect(await screen.findByText("这套后台还没接审批中心")).toBeTruthy();
+    expect(screen.getByText(/更可能是这个部署还停在接上之前的提交/)).toBeTruthy();
+    // 缺席断言，已做变异验证：把「已启用」那一行改成无条件渲染之后，
+    // 红的正是这一条（而不是上面两条正向断言）。
+    expect(screen.queryByText(/审批中心已在本环境启用/)).toBeNull();
+  });
+
+  it("发布与回滚接的是当前部署，且把构建标签与版本号分清", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges("/changes?sub=releases");
+
+    expect(await screen.findByText("9f3c1ab")).toBeTruthy();
+    expect(urls(fetchImpl)).toContain("/api/v1/ops/overview");
+    // 主数位来自 build.version，但它今天是环境名——标签叫「构建标签」并就地说明。
+    expect(screen.getByText(/部署脚本今天把它写成环境名，不是语义化版本号/)).toBeTruthy();
+    expect(screen.getByText(/这是「现在跑的是什么」，不是发布历史/)).toBeTruthy();
+    expect(screen.getByText(/与「运行保障 → 控制平面健康」读的是同一个端点/)).toBeTruthy();
+    expect(screen.getByRole("link", { name: /控制平面健康/ }).getAttribute("href")).toBe(
+      "/ops?sub=health",
+    );
+  });
+
+  it("构建信息取不到时说清是取不到，不说成没发布过", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/ops/overview")) {
+        return fakeResponse(opsOverview({ commit: "", version: "", environment: "" }));
+      }
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=releases");
+
+    expect(await screen.findByText(/这次部署没有注入 BUILD_COMMIT/)).toBeTruthy();
+    expect(screen.getByText(/空值说明取不到构建信息，不代表没有发布过/)).toBeTruthy();
+  });
+
+  it("自动测试与质量说清 Actions 停摆与复审期限，且不发请求", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges("/changes?sub=tests");
+
+    expect(await screen.findByText(/有效期至 2026-09-12，产品负责人须在该日前复审/)).toBeTruthy();
+    expect(screen.getByText(/它等的是一次复审，不是排期/)).toBeTruthy();
+    // 后台任务不是 CI：这句话防的是拿 /jobs 的运行记录顶这一格。
+    expect(screen.getByText(/后台任务页的运行记录不是 CI/)).toBeTruthy();
+    // 「不发请求」同样做过变异验证：给 BlueprintOnlyTab 加一个 useQuery 之后，
+    // 这三格的这条断言都会红——它不是一条恒真的断言。
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("发布包与安全检查说清整条供应链环节都不存在，且不发请求", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges("/changes?sub=packages");
+
+    expect(await screen.findByText(/全仓找不到 cosign \/ syft \/ trivy \/ grype 的调用/)).toBeTruthy();
+    expect(screen.getByText(/开票线是另一条独立流水线/)).toBeTruthy();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("数据库变更接上了迁移状态：版本、逐条清单，并打的是 ops/migrations", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges("/changes?sub=database");
+
+    expect(await screen.findByText("第 2 版")).toBeTruthy();
+    expect(urls(fetchImpl)).toContain("/api/v1/ops/migrations");
+    // 逐条清单来自响应，不是编的：两条脚本名都要出现。
+    expect(screen.getByText("init_core_registry")).toBeTruthy();
+    expect(screen.getByText("init_action")).toBeTruthy();
+    // 「已应用」两条都在（applied: true）。用 getAllByText 拿到确切条数，
+    // 而不是「至少有一个」——后者在只渲染出一行时也会绿。
+    expect(screen.getAllByText("已应用")).toHaveLength(2);
+    // 只读门禁写在这一格里，不能只写在页头那条横幅上。
+    expect(
+      screen.getByText(/走版本化脚本 \+ 变更单 \+ 人工批准，不经 Action 通道，后台也没有对应端点/),
+    ).toBeTruthy();
+  });
+
+  it("数据库变更把「已应用」说成推断，并说清蓝图那四列为什么取不到", async () => {
+    stubFetch(defaultHandler);
+    renderChanges("/changes?sub=database");
+
+    expect(await screen.findByText("第 2 版")).toBeTruthy();
+    // 这句是本格的诚实性所在：库里没有逐条台账，「已应用」是按版本号推断的。
+    expect(
+      screen.getByText(/库里没有逐条台账，所以不大于那个版本号的都算已应用/),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(/蓝图这张表要的「迁移前后行数 \/ 执行人 \/ 验证 \/ 回滚路径」四列取不到/),
+    ).toBeTruthy();
+  });
+
+  it("库标着 dirty 时用 alert 说出来，不混在正常文案里", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/ops/migrations")) {
+        return fakeResponse(migrationsBody({ dirty: true }));
+      }
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=database");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/上一次迁移跑到一半失败了/);
+    expect(alert.textContent).toMatch(/既不能继续迁移也不该继续服务/);
+    // 缺席断言，配正向锚点：上面已经拿到了 alert（说明这一格渲染出来了），
+    // 所以「那句 dirty=false 的话不在」不可能是因为整格没渲染。
+    expect(screen.queryByText(/dirty = false/)).toBeNull();
+  });
+
+  it("二进制比库新时把落后的版本号数出来", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/ops/migrations")) {
+        return fakeResponse(
+          migrationsBody({
+            applied_version: 1,
+            ahead: 1,
+            items: [
+              { version: 1, name: "init_core_registry", applied: true, has_down: true },
+              { version: 2, name: "init_action", applied: false, has_down: true },
+            ],
+          }),
+        );
+      }
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=database");
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/还有 1 版没应用/);
+    expect(alert.textContent).toMatch(/未应用的是第 2 版/);
+    expect(alert.textContent).toMatch(/镜像更新了而迁移容器没跑/);
+    // 表体里那一行也要标成未应用——横幅说一遍、表里说另一套是最糟的组合。
+    expect(screen.getByText("未应用")).toBeTruthy();
+    expect(screen.getAllByText("已应用")).toHaveLength(1);
+  });
+
+  it("库确实一条都没跑过时如实显示「第 0 版」", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/ops/migrations")) {
+        return fakeResponse(
+          migrationsBody({
+            applied_version: 0,
+            ahead: 2,
+            items: [
+              { version: 1, name: "init_core_registry", applied: false, has_down: true },
+              { version: 2, name: "init_action", applied: false, has_down: true },
+            ],
+          }),
+        );
+      }
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=database");
+
+    // 这一条同时是下一条那个缺席断言的**判据自检**：它证明「第 0 版」这个
+    // 匹配器在字符串真的出现时抓得到。没有它的话，下一条里的
+    // `queryByText("第 0 版")).toBeNull()` 有可能只是因为那个字符串永远
+    // 匹配不上（比如渲染成了「第0版」）而恒真。
+    expect(await screen.findByText("第 0 版")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toMatch(/还有 2 版没应用/);
+  });
+
+  it("迁移状态读不到时显示错误，不显示成「第 0 版」", async () => {
+    stubFetch((url) => {
+      if (url.includes("/api/v1/ops/migrations")) {
+        return fakeResponse(
+          { error: { code: "INTERNAL", message: "服务内部错误", request_id: "req-1" } },
+          500,
+        );
+      }
+      return defaultHandler(url);
+    });
+    renderChanges("/changes?sub=database");
+
+    // 正向锚点先立：错误态渲染出来了。变异验证时红的正是这一行——给
+    // getMigrations 加一个 `.catch(() => 零值报告)` 之后，错误态不再出现。
+    expect(await screen.findByText(/服务内部错误/)).toBeTruthy();
+    // 再同步断言那句假话不在。**不套 waitFor**：套在缺席断言外面几乎必然恒真。
+    // 这个匹配器抓不抓得到「第 0 版」由上一条用例自检（那里它必须找得到）。
+    expect(screen.queryByText("第 0 版")).toBeNull();
+    expect(screen.queryByText(/dirty = false/)).toBeNull();
+  });
+
+  it("四张统计格主数位是「—」，并逐格说清今天没有来源", async () => {
+    stubFetch(defaultHandler);
+    renderChanges();
+
+    for (const label of ["待评审变更", "等待生产批准", "自动测试失败", "供应链异常"]) {
+      const tile = screen.getByTitle(label).closest("article");
+      expect(tile).toBeTruthy();
+      expect(within(tile as HTMLElement).getByText("—")).toBeTruthy();
+      expect(within(tile as HTMLElement).getByText(/今天没有来源/)).toBeTruthy();
+    }
+    // 「等待生产批准」不能拿审批中心顶：这一格要的是发布批准。
+    expect(
+      screen.getByText(/审批中心里的单是 Action 执行审批，不是发布批准，不能拿来充数/),
+    ).toBeTruthy();
+  });
+
+  it("五格的落款不再把阻塞一律归给 Foundation-B", async () => {
+    stubFetch(defaultHandler);
+    for (const sub of ["requests", "releases", "tests", "packages", "database"]) {
+      const { unmount } = renderChanges(`/changes?sub=${sub}`);
+      // 缺席断言，已做变异验证：蓝图数据文件里那五句「随 Foundation-B
+      // （XM-0030）上线」是错归因（审批中心 2026-09-07 已启用，五格没有一格
+      // 在等它）。把 honestBlueprintTab 改成直接返回蓝图原样之后这条会红。
+      await waitFor(() => expect(screen.queryByText(/随 Foundation-B/)).toBeNull());
+      unmount();
+    }
+  });
+
+  it("未知子页不静默回落到变更单", async () => {
+    const fetchImpl = stubFetch(defaultHandler);
+    renderChanges("/changes?sub=not-a-real-tab");
+
+    expect(await screen.findByText("「not-a-real-tab」子页尚未接入")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "返回变更单" }).getAttribute("href")).toBe(
+      "/changes?sub=requests",
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});

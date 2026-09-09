@@ -1,5 +1,6 @@
 import { PageState } from "@xingmang/ui-admin";
 import type { ReactNode } from "react";
+import { ChannelProfitView } from "./ChannelProfitView";
 import { InvoiceConsolePanel } from "./InvoiceConsolePanel";
 import { NewApiFinanceOverview } from "./NewApiFinanceOverview";
 import { Sub2ApiFinanceOverview } from "./Sub2ApiFinanceOverview";
@@ -34,10 +35,15 @@ function sub2apiFinanceSubTab(subId: string): ReactNode | undefined {
     case "refunds":
       return <Sub2ApiRefundsPanel />;
     case "profit":
-      return pending(
-        "利润核算",
-        "逐渠道的使用收入、上游成本、毛利与毛利率。数据来自 XM-0037 成本台账（finance.profit-daily 端点已有），接线随第 5 片「渠道管理 + 上游管理」一并做——那一片才会把渠道与上游账号对上号。",
-      );
+      // XM-SUB2API-PROFIT：这一格曾经等的是「第 5 片把渠道与上游账号对上号」。
+      // 那件事已经由 finance/channels/summary 做完了——端点无条件挂载，一次
+      // 返回两个平台的行（`system_type`），NewAPI 侧同名子页早就在读它。
+      // 所以这里不是新做一张表，是把已经验证可用的那张按平台参数化。
+      //
+      // **供数不走 `finance/profit-daily`**：那条是逐行台账
+      //（upstream_account × business_day × token_id），比这一页需要的粒度细
+      // 一档，且没有任何前端在读它。见 docs/handoffs/slices/XM-SUB2API-PROFIT.md。
+      return <ChannelProfitView platform="sub2api" />;
     case "invoices":
       // CR-0005 第一阶段：这一格的阻塞点曾经是**契约**（同库还是同步，要等
       // CR-0002 冻结），产品负责人 2026-09-02 指令改走嵌入式迁入——不等

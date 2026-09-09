@@ -77,16 +77,33 @@ function effectiveFreshness(freshness: FreshnessContract): FreshnessContract {
     : freshness;
 }
 
-function UnavailableCard({ label, note }: { label: string; note: string }) {
+/** 值给不出时的卡片。
+ *
+ *  `badge` 缺省是「未接入」——**不传的调用点行为与加这个参数之前逐字相同**，
+ *  有用例钉着。只有确实不是「未接入」的那一种给不出才传，见
+ *  `coverageBadgeFor`。 */
+function UnavailableCard({ label, note, badge = "未接入" }: { label: string; note: string; badge?: string }) {
   return (
     <StatTile
       label={label}
       value="—"
       unavailable
       note={note}
-      status={<Badge tone="neutral">未接入</Badge>}
+      status={<Badge tone="neutral">{badge}</Badge>}
     />
   );
+}
+
+/** 非单日区间时这几张卡显示「—」，原因是**这个口径只覆盖单日**，不是数据缺失。
+ *
+ *  这两件事此前在屏幕上长得一模一样（都是「未接入」徽章 + 「—」），而**下一步
+ *  完全相反**：口径不覆盖不用管，数据缺失要查。徽章因此必须分开——只把区别写在
+ *  下面那行小字里不够，徽章才是扫一眼就会读到的东西。
+ *
+ *  返回 `undefined` 让 `UnavailableCard` 用回默认的「未接入」：单日区间下取不到
+ *  指标，那**就是**真的没接上/没数据，措辞不该改。 */
+function coverageBadgeFor(range: PaymentSummaryCardsRange): string | undefined {
+  return range.from === range.to ? undefined : "仅支持单日";
 }
 
 function NotApplicableCard({ label, note }: { label: string; note: string }) {
@@ -144,6 +161,7 @@ export function BucketCard({
     return (
       <UnavailableCard
         label={label}
+        badge={coverageBadgeFor(range)}
         note={
           range.from === range.to
             ? "暂无匹配业务日的支付日汇总指标"
@@ -202,6 +220,7 @@ function FeeCard({
     return (
       <UnavailableCard
         label="支付手续费"
+        badge={coverageBadgeFor(range)}
         note={
           range.from === range.to
             ? "暂无匹配业务日的支付日汇总指标"

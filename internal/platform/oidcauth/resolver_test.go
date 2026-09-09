@@ -616,6 +616,40 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 		t.Fatalf("sms-operator 应持有 sms.purchase，否则这个功能没有任何角色能用, got %v", got)
 	}
 
+	// XM-EXT-PUBLISHING（2026-09-08）：内容发布的三个权限。
+	//
+	// **publishing.publish 不给 admin**，与 fund.withdraw / sms.purchase 同一条
+	// 理由：对外发布不可逆、而且是公开的（删了也已经被抓取、被截图）。
+	// 「谁能以公司的名义说话」是一次显式的组织授予，不该由「他是管理员」
+	// 顺带获得。读与编辑给 admin，否则这一页对唯一能用它的人也是 403。
+	for _, sc := range []string{"publishing.read", "publishing.manage"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应持有 %s，否则内容发布页对唯一能用它的人是 403", sc)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 不该持有 %s：草稿正文与渠道登记不是看板数据", sc)
+		}
+	}
+	if slices.Contains(admin, "publishing.publish") {
+		t.Fatal("admin 不该持有 publishing.publish：对外发布不可逆，日常操作账号不该带它")
+	}
+	if slices.Contains(staff, "publishing.publish") {
+		t.Fatal("staff 更不该持有 publishing.publish")
+	}
+	// 挂在一个真实存在、可以被指派的角色上——否则「不给 admin」就成了
+	// 「谁都用不了」（那是 bug，不是最小权限）。
+	if got := m["content-publisher"]; !slices.Contains(got, "publishing.publish") {
+		t.Fatalf("content-publisher 应持有 publishing.publish，否则这个功能没有任何角色能用, got %v", got)
+	}
+	// 发布人也要看得见自己要发的东西，否则他必须同时被授予 admin 才用得起来。
+	if got := m["content-publisher"]; !slices.Contains(got, "publishing.read") {
+		t.Fatalf("content-publisher 应持有 publishing.read, got %v", got)
+	}
+	// 但发布人**不该**顺带拿到编辑权：改稿与发稿是两件事。
+	if slices.Contains(m["content-publisher"], "publishing.manage") {
+		t.Fatal("content-publisher 不该持有 publishing.manage：改稿与发稿刻意分开")
+	}
+
 	// XM-CARD6（2026-09-05 改）：额度从环境变量搬进数据库、由后台调整之后，
 	// 「改不了」这道物理屏障没有了。替代它的是**两把钥匙**：
 	//   fund.limit.manage（改额度）给 admin，
@@ -678,6 +712,16 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	if slices.Contains(staff, "server.manage") {
 		t.Fatal("staff 默认不该含 server.manage：写权限只给 admin 与显式授权角色")
 	}
+	// XM-EXT-APP：前端应用登记簿同上一条同一档——纯记录字段，且平台没有
+	// 发布通道（发布是 Platform Lifecycle Operation），改这张表不会让任何
+	// 站点发生变化。方向同样是 admin 含、staff 不含。
+	if !slices.Contains(admin, "extapp.manage") {
+		t.Fatal("admin 应含 extapp.manage：前端应用登记簿是纯记录字段，" +
+			"与 server.manage 同一档；不给的话这个功能对唯一的管理员也是 403")
+	}
+	if slices.Contains(staff, "extapp.manage") {
+		t.Fatal("staff 默认不该含 extapp.manage：写权限只给 admin 与显式授权角色")
+	}
 	if slices.Contains(admin, "request.content.read") {
 		t.Fatal("admin 默认**不该**含 request.content.read：" +
 			"用户与模型的完整对话要显式授权给客诉/风控岗，" +
@@ -687,6 +731,25 @@ func TestDefaultRoleScopeMapIsConservative(t *testing.T) {
 	for _, sc := range []string{"request.read", "request.content.read"} {
 		if slices.Contains(staff, sc) {
 			t.Fatalf("staff 默认不该含 %s", sc)
+		}
+	}
+	// XM-EXT-INTEGRATION（2026-09-08）：「接口与自动化」两张登记簿的读写。
+	//
+	// 方向与 server.manage 那条相同：两个都给 admin（登记簿是纯记录字段，
+	// 调用方登记簿不是授权面、规则登记簿没有执行器），两个都不给 staff。
+	//
+	// **读侧也不给 staff** 是这里与 registry.read 分家的全部理由：
+	// integration.read 返回的是「哪些机器身份该来调我们、期望持有哪些
+	// scope」外加 action_run 里观测到的调用方——那是一张授权面的地图，
+	// 看板角色不该顺带拿到。
+	for _, sc := range []string{"integration.read", "integration.manage"} {
+		if !slices.Contains(admin, sc) {
+			t.Fatalf("admin 应含 %s：登记簿是纯记录字段（不发凭据、不授权、无执行器），"+
+				"不给就等于「接口与自动化」页对唯一能用它的人 403, got %v", sc, admin)
+		}
+		if slices.Contains(staff, sc) {
+			t.Fatalf("staff 默认不该含 %s：调用方登记簿是一张授权面的地图，"+
+				"看板角色不该顺带拿到", sc)
 		}
 	}
 }

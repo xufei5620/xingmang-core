@@ -51,6 +51,26 @@ units     xingmang-cpa-snapshot.service / .timer
 systemctl status xingmang-cpa-snapshot.service --no-pager
 systemctl status xingmang-cpa-snapshot.timer --no-pager
 systemctl list-timers xingmang-cpa-snapshot.timer --no-pager
+```
+
+**定时器「过期」（2026-09-08 事故）**：`list-timers` 里 `NEXT` 显示 `n/a`、
+`status` 显示 `active (elapsed)`，同时 `is-enabled`/`is-active` 都正常——这就是
+只靠单调触发（`OnBootSec` + `OnUnitInactiveSec`）的定时器停摆的样子。生产上它
+09-01 22:47 停摆，快照停在 09-06 13:53（那次是人工 `start` 的），平台连续两天报
+「cpa.* 数据陈旧」，越诚实越像平台自己的问题。**过期的定时器不会被服务结束事件
+重新武装**，所以只 `start` 服务救不回循环。救法：
+
+```bash
+systemctl restart xingmang-cpa-snapshot.timer        # 先让定时器回到新鲜状态
+systemctl start --no-block xingmang-cpa-snapshot.service   # 再跑一次，给它一个"上次结束"参考点
+systemctl list-timers xingmang-cpa-snapshot.timer --no-pager   # 约 3 分钟后 NEXT 应回到 +5min
+```
+
+单元文件已加 `OnCalendar=*:0/5` 作墙钟兜底（单调触发失效时最迟 5 分钟内仍会跑一次）；
+`tests/security/cpa-snapshot-runtime-wiring.test.sh` 钉住它，缺了门禁红。已部署主机要
+`systemctl daemon-reload && systemctl restart xingmang-cpa-snapshot.timer` 才生效。
+
+```bash
 
 /opt/xingmang/cpa-snapshot/current/cpa-snapshot version
 /opt/xingmang/cpa-snapshot/current/cpa-snapshot verify

@@ -90,7 +90,7 @@ func TestWebhookVerifierRejectsWrongSecret(t *testing.T) {
 func TestWebhookVerifierRejectsStaleTimestamp(t *testing.T) {
 	payload := `{"id":"x"}`
 	for name, skew := range map[string]time.Duration{
-		"太旧": -webhookSkewTolerance - time.Second,
+		"太旧":   -webhookSkewTolerance - time.Second,
 		"来自未来": webhookSkewTolerance + time.Second,
 	} {
 		at := webhookNow.Add(skew)
@@ -112,8 +112,8 @@ func TestWebhookVerifierRequiresAllHeaders(t *testing.T) {
 	payload := `{"id":"x"}`
 	full := validHeaders(t, payload, true)
 	for name, h := range map[string]WebhookHeaders{
-		"缺签名":   {Timestamp: full.Timestamp, EventID: full.EventID},
-		"缺时间戳":  {Signature: full.Signature, EventID: full.EventID},
+		"缺签名":    {Timestamp: full.Timestamp, EventID: full.EventID},
+		"缺时间戳":   {Signature: full.Signature, EventID: full.EventID},
 		"缺事件 id": {Signature: full.Signature, Timestamp: full.Timestamp},
 	} {
 		if err := verifierAt(webhookNow).Verify(testWebhookSecret, h, []byte(payload)); err == nil {

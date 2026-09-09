@@ -432,7 +432,7 @@ func (s *QueryStore) configuredModeFor(ctx context.Context, platform, environmen
 	return &ConfiguredModeStatus{Mode: row.Mode, Source: "database"}
 }
 
-const recentRunsByKindSQL = `
+var recentRunsByKindSQL = fmt.Sprintf(`
 SELECT id, kind, queue, state, attempt, max_attempts,
        created_at, scheduled_at, attempted_at, finalized_at,
        to_jsonb(coalesce(errors, ARRAY[]::jsonb[])) AS errors_json,
@@ -445,11 +445,11 @@ FROM (
            ) AS rn
     FROM river_job
     WHERE kind = ANY($1::text[])
-      AND (args->>'environment' IS NULL OR args->>'environment' = $2::text)
+      AND %s
 ) ranked
 WHERE rn <= $3::int
 ORDER BY kind, rn;
-`
+`, fmt.Sprintf(riverJobEnvironmentPredicate, "$2"))
 
 // recentRunsByKind 返回每个 kind 最近 perKind 条记录，按 (kind, 最新在前) 排序。
 func (s *QueryStore) recentRunsByKind(
@@ -536,7 +536,130 @@ func (s *QueryStore) queueBacklog(ctx context.Context, now time.Time) ([]QueueBa
 	return out, nil
 }
 
-const listRunsSQL = `
+// FailedRunSummaryWindow 是失败作业摘要的回看窗口。
+//
+// 24 小时与 queueBacklog 的「已完成只算最近 24 小时」同一个口径：待处理清单
+// 问的是「今天要处理什么」，三天前那一批要么已经处理了、要么还在今天的窗口
+// 里继续产生新的失败行。
+const FailedRunSummaryWindow = 24 * time.Hour
+
+// FailedRunSummary 是某一类作业在窗口内的失败摘要。
+//
+// 存在的理由直接来自 2026-09-08 的现场：card_sync 在 24 小时里产生了 288 条
+// discarded，而管理端「我的待处理」只取最新 20 条失败作业、不分类型也不合并
+// 同类——于是这 288 条把那一格全占满，真正需要人处理的东西被挤出首屏。
+// 按 kind 合并之后，那 288 条是**一行**：「card_sync 失败 288 次，最早
+// 09-05 10:27，最近 …，上游说 …」。
+type FailedRunSummary struct {
+	Kind  string
+	Count int64
+	// FirstAt / LastAt 是窗口内最早与最晚一次失败的时刻（UTC）。
+	// 两个都留：只留其一就答不出「这是刚坏的还是坏了三天」。
+	FirstAt time.Time
+	LastAt  time.Time
+	// LastRunID 是最近那一条失败作业的 id，供前端跳到 /jobs/runs 定位。
+	LastRunID int64
+	// LastError 是**最近那一次尝试**写下的错误（已按 maxRunErrorMessageBytes
+	// 截断）。取最近而不是最早：取错方向时人看到的是三天前那句话。
+	LastError *RunError
+	// ErrorCount 是最近那条作业的尝试次数。
+	ErrorCount int
+}
+
+// riverJobEnvironmentPredicate 是「这条作业属于本环境吗」的唯一写法。
+//
+// 抽成一处而不是在每条 SQL 里各写一遍：它是一条**规则**（args 里没有
+// environment 的旧行视为本环境，有就必须相等），三条查询各写一遍的话，
+// 改一处不会带动另外两处，而那种漂移的后果是「某一个视图悄悄多出/少掉
+// 别的环境的作业」。占位符位置由各查询自己编号，所以这里留一个 %s。
+//
+// 三个使用点：listRunsSQL（$4）、recentRunsByKindSQL（$2）、
+// failedRunSummaryByKindSQL（$2）。
+const riverJobEnvironmentPredicate = `(args->>'environment' IS NULL OR args->>'environment' = %s::text)`
+
+// failedRunSummaryByKindSQL 按 kind 汇总窗口内的 discarded 作业。
+//
+// 三处照抄既有纪律：
+//  1. `state::text = 'discarded'` 而不是枚举字面量——策略里 xm_api_runtime 对
+//     public.river_job_state 没有 USAGE，listRunsSQL 与 queueBacklogSQL 都是
+//     这么写的。
+//  2. 只收 discarded：retryable 会自己消失、cancelled 是人主动取消，
+//     与前端「我的待处理」写下的理由保持同一口径，不在后端另立一套。
+//  3. 时刻取 coalesce(finalized_at, attempted_at, created_at)——discarded 行
+//     必有 finalized_at（River 的约束），后两个只是防御。
+var failedRunSummaryByKindSQL = fmt.Sprintf(`
+WITH failed AS (
+    SELECT id, kind,
+           coalesce(finalized_at, attempted_at, created_at) AS at,
+           to_jsonb(coalesce(errors, ARRAY[]::jsonb[])) AS errors_json
+    FROM river_job
+    WHERE state::text = 'discarded'
+      AND coalesce(finalized_at, attempted_at, created_at) >= $1
+      AND %s
+), agg AS (
+    SELECT kind, count(*) AS failure_count, min(at) AS first_at, max(at) AS last_at
+    FROM failed GROUP BY kind
+)
+SELECT a.kind, a.failure_count, a.first_at, a.last_at, l.id, l.errors_json
+FROM agg a
+JOIN LATERAL (
+    SELECT f.id, f.errors_json FROM failed f
+    WHERE f.kind = a.kind
+    ORDER BY f.at DESC, f.id DESC
+    LIMIT 1
+) l ON true
+ORDER BY a.failure_count DESC, a.kind;
+`, fmt.Sprintf(riverJobEnvironmentPredicate, "$2"))
+
+// FailedRunSummaryByKind 返回窗口内每一类作业的失败摘要，失败最多的在前。
+//
+// 按 count 降序：待处理清单的首屏要先看到最多的那一类。同 count 时按 kind
+// 升序，让结果稳定可比对（日志、测试、截图）。
+func (s *QueryStore) FailedRunSummaryByKind(
+	ctx context.Context, environment string, since time.Time,
+) ([]FailedRunSummary, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("jobs: query store has no pool")
+	}
+	rows, err := s.pool.Query(ctx, failedRunSummaryByKindSQL, since.UTC(), environment)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: failed run summary by kind: %w", err)
+	}
+	defer rows.Close()
+
+	out := []FailedRunSummary{}
+	for rows.Next() {
+		var (
+			kind            string
+			count           int64
+			firstAt, lastAt time.Time
+			lastID          int64
+			errorsJSON      []byte
+		)
+		if err := rows.Scan(&kind, &count, &firstAt, &lastAt, &lastID, &errorsJSON); err != nil {
+			return nil, fmt.Errorf("jobs: scan failed run summary row: %w", err)
+		}
+		lastErr, attempts, decodeErr := decodeLastError(errorsJSON)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		out = append(out, FailedRunSummary{
+			Kind:       kind,
+			Count:      count,
+			FirstAt:    firstAt.UTC(),
+			LastAt:     lastAt.UTC(),
+			LastRunID:  lastID,
+			LastError:  lastErr,
+			ErrorCount: attempts,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("jobs: iterate failed run summary rows: %w", err)
+	}
+	return out, nil
+}
+
+var listRunsSQL = fmt.Sprintf(`
 SELECT id, kind, queue, state, attempt, max_attempts,
        created_at, scheduled_at, attempted_at, finalized_at,
        to_jsonb(coalesce(errors, ARRAY[]::jsonb[])) AS errors_json,
@@ -545,10 +668,10 @@ FROM river_job
 WHERE (cardinality($1::text[]) = 0 OR kind = ANY($1::text[]))
   AND ($2::text = '' OR state::text = $2::text)
   AND ($3::bigint = 0 OR id < $3::bigint)
-  AND (args->>'environment' IS NULL OR args->>'environment' = $4::text)
+  AND %s
 ORDER BY id DESC
 LIMIT $5::int;
-`
+`, fmt.Sprintf(riverJobEnvironmentPredicate, "$4"))
 
 // ListRuns 按可选的 kinds / state 游标分页列出最近的运行记录，按 id 降序
 // （最新在前）。游标是上一页最后一条的 id；state 必须是空或

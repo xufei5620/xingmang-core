@@ -83,14 +83,28 @@ const ROLLUP_COLUMNS: DataTableColumn<PaymentBucketRollup>[] = [
     header: "金额",
     numeric: true,
     // 金额缺席时显示「—」而不是 0：一个桶里没有一条给出金额，与这个桶合计
-    // 为零，是两件完全不同的事（宪法 12 条）。
-    headerTitle: "该桶内所有订单的金额之和；桶内没有任何一条给出金额时显示「—」，不显示 0",
+    // 为零，是两件完全不同的事（宪法 12 条）。给不出的时候把**原因**写在
+    // 「—」旁边：光一个破折号读不出「上游没给」和「币种不一致所以不敢加」
+    // 的区别，而这两件事该做的处置完全不同。
+    headerTitle:
+      "该桶内所有订单的金额之和；没有任何一条给出金额、或桶内币种不止一种时显示「—」并说明原因，不显示 0，也不做隐式换算",
     value: (row) => row.minorUnits,
-    cell: (row) => (
-      <span className={row.minorUnits === null ? "text-fg-muted" : "tabular-nums"}>
-        {row.minorUnits === null ? "—" : formatMinorUnits(row.minorUnits, row.currency || "CNY")}
-      </span>
-    ),
+    cell: (row) =>
+      row.minorUnits === null ? (
+        <span className="flex flex-col items-end gap-0.5 text-fg-muted">
+          <span>—</span>
+          <span className="text-xs">
+            {row.amountGap === "currency-mismatch"
+              ? `币种不一致（${row.currencies.join("、")}），合计给不出`
+              : "上游没有给出金额（不是 0）"}
+          </span>
+        </span>
+      ) : (
+        // 币种空串时**不兜底成 CNY**：formatMinorUnits 会显示「最小单位，
+        // 金额单位未知」，那是实话；兜底成 CNY 会把一笔不知道币种的钱
+        // 画上人民币符号，是一句看不出来的假话。
+        <span className="tabular-nums">{formatMinorUnits(row.minorUnits, row.currency)}</span>
+      ),
   },
   {
     id: "raw",

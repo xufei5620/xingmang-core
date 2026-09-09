@@ -8,10 +8,16 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 )
 
-// XM-SMS1 新增的五个 Action。**全部 L1**（内核对 L2+ 返回 ADVANCED_CONTROLS_REQUIRED）。
+// XM-SMS1 新增的五个 Action。
 //
 // 花钱的两个（租用、买邮箱）用 sms.purchase——与买号同一把钥匙：它们都是
 // 「向供应商付费换一个资源」。邮箱取消/重下单与收藏用 sms.manage。
+//
+// 等级也照这条线分（XM-RISK-RESTORE）：花钱的两个是 **L2**，与
+// sms.number.purchase 同档；邮箱取消/重下单与收藏仍是 L1——契约里写明收藏
+// 「不花钱，也不改后台态」，取消不产生费用。此前五个全是 L1，那是因为内核
+// 对 L2+ 返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2
+// 会让它们变成永远跑不起来的摆设；审批中心实装后这个理由不再成立。
 const (
 	ActionRentPurchase   = "sms.rent.purchase"
 	ActionEmailPurchase  = "sms.email.purchase"
@@ -49,7 +55,7 @@ func providerFieldWith(c Capability) action.Field {
 func rentDef() action.Definition {
 	return action.Definition{
 		ID: ActionRentPurchase, Version: actionVersion,
-		RiskLevel: action.L1, Permission: PermissionPurchase,
+		RiskLevel: action.L2, Permission: PermissionPurchase,
 		Schema: action.Schema{Fields: []action.Field{
 			providerFieldWith(CapRent),
 			{Name: "operation_id", Type: action.FieldString, Required: true},
@@ -90,7 +96,7 @@ func rentHandler(svc *Service) action.Handler {
 func emailPurchaseDef() action.Definition {
 	return action.Definition{
 		ID: ActionEmailPurchase, Version: actionVersion,
-		RiskLevel: action.L1, Permission: PermissionPurchase,
+		RiskLevel: action.L2, Permission: PermissionPurchase,
 		Schema: action.Schema{Fields: []action.Field{
 			providerFieldWith(CapEmail),
 			{Name: "operation_id", Type: action.FieldString, Required: true},

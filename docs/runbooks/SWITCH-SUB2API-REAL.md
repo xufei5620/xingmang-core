@@ -49,12 +49,23 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deplo
 
 ## 验证(切换后 5 分钟内)
 
-1. **worker 日志**应显示 `sub2api_mode":"real"` 且 `metrics_failed":0`:
+1. **worker 日志**看**本轮生效模式**,不是启动缺省:
    ```bash
-   docker logs --since 6m xingmang-launch-platform-worker-1 | grep sub2api_sync | tail -1
+   docker logs --since 6m xingmang-launch-platform-worker-1 \
+     | grep -E 'connector_config_applied|"job_kind":"sub2api_sync"' | tail -3
    ```
+   - `connector_config_applied` 应为 `"platform":"sub2api"`、`"mode":"real"`、
+     `"config_source":"database"`,`endpoint_host` 是你填的主机;
+   - 随后的 `job_completed` 应为 `"sub2api_mode":"real"`、
+     `"sub2api_mode_source":"database"`、`"metrics_failed":0`。
+   - **`worker_started` 里的 `sub2api_mode_default` 不用看**:那是环境变量
+     缺省,后台切模式不重启容器它永远不变
+     (见 `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1)。
    - 若 `error_code":"auth"` → 合规确认没做,或 token 错;
    - 若 `bad_response` → endpoint 不对或实例版本不在 0.1 线;
+   - 若 `unavailable` → 看同一轮的 `upstream_read` 行:`elapsed_ms` 顶到
+     `group_budget_ms` 且 `round_remaining_ms` 被抽干 = 上游整体变慢;
+     `elapsed_ms` 远小于 `group_budget_ms` 而余量宽裕 = 那几个接口自己坏了;
    - 若 `metrics_failed` > 0 但非全失败 → 部分指标读到了,看哪条失败。
 
 2. **浏览器** `http://<平台>/platforms/sub2api`:

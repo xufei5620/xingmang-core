@@ -131,9 +131,33 @@ type Alert struct {
 	ResolvedAt     *time.Time
 	LastSeenAt     time.Time
 
-	// FireCount 是被去重合并掉的命中次数（含首次），最小为 1。
-	// 它是「抖了一下」与「持续两小时」的唯一区分依据。
+	// FireCount 是**评估轮数**：这条告警自开启以来，有多少轮评估里条件仍然
+	// 成立（含首次），最小为 1。评估每 60 秒一轮，所以它约等于「持续了多少
+	// 分钟」，而**不是**「发生了多少次」。
+	//
+	// 这行注释原来写的是「它是『抖了一下』与『持续两小时』的唯一区分依据」，
+	// 那句话在 2026-09-08 被生产证伪：界面照着它把 fire_count=669 显示成
+	// 「触发 669 次」，而真实情况是一次升级持续了 668 分钟
+	// （见 docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md §二）。
+	// 「触发了几次」现在由 TriggerCount 回答，「持续了多久」由
+	// EffectiveFirstOpenedAt 回答。
 	FireCount int32
+
+	// TriggerCount 是真正「触发」的次数：新开算一次，静默窗口过期后转回 OPEN
+	// 并重新投递算一次；持续命中不算。
+	//
+	// 指针而不是零值：**nil 表示不知道**（这一列上线之前就存在的旧行）。
+	// 用 0 表达「不知道」会让那些行在界面上显示成「触发 0 次」——一条正在
+	// 响的告警触发过 0 次是不可能的，那是个看起来像真答案的假答案。
+	// 迁移 000054 明确不回填。
+	TriggerCount *int32
+
+	// FirstOpenedAt 是这个去重键**第一次**开启的时刻，跨
+	// RESOLVED→REOPENED 继承（限 24 小时复发窗口内，见 reopenLookback）。
+	//
+	// nil 与 TriggerCount 同一个含义：本列上线前的旧行。读取侧不要各自
+	// 兜底，调 EffectiveFirstOpenedAt。
+	FirstOpenedAt *time.Time
 
 	// SourceMetricKey 指回 ops.metric_observation 里那条指标；
 	// 空串表示这条告警与具体指标无关。
@@ -145,6 +169,40 @@ type Alert struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// EffectiveFirstOpenedAt 回答「这个问题从什么时候开始的」，并诚实地说出
+// 这个答案是不是估计值。
+//
+// 第二个返回值为 true 表示 FirstOpenedAt 为 nil、此处用 OpenedAt 兜的底
+// ——那是本列上线前就存在的行，它们的真实首开时刻没有人记下来过。
+//
+// 兜底规则**只写在这一处**。HTTP 层、通知文案与将来的看板都调它：
+// 「first_opened_at 没有就用 opened_at」这句话在两个地方各写一遍，正是本仓
+// 反复吃过的亏（同一个事实钉在两处，改一处不会带动另一处）。
+func (a Alert) EffectiveFirstOpenedAt() (time.Time, bool) {
+	if a.FirstOpenedAt != nil && !a.FirstOpenedAt.IsZero() {
+		return a.FirstOpenedAt.UTC(), false
+	}
+	return a.OpenedAt.UTC(), true
+}
+
+// UpstreamVersionAck 是一条「已核对的上游版本」记录（XM-OPS-TRUTH 子片 B）。
+//
+// 它是 upstream.version.changed 这条规则唯一正常的结束方式。在它之前，那条
+// 告警只能等旧探测样本被挤出回看窗口后自己消失——2026-09-08 那次是
+// 「今晚 20:52 前后自己消失，不是因为有人核对了，是因为证据过期了」。
+type UpstreamVersionAck struct {
+	Environment string
+	// MetricKey 指回探测那条指标（如 sub2api.connector.health）。
+	MetricKey string
+	// Version 是被核对的那个上游自报版本，与观测里的 value_json.version 逐字相同。
+	Version string
+	// Source 由服务端从观测里读出后写入，不来自调用方参数。
+	Source         string
+	AcknowledgedBy string
+	AcknowledgedAt time.Time
+	Note           string
 }
 
 // Silence 是一个静默窗口（规格 §9.3「静默」、§22.2 第 13 项「静默窗口」）。
@@ -174,6 +232,20 @@ func (s Silence) Matches(ruleKey string, at time.Time) bool {
 	if s.RuleKey != "" && s.RuleKey != ruleKey {
 		return false
 	}
+	return s.Active(at)
+}
+
+// Active 报告该窗口此刻是否开着——**不问规则**。
+//
+// 与 Matches 分开是因为这是两个问题：Matches 答「这条规则现在被压着吗」，
+// Active 答「这个窗口现在生效吗」。列表页问的是后者：一个 rule_key 为空的
+// 全局窗口在 Matches 下永远要配一个具体规则才有答案，拿它去判「这条记录
+// 是不是生效中」会把全局窗口整片判成不生效。
+//
+// 边界规则只写在这里一处。它原先长在 Matches 里，HTTP 层要判「生效中 vs
+// 已过期」时若照抄一遍，两份实现迟早分叉，而分叉的后果是列表说「已过期」、
+// 投递侧仍在静默（或反过来）——那比没有列表更糟。
+func (s Silence) Active(at time.Time) bool {
 	at = at.UTC()
 	// 左闭右开：[starts_at, ends_at)。右开让「窗口正好到期的那一刻」
 	// 归属明确——到点即失效，不会出现多静默一轮的边界争议。

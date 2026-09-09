@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { OpsFreshness, OpsMetricSnapshot, OpsOverview, OpsSyncPipeline } from "../api/ops";
-import { buildOpsHealthRows, describeSyncMode, readConnectorHealthValue } from "./ops";
+import {
+  buildOpsHealthRows,
+  describeSyncMode,
+  MODE_SOURCE_UNKNOWN_HINT,
+  readConnectorHealthValue,
+} from "./ops";
 
 function freshness(partial: Partial<OpsFreshness> = {}): OpsFreshness {
   return {
@@ -90,6 +95,9 @@ function overview(partial: Partial<OpsOverview> = {}): OpsOverview {
       },
     }),
     database: { connected: true },
+    failed_jobs_by_kind: [],
+    failed_jobs_status: "ok",
+    failed_jobs_window_hours: 24,
     ...partial,
   };
 }
@@ -154,6 +162,8 @@ describe("describeSyncMode", () => {
     expect(describeSyncMode({ config_available: true, effective_mode: "real" })).toEqual({
       label: "真实对接",
       tone: "success",
+      // 确定的答案不挂悬浮说明：没什么要解释的
+      hint: "",
     });
   });
 
@@ -167,6 +177,77 @@ describe("describeSyncMode", () => {
   it("未知的 effective_mode 原样显示，不吞掉信息", () => {
     const got = describeSyncMode({ config_available: true, effective_mode: "shadow" });
     expect(got.label).toBe("shadow");
+  });
+
+  // XM-WORKBENCH-WIRE-OPS：后端从 XM-OPS-TRUTH 子片 A 起多给一个
+  // effective_mode_source。它此前在库里没有这一行时硬答 "fake"——恰好因为生产的
+  // env 缺省也是 fake 才没出事，那是 2026-09-08 事故报告里三个互相矛盾的答案
+  // 之一。**在场与缺席两条都要有**：只测在场，老后端那条路是死是活没人答得上来。
+  describe("effective_mode_source：在场 / 缺席", () => {
+    it("database：按 effective_mode 说，与没有这个字段时逐字相同", () => {
+      const real = describeSyncMode({
+        config_available: true,
+        effective_mode: "real",
+        effective_mode_source: "database",
+      });
+      expect(real).toEqual({ label: "真实对接", tone: "success", hint: "" });
+      const fake = describeSyncMode({
+        config_available: true,
+        effective_mode: "fake",
+        effective_mode_source: "database",
+      });
+      expect(fake).toEqual({ label: "模拟数据", tone: "warning", hint: "" });
+    });
+
+    it("unknown：显示「模式未知」，并挂上那句「去哪配」的说明", () => {
+      // 契约里这一支的 effective_mode 是空串（子片 A 点名要加这条用例：
+      // 别让 `=== 'fake'` 之类的判断把空串落进未定义分支）。
+      const got = describeSyncMode({
+        config_available: true,
+        effective_mode: "",
+        effective_mode_source: "unknown",
+      });
+      expect(got.label).toBe("模式未知");
+      expect(got.hint).toBe(MODE_SOURCE_UNKNOWN_HINT);
+      // 「不知道」绝不能显示成一个具体的模式——尤其不能是 fake：那正是后端
+      // 改掉的那个硬答案，也是事故里那三个互相矛盾的答案之一。
+      expect(got.label).not.toBe("模拟数据");
+      expect(got.label).not.toBe("真实对接");
+      // 也不能是 success 语气：一个答不出来的格子不该看着像一切正常
+      expect(got.tone).not.toBe("success");
+    });
+
+    it("source 说不知道就是不知道，哪怕 mode 带着一个值（契约违例时以 source 为准）", () => {
+      // source 回答「这个答案算不算数」，mode 回答「答案是什么」。判据顺序反
+      // 过来的话，这一条会显示成一个确定的「真实对接」。
+      const got = describeSyncMode({
+        config_available: true,
+        effective_mode: "real",
+        effective_mode_source: "unknown",
+      });
+      expect(got.label).toBe("模式未知");
+      expect(got.hint).toBe(MODE_SOURCE_UNKNOWN_HINT);
+    });
+
+    it("缺席（老后端还没这一列）：退回只看 effective_mode 的旧口径，不编说明", () => {
+      const real = describeSyncMode({ config_available: true, effective_mode: "real" });
+      expect(real).toEqual({ label: "真实对接", tone: "success", hint: "" });
+      // 空串这时只能说「不知道」，但**不挂那句悬浮说明**：我们并不知道它为什么
+      // 是空的，编一句「该平台未在后台配置接入模式」出来是造假。
+      const blank = describeSyncMode({ config_available: true, effective_mode: "" });
+      expect(blank.label).toBe("模式未知");
+      expect(blank.hint).toBe("");
+    });
+
+    it("模块没挂载时两个字段都不看：那是另一回事，也不挂说明", () => {
+      const got = describeSyncMode({
+        config_available: false,
+        effective_mode: "",
+        effective_mode_source: "unknown",
+      });
+      expect(got.label).toBe("凭据模块未挂载");
+      expect(got.hint).toBe("");
+    });
   });
 });
 
@@ -274,5 +355,30 @@ describe("buildOpsHealthRows", () => {
         }),
       ),
     ).toThrow(/connector_health\[1\]/);
+  });
+
+  // XM-WORKBENCH-WIRE-OPS：判据对不等于它被送到了行上。这一层单独钉一次，
+  // 否则 describeSyncMode 算出来的 hint 在 pipelineRow 里被丢掉也不会有人知道。
+  it("采集链路那两行把「模式未知」的悬浮说明带上，别的行不带", () => {
+    const rows = buildOpsHealthRows(
+      overview({
+        sync_pipelines: [
+          pipeline({ platform: "sub2api", effective_mode: "", effective_mode_source: "unknown" }),
+          pipeline({
+            platform: "newapi",
+            kind: "newapi_sync",
+            effective_mode: "real",
+            effective_mode_source: "database",
+          }),
+        ],
+      }),
+    );
+    expect(rows[1]?.note).toBe("模式未知");
+    expect(rows[1]?.noteHint).toBe(MODE_SOURCE_UNKNOWN_HINT);
+    // 确定的那一行不挂：一句永远都在的说明等于没有说明
+    expect(rows[2]?.note).toBe("真实对接");
+    expect(rows[2]?.noteHint).toBe("");
+    // 别的四行本来就没有 note，更不该凭空长出 hint
+    expect(rows.filter((r) => r.noteHint !== "")).toHaveLength(1);
   });
 });

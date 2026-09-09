@@ -9,12 +9,15 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/integration"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/platformusers"
+	"github.com/xufei5620/xingmang-platform/internal/platform/publishing"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
@@ -34,8 +37,23 @@ type Deps struct {
 	Kernel         ActionExecutor
 	ActionRegistry *action.Registry
 	Services       ServiceLister
-	Metrics        MetricLister
-	MetricHistory  MetricHistoryLister
+	// Connectors / Connections 是资源目录另外两张表的只读查询
+	// （XM-READONLY-QUERIES）。与 Services 同为 *registry.Store，分成三个字段
+	// 是因为它们是三个窄接口（见 ConnectorLister / ConnectionLister）。
+	//
+	// 为 nil 时对应路由不挂载——与 RequestLogs 同一条纪律：端点不存在（404）
+	// 比端点存在却一调就 500 诚实。生产装配始终提供（同一个 Store）。
+	Connectors  ConnectorLister
+	Connections ConnectionLister
+	// Migrations 供「版本与发布 → 数据库变更」那一格读已应用的迁移版本
+	// （XM-READONLY-QUERIES）。权限是 ops.read，见 migrations.go 的说明。
+	//
+	// 为 nil 时不挂载：这份读数依赖 public.schema_migrations 的读权限，而库
+	// 角色拆分落地后该权限需要显式授予（见交接文档）。没授权的部署应当是
+	// 端点不存在，而不是端点存在却每次 500。
+	Migrations    MigrationReporter
+	Metrics       MetricLister
+	MetricHistory MetricHistoryLister
 	// Jobs 供「后台任务」页的两个只读端点（XM-JOBS0）：周期任务目录 + 队列
 	// 积压 + worker 心跳的快照，以及分页的运行记录。与 Metrics/Alerts 同样
 	// 是核心能力，不做 nil 门禁——platform-api 进程总是持有数据库连接池,
@@ -51,7 +69,38 @@ type Deps struct {
 	// 与 ActionRuns 分开传入是因为二者的读权限不同（见 ActionRunAuditLookup
 	// 的注释）；为 nil 时详情端点不挂载，即便 ActionRuns 非 nil。
 	ActionRunAudit ActionRunAuditLookup
-	Alerts         AlertLister
+	// Approvals / ApprovalExec 是审批中心（XM-0030b）。两个都为 nil 时
+	// /approvals* 一概不挂载——与 Foundation-A 的行为一致：没有审批中心时，
+	// L2+ 的调用仍然拿 ADVANCED_CONTROLS_REQUIRED，而不是拿到一组一调就 500
+	// 的端点。ApprovalExec 单独一个字段是因为触发执行走的是内核而非审批服务。
+	Approvals    ApprovalService
+	ApprovalExec ApprovalExecutor
+	Alerts       AlertLister
+	// Silences 是静默窗口的只读列表（XM-SILENCE-LIST）。与 Alerts 同为
+	// *alerts.Store，分成两个字段是因为它们是两个窄接口，见 SilenceLister。
+	Silences SilenceLister
+	// UpstreamVersionAcks 是「已核对的上游版本」的只读列表
+	// （XM-OPS-TRUTH 子片 B 审稿处置）。同为 *alerts.Store 上的第三个窄接口。
+	//
+	// nil 时该端点不挂载——与 RequestLogs 同一条纪律：端点不存在（404）
+	// 比端点存在却一调就 500 诚实。
+	UpstreamVersionAcks UpstreamVersionAckLister
+	// SilenceNow 只为测试而存在：nil 时用 time.Now，生产从不设置它。
+	//
+	// 静默列表的全部内容就是「拿此刻去比起止时间」，跟着真实时钟走的话，
+	// 「生效中 / 未开始 / 已过期」三态的用例会在边界上间歇性变红——那种红
+	// 比不红更难查。把时刻做成可注入的，是让这三态能被确定性地钉住。
+	SilenceNow func() time.Time
+	// Publishing / PublishingDeliver 是「内容发布」页的只读 Query
+	// （XM-EXT-PUBLISHING）。为 nil 时整组 /publishing/* 端点不挂载——与
+	// RequestLogs 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	//
+	// 写入仍只走 publishing.* Action（宪法 2 条），不在这里开第二条写路径。
+	// PublishingDeliver 单独一个字段是因为它回答的不是「库里有什么」而是
+	// 「此刻能不能真的发出去」——那个答案来自 Service 的投递器表，不是仓储。
+	// 它为 nil 时渠道列表一律按**不能发**渲染（fail closed）。
+	Publishing        PublishingQuerier
+	PublishingDeliver PublishingDelivery
 	// SavedViews 是 Principal/Environment 自隔离的个人表格视图 Query。
 	// 写入仍只走 ui.saved_view.* Action，不在这里增加第二条写路径。
 	SavedViews SavedViewLister
@@ -137,6 +186,28 @@ type Deps struct {
 	ServerSuppliers    ServerSupplierLister
 	ServerDomains      ServerDomainLister
 	ServerServiceNotes ServerServiceNoteLister
+	// ExtApps / ExtAppReleases 是前端应用登记簿与发布记录簿的两个只读查询
+	// （XM-EXT-APP）。「应用」= 平台自己纳管的前端站点（ADMIN-IA §5.4.1），
+	// 不是被管平台的前端、也不是页面搭建器。权限同样复用 registry.ScopeRead。
+	//
+	// **这一对里没有发布端点，将来也不该有**：发布与回滚是 Platform Lifecycle
+	// Operation（宪法 2、3 条），走版本化脚本 + 人工批准。
+	ExtApps        ExtAppLister
+	ExtAppReleases ExtAppReleaseLister
+	// APIClients / AutomationRules 是「接口与自动化」的两张登记簿
+	// （XM-EXT-INTEGRATION）。各自为 nil 时对应端点不挂载——与
+	// PlatformUsers 同一条纪律：端点不存在（404）比端点存在却一调就 500 诚实。
+	//
+	// APIClients 还额外要求 CallerActivity 非 nil：那一格的全部价值在于
+	// **对账**（登记簿 × action_run 里实际观测到的调用方），只给登记簿一半
+	// 就变成了一张什么也不校验的台账。缺哪一半都不挂，比挂一个只有半边
+	// 事实的端点诚实。
+	APIClients      APIClientLister
+	CallerActivity  CallerAggregator
+	AutomationRules AutomationRuleLister
+	// IntegrationNow 只为测试注入固定时钟（观测窗口的起点由它算）；
+	// nil 时用 time.Now，生产从不设置它。
+	IntegrationNow func() time.Time
 	// FinanceSubscriptions 供订阅成本批次与代理资产的只读端点（XM-0037c）。
 	FinanceSubscriptions SubscriptionLister
 	// FinanceSummaries 供看板的渠道 / 上游摘要（XM-0037d，§8.5 + §13）。
@@ -210,6 +281,9 @@ func NewRouter(d Deps) http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(RequestID)
+	// Logging 要排在 Recover 之前：panic 恢复时也该用注入的 logger，
+	// 而不是掉回 slog.Default()。
+	r.Use(Logging(logger))
 	r.Use(Recover(logger))
 	r.Use(AccessLog(logger, d.Service, d.Environment))
 	r.Use(Timeout(timeout))
@@ -254,12 +328,35 @@ func NewRouter(d Deps) http.Handler {
 			// 身份，而不是调用方声称的那个。装反了等于让伪造者换个 Header 就
 			// 换一个新桶。探针不在这一组，天然豁免——靠装配位置，不靠豁免名单。
 			api.Use(RateLimit(NewRateLimiter(d.RateLimit), logger))
-			api.Get("/actions", ListActionsHandler(d.ActionRegistry))
+			// d.Approvals 兼作「审批中心接上了没有」的信号：它与内核的
+			// WithApprovalGateway 在 cmd/platform-api 里由同一个 service 装配，
+			// 两者要么都在要么都不在（见上面 Approvals 字段的注释）。
+			api.Get("/actions", ListActionsHandler(d.ActionRegistry, d.Approvals != nil))
 			api.Post("/actions/{actionID}/versions/{version}/execute", ExecuteActionHandler(d.Kernel))
 			// 读也要权限（规格 §2.4）。声明在路由上，让路由表成为
 			// 「哪个端点要什么权限」的单一清单
 			api.With(RequireScope(registry.ScopeRead)).
 				Get("/services", ListServicesHandler(d.Services))
+			// 资源目录的另外两张表（XM-READONLY-QUERIES），**复用
+			// registry.ScopeRead**：服务 / 连接器 / 连接是同一份「平台管着哪些
+			// 系统、用哪种实现连、连成了几条」的知识面，能看第一张就该看得见
+			// 另外两张（同 /servers/* 复用它的理由）。
+			//
+			// ⚠️ 与下面凭据模块的 /connectors/config 不是同一个东西：那一条读
+			// 的是「连接器跑在 fake 还是 real 模式」（credentials 包，权限
+			// connector.manage），这里读的是 core.connector 登记簿。路径相邻
+			// 但分属两个模块，改动时别当成一族。
+			//
+			// 写路径不在这里：connector.create 是 L2、connection.create 是 L3、
+			// connection.set_status 是 L2，一律走 Action 端点并经审批中心裁决。
+			if d.Connectors != nil {
+				api.With(RequireScope(registry.ScopeRead)).
+					Get("/connectors", ListConnectorsHandler(d.Connectors))
+			}
+			if d.Connections != nil {
+				api.With(RequireScope(registry.ScopeRead)).
+					Get("/connections", ListConnectionsHandler(d.Connections))
+			}
 			api.With(RequireScope(ops.ScopeRead)).
 				Get("/metrics", ListMetricsHandler(d.Metrics))
 			// 历史样本与最新态同属运营指标，共用 ops.read
@@ -281,7 +378,28 @@ func NewRouter(d Deps) http.Handler {
 					ConnectorConfigs: d.OpsConnectorConfigs,
 					DB:               d.DB,
 					AlertDelivery:    d.OpsAlertDelivery,
+					// 失败作业按 kind 的聚合（XM-OPS-TRUTH 子片 B）走这个
+					// 端点而不是新开一条路由：两者权限口径完全一致
+					// （都是 ops.read），而这样跨所有权的改动只有这一行。
+					Jobs: d.Jobs,
+					// 让 failed_jobs 的读库失败留下一条 Warn。没有它，
+					// 「那一格永久瞎着」在生产里绝对不可见。
+					Logger: d.Logger,
 				}))
+			// 数据库变更（XM-READONLY-QUERIES）同样复用 ops.read：迁移版本
+			// 回答「这套部署自己处在什么状态」，与心跳、队列积压、控制平面
+			// 健康同一类运行保障知识面。它**不归 registry.read**——那一族说的
+			// 是「平台管着哪些被管系统」，迁移是平台自己的运行事实。
+			//
+			// 挂在 /ops/ 下而不是顶层 /migrations：与上面 /ops/overview 同一
+			// 个族，路径本身就说清了它属于运行保障而不是资源目录。
+			//
+			// 只读。执行迁移与回滚是 Platform Lifecycle Operation（宪法 2、3
+			// 条），走版本化脚本 + 变更单 + 人工批准，不经 Action，更不经 HTTP。
+			if d.Migrations != nil {
+				api.With(RequireScope(ops.ScopeRead)).
+					Get("/ops/migrations", ListMigrationsHandler(d.Migrations))
+			}
 			// audit.read 单独授予：审计事件带前后摘要，敏感度高于 ops.read
 			api.With(RequireScope(audit.ScopeRead)).
 				Get("/audit/events", ListAuditEventsHandler(d.AuditEvents))
@@ -298,12 +416,70 @@ func NewRouter(d Deps) http.Handler {
 						Get("/actions/runs/{runID}", GetActionRunHandler(d.ActionRuns, d.ActionRunAudit))
 				}
 			}
+			// 审批中心（XM-0030b）。
+			//
+			// **没有 POST /approvals**：单由内核代落——一次 L2+ 的
+			// POST /actions/{id}/versions/{v}/execute 被受理时返回 202 + 单号
+			// （设计稿 §4 的「由内核代落，一般不直调」）。单独开一个建单端点
+			// 就得在这一层把权限/环境/Schema 再判一遍，否则谁都能往队列里灌单
+			// ——那正是 XM-0030a-wire 挪风险闸堵掉的洞，不该在这里重新开一个。
+			//
+			// 执行端点不挂 RequireScope：要什么权限取决于单上那个 Action，
+			// 只有内核知道（见 ExecuteApprovalHandler 的注释）。
+			if d.Approvals != nil {
+				api.With(RequireScope(approval.ScopeRead)).
+					Get("/approvals", ListApprovalsHandler(d.Approvals))
+				api.With(RequireScope(approval.ScopeRead)).
+					Get("/approvals/{approvalID}", GetApprovalHandler(d.Approvals))
+				api.With(RequireScope(approval.ScopeDecide)).
+					Post("/approvals/{approvalID}/decide", DecideApprovalHandler(d.Approvals))
+				// 撤回只要 read：撤的是自己的单，归属由领域层按 requester_id 判。
+				// 要求 decide 会把「提交人撤回自己的单」变成需要审批权，说不通。
+				api.With(RequireScope(approval.ScopeRead)).
+					Post("/approvals/{approvalID}/cancel", CancelApprovalHandler(d.Approvals))
+				if d.ApprovalExec != nil {
+					api.Post("/approvals/{approvalID}/execute", ExecuteApprovalHandler(d.ApprovalExec))
+				}
+			}
 			// 告警与指标共用 ops.read：告警内容就是指标的判读结果，
 			// 泄漏面完全相同（见 alerts.ScopeRead 的注释）。
 			// 写路径（确认、静默）不在这里——它们是 Action，走
 			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
 			api.With(RequireScope(alerts.ScopeRead)).
 				Get("/alerts", ListAlertsHandler(d.Alerts))
+			// 静默窗口的只读列表（XM-SILENCE-LIST）。同一个 scope：窗口正文
+			// （规则 + 理由 + 按的人 + 起止）比告警正文泄漏面更小。建窗口
+			// 仍走 Action（alerts.silence.manage），不在这里开第二条写路径。
+			api.With(RequireScope(alerts.ScopeRead)).
+				Get("/alerts/silences", ListSilencesHandler(d.Silences, d.SilenceNow))
+			// 已核对的上游版本（XM-OPS-TRUTH 子片 B 审稿处置）。同一个 scope：
+			// 它就是「哪几条版本提醒被人主动压住了」，泄漏面小于告警正文。
+			// 撤销仍走 Action（alerts.upstream_version.revoke）。
+			if d.UpstreamVersionAcks != nil {
+				api.With(RequireScope(alerts.ScopeRead)).
+					Get("/alerts/upstream-versions", ListUpstreamVersionAcksHandler(d.UpstreamVersionAcks))
+			}
+			// 内容发布（XM-EXT-PUBLISHING）。五个只读端点共用
+			// publishing.read：草稿正文、素材地址、渠道登记（**只回显
+			// CredentialRef，不是明文**）与发布记录属于同一份内容资产，
+			// 拆成多个读 scope 只会多出几个会漏授的授权面。
+			//
+			// 写路径不在这里——草稿/素材/渠道/发布全部是 Action，走
+			// POST /api/v1/actions/{id}/versions/{v}/execute，权限与风险
+			// 等级由内核裁决（发布是 L3，会落审批单）。
+			if d.Publishing != nil {
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/drafts", ListPublishingDraftsHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/drafts/{draftID}", GetPublishingDraftHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/assets", ListPublishingAssetsHandler(d.Publishing))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/channels",
+						ListPublishingChannelsHandler(d.Publishing, d.PublishingDeliver))
+				api.With(RequireScope(publishing.ScopeRead)).
+					Get("/publishing/records", ListPublishingRecordsHandler(d.Publishing))
+			}
 			if d.Cards != nil {
 				interval := d.CardSyncInterval
 				if interval <= 0 {
@@ -544,6 +720,39 @@ func NewRouter(d Deps) http.Handler {
 				Get("/servers/domains", ListServerDomainsHandler(d.ServerDomains))
 			api.With(RequireScope(registry.ScopeRead)).
 				Get("/servers/service-notes", ListServerServiceNotesHandler(d.ServerServiceNotes))
+
+			// 前端应用登记簿与发布记录簿（XM-EXT-APP）。同样复用
+			// registry.ScopeRead：能看服务清单与服务器登记簿的人本就该能看
+			// 「我们自己有哪些前端站点」，三者是同一类知识面。
+			//
+			// 写路径（登记 / 修改 / 下线 / 记录发布）不在这里——三个 L1
+			// Action，走执行通道，权限是独立的 extapp.manage。
+			// **没有发布端点**：这两条只回答「登记了什么」，不做任何事。
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/ext/apps", ListExtAppsHandler(d.ExtApps))
+			api.With(RequireScope(registry.ScopeRead)).
+				Get("/ext/apps/releases", ListExtAppReleasesHandler(d.ExtAppReleases))
+			// 「接口与自动化」的两张登记簿（XM-EXT-INTEGRATION，ADMIN-IA §5.4.1）。
+			//
+			// 读侧用**新 scope** integration.read 而不是复用 registry.read：
+			// 后者默认发给 staff，而调用方登记簿是一张授权面的地图
+			// （谁该来调我们、期望持有哪些 scope），看板角色不该顺带拿到
+			// （见 internal/platform/integration.ScopeRead 的注释）。
+			//
+			// 写路径（四个 L1 Action）不在这里——走
+			// POST /api/v1/actions/{id}/versions/{v}/execute，权限由内核裁决。
+			// **这两条路由都不会触发任何 Action**：调用方那条只读两张表，
+			// 规则那条只拿注册表查声明、不拿 handler。
+			if d.APIClients != nil && d.CallerActivity != nil {
+				api.With(RequireScope(integration.ScopeRead)).
+					Get("/integration/api-clients",
+						ListAPIClientsHandler(d.APIClients, d.CallerActivity, d.IntegrationNow))
+			}
+			if d.AutomationRules != nil {
+				api.With(RequireScope(integration.ScopeRead)).
+					Get("/integration/automation-rules",
+						ListAutomationRulesHandler(d.AutomationRules, d.ActionRegistry))
+			}
 
 			// 利润台账（XM-0037b）**复用 finance.read**，不另立一个 scope：
 			// 台账里的毛利就是「倍率 × 用量」的结果，能看登记簿里那个倍率的人

@@ -262,27 +262,51 @@ describe("查表与状态标签", () => {
   });
 
   it("已实装的页不挂阶段标签，未实装的挂「未建·<阶段>」", () => {
-    const dashboard = navItemByPath("/dashboard")?.item;
+    // 先取到条目再断言，**不写 `item && navStageHint(item)`**：那种写法在条目
+    // 不存在时整个表达式就是 undefined，三条 toBeUndefined() 会一起恒真——
+    // 路径写错、导航项被删掉都照样绿。这是本仓库栽过的「缺席型断言」坑。
+    const stageHintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
     // 操作与审批在 XM-ACTIONS0 接了操作目录/执行记录的真实数据，已实装，
-    // 不再挂阶段标签——「版本与发布」是现在仍未实装的 F-B 条目
-    const actions = navItemByPath("/actions")?.item;
-    const changes = navItemByPath("/changes")?.item;
-    expect(dashboard && navStageHint(dashboard)).toBeUndefined();
-    expect(actions && navStageHint(actions)).toBeUndefined();
-    expect(changes && navStageHint(changes)).toBe("未建·F-B");
+    // 不再挂阶段标签。
+    expect(stageHintOf("/dashboard")).toBeUndefined();
+    expect(stageHintOf("/actions")).toBeUndefined();
+    // 2026-09-07 三页建成（XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0）之后，
+    // 「版本与发布」也不再挂标签了。
+    expect(stageHintOf("/changes")).toBeUndefined();
+    expect(stageHintOf("/design")).toBeUndefined();
+    expect(stageHintOf("/finance")).toBeUndefined();
+    // 2026-09-08：扩展能力段三页全部建成（XM-EXT-APP / XM-EXT-INTEGRATION /
+    // XM-EXT-PUBLISHING，裁定变更见 ADMIN-IA §5.4），于是它们都不再挂阶段标签。
+    // **仍挂标签的只剩 `/ext/ai` 一页**——它按 §5.4 原裁定**刻意只做只读蓝图**，
+    // 不是缺口。
+    expect(stageHintOf("/ext/app")).toBeUndefined();
+    expect(stageHintOf("/ext/integration")).toBeUndefined();
+    expect(stageHintOf("/ext/publishing")).toBeUndefined();
+    expect(stageHintOf("/ext/ai")).toBe("未建·后置");
   });
 
   it("placeholderNavItems 就是全部 built=false 的条目", () => {
     const paths = placeholderNavItems().map((item) => item.path);
-    // 全局段 0（操作与审批、后台任务已实装）+ 治理段 3（资源目录、人员与
-    // 权限、运行保障、设置已实装）+ 扩展能力 4
+    // 全局段 0 + 治理段 0 + 扩展能力 1。
+    //
+    // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
+    // 2026-09-08 产品负责人推翻了 ADMIN-IA §5.4「扩展能力四页只读蓝图、
+    // 不得因此提前建后端」对其中三页的适用：`应用与配置`（XM-EXT-APP）、
+    // `接口与自动化`（XM-EXT-INTEGRATION）、`内容发布`（XM-EXT-PUBLISHING）
+    // 三页均已建成，从这份清单里掉出去。
+    //
+    // **只剩 `/ext/ai` 一条,而它是刻意的**——按 §5.4 与实施计划 §2.5 仍是
+    // 只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里表达的是
+    // 「后端未接**且不打算接**」，与治理段那三页当初的含义不是一回事。
+    //
+    // **合并三片时这份清单必须重算,不能取任何一侧**：三片各自基于同一基线、
+    // 各自只删掉自己那一页，机械合并会留下一个多余的条目。这类冲突取任一侧
+    // 都是错的。
     expect(paths).toEqual([
-      "/finance",
-      "/changes",
-      "/design",
-      "/ext/app",
-      "/ext/integration",
-      "/ext/publishing",
       "/ext/ai",
     ]);
     expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
@@ -301,8 +325,41 @@ describe("查表与状态标签", () => {
       "/sms",
       "/registry",
       "/identity",
+      // 2026-09-07 建成的三页。顺序即 navigation.ts 的声明顺序：
+      // finance 在 identity 之后、ops 之前；changes 与 design 在 ops 之后。
+      "/finance",
       "/ops",
+      "/changes",
+      "/design",
       "/settings",
+      // XM-EXT-APP / XM-EXT-INTEGRATION / XM-EXT-PUBLISHING（2026-09-08）：
+      // 扩展能力段前三页建成。它们排在最后是因为顺序即 navigation.ts 的
+      // **声明顺序**（扩展能力是第四个分组），**不是按建成时间排的**——
+      // 三者之间的先后也照声明顺序，不照合并顺序。
+      "/ext/app",
+      "/ext/integration",
+      "/ext/publishing",
     ]);
+  });
+
+  it("接口与自动化建成后不再挂「未建」标签，同段其余三页仍挂", () => {
+    // 这一条与上面两条不重复：它盯的是**侧栏上看得见的那个字**。
+    // 一页已经接了真数据却仍挂着「未建·后置」，会让人以为里面的数字是假的。
+    //
+    // 先取条目再断言，理由同上面那条 stageHintOf：写成
+    // `navStageHint(navItemByPath(path)?.item!)` 的话，路径写错会让
+    // toBeUndefined() 恒真。
+    const hintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
+    // 三片各自写这条时都只知道自己那一页，于是各自把「其余三页仍挂标签」
+    // 写进了断言。**合并后三页都建成了，这类断言必须整体重算**——这正是
+    // 「取任一侧都错」的那类冲突在测试里的表现。
+    for (const path of ["/ext/app", "/ext/integration", "/ext/publishing"]) {
+      expect(hintOf(path), `${path} 已建成，不该再挂「未建」标签`).toBeUndefined();
+    }
+    expect(hintOf("/ext/ai"), "/ext/ai 仍是只读蓝图，标签必须留着").toBe("未建·后置");
   });
 });

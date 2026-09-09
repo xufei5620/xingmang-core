@@ -101,12 +101,14 @@ it("租用小时数不为正时不能进入下一步", async () => {
   expect((screen.getByRole("button", { name: "下一步" }) as HTMLButtonElement).disabled).toBe(true);
 
   fireEvent.change(screen.getByLabelText("租用小时数"), { target: { value: "4" } });
+  fireEvent.change(screen.getByLabelText("理由"), { target: { value: "给新接的注册流程压测收码链路" } });
   fireEvent.click(screen.getByRole("button", { name: "下一步" }));
-  vi.mocked(rentSMSNumber).mockResolvedValue({ runId: "run-r" } as never);
-  fireEvent.click(await screen.findByRole("button", { name: /确认租 4 小时/ }));
+  vi.mocked(rentSMSNumber).mockResolvedValue({ kind: "executed", runId: "run-r" } as never);
+  fireEvent.click(await screen.findByRole("button", { name: /提交租 4 小时的审批/ }));
   await waitFor(() =>
     expect(vi.mocked(rentSMSNumber).mock.calls[0]?.[0]).toMatchObject({ service: "go", country: 12, duration_hours: 4 }),
   );
+  expect(vi.mocked(rentSMSNumber).mock.calls[0]?.[1]).toBe("给新接的注册流程压测收码链路");
 });
 
 // 邮箱刷新是**人发起**的，且要真的带 refresh 去打上游。

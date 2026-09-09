@@ -23,7 +23,7 @@ func readJobManifestContract(t *testing.T) []byte {
 	return raw
 }
 
-func TestManifestCoversExactlyElevenRegisteredPeriodicJobs(t *testing.T) {
+func TestManifestCoversExactlyTwelveRegisteredPeriodicJobs(t *testing.T) {
 	manifest, hash, err := LoadJobManifest(readJobManifestContract(t))
 	if err != nil {
 		t.Fatalf("load frozen manifest: %v", err)
@@ -32,8 +32,11 @@ func TestManifestCoversExactlyElevenRegisteredPeriodicJobs(t *testing.T) {
 		t.Fatal("manifest hash must not be empty")
 	}
 	registered := RegisteredPeriodicJobSpecs()
-	if len(registered) != 11 {
-		t.Fatalf("registered periodic jobs = %d, want 11", len(registered))
+	// 数字写死是刻意的：加一个周期任务必须同时改冻结契约、这个数字，以及
+	// 下面那张 want 表——三处都改到了，才说明「新任务进了清单」是被审过的
+	// 决定，而不是某次装配顺手多注册了一个。
+	if len(registered) != 12 {
+		t.Fatalf("registered periodic jobs = %d, want 12", len(registered))
 	}
 	if len(manifest.Jobs) != len(registered) {
 		t.Fatalf("manifest jobs = %d, registered = %d", len(manifest.Jobs), len(registered))
@@ -125,6 +128,12 @@ func TestManifestPinsStableIDsKindsQueuesScheduleSourcesAndCatchup(t *testing.T)
 			ID: SMSProbeJobKind, Kind: SMSProbeJobKind, Queue: QueueMaintenance,
 			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
 			ScheduleConfig: "XM_SMS_PROBE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.SMSProbeRunOnStart",
+			CatchUp: "at_most_one_immediate",
+		},
+		ApprovalExpireJobKind: {
+			ID: ApprovalExpireJobKind, Kind: ApprovalExpireJobKind, Queue: QueueMaintenance,
+			OwnerProcess: "platform-worker", Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_APPROVAL_EXPIRE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ApprovalExpireRunOnStart",
 			CatchUp: "at_most_one_immediate",
 		},
 	}
@@ -333,8 +342,10 @@ func TestEffectiveManifestDisabledJobAndConfigChangesChangeHash(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base.Jobs) != 11 {
-		t.Fatalf("jobs = %d, want 11", len(base.Jobs))
+	// 生效清单**包含关掉的任务**（带 Enabled=false），所以这里数的是清单
+	// 总条数而不是「在跑几个」——approval_expire 默认关闭，但它在清单里。
+	if len(base.Jobs) != 12 {
+		t.Fatalf("jobs = %d, want 12", len(base.Jobs))
 	}
 	cfg.RetentionEnabled = false
 	disabled, disabledHash, err := BuildEffectiveManifest(cfg, manifest)
@@ -527,6 +538,8 @@ func intervalForJob(id string) time.Duration {
 		return DefaultCardSyncInterval
 	case SMSProbeJobKind:
 		return DefaultSMSProbeInterval
+	case ApprovalExpireJobKind:
+		return DefaultApprovalExpireInterval
 	default:
 		return 0
 	}

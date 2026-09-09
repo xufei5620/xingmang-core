@@ -12,9 +12,16 @@ import (
 )
 
 // JobsQuerier 是「后台任务」页的只读能力（*jobs.QueryStore 满足）。
+//
+// FailedRunSummaryByKind 不被本文件的两个 handler 使用，它服务于
+// /ops/overview 的 failed_jobs_by_kind（XM-OPS-TRUTH 子片 B）。放在这个接口里
+// 而不是另立一个：Deps.Jobs 只有一个实现（*jobs.QueryStore），多一个接口只会
+// 让装配处多一次类型断言，而断言失败是静默的——那正是「点了没生效但不报错」
+// 那一类失效。
 type JobsQuerier interface {
 	Overview(ctx context.Context, environment string) (jobs.Overview, error)
 	ListRuns(ctx context.Context, in jobs.ListRunsInput) (jobs.RunPage, error)
+	FailedRunSummaryByKind(ctx context.Context, environment string, since time.Time) ([]jobs.FailedRunSummary, error)
 }
 
 // jobRunErrorBody 是最近一次失败尝试的对外表示，已经过截断

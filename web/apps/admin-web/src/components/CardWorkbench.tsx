@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatUtcTimestamp } from "@xingmang/ui-admin";
 import { Badge, Button, Dialog, Input } from "@xingmang/ui-primitives";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router";
 import {
   deleteCard,
@@ -19,8 +19,9 @@ import {
 } from "../lib/cardStatus";
 import { formatMinorUnits } from "../lib/money";
 import { ActionErrorNote } from "./ActionErrorNote";
-import { ActionResultNote, type ActionResult } from "./ActionResultNote";
+import { actionResultOf, ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ApprovalReasonField, isApprovalReasonUsable } from "./ApprovalReasonField";
 import { CardTransactions, UsageForm } from "./CardCardForms";
 import { CardFundsDialog } from "./CardFundsDialog";
 
@@ -518,7 +519,10 @@ function CopyCardSecrets({ card }: { card: CardItem }) {
 /** 余额旁边的四个动作，与 Infini 的位置一致。
  *
  *  充值/赎回开对话框（它们要填金额与代币）；锁定/解锁一点即走；
- *  关停两步确认——不可逆的动作不该和其它三个一样一点就走。 */
+ *  关停两步确认——不可逆的动作不该和其它三个一样一点就走。
+ *
+ *  关停自 XM-RISK-RESTORE 起是 L2：上膛之后还要写一句理由，因为这次点击
+ *  不会关停任何东西，只会落一张审批单，而单上的理由是审批人唯一的依据。 */
 function CardActions({
   card,
   onWrite,
@@ -529,6 +533,9 @@ function CardActions({
   onError: (e: unknown) => void;
 }) {
   const [armed, setArmed] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
+  const fieldId = useId();
 
   const lockMutation = useMutation({
     mutationFn: (freeze: boolean) => {
@@ -546,14 +553,24 @@ function CardActions({
 
   const deleteMutation = useMutation({
     mutationFn: (key: string) =>
-      deleteCard({
-        account: card.account,
-        idempotency_key: key,
-        card_id: card.card_id,
-      }),
-    onSuccess: (run) => {
-      onWrite({ runId: run.runId, title: "已提交关停请求" });
+      deleteCard(
+        {
+          account: card.account,
+          idempotency_key: key,
+          card_id: card.card_id,
+        },
+        reason.trim(),
+      ),
+    onSuccess: (outcome) => {
+      onWrite(
+        actionResultOf(outcome, {
+          executed: "已提交关停请求",
+          approvalPending: "关停已提交审批，卡还没有关停",
+        }),
+      );
       setArmed(null);
+      setReason("");
+      setReasonTouched(false);
     },
     onError: (e) => {
       setArmed(null);
@@ -564,36 +581,66 @@ function CardActions({
   const gone = card.status === "pending_delete" || card.status === "deleted";
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <CardFundsDialog card={card} kind="topup" onDone={onWrite} />
-      <CardFundsDialog card={card} kind="redeem" onDone={onWrite} />
-      <Button
-        variant="secondary"
-        size="sm"
-        disabled={lockMutation.isPending}
-        onClick={() => lockMutation.mutate(!isCardLocked(card.status))}
-      >
-        {isCardLocked(card.status) ? "解锁" : "锁定"}
-      </Button>
-      {gone ? null : armed ? (
-        <Button
-          variant="danger"
-          size="sm"
-          disabled={deleteMutation.isPending}
-          onClick={() => deleteMutation.mutate(armed)}
-          title="再点一次将真的关停这张卡"
-        >
-          {deleteMutation.isPending ? "关停中…" : "确认关停"}
-        </Button>
-      ) : (
+    <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <CardFundsDialog card={card} kind="topup" onDone={onWrite} />
+        <CardFundsDialog card={card} kind="redeem" onDone={onWrite} />
         <Button
           variant="secondary"
           size="sm"
-          onClick={() => setArmed(crypto.randomUUID())}
-          title="关停不可逆：卡会结清余额后删除，无法恢复"
+          disabled={lockMutation.isPending}
+          onClick={() => lockMutation.mutate(!isCardLocked(card.status))}
         >
-          关停
+          {isCardLocked(card.status) ? "解锁" : "锁定"}
         </Button>
+        {gone ? null : armed ? (
+          <>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={deleteMutation.isPending}
+              onClick={() => {
+                setReasonTouched(true);
+                if (!isApprovalReasonUsable(reason)) return;
+                deleteMutation.mutate(armed);
+              }}
+              // 这句话以前是「再点一次将真的关停这张卡」。关停恢复成 L2 之后
+              // 它不再成立：这一点只会落一张审批单。
+              title="提交后先落审批单，批准并由人执行之后卡才会被关停，且无法恢复"
+            >
+              {deleteMutation.isPending ? "提交中…" : "提交关停审批"}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setArmed(null);
+                setReason("");
+                setReasonTouched(false);
+              }}
+            >
+              取消
+            </Button>
+          </>
+        ) : (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setArmed(crypto.randomUUID())}
+            title="关停不可逆：批准执行后卡会结清余额并删除，无法恢复"
+          >
+            关停
+          </Button>
+        )}
+      </div>
+      {gone || !armed ? null : (
+        <ApprovalReasonField
+          id={`${fieldId}-delete-reason`}
+          value={reason}
+          onChange={setReason}
+          subject={`关停 ${card.mask}`}
+          touched={reasonTouched}
+        />
       )}
     </div>
   );

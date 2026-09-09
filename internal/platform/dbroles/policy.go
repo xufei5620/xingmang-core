@@ -396,6 +396,16 @@ func defaultObjects() []ObjectGrant {
 	add("table", "core", "service", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_lifecycle_runtime": {"SELECT", "INSERT"}, "xm_worker_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "core", "connector", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "core", "connection", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
+	// core.schema_migration_state (migration 000050) is the sanctioned read-only
+	// projection of public.schema_migrations. Design §7.6 keeps `public`
+	// River-only and marks schema_migrations no-runtime-access; the same section
+	// names "another approved read-only view" as the way out, and this is it.
+	// Reading through a core view means no runtime role needs USAGE on `public`.
+	//
+	// xm_worker_runtime is deliberately absent: §7.6 states the worker gets no
+	// access to schema_migrations, and granting it here would be an end-run
+	// around that decision. xm_lifecycle_runtime is absent for lack of any need.
+	add("view", "core", "schema_migration_state", map[string][]string{"xm_api_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "action", "action_run", map[string][]string{"xm_api_runtime": {"INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "audit", "audit_event", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	addCols("table", "audit", "chain_root", map[string][]string{"xm_lifecycle_runtime": {"SELECT", "INSERT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}}, map[string]map[string][]string{"xm_lifecycle_runtime": {"exported_at": {"UPDATE"}, "export_target": {"UPDATE"}}})
@@ -403,6 +413,24 @@ func defaultObjects() []ObjectGrant {
 	add("table", "ops", "metric_observation_sample", map[string][]string{"xm_api_runtime": {"SELECT"}, "xm_worker_runtime": {"SELECT", "INSERT", "DELETE"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "alerts", "alert", map[string][]string{"xm_api_runtime": {"SELECT", "UPDATE"}, "xm_worker_runtime": {"SELECT", "INSERT", "UPDATE", "DELETE"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "alerts", "alert_silence", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
+	// alerts.upstream_version_ack (migration 000054). The API needs UPDATE in
+	// addition to INSERT: the Action writes with ON CONFLICT DO UPDATE, because
+	// one upstream has exactly one *current* acknowledged version. Copying
+	// alert_silence's {SELECT, INSERT} shape would compile, pass every local
+	// test, and only fail on the day role separation actually ships -- grants
+	// are written for the statement that runs, not for the table that looks
+	// nearest. The worker (alert evaluator) only ever reads it.
+	//
+	// DELETE was added by the same slice's review round, for
+	// alerts.upstream_version.revoke. Without it the acknowledgement is a latch
+	// with no release path: a mistaken acknowledgement permanently silences the
+	// "go re-check the bridge contract and compatibility matrix" reminder for
+	// that version, and the only automatic release is the upstream shipping yet
+	// another version -- an external event, not something the operator controls.
+	// Granting DELETE here is deliberately narrower than it looks: the row is
+	// keyed (environment, metric_key) and the handler resolves the environment
+	// from the Principal, never from a parameter.
+	add("table", "alerts", "upstream_version_ack", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE", "DELETE"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	for _, name := range []string{"upstream_account", "token_map", "profit_daily", "proxy_asset", "subscription_cost_batch", "amortization_loss", "balance_history", "platform_channel_binding", "runway_threshold_config", "runway_threshold_history", "runway_threshold_current_verified"} {
 		grants := readAll
 		if name == "upstream_account" {
@@ -466,10 +494,12 @@ func tableColumns(kind, schema, name string) []string {
 	}
 	key := schema + "." + name
 	columns := map[string][]string{
-		"core.environment":                          {"id", "description", "created_at"},
-		"core.service":                              {"id", "service_type", "instance_id", "environment", "endpoint", "internal_endpoint", "owner", "health_check_path", "native_console_url", "runbook_path", "status", "source_watermark", "observed_at", "created_at", "updated_at"},
-		"core.connector":                            {"id", "key", "version", "contract_version", "connection_schema_path", "target_allowlist", "read_capabilities", "write_capabilities", "supported_upstream_versions", "compatibility_test_path", "created_at", "updated_at"},
-		"core.connection":                           {"id", "connector_id", "service_id", "environment", "credential_ref", "target_allowlist", "granted_capabilities", "kill_switch", "status", "detected_upstream_version", "version_fingerprint", "last_verified_at", "created_at", "updated_at"},
+		"core.environment": {"id", "description", "created_at"},
+		"core.service":     {"id", "service_type", "instance_id", "environment", "endpoint", "internal_endpoint", "owner", "health_check_path", "native_console_url", "runbook_path", "status", "source_watermark", "observed_at", "created_at", "updated_at"},
+		"core.connector":   {"id", "key", "version", "contract_version", "connection_schema_path", "target_allowlist", "read_capabilities", "write_capabilities", "supported_upstream_versions", "compatibility_test_path", "created_at", "updated_at"},
+		"core.connection":  {"id", "connector_id", "service_id", "environment", "credential_ref", "target_allowlist", "granted_capabilities", "kill_switch", "status", "detected_upstream_version", "version_fingerprint", "last_verified_at", "created_at", "updated_at"},
+		// Mirrors public.schema_migrations exactly: golang-migrate's two columns.
+		"core.schema_migration_state":               {"version", "dirty"},
 		"action.action_run":                         {"id", "action_id", "action_version", "principal_id", "principal_type", "environment", "request_id", "risk_level", "status", "error_code", "duration_ms", "started_at", "finished_at"},
 		"audit.audit_event":                         {"id", "sequence", "occurred_at", "recorded_at", "principal_id", "principal_type", "action_id", "action_version", "action_run_id", "resource_type", "resource_id", "environment", "reason", "approval_id", "request_id", "trace_id", "source_ip", "before_summary", "after_summary", "connector_request_summary", "connector_response_summary", "result", "compensation_result", "prev_hash", "event_hash", "canonical_version"},
 		"audit.chain_root":                          {"id", "computed_at", "from_sequence", "to_sequence", "root_hash", "signature", "key_id", "exported_at", "export_target"},
@@ -479,8 +509,9 @@ func tableColumns(kind, schema, name string) []string {
 		"audit.archive_terminal_receipt":            {"operation_id", "signed_result_bytes", "terminal_result_digest", "optional_artifact_ref_bytes", "recorded_at"},
 		"ops.metric_observation":                    {"id", "metric_key", "source", "environment", "observed_at", "synced_at", "watermark", "status", "is_partial", "last_success", "last_error_code", "staleness_threshold_seconds", "value_json", "updated_at"},
 		"ops.metric_observation_sample":             {"id", "metric_key", "source", "environment", "observed_at", "synced_at", "status", "is_partial", "watermark", "last_error_code", "value_json"},
-		"alerts.alert":                              {"id", "rule_key", "dedup_key", "severity", "status", "title", "detail", "environment", "opened_at", "acknowledged_at", "resolved_at", "last_seen_at", "fire_count", "source_metric_key", "notify_status", "notify_error", "notified_at", "created_at", "updated_at"},
+		"alerts.alert":                              {"id", "rule_key", "dedup_key", "severity", "status", "title", "detail", "environment", "opened_at", "acknowledged_at", "resolved_at", "last_seen_at", "fire_count", "source_metric_key", "notify_status", "notify_error", "notified_at", "created_at", "updated_at", "trigger_count", "first_opened_at"},
 		"alerts.alert_silence":                      {"id", "rule_key", "environment", "reason", "starts_at", "ends_at", "created_by", "created_at"},
+		"alerts.upstream_version_ack":               {"environment", "metric_key", "version", "source", "acknowledged_by", "acknowledged_at", "note"},
 		"finance.upstream_account":                  {"id", "system_type", "access_method", "base_url", "credential_ref", "recharge_ratio", "currency", "business_day_tz", "status", "environment", "created_at", "updated_at", "platform_id", "group_rate", "upstream_name", "upstream_contact", "upstream_group"},
 		"finance.token_map":                         {"upstream_account_id", "upstream_token_id", "own_account_id", "credential_ref", "created_at", "updated_at"},
 		"finance.profit_daily":                      {"upstream_account_id", "business_day", "business_day_tz", "token_id", "account_id", "platform_id", "revenue_minor", "cost_minor", "profit_minor", "currency", "ratio_snapshot", "source", "cost_observed_at", "revenue_observed_at", "updated_at"},

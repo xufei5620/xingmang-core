@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ACTIVE_ALERT_STATUSES,
+  ALERT_AGE_RESET_HINT,
   ALERT_RULES,
   ALERT_STATUS_ALL,
   acknowledgeAlert,
+  alertAgeAnchor,
   createSilence,
+  estimatedPrefix,
+  FIRST_OPENED_AT_ESTIMATED_HINT,
+  FIRST_OPENED_AT_ESTIMATED_MARK,
   listAlerts,
   ruleLabel,
 } from "./alerts";
@@ -128,8 +133,11 @@ describe("写路径", () => {
 });
 
 describe("规则清单", () => {
-  it("五条规则，键的形态与后端 CHECK 一致", () => {
-    expect(ALERT_RULES).toHaveLength(5);
+  it("键的形态与后端 CHECK 一致", () => {
+    // 条数不写死在这里：清单该有几条由后端 alerts/rules.go 说了算，
+    // 那条对账在 lib/labels.reconcile.test.ts（它直接读 rules.go 求差集）。
+    // 这里写一个数字只会在后端加规则时红在一个说不清原因的地方。
+    expect(ALERT_RULES.length).toBeGreaterThan(0);
     for (const rule of ALERT_RULES) {
       // 库层 CHECK：^[a-z0-9][a-z0-9_.-]{0,127}$
       expect(rule.key).toMatch(/^[a-z0-9][a-z0-9_.-]{0,127}$/);
@@ -144,5 +152,62 @@ describe("规则清单", () => {
     // 显示成「未知规则」则是在丢事实。
     expect(ruleLabel("metric.sync.failed")).toBe("指标同步失败");
     expect(ruleLabel("brand.new.rule")).toBe("brand.new.rule");
+  });
+});
+
+// XM-WORKBENCH-WIRE-OPS：后端 XM-OPS-TRUTH 起给了 first_opened_at（跨复发继承）
+// 与 first_opened_at_estimated（这个值是不是拿 opened_at 兜的底）。三条分支的
+// 判据各不相同，**三条都要测**：只测其中一条，另外两条到时候是死的还是活的，
+// 谁也答不上来。
+describe("首开时刻：真值 / 兜底估计 / 老后端没有这一列", () => {
+  const base = { opened_at: "2026-09-08T11:00:00Z" };
+
+  it("确定值：用它、不标「约」、不挂说明", () => {
+    const anchor = alertAgeAnchor({
+      ...base,
+      first_opened_at: "2026-09-05T04:00:00Z",
+      first_opened_at_estimated: false,
+    });
+    expect(anchor.since).toBe("2026-09-05T04:00:00Z");
+    expect(anchor.estimated).toBe(false);
+    expect(anchor.hint).toBeNull();
+    expect(estimatedPrefix(anchor)).toBe("");
+  });
+
+  it("兜底估计：仍然用它，但标「约」并换成后端那句更准确的说明", () => {
+    const anchor = alertAgeAnchor({
+      ...base,
+      first_opened_at: "2026-09-08T11:00:00Z",
+      first_opened_at_estimated: true,
+    });
+    expect(anchor.since).toBe("2026-09-08T11:00:00Z");
+    expect(anchor.estimated).toBe(true);
+    expect(anchor.hint).toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+    expect(estimatedPrefix(anchor)).toBe("约 ");
+  });
+
+  it("字段整个不在（老后端）：退回 opened_at，同样标「约」，说明用「会重新计时」那句", () => {
+    // 这一支连 first_opened_at_estimated 都没有，所以「是不是估计」只能由缺席
+    // 本身来答——答案是「是」，而不是默认 false。默认成 false 会让一个系统性
+    // 偏小的时长看起来是确定的。
+    const anchor = alertAgeAnchor(base);
+    expect(anchor.since).toBe("2026-09-08T11:00:00Z");
+    expect(anchor.estimated).toBe(true);
+    expect(anchor.hint).toBe(ALERT_AGE_RESET_HINT);
+    expect(anchor.hint).not.toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+  });
+
+  it("显式 null 与空串走的是「字段不在」那一支", () => {
+    for (const value of [null, ""] as const) {
+      const anchor = alertAgeAnchor({ ...base, first_opened_at: value });
+      expect(anchor.since).toBe(base.opened_at);
+      expect(anchor.estimated).toBe(true);
+    }
+  });
+
+  it("estimated 为假时前缀是空串，不是「约」——「约」不能长在确定值上", () => {
+    // 反向判据：把一个确定的首开时刻也标上「约」，是白白让人不敢信它。
+    expect(estimatedPrefix({ estimated: false })).toBe("");
+    expect(estimatedPrefix({ estimated: true })).toContain(FIRST_OPENED_AT_ESTIMATED_MARK);
   });
 });

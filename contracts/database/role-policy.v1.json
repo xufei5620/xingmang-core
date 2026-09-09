@@ -593,6 +593,7 @@
         "detail",
         "environment",
         "fire_count",
+        "first_opened_at",
         "id",
         "last_seen_at",
         "notified_at",
@@ -605,6 +606,7 @@
         "source_metric_key",
         "status",
         "title",
+        "trigger_count",
         "updated_at"
       ],
       "table_privileges": {
@@ -648,6 +650,41 @@
         "xm_api_runtime": [
           "INSERT",
           "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_lifecycle_runtime": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
+        ],
+        "xm_worker_runtime": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "alerts",
+      "name": "upstream_version_ack",
+      "owner": "xm_migrator",
+      "columns": [
+        "acknowledged_at",
+        "acknowledged_by",
+        "environment",
+        "metric_key",
+        "note",
+        "source",
+        "version"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "DELETE",
+          "INSERT",
+          "SELECT",
+          "UPDATE"
         ],
         "xm_backup_read": [
           "SELECT"
@@ -1601,6 +1638,27 @@
       "privileges": {
         "xm_worker_runtime": [
           "USAGE"
+        ]
+      }
+    },
+    {
+      "kind": "view",
+      "schema": "core",
+      "name": "schema_migration_state",
+      "owner": "xm_migrator",
+      "columns": [
+        "dirty",
+        "version"
+      ],
+      "table_privileges": {
+        "xm_api_runtime": [
+          "SELECT"
+        ],
+        "xm_backup_read": [
+          "SELECT"
+        ],
+        "xm_ops_read": [
+          "SELECT"
         ]
       }
     },

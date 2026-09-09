@@ -45,7 +45,27 @@ type alertItem struct {
 	LastSeenAt     string  `json:"last_seen_at"`
 	AcknowledgedAt *string `json:"acknowledged_at"`
 	ResolvedAt     *string `json:"resolved_at"`
-	FireCount      int32   `json:"fire_count"`
+
+	// FireCount 是**评估轮数**（每 60 秒一轮，条件仍成立就 +1），不是
+	// 「发生了几次」。字段名与语义都保持不变——前端片正在并行消费它，
+	// 改名会让它当场炸。要显示「触发几次」请用 trigger_count。
+	FireCount int32 `json:"fire_count"`
+	// TriggerCount 是真正的触发次数（新开 +1、静默过期转回 OPEN +1）。
+	//
+	// **null 表示不知道**：迁移 000054 之前就存在的行没有这个事实，
+	// 也没有可以兜的底。前端应显示「—」而不是 0——一条正在响的告警
+	// 触发过 0 次是不可能的。
+	TriggerCount *int32 `json:"trigger_count"`
+	// FirstOpenedAt 是这个问题**第一次**开始的时刻，跨复发继承。
+	//
+	// 与 trigger_count 的空值口径**故意不一样**：它恒非空。「已持续多久」
+	// 是待处理清单的主行文案，必须渲染得出东西，所以服务端用 opened_at
+	// 兜底（规则只写在 alerts.Alert.EffectiveFirstOpenedAt 一处），
+	// 并用下一个字段诚实地说出这是不是估计值。
+	FirstOpenedAt string `json:"first_opened_at"`
+	// FirstOpenedAtEstimated 为 true 表示上一行是用 opened_at 兜的底
+	// （本列上线前的旧行），不是真的首开时刻。
+	FirstOpenedAtEstimated bool `json:"first_opened_at_estimated"`
 
 	// 投递状态与告警状态一起返回，从不省略：一条 OPEN 却没投递出去的告警
 	// 是本模块最危险的状态，前端必须能显示它（规格 §9.3「通知投递状态」）。
@@ -55,6 +75,7 @@ type alertItem struct {
 }
 
 func alertToItem(a alerts.Alert) alertItem {
+	firstOpenedAt, estimated := a.EffectiveFirstOpenedAt()
 	return alertItem{
 		ID:              a.ID.String(),
 		RuleKey:         a.RuleKey,
@@ -70,9 +91,14 @@ func alertToItem(a alerts.Alert) alertItem {
 		AcknowledgedAt:  rfc3339Ptr(a.AcknowledgedAt),
 		ResolvedAt:      rfc3339Ptr(a.ResolvedAt),
 		FireCount:       a.FireCount,
-		NotifyStatus:    string(a.NotifyStatus),
-		NotifyError:     a.NotifyError,
-		NotifiedAt:      rfc3339Ptr(a.NotifiedAt),
+		TriggerCount:    a.TriggerCount,
+
+		FirstOpenedAt:          firstOpenedAt.Format(time.RFC3339),
+		FirstOpenedAtEstimated: estimated,
+
+		NotifyStatus: string(a.NotifyStatus),
+		NotifyError:  a.NotifyError,
+		NotifiedAt:   rfc3339Ptr(a.NotifiedAt),
 	}
 }
 
@@ -165,9 +191,19 @@ func parseAlertStatuses(raw string) ([]alerts.Status, error) {
 }
 
 func parseAlertLimit(raw string) (int32, error) {
+	return parseListLimit(raw, defaultAlertLimit)
+}
+
+// parseListLimit 解析 limit 查询参数：空值取 def，其余必须是正整数。
+//
+// 抽出来给告警与静默两个列表共用，但**默认值仍由各自传进来**：共用的是
+// 「怎么解析、拼错了说什么」，不是「一页多少条」。前者两处必须逐字一致
+// （同一个参数在相邻端点上给出两种错误文案，只会让调用方以为自己看错了），
+// 后者是两份列表各自的取舍。
+func parseListLimit(raw string, def int32) (int32, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return defaultAlertLimit, nil
+		return def, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n <= 0 {

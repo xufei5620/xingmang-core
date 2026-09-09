@@ -69,7 +69,7 @@ it("提现需要两步确认，第一次点击不发请求", async () => {
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
 
   expect(executeWithdraw).not.toHaveBeenCalled();
-  await screen.findByRole("button", { name: /确认提现/ });
+  await screen.findByRole("button", { name: /提交提现审批/ });
   expect(executeWithdraw).not.toHaveBeenCalled();
 });
 
@@ -87,13 +87,17 @@ it("确认后只提交 address_id，不提交地址本身", async () => {
   // 用表单自身当就绪信号：地址名现在同时出现在清单行和下拉选项里，
   // 按文本找会撞到多个元素。
   fireEvent.change(await screen.findByLabelText("金额"), { target: { value: "10" } });
+  fireEvent.change(screen.getByLabelText("理由"), { target: { value: "季度结算，把冷钱包余额转回运营账户" } });
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
-  fireEvent.click(await screen.findByRole("button", { name: /确认提现/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /提交提现审批/ }));
 
   await waitFor(() => expect(executeWithdraw).toHaveBeenCalledTimes(1));
   const params = vi.mocked(executeWithdraw).mock.calls[0]![0];
   expect(params.address_id).toBe("a1");
   expect(JSON.stringify(params)).not.toContain(coldWallet.address);
+  // 理由是**第二个实参**，不在 params 里：它进审批单，不进 Action 参数
+  // （params 要过后端 JSON Schema，多一个字段会被当场拒）。
+  expect(vi.mocked(executeWithdraw).mock.calls[0]![1]).toBe("季度结算，把冷钱包余额转回运营账户");
 });
 
 // 幂等键在**上膛时**生成并保持不变。
@@ -110,8 +114,9 @@ it("两步之间幂等键不变", async () => {
   // 用表单自身当就绪信号：地址名现在同时出现在清单行和下拉选项里，
   // 按文本找会撞到多个元素。
   fireEvent.change(await screen.findByLabelText("金额"), { target: { value: "10" } });
+  fireEvent.change(screen.getByLabelText("理由"), { target: { value: "季度结算，把冷钱包余额转回运营账户" } });
   fireEvent.click(screen.getByRole("button", { name: "提现" }));
-  fireEvent.click(await screen.findByRole("button", { name: /确认提现/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /提交提现审批/ }));
   await waitFor(() => expect(executeWithdraw).toHaveBeenCalledTimes(1));
   const first = vi.mocked(executeWithdraw).mock.calls[0]![0].request_id;
 
@@ -120,7 +125,7 @@ it("两步之间幂等键不变", async () => {
   expect(screen.queryByRole("button", { name: "提现" })).toBeNull();
 
   // 直接再确认一次：仍是同一笔业务，键必须一样。
-  fireEvent.click(await screen.findByRole("button", { name: /确认提现/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /提交提现审批/ }));
   await waitFor(() => expect(executeWithdraw).toHaveBeenCalledTimes(2));
   expect(vi.mocked(executeWithdraw).mock.calls[1]![0].request_id).toBe(first);
 });

@@ -11,7 +11,13 @@ import {
   looksLikeUnmountedRoute,
   type ApiClient,
 } from "./client";
-import { executeAction, type ActionRun, type ListOptions } from "./platform";
+import {
+  executeAction,
+  submitAction,
+  type ActionOutcome,
+  type ActionRun,
+  type ListOptions,
+} from "./platform";
 
 const WITHDRAW_NOT_MOUNTED_DESCRIPTION =
   "提现在当前环境未启用。它跟随卡片功能一起挂载（XM_CARDS_MODE 不为 off），" +
@@ -172,13 +178,17 @@ export function registerWithdrawAddress(
   );
 }
 
-/** 发起一次提现（`cards.withdraw.execute@1`）。
+/** 发起一次提现（`cards.withdraw.execute@1`，**L3**）。
  *
  *  只传 `address_id`，**不传地址本身**：地址由服务端从白名单里取。
  *  传地址进来再比对是另一回事——那样一个比对逻辑的疏漏就能让任意地址过去。
  *
  *  `request_id` 必须由调用方稳定生成：上游对它有真幂等（重复会回
- *  is_duplicate 而不是转两次），换一个键等于告诉双方「这是另一笔提现」。 */
+ *  is_duplicate 而不是转两次），换一个键等于告诉双方「这是另一笔提现」。
+ *
+ *  L3 是全平台最高的一档（宪法 9 条：L3/L4 必须审批）。这次调用**不会**当场
+ *  转账，内核会受理成一张审批单并回 202；`reason` 必填，它是审批人唯一能据以
+ *  判断「这笔钱该不该转」的东西。 */
 export function executeWithdraw(
   params: {
     account: string;
@@ -190,11 +200,12 @@ export function executeWithdraw(
     source_currency?: string;
     note?: string;
   },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction(
-    { actionId: "cards.withdraw.execute", version: "1", params },
+): Promise<ActionOutcome> {
+  return submitAction(
+    { actionId: "cards.withdraw.execute", version: "1", params, reason },
     options,
     client,
   );

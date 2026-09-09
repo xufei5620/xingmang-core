@@ -31,7 +31,10 @@ func ParseRiskLevel(s string) (RiskLevel, error) {
 
 // RequiresAdvancedControls 判断该等级是否需要 Action Advanced Controls
 // （幂等键、写后读取确认、审批、Step-up MFA、冷却、Kill Switch）。
-// Foundation-A 未实现这些控制，因此 L2 及以上在本阶段一律拒绝执行。
+//
+// 返回 true **不等于拒绝执行**：内核接了审批中心（WithApprovalGateway）时，
+// 这样的调用被受理成一张审批单，批准后由人触发执行；没接时才保持
+// Foundation-A 的 fail closed，返回 ADVANCED_CONTROLS_REQUIRED。
 func (r RiskLevel) RequiresAdvancedControls() bool {
 	return r == L2 || r == L3 || r == L4
 }

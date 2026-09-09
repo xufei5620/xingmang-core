@@ -261,8 +261,8 @@ func (f *Fake) BatchCardStatus(ctx context.Context, cardIDs []string) (map[strin
 	if err := f.takeErr(); err != nil {
 		return nil, err
 	}
-	if len(cardIDs) > batchStatusMax {
-		return nil, fmt.Errorf("fake: 一次最多 %d 张", batchStatusMax)
+	if len(cardIDs) > BatchStatusMax {
+		return nil, fmt.Errorf("fake: 一次最多 %d 张", BatchStatusMax)
 	}
 	out := make(map[string]string, len(cardIDs))
 	for _, id := range cardIDs {

@@ -4,6 +4,7 @@ import { Badge } from "@xingmang/ui-primitives";
 import {
   listChannelSummaries,
   listUpstreamSummaries,
+  UPSTREAM_SUMMARY_QUERY,
   type ChannelSummary,
   type RunwayThresholds,
 } from "../api/finance";
@@ -74,7 +75,7 @@ export function ChannelTable({
   // 阈值只在上游汇总端点上下发（两个端点同源同粒度，XM-0049 一份解析）。
   // **单独一个 query**：档位说明取不到不该把整张表拖成错误态
   const thresholdQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 
@@ -95,7 +96,7 @@ export function ChannelTable({
       onDone={() => {
         void queryClient.invalidateQueries({ queryKey: ["finance", "channels", "summary"] });
         void queryClient.invalidateQueries({ queryKey: ["finance-upstream-accounts"] });
-        void queryClient.invalidateQueries({ queryKey: ["finance", "upstreams", "summary"] });
+        void queryClient.invalidateQueries({ queryKey: [UPSTREAM_SUMMARY_QUERY] });
       }}
     />
   );

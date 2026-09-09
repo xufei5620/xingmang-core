@@ -264,8 +264,12 @@ var registeredMetrics = struct {
 		// jobs，不构成生产代码的环）。
 		"platform.heartbeat":          {},
 		"platform.retention.last_run": {},
-		"sub2api.connector.health":    {},
-		"newapi.connector.health":     {},
+		// XM-0030c：审批队列积压（jobs/approval_expire.go 的 MetricApprovalQueue）。
+		// alerts 的 approval.pending.too_long 规则以它为**唯一输入**——不在这份
+		// 白名单里的话，/metrics/history 会把它判成未注册。
+		"platform.approval.queue":  {},
+		"sub2api.connector.health": {},
+		"newapi.connector.health":  {},
 		// CPA（XM-CPA0，connectors/cpa）。CPA = CLI Proxy API + cpa-manager-plus，
 		// 只读文件后端直读宿主机 usage.sqlite（只读绑定挂载，从不挂载凭据文件）。
 		// 四条键字面量与 connectors/cpa/contract.go 的 Metric* 常量逐字对应，
@@ -280,6 +284,15 @@ var registeredMetrics = struct {
 		// 落在"渠道保障"页签位置（ADMIN-IA CPA 第 4 格，M1.5 徽标）——语义其实是
 		// 账号巡检而非模型路由验证，裁定见 contracts/connectors/cpa.read.v1.md §9。
 		"cpa.accounts.health": {},
+		// 卡片同步的每轮状态（XM-CARD-VISIBILITY，jobs/card_sync.go 的
+		// MetricCardSyncStatus）。写它的是 card_sync 作业，读它的是 alerts 的
+		// cards.sync.failed 规则——与上面 platform.approval.queue 是同一种
+		// 「本平台自己产、本平台自己用」的运维信号，登记方式照搬那一条。
+		//
+		// 不登记的后果不是报错而是**静默**：/metrics/history 会把它判成未注册
+		// 直接 400，而规则的 ListSamples 一条不返回也不报错，于是那条告警
+		// 结构上永远不可能响。
+		"cards.sync.status": {},
 	},
 }
 

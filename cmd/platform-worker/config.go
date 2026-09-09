@@ -187,6 +187,28 @@ func configFromEnv(getenv func(string) string) (jobs.Config, error) {
 	//
 	// ⚠️ 审计事件不在清理范围内（宪法 11 条 append-only），所以这里没有
 	// 「审计保留天数」这个变量：给一个删不掉东西的旋钮，比不给更误导。
+	// XM-0030c：审批单过期清理与队列观测。
+	//
+	// jobs.DefaultConfig 把它设成**关闭**（那时审批中心还没接），产品负责人
+	// 2026-09-07 指示启用，所以这里显式打开。它同时是这条链路的停用开关
+	// （宪法 26 条）：真出问题时置 false 即可，不必改代码——代价只是队列观测
+	// 停更，进而「审批单挂太久」那条告警失去输入（会先由「指标数据陈旧」响）。
+	config.ApprovalExpireEnabled = true
+	if value := getenv("XM_APPROVAL_EXPIRE_ENABLED"); value != "" {
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("approval expire enabled: %w", err)
+		}
+		config.ApprovalExpireEnabled = enabled
+	}
+	if value := getenv("XM_APPROVAL_EXPIRE_INTERVAL"); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return jobs.Config{}, fmt.Errorf("approval expire interval: %w", err)
+		}
+		config.ApprovalExpireInterval = interval
+	}
+
 	if value := getenv("XM_RETENTION_ENABLED"); value != "" {
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {

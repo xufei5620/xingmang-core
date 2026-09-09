@@ -67,10 +67,19 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deplo
 
 ## 验证(切换后 5 分钟内)
 
-1. **worker 日志**应显示 `newapi_mode":"real"` 且 `metrics_failed":0`:
+1. **worker 日志**看**本轮生效模式**,不是启动缺省:
    ```bash
-   docker logs --since 6m xingmang-launch-platform-worker-1 | grep newapi_sync | tail -1
+   docker logs --since 6m xingmang-launch-platform-worker-1 \
+     | grep -E 'connector_config_applied|"job_kind":"newapi_sync"' | tail -3
    ```
+   - `connector_config_applied` 应为 `"platform":"newapi"`、`"mode":"real"`、
+     `"config_source":"database"`,`endpoint_host` 是你填的主机;
+   - 随后的 `job_completed` 应为 `"newapi_mode":"real"`、
+     `"newapi_mode_source":"database"`、`"metrics_failed":0`。
+   - **`worker_started` 里的 `newapi_mode_default` 不用看**:那是环境变量
+     缺省,后台切模式不重启容器它永远不变。2026-09-08 的排查里照旧口径读它,
+     得出「生产在跑假数据」的错误结论
+     (见 `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 三·1)。
    - 若 `error_code":"auth"` → token 错、账号不是管理员(role < 10)、
      或者实例是老版本需要 `XM_NEWAPI_USER_ID`;
    - 若 `error_code":"forbidden_target"` → endpoint 主机与 allowlist 对不上;
@@ -78,7 +87,16 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deplo
      写成带路径的形式;
    - 若 `bad_response` → endpoint 不对,或者上游的 `quota_per_unit` 被改成了 0
      (见下面「金额口径」);
-   - 若 `not_supported` → 三个变量没配齐,日志里会写清缺哪个。
+   - 若 `not_supported` → 三个变量没配齐,日志里会写清缺哪个;
+     生效模式仍是 fake 时也是这个码(生产禁 fake,见 worker README)。
+   - 若 `unavailable` → 看同一轮的 `upstream_read` 行分辨两种病因。每组读取
+     一条,带 `read_step` / `elapsed_ms` / `group_budget_ms` /
+     `round_remaining_ms`:
+     - `elapsed_ms` 顶到 `group_budget_ms`、`round_remaining_ms` 一路被抽干 →
+       **上游整体变慢或链太长**,不是某几个接口坏了;
+     - `elapsed_ms` 远小于 `group_budget_ms` 而 `round_remaining_ms` 一直宽裕
+       → **上游那几个接口自己坏了**(快速失败)。
+     2026-09-08 分不清这两说,正是因为当时没有逐次耗时。
 
 2. **浏览器** `http://<平台>/platforms/newapi`:
    - 概览 5 张卡的**来源**应从 `newapi-staging` 变成你的真实 instance id;

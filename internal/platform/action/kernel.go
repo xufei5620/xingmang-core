@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,7 +49,10 @@ type Request struct {
 	ActionID      string
 	ActionVersion string
 	RequestID     string // 调用方提供的请求标识（规格 §5.8 X-Request-ID）
-	Params        map[string]any
+	// Reason 是「为什么要做这件事」。L0/L1 可空；**L2 及以上必填**——
+	// 审批单的 reason 是审计要求（库层 NOT NULL），而它只能由发起人给出。
+	Reason string
+	Params map[string]any
 }
 
 // Result 是执行结果。
@@ -58,13 +61,55 @@ type Result struct {
 	Value any
 }
 
+// ApprovalSubmission 是内核交给审批中心的一次「请批准这件事」。
+//
+// 参数在这一刻冻结：审批中心算 params_hash 存下来，执行时内核重算比对。
+type ApprovalSubmission struct {
+	ActionID      string
+	ActionVersion string
+	RiskLevel     RiskLevel
+	Params        map[string]any
+	Requester     principal.Principal
+	Reason        string
+	RequestID     string
+}
+
+// ApprovalGateway 是审批中心在内核这一侧的接口（XM-0030）。
+//
+// 定义在本包而不是直接依赖 approval 包：内核只需要「落一张单」这一件事，
+// 窄接口让内核的接线测试不必起容器，也让 approval 包不必反过来认识内核。
+type ApprovalGateway interface {
+	// Submit 为一次被拦下的 L2+ 调用落一张待批审批单，返回单号。
+	Submit(ctx context.Context, in ApprovalSubmission) (string, error)
+	// Peek 只读地取出单上冻结的内容，**不改变任何状态**。
+	// 内核用它得知「这张单要跑什么」，好在占用之前先对执行者跑完校验链。
+	Peek(ctx context.Context, approvalID string) (ApprovalClaim, error)
+	// Claim 校验单此刻可执行，并**原子地占用它**（写入 execution_run_id）。
+	// params 是调用方当场声明的参数：非 nil 时必须与单上冻结的一致，
+	// 让客户端能证明自己执行的正是它看到的那份。
+	//
+	// 两个方法的错误都由审批中心映射成 *Error（它才分得清「单不存在」
+	// 「还没批」「已经跑过」），内核原样透传。
+	Claim(ctx context.Context, approvalID string, runID uuid.UUID, params map[string]any) error
+}
+
 // Kernel 是 Action 执行内核（Foundation-A 级 Core Lite）。
 type Kernel struct {
-	registry *Registry
-	runs     RunStore
-	audit    AuditSink
-	logger   *slog.Logger
-	now      func() time.Time
+	registry  *Registry
+	runs      RunStore
+	audit     AuditSink
+	approvals ApprovalGateway
+	logger    *slog.Logger
+	now       func() time.Time
+}
+
+// WithApprovalGateway 接入审批中心（XM-0030）。
+//
+// **不接的话内核对 L2+ 仍然 fail closed**，返回 ADVANCED_CONTROLS_REQUIRED
+// ——Foundation-A 的行为原样保留。这不是可选的降级：没有审批中心时，放行
+// L2+ 才是错的。
+func WithApprovalGateway(g ApprovalGateway) KernelOption {
+	return func(k *Kernel) { k.approvals = g }
 }
 
 // KernelOption 配置内核。
@@ -146,37 +191,65 @@ func (k *Kernel) Execute(ctx context.Context, req Request) (Result, error) {
 		return Result{}, err
 	}
 
-	p, hasPrincipal := principal.FromContext(ctx)
+	// 校验链与 ExecuteApproved 共用同一份实现（见 precheck 的注释）：
+	// 审批那条路径只免掉风险闸，其余一项不少，写成两份迟早分叉。
+	p, hasPrincipal, chk := k.precheck(ctx, def, req.RequestID, req.Params)
 	if !hasPrincipal {
 		// 无身份时不写 ActionRun：principal_id 非空是审计表的硬约束，
 		// 且「谁都不是」的记录对审计没有价值。
-		return Result{}, newError(CodePermissionDenied, "缺少 Principal", nil)
+		return Result{}, chk
 	}
-	if err := p.Validate(); err != nil {
-		return fail(CodePermissionDenied, "Principal 不合法", err, p)
+	if chk != nil {
+		return fail(chk.Code, chk.Message, chk.cause, p)
 	}
-	if req.RequestID == "" {
-		return fail(CodeInvalidParams, "缺少 request_id", nil, p)
-	}
-	if !slices.Contains(def.PrincipalTypes, p.Type) {
-		return fail(CodePrincipalTypeNotAllowed,
-			fmt.Sprintf("action %s 不允许 %s 类型身份", def.ID, p.Type), nil, p)
-	}
+	// 风险闸放在**环境/权限/Schema 之后**（XM-0030a-wire 把它从之前挪到了
+	// 这里）。理由：没有权限的人不该能刷审批单——他该拿到 PERMISSION_DENIED，
+	// 而不是「单已建立」然后等着被人驳回。参数不合 Schema 的单同样没有意义：
+	// 冻结一份注定执行不了的参数，只会让审批人替内核做校验。
+	//
+	// 到这里为止，这次调用除了「等级太高」之外每一项都合格——这正是一张
+	// 审批单该有的前提。
 	if def.RiskLevel.RequiresAdvancedControls() {
-		return fail(CodeAdvancedControlsRequired,
-			fmt.Sprintf("action %s 风险等级 %s 需要 Action Advanced Controls（Foundation-B / XM-0030）",
-				def.ID, def.RiskLevel), nil, p)
-	}
-	if !slices.Contains(def.Environments, p.Environment) {
-		return fail(CodeEnvironmentMismatch,
-			fmt.Sprintf("action %s 不允许在 %s 环境执行", def.ID, p.Environment), nil, p)
-	}
-	if !p.HasScope(def.Permission) {
-		return fail(CodePermissionDenied,
-			fmt.Sprintf("缺少权限 %s", def.Permission), nil, p)
-	}
-	if err := def.Schema.Validate(req.Params); err != nil {
-		return fail(CodeInvalidParams, "参数不符合 Action Schema", err, p)
+		if k.approvals == nil {
+			// 没接审批中心：保持 Foundation-A 的 fail closed。
+			return fail(CodeAdvancedControlsRequired,
+				fmt.Sprintf("action %s 风险等级 %s 需要 Action Advanced Controls（Foundation-B / XM-0030）",
+					def.ID, def.RiskLevel), nil, p)
+		}
+		if strings.TrimSpace(req.Reason) == "" {
+			// 理由是审计要求（库层 reason NOT NULL）。在这里拒而不是让审批
+			// 中心拒，是为了让调用方拿到 INVALID_PARAMS 而不是一张没人看得懂
+			// 的空理由待批单。
+			return fail(CodeInvalidParams,
+				fmt.Sprintf("action %s 风险等级 %s 需要审批，必须提供 reason", def.ID, def.RiskLevel), nil, p)
+		}
+		approvalID, submitErr := k.approvals.Submit(ctx, ApprovalSubmission{
+			ActionID: def.ID, ActionVersion: def.Version, RiskLevel: def.RiskLevel,
+			Params: req.Params, Requester: p, Reason: req.Reason, RequestID: req.RequestID,
+		})
+		if submitErr != nil {
+			return fail(CodeInternal, "落审批单失败", submitErr, p)
+		}
+		// 落单同样留痕：谁在什么时候请求做什么，是审计最有价值的部分之一。
+		// 用 fail 的记录路径（这次调用确实没有执行 Handler），但错误码是
+		// APPROVAL_REQUIRED——HTTP 层据此给 202 而不是 4xx/5xx。
+		failErr := newError(CodeApprovalRequired,
+			fmt.Sprintf("action %s 风险等级 %s 需要审批，已受理为审批单 %s",
+				def.ID, def.RiskLevel, approvalID), nil)
+		failErr.ApprovalRequestID = approvalID
+		k.record(ctx, Run{
+			ID: runID, ActionID: def.ID, ActionVersion: def.Version,
+			PrincipalID: p.ID, PrincipalType: p.Type, Environment: p.Environment,
+			RequestID: req.RequestID, RiskLevel: def.RiskLevel,
+			Status: RunFailed, ErrorCode: CodeApprovalRequired, StartedAt: startedAt,
+		})
+		k.recordAudit(ctx, AuditEvent{
+			OccurredAt: startedAt, PrincipalID: p.ID, PrincipalType: p.Type,
+			ActionID: def.ID, ActionVersion: def.Version, ActionRunID: runID,
+			Environment: p.Environment, RequestID: req.RequestID,
+			Succeeded: false, ErrorCode: CodeApprovalRequired,
+		})
+		return Result{}, failErr
 	}
 
 	// 注入审计元信息收集器：Handler 可选地贡献 resource/before/after

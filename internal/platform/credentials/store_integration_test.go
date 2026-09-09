@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -27,9 +28,31 @@ func credentialPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("Ping 测试库: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, "TRUNCATE core.credential_ref, core.connector_config"); err != nil {
-		t.Fatalf("清空凭据表: %v", err)
+
+	// **两头都清**（XM-DBTEST-FIX0）。
+	//
+	// 只在开跑前清的话，本包会给共享测试库留下 ('sub2api','staging') 那一行
+	// ——实测确认过：跑完本包，`core.connector_config` 从 0 变 1。
+	// `internal/platform/jobs/connector_config_integration_test.go` 的注释
+	// 点名过这件事：「其他包（如 internal/platform/credentials 的
+	// TestConnectorConfigSetAndList）同样会写 ('sub2api','staging')，且不保证
+	// 在它之后清干净」，那一片因此不得不自己两头设防。
+	//
+	// 每个包都自己防一遍是行得通的，但它把「表是干净的」从**不变量**降成
+	// 了「谁记得防谁就没事」——2026-09-02/03 已经真撞过一次。这里补上收尾，
+	// 让不变量重新成立，新写的测试不必再各自设防。
+	//
+	// 用 t.Cleanup 而不是 defer：credentialPool 是被每个用例各自调用的，
+	// t.Cleanup 挂在调用它的那个用例上，逐个用例收尾比整包收一次更干净。
+	cleanup := func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := pool.Exec(cleanupCtx, "TRUNCATE core.credential_ref, core.connector_config"); err != nil {
+			t.Errorf("收尾清空凭据表: %v", err)
+		}
 	}
+	cleanup()
+	t.Cleanup(cleanup)
 	return pool
 }
 

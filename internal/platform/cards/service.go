@@ -69,6 +69,17 @@ type Store interface {
 	// 开卡成功后当场拉一次（卡通常已经是 active），不必等周期同步——
 	// 运营开完卡看到一行没有卡号的记录，只能反复刷新。
 	StoreCardSecrets(ctx context.Context, account, cardID string, revealed infini.RevealedCard) error
+	// SetAccountSyncPause 写「按账号暂停同步」的开关（XM-CARD-VISIBILITY）。
+	//
+	// 放在 Store 而不是 SyncStore：写它的是 Action（走 Service），
+	// 读它的是同步作业，两侧都要能拿到。
+	SetAccountSyncPause(ctx context.Context, pause AccountSyncPause) error
+	// PausedAccounts 返回**当前正暂停**的账号（account → 记录）。
+	//
+	// 不返回已恢复的历史记录：调用方要的是「现在谁停着」，
+	// 把恢复过的行也返回会让每个调用点都得自己再过滤一遍 Paused，
+	// 而漏过滤的那一处会安静地停掉一个本该同步的账号。
+	PausedAccounts(ctx context.Context) (map[string]AccountSyncPause, error)
 }
 
 // CardAttribution 是只有平台自己知道的卡片归属信息。

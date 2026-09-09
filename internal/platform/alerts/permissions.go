@@ -14,6 +14,12 @@ package alerts
 const ScopeRead = "ops.read"
 
 // ScopeAcknowledge 是确认告警所需的权限（L0 动作）。
+//
+// alerts.upstream_version.acknowledge（L1，核对上游版本）**复用它**，不另立
+// scope：两件事都是「我看过了」，而核对上游版本的爆炸半径比静默小一个量级
+// ——它只让**这一条**上游的版本提醒停下来，不会让任何别的告警闭嘴。
+// 新增一个 scope 要同时改 oidcauth/rolemap.go 与前端的权限清单，
+// 换不来任何实际的信息隔离。
 const ScopeAcknowledge = "alerts.alert.manage"
 
 // ScopeSilenceManage 是创建静默窗口所需的权限（L1 动作）。

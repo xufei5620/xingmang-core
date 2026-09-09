@@ -51,7 +51,13 @@ import { IdentityPage } from "./pages/IdentityPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
+import { ChangesPage } from "./pages/ChangesPage";
+import { DesignPage } from "./pages/DesignPage";
+import { ExtAppPage } from "./pages/ExtAppPage";
+import { ExtIntegrationPage } from "./pages/ExtIntegrationPage";
+import { FinancePage } from "./pages/FinancePage";
 import { OpsPage } from "./pages/OpsPage";
+import { PublishingPage } from "./pages/PublishingPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PlatformDetailPage } from "./pages/PlatformDetailPage";
@@ -390,6 +396,30 @@ export const routes = [
               // 回归用例见下方改动。
               { path: "jobs", Component: JobsPage },
               { path: "ops", Component: OpsPage },
+              // XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0（2026-09-07）：
+              // 这三页的 built 刚翻成 true，于是它们掉出了 placeholderRoutes
+              // （那份只收 !item.built）。不在这里补显式路由的话，侧栏上有条目、
+              // 点进去落到最后的 `*` 兜底 404——与 XM-OPS-TAILS0 记录过的
+              // /jobs 那次缺口一模一样。
+              { path: "finance", Component: FinancePage },
+              { path: "changes", Component: ChangesPage },
+              { path: "design", Component: DesignPage },
+              // XM-EXT-APP（2026-09-08）：产品负责人推翻了 ADMIN-IA §5.4
+              // 「扩展能力四页只读蓝图、不得因此提前建后端」对这一页的适用，
+              // 于是它的 built 翻成了 true，也就掉出了 placeholderRoutes
+              // （那份只收 !item.built）。不在这里补显式路由的话，侧栏上有
+              // 条目、点进去落到最后的 `*` 兜底 404——与上面那三页、以及
+              // XM-OPS-TAILS0 记录过的 /jobs 那次缺口一模一样。
+              { path: "ext/app", Component: ExtAppPage },
+              // XM-EXT-INTEGRATION（2026-09-08）：同一条纪律再来一次——
+              // `/ext/integration` 的 built 刚翻成 true，于是它掉出了
+              // placeholderRoutes（那份只收 !item.built）。不在这里补显式
+              // 路由的话，侧栏上有条目、点进去落到最后的 `*` 兜底 404。
+              { path: "ext/integration", Component: ExtIntegrationPage },
+              // XM-EXT-PUBLISHING（2026-09-08，ADMIN-IA §5.4.1）：同上一条
+              // 理由——`built` 翻成 true 之后它掉出 placeholderRoutes，
+              // 不在这里补一条显式路由就会 404。
+              { path: "ext/publishing", Component: PublishingPage },
               {
                 path: "platforms/:serviceType/upstream/detail/:channelId",
                 loader: channelDetailLoader,

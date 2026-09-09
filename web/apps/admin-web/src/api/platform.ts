@@ -68,6 +68,114 @@ export async function listMetrics(
   return body.items ?? [];
 }
 
+// --- 资源目录的另外两张表（XM-READONLY-QUERIES）---
+
+/** `GET /api/v1/connectors` 的一条记录（httpapi/registry_catalog.go connectorItem）。
+ *
+ *  **没有 environment 字段**：core.connector 是全平台一份的类型目录，
+ *  不按环境分（与 ServiceItem / ConnectionItem 不同）。 */
+export interface ConnectorItem {
+  id: string;
+  key: string;
+  version: string;
+  contract_version: string;
+  connection_schema_path: string;
+  target_allowlist: string[];
+  /** 读写能力分两列：ADR-004 的「写能力必须配 Kill Switch」是按集合下的约束。 */
+  read_capabilities: string[];
+  write_capabilities: string[];
+  /** 空数组 = 没有声明兼容版本，**不是**「兼容所有版本」。 */
+  supported_upstream_versions: string[];
+  compatibility_test_path: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** `GET /api/v1/connections` 的一条记录（httpapi/registry_catalog.go connectionItem）。 */
+export interface ConnectionItem {
+  id: string;
+  connector_id: string;
+  service_id: string;
+  environment: string;
+  /** 引用不是凭据（ADR-014：`secret://<scope>/<name>`）；明文永远不经过端点。 */
+  credential_ref: string;
+  target_allowlist: string[];
+  granted_capabilities: string[];
+  /** 空串 = 未配置。含写能力的连接必须配（ADR-004），空串意味着这是纯读连接。 */
+  kill_switch: string;
+  status: string;
+  detected_upstream_version: string;
+  version_fingerprint: string;
+  /** null = **从未核验过**，与「核验过但很久以前」不是一回事。 */
+  last_verified_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 列出全部已登记的连接器类型版本。
+ *
+ *  **不传 environment**：端点不按环境筛（见 ConnectorItem）。传了也只会被
+ *  后端当成跨环境判定的输入，而这里根本没有那一步。 */
+export async function listConnectors(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ConnectorItem[]> {
+  const body = await client.get<ListResponse<ConnectorItem>>("/api/v1/connectors", {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+/** 列出某环境下的全部连接。environment 的传法与 listServices 一致。 */
+export async function listConnections(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+  config: PlatformApiConfig = appApiConfig,
+): Promise<ConnectionItem[]> {
+  const body = await client.get<ListResponse<ConnectionItem>>("/api/v1/connections", {
+    searchParams: envParams(config),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return body.items ?? [];
+}
+
+// --- 数据库变更（XM-READONLY-QUERIES）---
+
+/** `GET /api/v1/ops/migrations` 的一条记录。 */
+export interface MigrationItem {
+  version: number;
+  name: string;
+  applied: boolean;
+  /** 有没有配套的 down 脚本。**不等于「可以回滚」**：迁移是 forward-only
+   *  （规格 §5.7），down 脚本存在只是让退路有据可查。 */
+  has_down: boolean;
+}
+
+/** `GET /api/v1/ops/migrations` 的响应（httpapi/migrations.go migrationsResponse）。 */
+export interface MigrationsReport {
+  /** 库自己记着的版本号；0 = 一条都没跑过。 */
+  applied_version: number;
+  /** 上一次迁移跑到一半失败了。服务照常起、端点照常回 200，只有这一位说得出来。 */
+  dirty: boolean;
+  /** 二进制里带着、库里还没应用的脚本数。> 0 = 镜像更新了而迁移没跑。 */
+  ahead: number;
+  items: MigrationItem[];
+}
+
+/** 读迁移状态（需 ops.read）。
+ *
+ *  读不到时后端**报错而不是回一个「版本 0」**（httpapi/migrations.go）：
+ *  一句「一条迁移都没应用」比一个错误难查得多。所以这里也不做任何兜底，
+ *  失败原样抛给 ApiStateView。 */
+export function getMigrations(
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<MigrationsReport> {
+  return client.get<MigrationsReport>("/api/v1/ops/migrations", {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
 /** 服务采集的新鲜度阈值（秒）。
  *
  *  services 端点只给 observed_at / stale_seconds，没有阈值——registry 里就没有
@@ -213,20 +321,71 @@ export async function listAuditEvents(
 
 // --- 写路径（POST /api/v1/actions/{id}/versions/{version}/execute）---
 
-/** Action 执行结果。
+/** 执行入口的响应体。**两种**，取决于风险等级：
  *
- *  字段名照抄 httpapi.executeActionResponse：`action_run_id` + `result`。 */
+ *  - 200：`httpapi.executeActionResponse`，`action_run_id` + `result`；
+ *  - 202：`httpapi.approvalRequiredResponse`，`approval_request_id` + `status`
+ *    + `message`——内核把 L2 及以上受理成了一张待批的审批单，动作**没有执行**。
+ *
+ *  合成一个类型是因为 ApiClient.post 只把 body 交出来，状态码留在它里面
+ *  （见 api/client.ts）。这不构成歧义：两个后端结构体的字段互不相交，而且用来
+ *  分辨的那个字段正是我们要用的那一个。字段名逐字照抄 httpapi/actions.go。 */
 interface ExecuteActionResponse {
   action_run_id?: string;
   /** 后端若改名成 run_id 也认——只用于显示，认宽一点不会误导人。 */
   run_id?: string;
   result?: unknown;
+  approval_request_id?: string;
+  status?: string;
+  message?: string;
 }
+
+/** 202 响应体里 `status` 的字面量（action/errors.go 的 CodeApprovalRequired）。 */
+export const APPROVAL_REQUIRED_STATUS = "APPROVAL_REQUIRED";
 
 export interface ActionRun {
   /** 规格 §5.8：所有写接口返回 action_run_id，界面必须把它显示出来。 */
   runId: string;
   result: unknown;
+}
+
+/** 同步执行完了：Handler 真的跑过，有 action_run_id。 */
+export interface ActionExecuted extends ActionRun {
+  kind: "executed";
+}
+
+/** 已受理为审批单：动作**还没发生**，等人批准后才由人在审批队列里触发。 */
+export interface ActionApprovalPending {
+  kind: "approval_pending";
+  /** 审批单号（`approval_request_id`）。 */
+  approvalRequestId: string;
+  /** 内核拼的那句人话（kernel.go：「action X 风险等级 L3 需要审批，已受理为审批单 Y」）。 */
+  message: string;
+}
+
+/** 一次 Action 调用的两种结局。
+ *
+ *  **刻意做成可辨识联合，而不是「runId 为空就当作审批」**：那个空串哨兵正是
+ *  本片之前那个 bug 的成因——界面把「已受理为审批单 X」显示成一次 run_id
+ *  为空的成功。哨兵表达不了「这是另一种结局」，只能表达「这一种结局缺了个值」。 */
+export type ActionOutcome = ActionExecuted | ActionApprovalPending;
+
+/** 一个只准备好接「执行完了」的调用点拿到了审批受理。
+ *
+ *  这不是服务端出错：单已经落下了。抛出来是因为**这个调用点没有承接它的界面**
+ *  ——没有填理由的入口，也没有显示单号的地方。宁可当场把话说出来，也不能悄悄
+ *  显示成成功；后者已经发生过一次。要处理审批的调用点改用 submitAction。 */
+export class ApprovalRequiredError extends Error {
+  readonly approvalRequestId: string;
+
+  constructor(pending: ActionApprovalPending) {
+    super(
+      pending.message ||
+        `该动作需要审批，已受理为审批单 ${pending.approvalRequestId || "（响应未带单号）"}`,
+    );
+    this.name = "ApprovalRequiredError";
+    this.approvalRequestId = pending.approvalRequestId;
+  }
 }
 
 export interface ExecuteActionInput {
@@ -235,26 +394,58 @@ export interface ExecuteActionInput {
   params: Record<string, unknown>;
   /** 不传则现生成一个。显式传是为了让「同一次提交重试」能带同一个 ID。 */
   requestId?: string;
+  /** 「为什么要做这件事」。L0/L1 可空；**L2 及以上必填**，否则内核当场回
+   *  INVALID_PARAMS（action/kernel.go）。这句话会原样写进审批单给审批人看，
+   *  所以只能由人自己写——**不要在任何一层兜底生成一句套话**，那等于让审批人
+   *  对着一句机器话做判断。 */
+  reason?: string;
 }
 
-/** 执行一个 Action。
+/** 提交一个 Action，如实返回两种结局之一（写路径唯一入口）。
  *
- *  请求体只有 `params`：后端 ExecuteActionHandler 用 DisallowUnknownFields 解析，
- *  多塞一个 request_id 会 400。request_id 走 `X-Request-ID` 头
- *  （httpapi/middleware.go 的 RequestID 中间件读它，写进审计事件与访问日志）。 */
+ *  请求体是 `{params, reason}`：后端 ExecuteActionHandler 用 DisallowUnknownFields
+ *  解析，而 httpapi.executeActionBody 只认这两个字段——多塞一个 request_id 会 400。
+ *  request_id 走 `X-Request-ID` 头（httpapi/middleware.go 的 RequestID 中间件读它，
+ *  写进审计事件与访问日志）。
+ *
+ *  没给 reason 时**不发这个字段**：L0/L1 的请求形状与本片之前逐字一致。 */
+export async function submitAction(
+  input: ExecuteActionInput,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionOutcome> {
+  const requestId = input.requestId ?? newRequestId();
+  const path = `/api/v1/actions/${encodeURIComponent(input.actionId)}/versions/${encodeURIComponent(input.version)}/execute`;
+  const body = await client.post<ExecuteActionResponse>(
+    path,
+    { params: input.params, ...(input.reason === undefined ? {} : { reason: input.reason }) },
+    { requestId, ...(options.signal ? { signal: options.signal } : {}) },
+  );
+  // 认单号**或**状态字面量：万一单号是空串，status 仍然说得清「这不是一次执行」。
+  // 反过来只认 status 也不行——它是 202 体里最不像业务数据的那个字段，改名的
+  // 代价最低，而单号是这条分支存在的理由。
+  if (body.approval_request_id !== undefined || body.status === APPROVAL_REQUIRED_STATUS) {
+    return {
+      kind: "approval_pending",
+      approvalRequestId: body.approval_request_id ?? "",
+      message: body.message ?? "",
+    };
+  }
+  return { kind: "executed", runId: body.action_run_id ?? body.run_id ?? "", result: body.result };
+}
+
+/** 执行一个 L0/L1 Action，只接受「执行完了」这一种结局。
+ *
+ *  **L2 及以上不要用它**：那些调用会被内核受理成审批单，这里会抛
+ *  ApprovalRequiredError。需要审批的调用点用 submitAction，并把两种结局都画出来。 */
 export async function executeAction(
   input: ExecuteActionInput,
   options: ListOptions = {},
   client: ApiClient = apiClient,
 ): Promise<ActionRun> {
-  const requestId = input.requestId ?? newRequestId();
-  const path = `/api/v1/actions/${encodeURIComponent(input.actionId)}/versions/${encodeURIComponent(input.version)}/execute`;
-  const body = await client.post<ExecuteActionResponse>(
-    path,
-    { params: input.params },
-    { requestId, ...(options.signal ? { signal: options.signal } : {}) },
-  );
-  return { runId: body.action_run_id ?? body.run_id ?? "", result: body.result };
+  const outcome = await submitAction(input, options, client);
+  if (outcome.kind === "approval_pending") throw new ApprovalRequiredError(outcome);
+  return { runId: outcome.runId, result: outcome.result };
 }
 
 /** 登记服务（registry.service.create@1，Permission = registry.service.manage）。 */

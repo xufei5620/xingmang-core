@@ -72,7 +72,9 @@ if [ -f "$service" ]; then
 fi
 
 if [ -f "$timer" ]; then
-  for required in 'OnBootSec=2min' 'OnUnitInactiveSec=5min' 'RandomizedDelaySec=15s' 'Persistent=true'; do
+  # OnCalendar 是 2026-09-08 事故后加的墙钟兜底：只靠单调触发的定时器一旦过期就
+  # 再也不会自己醒来（生产停摆了七天没人知道）。它必须一直在，缺了就是把闸拆了。
+  for required in 'OnBootSec=2min' 'OnUnitInactiveSec=5min' 'OnCalendar=*:0/5' 'RandomizedDelaySec=15s' 'Persistent=true'; do
     has "$timer" "$required" || bad "timer missing $required"
   done
 fi

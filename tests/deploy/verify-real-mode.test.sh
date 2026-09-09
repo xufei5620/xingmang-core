@@ -230,6 +230,21 @@ expect_failure "real 拒绝演示 source" \
   --probe-attempts 1
 assert_text "演示 source 失败原因不泄漏响应正文" 'demo source' "$tmp/stderr"
 
+# XM-OPS-TRUTH：这一条是新增的那道闸。fixture 里 worker 的 env 缺省写着
+# real、后台那张表也说 real，只有 worker **每轮真的用了什么**（
+# connector_config_applied）说的是 fake。旧版脚本只比对 worker_started 里的
+# env 缺省与后台表，这种「两边都说 real、实际跑 fake」的形态它一条都抓不到。
+expect_failure "生效模式（connector_config_applied）与请求模式不一致时被拒" \
+  env "${common[@]}" VERIFY_WORKER_LOG_FIXTURE="$fixture_root/worker-applied-fake.log" \
+  VERIFY_METRICS_FIXTURE="$fixture_root/real-metrics.json" \
+  VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-real.json" \
+  "$verify_script" --test-mode --repo "$fixture_repo" \
+  --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
+  --env-file "$fixture_repo/deploy/compose/.env" --mode real --platform sub2api,newapi \
+  --probe-attempts 1
+assert_text "生效模式不一致失败点名 effective mode" 'effective mode mismatch' "$tmp/stderr"
+assert_text "生效模式不一致失败点名具体平台" 'sub2api=fake' "$tmp/stderr"
+
 expect_failure "core.connector_config 模式与请求模式不一致时被拒（热切换未被察觉）" \
   env "${common[@]}" VERIFY_WORKER_LOG_FIXTURE="$fixture_root/worker-real.log" VERIFY_METRICS_FIXTURE="$fixture_root/real-metrics.json" \
   VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-stale-real.json" \
@@ -240,13 +255,17 @@ expect_failure "core.connector_config 模式与请求模式不一致时被拒（
 assert_text "connector_config 不一致失败明确指出 mismatch" 'core.connector_config mode mismatch' "$tmp/stderr"
 assert_text "connector_config 不一致失败点名具体平台" 'sub2api=fake' "$tmp/stderr"
 
-expect_success "core.connector_config 里没有该平台的行按 fake 处理（未配置=正常状态）" \
+# XM-OPS-TRUTH：没有行时脚本**不再猜 fake**（那是「没有行就是 fake」那套
+# 猜法的第四份拷贝，只在 worker 的 env 缺省恰好也是 fake 时答对）。它如实
+# 报 none，生效模式由 worker 日志里的 connector_config_applied 判定——那是
+# worker 真的拿去建客户端的那一份。
+expect_success "core.connector_config 里没有该平台的行仍放行（未配置=正常状态）" \
   env "${common[@]}" VERIFY_CONNECTOR_CONFIG_FIXTURE="$fixture_root/connector-config-unconfigured.json" \
   "$verify_script" --test-mode --repo "$fixture_repo" \
   --compose-file "$fixture_repo/deploy/compose/launch.yaml" \
   --env-file "$fixture_repo/deploy/compose/.env" --mode staging --platform sub2api \
   --probe-attempts 1
-assert_text "未配置平台按 fake 汇报" 'connector_config_mode=sub2api:fake' "$tmp/stdout"
+assert_text "未配置平台如实报 none 而不是猜 fake" 'connector_config_mode=sub2api:none' "$tmp/stdout"
 
 expect_failure "缺 key 的 metrics fixture 被拒" \
   env "${common[@]}" VERIFY_METRICS_FIXTURE="$fixture_root/missing-metric.json" \

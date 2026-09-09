@@ -202,11 +202,11 @@ func ParseWebhookEvent(payload []byte, eventID string) (WebhookEvent, error) {
 	var raw struct {
 		Event      string `json:"event"`
 		OccurredAt int64  `json:"occurred_at"`
-		Data struct {
+		Data       struct {
 			Card struct {
-				CardID    string `json:"card_id"`
-				LastFour  string `json:"last_four"`
-				Status    string `json:"status"`
+				CardID   string `json:"card_id"`
+				LastFour string `json:"last_four"`
+				Status   string `json:"status"`
 			} `json:"card"`
 			Amount   string `json:"amount"`
 			Currency string `json:"currency"`

@@ -145,7 +145,10 @@ func (q *dynamicPaymentsQuerier) listSub2API(
 	// 复用 jobs.NewSub2APIClientFactory：真实模式下的配置校验(missing 清单)、
 	// 错误分类(not_supported vs internal)与 worker 同步走的是同一段代码，
 	// 这个端点不该有第二份"怎么判定配置不全"的逻辑。
-	rc, err := jobs.NewSub2APIClientFactory(mode, cfg)(ctx)
+	// 第二个返回值（本轮生效的接入配置，XM-OPS-TRUTH）在这里丢掉：这是一条
+	// 即时查询，模式是 resolveSub2API 刚刚在上面几行算出来的，没有「本轮」
+	// 这个概念；把它再打一遍只会多一份可能漂开的副本。
+	rc, _, err := jobs.NewSub2APIClientFactory(mode, cfg)(ctx)
 	if err != nil {
 		return httpapi.PlatformOrdersResult{}, err
 	}
@@ -175,7 +178,8 @@ func (q *dynamicPaymentsQuerier) listNewAPI(
 			op, jobs.ErrConnectorProductionFake)
 	}
 
-	rc, err := jobs.NewNewAPIClientFactory(mode, cfg)(ctx)
+	// 生效配置在这里同样丢掉，理由见 listSub2API 的同一处。
+	rc, _, err := jobs.NewNewAPIClientFactory(mode, cfg)(ctx)
 	if err != nil {
 		return httpapi.PlatformOrdersResult{}, err
 	}

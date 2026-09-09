@@ -128,14 +128,19 @@ func TestDynamicSub2APIFactoryNoRowKeepsEnvBehavior(t *testing.T) {
 	ctx := context.Background()
 
 	// env 缺省 fake → Fake 客户端。
-	client, err := NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+	client, eff, err := NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeFake, Defaults: sub2apiDefaults(t, "staging"),
 	})(ctx)
+	// 没有行时生效模式来自 env，而且工厂必须**说出来**是 env——
+	// 「没有行」不等于 fake，这个区分是 XM-OPS-TRUTH 的要点。
+	if eff.Mode != string(Sub2APIModeFake) || eff.Source != ModeSourceEnv {
+		t.Fatalf("没有行时生效配置 = %+v, want mode=fake source=env", eff)
+	}
 	if err != nil || client == nil {
 		t.Fatalf("没有行时应按 env 缺省 fake 构造: client=%v err=%v", client, err)
 	}
 	// env 缺省 real 且连接配置不全 → not_supported，错误链里仍说得清缺哪个变量。
-	_, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+	_, _, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeReal, Defaults: sub2apiDefaults(t, "staging"),
 	})(ctx)
 	if connector.KindOf(err) != connector.KindNotSupported || !errors.Is(err, ErrSub2APIRealClientUnavailable) {
@@ -146,7 +151,7 @@ func TestDynamicSub2APIFactoryNoRowKeepsEnvBehavior(t *testing.T) {
 	defaults.Endpoint = "https://env.example.test"
 	defaults.TargetAllowlist = []string{"env.example.test"}
 	defaults.CredentialRef = "secret://sub2api/env-token"
-	client, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+	client, _, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeReal, Defaults: defaults,
 	})(ctx)
 	if err != nil || client == nil {
@@ -180,9 +185,13 @@ func TestDynamicSub2APIFactoryRowSwitchesToReal(t *testing.T) {
 	ctx := context.Background()
 
 	// env 缺省没有端点 / allowlist / 引用：造得出客户端只能是因为用了行里的值。
-	client, err := factory(ctx)
+	client, eff, err := factory(ctx)
 	if err != nil || client == nil {
 		t.Fatalf("行 mode=real 且齐全应造出真实客户端: client=%v err=%v", client, err)
+	}
+	// 行压过 env：生效模式必须是 real，来源必须是 database，版本必须是行的版本。
+	if eff.Mode != "real" || eff.Source != ModeSourceDatabase || eff.Version != 7 {
+		t.Fatalf("生效配置 = %+v, want mode=real source=database version=7", eff)
 	}
 	out := logs.String()
 	for _, want := range []string{
@@ -196,7 +205,7 @@ func TestDynamicSub2APIFactoryRowSwitchesToReal(t *testing.T) {
 	}
 	// 同一份配置第二轮不再重复打。
 	logs.Reset()
-	if _, err := factory(ctx); err != nil {
+	if _, _, err := factory(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(logs.String(), "connector_config_applied") {
@@ -206,7 +215,7 @@ func TestDynamicSub2APIFactoryRowSwitchesToReal(t *testing.T) {
 	// 行里的端点写错（http）→ 归 internal，证明确实是行的端点在起作用。
 	row.Endpoint = "http://row.example.test"
 	row.Version = 8
-	if _, err := factory(ctx); connector.KindOf(err) != connector.KindInternal {
+	if _, _, err := factory(ctx); connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("行里配错的端点应归 internal, got %v (%v)", connector.KindOf(err), err)
 	}
 
@@ -219,7 +228,7 @@ func TestDynamicSub2APIFactoryRowSwitchesToReal(t *testing.T) {
 	defaults := sub2apiDefaults(t, "staging")
 	defaults.TargetAllowlist = []string{"row.example.test"}
 	defaults.CredentialRef = "secret://sub2api/env-token"
-	client, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+	client, _, err = NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeFake, Defaults: defaults,
 	})(ctx)
 	if err != nil || client == nil {
@@ -230,14 +239,18 @@ func TestDynamicSub2APIFactoryRowSwitchesToReal(t *testing.T) {
 	envReal := sub2apiDefaults(t, "staging")
 	envReal.Endpoint, envReal.TargetAllowlist, envReal.CredentialRef =
 		"https://env.example.test", []string{"env.example.test"}, "secret://sub2api/env-token"
-	if client, err := NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
+	if client, eff, err := NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeReal, Defaults: envReal,
 	})(ctx); err != nil || client == nil {
 		t.Fatalf("行 fake 在 staging 应造出 Fake 客户端: %v", err)
+	} else if eff.Mode != "fake" || eff.Source != ModeSourceDatabase {
+		// 行压过 env 的**两个方向**都要验：上面验了 real 压 fake，
+		// 这里验 fake 压 real，否则「以行为准」可能只在一个方向成立。
+		t.Fatalf("行 fake / env real 时生效配置 = %+v, want mode=fake source=database", eff)
 	}
 	// 行里的模式非法 → internal（库有 CHECK，这里是最后一道）。
 	source.rows["sub2api/staging"] = &ConnectorConfig{Platform: ConnectorPlatformSub2API, Environment: "staging", Mode: "wat"}
-	if _, err := factory(ctx); connector.KindOf(err) != connector.KindInternal {
+	if _, _, err := factory(ctx); connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("非法模式应归 internal, got %v", err)
 	}
 }
@@ -251,16 +264,21 @@ func TestDynamicSub2APIFactoryProductionFakeIsNotSupported(t *testing.T) {
 	factory := NewDynamicSub2APIClientFactory(Sub2APIDynamicOptions{
 		Source: source, DefaultMode: Sub2APIModeFake, Defaults: sub2apiDefaults(t, "production"),
 	})
-	_, err := factory(context.Background())
+	_, eff, err := factory(context.Background())
 	if connector.KindOf(err) != connector.KindNotSupported || !errors.Is(err, ErrConnectorProductionFake) {
 		t.Fatalf("production + fake 行应 not_supported: %v", err)
+	}
+	// 客户端造不出来，但模式**是**知道的（正是它导致造不出来）：这一轮的
+	// job_completed 仍要说得出生效模式，否则运维只看到一句 not_supported。
+	if eff.Mode != "fake" || eff.Source != ModeSourceDatabase {
+		t.Fatalf("production + fake 行的生效配置 = %+v, want mode=fake source=database", eff)
 	}
 	if got := err.Error(); got != "not_supported: sub2api.client.mode" {
 		t.Fatalf("对外错误文本 = %q，不该带细节", got)
 	}
 	// 没有行、env 缺省 fake，在 production 同样不放行——启动闸放行的只是启动。
 	source.rows = map[string]*ConnectorConfig{}
-	if _, err := factory(context.Background()); !errors.Is(err, ErrConnectorProductionFake) {
+	if _, _, err := factory(context.Background()); !errors.Is(err, ErrConnectorProductionFake) {
 		t.Fatalf("production 下 env fake 兜底同样应 not_supported: %v", err)
 	}
 
@@ -269,7 +287,6 @@ func TestDynamicSub2APIFactoryProductionFakeIsNotSupported(t *testing.T) {
 	worker := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Logger:      slog.New(slog.NewJSONHandler(&bytes.Buffer{}, nil)),
 		Environment: "production",
-		Mode:        Sub2APIModeFake,
 		Store:       store,
 		NewClient:   factory,
 		Now:         func() time.Time { return fixedNow },
@@ -314,9 +331,14 @@ func TestDynamicFactoryFallsBackToEnvWhenSourceFails(t *testing.T) {
 	})
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		client, err := factory(ctx)
+		client, eff, err := factory(ctx)
 		if err != nil || client == nil {
 			t.Fatalf("库不可用时应回落到 env 缺省（fake）: %v", err)
+		}
+		// 「本轮按 env 兜底」必须自报：读不到库不等于「没有配过」，
+		// 也不等于「按 fake 跑是对的」，运维要能从来源字段分辨这两种。
+		if eff.Mode != "fake" || eff.Source != ModeSourceEnv || eff.Version != 0 {
+			t.Fatalf("库不可用时生效配置 = %+v, want mode=fake source=env version=0", eff)
 		}
 	}
 	out := logs.String()
@@ -329,7 +351,7 @@ func TestDynamicFactoryFallsBackToEnvWhenSourceFails(t *testing.T) {
 	// 库恢复：切回行（real），并记一条 recovered。
 	source.err = nil
 	logs.Reset()
-	if client, err := factory(ctx); err != nil || client == nil {
+	if client, _, err := factory(ctx); err != nil || client == nil {
 		t.Fatalf("库恢复后应按行构造真实客户端: %v", err)
 	}
 	out = logs.String()
@@ -352,12 +374,14 @@ func TestDynamicNewAPIFactory(t *testing.T) {
 	}
 	// (a) 没有行 → env 缺省。
 	source := &fakeConnectorConfigSource{rows: map[string]*ConnectorConfig{}}
-	if client, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+	if client, eff, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
 		Source: source, DefaultMode: NewAPIModeFake, Defaults: defaults("staging"),
 	})(ctx); err != nil || client == nil {
 		t.Fatalf("没有行时应按 env 缺省 fake 构造: %v", err)
+	} else if eff.Mode != "fake" || eff.Source != ModeSourceEnv {
+		t.Fatalf("没有行时生效配置 = %+v, want mode=fake source=env", eff)
 	}
-	if _, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+	if _, _, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
 		Source: source, DefaultMode: NewAPIModeReal, Defaults: defaults("staging"),
 	})(ctx); !errors.Is(err, ErrNewAPIRealClientUnavailable) {
 		t.Fatalf("没有行且 env real 未就绪应 not_supported: %v", err)
@@ -368,24 +392,30 @@ func TestDynamicNewAPIFactory(t *testing.T) {
 		Endpoint: "https://xm.example.test", TargetAllowlist: []string{"xm.example.test"},
 		CredentialRef: "secret://newapi/readonly-token", Version: 2,
 	}
-	if client, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+	if client, eff, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
 		Source: source, DefaultMode: NewAPIModeFake, Defaults: defaults("staging"),
 	})(ctx); err != nil || client == nil {
 		t.Fatalf("行 mode=real 且齐全应造出真实客户端: %v", err)
+	} else if eff.Mode != "real" || eff.Source != ModeSourceDatabase || eff.Version != 2 {
+		t.Fatalf("生效配置 = %+v, want mode=real source=database version=2", eff)
 	}
 	// (c) production + fake 行 → not_supported。
 	source.rows["newapi/production"] = &ConnectorConfig{Platform: ConnectorPlatformNewAPI, Environment: "production", Mode: "fake"}
-	_, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+	_, _, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
 		Source: source, DefaultMode: NewAPIModeFake, Defaults: defaults("production"),
 	})(ctx)
 	if connector.KindOf(err) != connector.KindNotSupported || !errors.Is(err, ErrConnectorProductionFake) {
 		t.Fatalf("production + fake 行应 not_supported: %v", err)
 	}
 	// 没有来源时退化为静态工厂（与 XM-CRED0 之前逐字相同）。
-	if client, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
+	if client, eff, err := NewDynamicNewAPIClientFactory(NewAPIDynamicOptions{
 		DefaultMode: NewAPIModeFake, Defaults: defaults("staging"),
 	})(ctx); err != nil || client == nil {
 		t.Fatalf("没有来源应退化为静态工厂: %v", err)
+	} else if eff.Source != ModeSourceEnv {
+		// 静态工厂那条路上 env 缺省**就是**生效配置，如实标 env——
+		// 不是 unknown（这个进程知道自己的缺省），也不是 database（没有库）。
+		t.Fatalf("静态工厂的生效来源 = %q, want env", eff.Source)
 	}
 }
 
@@ -406,14 +436,14 @@ func TestProductionFakeAllowedAtStartupWithConnectorConfigs(t *testing.T) {
 	}
 	// 装配选择：有来源走动态工厂，没有来源走静态工厂；两者都造得出客户端。
 	cfg.Environment = "staging"
-	if client, err := cfg.normalized().sub2apiClientFactory()(context.Background()); err != nil || client == nil {
+	if client, _, err := cfg.normalized().sub2apiClientFactory()(context.Background()); err != nil || client == nil {
 		t.Fatalf("动态 sub2api 工厂: %v", err)
 	}
-	if client, err := cfg.normalized().newapiClientFactory()(context.Background()); err != nil || client == nil {
+	if client, _, err := cfg.normalized().newapiClientFactory()(context.Background()); err != nil || client == nil {
 		t.Fatalf("动态 newapi 工厂: %v", err)
 	}
 	cfg.ConnectorConfigs = nil
-	if client, err := cfg.normalized().sub2apiClientFactory()(context.Background()); err != nil || client == nil {
+	if client, _, err := cfg.normalized().sub2apiClientFactory()(context.Background()); err != nil || client == nil {
 		t.Fatalf("静态 sub2api 工厂: %v", err)
 	}
 }

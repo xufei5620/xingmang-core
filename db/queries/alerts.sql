@@ -26,15 +26,29 @@ LIMIT 1;
 -- fire_count 从 1 起（不是 0）——「发生过一次」就是 1 次。
 -- notify_status 恒为 pending：新告警一律先排队等投递，
 -- 由投递环节决定它变 delivered 还是 failed，这里不预判。
+--
+-- trigger_count 与 first_opened_at 都由调用方给，而且**必须一起给**：它们
+-- 回答的是同一段时间跨度上的两个问题（「这个问题从什么时候开始的」与「它
+-- 在这段里真正触发过几次」）。首开一条新告警时是 (now, 1)；复发
+-- （REOPENED）时两个都从上一条继承——first_opened_at 取它的有效首开时刻，
+-- trigger_count 取它的值 +1。
+--
+-- 只继承其中一个的后果，是界面上那行会读成「已持续 4 小时，触发 1 次」，
+-- 而真相是它开关了四轮——与它替换掉的「触发 669 次」是同一类误读，只是
+-- 方向相反（见 store.go insert 的注释）。
+--
+-- trigger_count 允许为 NULL：上一条自己就是本列上线前的旧行时，链上真正
+-- 触发过几次没有人记下来过，继承一个编出来的数比留空更糟。
 INSERT INTO alerts.alert (
     id, rule_key, dedup_key, severity, status, title, detail, environment,
-    opened_at, last_seen_at, fire_count, source_metric_key,
-    notify_status, notify_error, notified_at, created_at, updated_at
+    opened_at, last_seen_at, fire_count, trigger_count, first_opened_at,
+    source_metric_key, notify_status, notify_error, notified_at, created_at, updated_at
 ) VALUES (
     sqlc.arg(id), sqlc.arg(rule_key), sqlc.arg(dedup_key), sqlc.arg(severity),
     sqlc.arg(status), sqlc.arg(title), sqlc.arg(detail), sqlc.arg(environment),
-    sqlc.arg(opened_at), sqlc.arg(opened_at), 1, sqlc.arg(source_metric_key),
-    'pending', '', NULL, now(), now()
+    sqlc.arg(opened_at), sqlc.arg(opened_at), 1, sqlc.narg(trigger_count),
+    sqlc.arg(first_opened_at),
+    sqlc.arg(source_metric_key), 'pending', '', NULL, now(), now()
 )
 RETURNING *;
 
@@ -46,8 +60,17 @@ RETURNING *;
 -- reset_notify 为真时把投递状态推回 pending：只用于「静默窗口过期，
 -- 这条告警要重新投递」这一种转换。平时（OPEN 持续命中）绝不能重置，
 -- 否则每 60 秒就会重发一次同样的 Telegram 消息。
+--
+-- trigger_count 只在 reset_notify 为真那一次 +1，理由是：库里唯一一处表达
+-- 「这条告警要重新被投递出去」的判据已经是它，不必再发明第二个。持续命中
+-- （每 60 秒一轮）与 OPEN→SILENCED 都不算触发——那正是 fire_count 被当成
+-- 「触发 669 次」显示出来的那个错。coalesce 让上线前的旧行（trigger_count
+-- IS NULL）在第一次真触发时从 1 起算，而不是永远留 NULL。
 UPDATE alerts.alert SET
     fire_count    = fire_count + 1,
+    trigger_count = CASE WHEN sqlc.arg(reset_notify)::boolean
+                         THEN coalesce(trigger_count, 0) + 1
+                         ELSE trigger_count END,
     last_seen_at  = $2,
     status        = $3,
     detail        = $4,
@@ -168,3 +191,46 @@ WITH victims AS (
 DELETE FROM alerts.alert a
 USING victims v
 WHERE a.id = v.id;
+
+-- name: SetUpstreamVersionAck :one
+-- 记下「这条上游的这个版本我核对过了」（XM-OPS-TRUTH 子片 B）。
+--
+-- ON CONFLICT DO UPDATE 而不是先删后插：一条上游只有一个**当前**已核对版本，
+-- 新的核对覆盖旧的。先删后插会在两条语句之间留一个「谁都没核对过」的窗口，
+-- 而那一瞬间刚好跑到的评估轮次会把告警重新开出来。
+INSERT INTO alerts.upstream_version_ack (
+    environment, metric_key, version, source, acknowledged_by, acknowledged_at, note
+) VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (environment, metric_key) DO UPDATE SET
+    version         = excluded.version,
+    source          = excluded.source,
+    acknowledged_by = excluded.acknowledged_by,
+    acknowledged_at = excluded.acknowledged_at,
+    note            = excluded.note
+RETURNING *;
+
+-- name: GetUpstreamVersionAck :one
+SELECT * FROM alerts.upstream_version_ack
+WHERE environment = $1 AND metric_key = $2;
+
+-- name: ListUpstreamVersionAcks :many
+-- 评估器每轮取一次整个环境的快照（条数与探测型指标数同阶，个位数），
+-- 而不是每条观测各查一次：评估 60 秒一轮，那会是每轮几十次往返。
+SELECT * FROM alerts.upstream_version_ack
+WHERE environment = $1
+ORDER BY metric_key;
+
+-- name: DeleteUpstreamVersionAck :one
+-- 撤销一条已核对记录（alerts.upstream_version.revoke）。
+--
+-- 这条查询存在的理由是：已核对版本本来是一个**没有解除路径**的抑制器。
+-- 点错一次，「去核对桥接契约与兼容矩阵」那条提醒就对该版本永久消失，
+-- 而唯一的自动解除条件是上游再升一次版本——那是外部事件，不在操作者手里。
+-- 一个引入了就撤不掉的闩，正是本片自己列在致命清单里的东西。
+--
+-- 不带 version 参数：撤销的对象是「这条上游此刻记着的那条核对」，
+-- 让调用方再报一次版本号只会多一种「版本对不上所以撤不掉」的失败形态。
+-- RETURNING 是给审计用的 before 快照。
+DELETE FROM alerts.upstream_version_ack
+WHERE environment = $1 AND metric_key = $2
+RETURNING *;

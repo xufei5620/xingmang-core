@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FIRST_OPENED_AT_ESTIMATED_HINT } from "../api/alerts";
 import { PlatformAlertsPanel } from "./PlatformAlertsPanel";
 
 function response(body: unknown, status = 200): Response {
@@ -147,6 +148,25 @@ describe("持续时长与时间范围（XM-ALERTS-TAB-DURATION）", () => {
     expect(await screen.findByText("2 小时 7 分")).toBeTruthy();
   });
 
+  it("已确认的行多一行「确认 <时刻>」，与告警中心同一列同一写法", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [
+      alert({
+        id: "alert-acked",
+        title: "已确认的那条",
+        status: "ACKNOWLEDGED",
+        acknowledged_at: "2026-08-29T07:30:00Z",
+      }),
+      alert(),
+    ]);
+    renderPanel();
+
+    const acked = (await screen.findByText("已确认的那条")).closest("tr") as HTMLElement;
+    const open = screen.getByText("NewAPI 渠道健康数据延迟").closest("tr") as HTMLElement;
+    expect(within(acked).getByText("确认 2026-08-29 07:30:00 UTC")).toBeTruthy();
+    expect(within(open).queryByText(/^确认 /)).toBeNull();
+  });
+
   it("已恢复的告警算到恢复时刻，不再继续增长", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     withNow("2026-08-30T00:00:00Z", [
@@ -204,5 +224,76 @@ describe("持续时长与时间范围（XM-ALERTS-TAB-DURATION）", () => {
 
     const link = await screen.findByRole("link", { name: "全局告警中心" });
     expect(link.getAttribute("href")).toBe("/alerts");
+  });
+
+  // XM-WORKBENCH-TRUTH 评审回合三：与告警中心那一列同一写法——数字列里只放数字，
+  // 整句留给悬停与表格说明。
+  it("「评估轮次」列的格子是纯数字，整句退到悬停里", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:00:00Z", [alert({ fire_count: 3 })]);
+    renderPanel();
+    await screen.findByText("NewAPI 渠道健康数据延迟");
+
+    const table = screen.getByRole("table");
+    const headers = within(table).getAllByRole("columnheader");
+    const index = headers.findIndex((h) => (h.textContent ?? "").includes("评估轮次"));
+    expect(index).toBeGreaterThanOrEqual(0);
+    const row = within(table)
+      .getAllByRole("row")
+      .find((r) => within(r).queryAllByRole("cell").length > 0)!;
+    const cell = within(row).getAllByRole("cell")[index]!;
+    expect(cell.textContent).toBe("3");
+    expect(cell.querySelector("[title]")?.getAttribute("title")).toContain("评估 3 轮");
+  });
+
+  // XM-WORKBENCH-WIRE-OPS：这一列与告警中心那一列共用同一个 alertAgeAnchor。
+  // 两处各写各的，就会出现同一条告警在平台页和告警中心显示两个「首次」。
+  it("「首次」渲染 first_opened_at，不是 opened_at", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [
+      alert({
+        first_opened_at: "2026-08-26T07:00:00Z",
+        first_opened_at_estimated: false,
+      }),
+    ]);
+    renderPanel();
+    await screen.findByText("NewAPI 渠道健康数据延迟");
+
+    expect(screen.getByText("首次 2026-08-26 07:00:00 UTC")).toBeTruthy();
+    expect(screen.queryByText(/首次 2026-08-29 07:00:00 UTC/)).toBeNull();
+    // 「持续」的起点与「首次」是同一个时刻：一边写着「首次 08-26」一边写着
+    // 「持续 2 小时 7 分」，两个数字互相打脸，而打脸的那个正是本片要修的病。
+    // 08-26 07:00 → 08-29 09:07 是 3 天 2 小时。
+    expect(screen.getByText("3 天 2 小时")).toBeTruthy();
+    expect(screen.queryByText("2 小时 7 分")).toBeNull();
+  });
+
+  it("兜底估计的首开时刻标「约」，并把为什么挂在悬停上", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [
+      alert({
+        first_opened_at: "2026-08-29T07:00:00Z",
+        first_opened_at_estimated: true,
+      }),
+    ]);
+    renderPanel();
+    // 限定在数据行里找：表头也叫「首次 / 最近」，不限定会撞上它
+    const row = (await screen.findByText("NewAPI 渠道健康数据延迟")).closest("tr") as HTMLElement;
+
+    const cell = within(row).getByText(/^首次/);
+    expect(cell.textContent).toBe("首次 约 2026-08-29 07:00:00 UTC");
+    expect(cell.getAttribute("title")).toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+  });
+
+  it("老后端没有这一列时退回 opened_at，同样标「约」", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [alert()]);
+    renderPanel();
+    // 限定在数据行里找：表头也叫「首次 / 最近」，不限定会撞上它
+    const row = (await screen.findByText("NewAPI 渠道健康数据延迟")).closest("tr") as HTMLElement;
+
+    const cell = within(row).getByText(/^首次/);
+    expect(cell.textContent).toBe("首次 约 2026-08-29 07:00:00 UTC");
+    expect(cell.getAttribute("title")).toContain("恢复后重新触发会新开一条");
   });
 });

@@ -17,7 +17,13 @@ import {
   looksLikeUnmountedRoute,
   type ApiClient,
 } from "./client";
-import { executeAction, type ActionRun, type ListOptions } from "./platform";
+import {
+  executeAction,
+  submitAction,
+  type ActionOutcome,
+  type ActionRun,
+  type ListOptions,
+} from "./platform";
 
 interface ListResponse<T> {
   items: T[] | null;
@@ -224,11 +230,15 @@ export async function listCardOperationsNeedingAttention(
   return body.items ?? [];
 }
 
-/** 开卡（`cards.card.issue@1`）。
+/** 开卡（`cards.card.issue@1`，**L2**）。
  *
  *  `idempotency_key` 必填且必须由调用方**稳定**生成：它决定发给上游的
  *  card_alias，也是超时后对账的唯一抓手。同一次提交重试要带同一个键——
- *  换一个键等于告诉后端「这是另一次开卡」，而上游没有幂等能力。 */
+ *  换一个键等于告诉后端「这是另一次开卡」，而上游没有幂等能力。
+ *
+ *  L2 意味着这次调用**多半不会当场执行**：内核会受理成一张审批单并回 202
+ *  （XM-RISK-RESTORE 把它从 L1 恢复成 L2）。所以返回的是 ActionOutcome 而不是
+ *  ActionRun，`reason` 也必填——它会原样写进单里给审批人看。 */
 export function issueCard(
   params: {
     account: string;
@@ -240,10 +250,15 @@ export function issueCard(
     holder_name: string;
     owner_ref?: string;
   },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction({ actionId: "cards.card.issue", version: "1", params }, options, client);
+): Promise<ActionOutcome> {
+  return submitAction(
+    { actionId: "cards.card.issue", version: "1", params, reason },
+    options,
+    client,
+  );
 }
 
 /** 给已有的卡充值（`cards.card.topup@1`）。同样受金额上限约束。 */
@@ -397,16 +412,23 @@ export async function listCardChallenges(
   return body.items ?? [];
 }
 
-/** 关停一张卡（`cards.card.delete@1`）。
+/** 关停一张卡（`cards.card.delete@1`，**L2**）。
  *
  *  **不可逆**：上游接受后卡进 pending_delete，结清余额后变 deleted，
- *  没有任何接口能把它恢复。调用方必须先向人确认。 */
+ *  没有任何接口能把它恢复。调用方必须先向人确认。
+ *
+ *  L2：内核多半会受理成审批单并回 202，所以返回 ActionOutcome、`reason` 必填。 */
 export function deleteCard(
   params: { account: string; idempotency_key: string; card_id: string },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction({ actionId: "cards.card.delete", version: "1", params }, options, client);
+): Promise<ActionOutcome> {
+  return submitAction(
+    { actionId: "cards.card.delete", version: "1", params, reason },
+    options,
+    client,
+  );
 }
 
 /** 一格聚合：某币种、某类型、某状态的笔数与金额。

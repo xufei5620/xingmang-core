@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -297,5 +298,133 @@ func TestAlertsEndpointIsNoStore(t *testing.T) {
 	rec := getAlerts(t, alertRouter(t, &fakeAlertLister{}), "", "ops.read")
 	if cc := rec.Header().Get("Cache-Control"); cc == "" {
 		t.Fatal("缺少 Cache-Control（应由 /api/v1 组上的 NoStore 中间件设置）")
+	}
+}
+
+// TestAlertItemSeparatesFireCountFromTriggerCount 是 2026-09-08 那条
+// 「触发 669 次」的对外修正。
+//
+// 真相是「触发 1 次、已持续 668 分钟」：fire_count 是评估轮数（每 60 秒一轮，
+// 条件仍成立就 +1），trigger_count 才是发生次数。两个数必须分别出现在响应里，
+// 前端才不会再把前者当成后者。
+//
+// 断言解成 map 而不是一个只含新字段的结构体：后者会让「旧字段被删掉」这种
+// 回归静默通过，而前端片（XM-WORKBENCH-TRUTH）正在并行消费那些旧字段。
+func TestAlertItemSeparatesFireCountFromTriggerCount(t *testing.T) {
+	a := sampleAlert()
+	// 照 09-08 生产上那条 sub2api 版本告警的真实形态：持续 669 轮、触发 1 次。
+	opened := time.Date(2026, 9, 8, 4, 12, 0, 0, time.UTC)
+	a.OpenedAt = opened
+	a.FirstOpenedAt = &opened
+	a.FireCount = 669
+	one := int32(1)
+	a.TriggerCount = &one
+
+	rec := getAlerts(t, alertRouter(t, &fakeAlertLister{items: []alerts.Alert{a}}), "", "ops.read")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if len(raw.Items) != 1 {
+		t.Fatalf("items = %d", len(raw.Items))
+	}
+	item := raw.Items[0]
+
+	if got := item["fire_count"]; got != float64(669) {
+		t.Fatalf("fire_count = %v, want 669", got)
+	}
+	if got := item["trigger_count"]; got != float64(1) {
+		t.Fatalf("trigger_count = %v, want 1（与 fire_count 分离）", got)
+	}
+	// 时间恒为 UTC RFC3339，与既有的 opened_at / last_seen_at 逐字同形。
+	if got := item["first_opened_at"]; got != "2026-09-08T04:12:00Z" {
+		t.Fatalf("first_opened_at = %v", got)
+	}
+	if got := item["first_opened_at_estimated"]; got != false {
+		t.Fatalf("有真实首开时刻时不该标成估计值：%v", got)
+	}
+
+	// 既有键仍在且值不变——前端片正在并行消费它们，改名等于让它当场炸。
+	for _, key := range []string{
+		"id", "rule_key", "dedup_key", "severity", "status", "title", "detail",
+		"environment", "source_metric_key", "opened_at", "last_seen_at",
+		"acknowledged_at", "resolved_at", "fire_count",
+		"notify_status", "notify_error", "notified_at",
+	} {
+		if _, ok := item[key]; !ok {
+			t.Fatalf("既有字段 %q 不见了", key)
+		}
+	}
+}
+
+// TestAlertItemTellsYouWhenFirstOpenedAtIsAGuess：迁移 000054 明确不回填，
+// 所以库里既有的行没有真实的首开时刻。
+//
+// 两个字段的空值口径**故意不同**：
+//   - trigger_count 回 null（前端显示「—」）——没有可兜的底，
+//     显示成 0 是一个看起来像真答案的假答案；
+//   - first_opened_at 恒非空（用 opened_at 兜底）——「已持续」是待处理清单的
+//     主行文案，必须渲染得出东西，但要用 first_opened_at_estimated 说出实情。
+func TestAlertItemTellsYouWhenFirstOpenedAtIsAGuess(t *testing.T) {
+	a := sampleAlert()
+	a.TriggerCount = nil  // 本列上线前的旧行
+	a.FirstOpenedAt = nil // 同上
+
+	rec := getAlerts(t, alertRouter(t, &fakeAlertLister{items: []alerts.Alert{a}}), "", "ops.read")
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	item := raw.Items[0]
+
+	if got, ok := item["trigger_count"]; !ok || got != nil {
+		t.Fatalf("旧行的 trigger_count 应是 null（不是 0），实际 %v", got)
+	}
+	if got := item["first_opened_at"]; got != a.OpenedAt.UTC().Format(time.RFC3339) {
+		t.Fatalf("first_opened_at 应兜底成 opened_at，实际 %v", got)
+	}
+	if got := item["first_opened_at_estimated"]; got != true {
+		t.Fatalf("兜底值必须被标成估计值，实际 %v", got)
+	}
+	// 零值时刻绝不能被格式化成 0001-01-01——界面上「不知道」必须显示成不知道。
+	if strings.Contains(rec.Body.String(), "0001-01-01") {
+		t.Fatalf("响应里出现了零值时刻: %s", rec.Body.String())
+	}
+}
+
+// TestAlertItemJSONKeysMatchTheStructTags 用反射清点，不手列。
+//
+// 手列一份键清单会让「新增字段漏进响应」这种回归静默通过——而闸的范围要
+// 从被校验对象身上发现，不能与它同源手抄。
+func TestAlertItemJSONKeysMatchTheStructTags(t *testing.T) {
+	rec := getAlerts(t, alertRouter(t, &fakeAlertLister{items: []alerts.Alert{sampleAlert()}}),
+		"", "ops.read")
+	var raw struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	item := raw.Items[0]
+
+	typ := reflect.TypeOf(alertItem{})
+	if typ.NumField() != len(item) {
+		t.Fatalf("响应键数 %d 与 alertItem 字段数 %d 不符：%v", len(item), typ.NumField(), item)
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		tag := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if tag == "" {
+			t.Fatalf("字段 %s 没有 json tag", typ.Field(i).Name)
+		}
+		if _, ok := item[tag]; !ok {
+			t.Fatalf("结构体声明了 %q，响应里却没有", tag)
+		}
 	}
 }

@@ -115,11 +115,21 @@ docker compose -f deploy/compose/launch.yaml up -d platform-worker
 启动日志里先确认这一行（`worker_started`）：
 
 ```json
-{"event":"worker_started","sub2api_mode":"real","sub2api_source":"...","sub2api_sync_enabled":true}
+{"event":"worker_started","sub2api_mode_default":"real","sub2api_source":"...","sub2api_sync_enabled":true}
 ```
 
-`sub2api_mode` 还是 `fake` 说明变量没进容器——检查是不是改了 `.env`
-但没重建容器。
+`sub2api_mode_default` 还是 `fake` 只说明**环境变量**没进容器——检查是不是
+改了 `.env` 但没重建容器。
+
+它**不能**用来判断生效模式：XM-CRED0 之后模式以 `core.connector_config` 为准，
+后台切换不重启容器，启动日志不会变。生效模式看每轮的
+`connector_config_applied`（`mode` + `config_source`）与 `job_completed` 的
+`sub2api_mode` / `sub2api_mode_source`：
+
+```bash
+docker compose logs --no-color --since 6m platform-worker \
+  | grep -E 'connector_config_applied|"job_kind":"sub2api_sync"' | tail -3
+```
 
 ## 第 4 步：验证数据真的换了源
 

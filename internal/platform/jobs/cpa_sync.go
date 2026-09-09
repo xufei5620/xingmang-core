@@ -262,7 +262,18 @@ func (w *CPASyncWorker) Work(ctx context.Context, job *river.Job[CPASyncArgs]) e
 		level = slog.LevelWarn
 	}
 	w.logJob(ctx, job, level, "job_completed", writeFailed == "" && readErrorCode == "", readErrorCode,
+		// cpa_mode 打的一直就是生效模式，这一条**没有**说谎（与 XM-OPS-TRUTH
+		// 修掉的 sub2api_mode / newapi_mode 不同型）：cpa 不在
+		// credentials.Platforms（只有 sub2api / newapi，与迁移 000020 的 CHECK
+		// 一致），core.connector_config 里没有它的行，模式由 XM_CPA_MODE 在
+		// 进程启动时定死，工厂与本字段同取一个值（client.go 的 CPASyncOptions）。
+		//
+		// 补 cpa_mode_source 是为了让它与另外两条采集链路在日志里可比——运维
+		// 不必记住「哪个 *_mode 能信」。TestCPAHasNoConnectorConfigRow 钉住这个
+		// 前提：哪天有人把 cpa 加进 credentials.Platforms，那个测试会红，提醒
+		// 这里必须改成每轮解析（见 jobs.ResolveEffectiveMode）。
 		slog.String("cpa_mode", string(w.mode)),
+		slog.String("cpa_mode_source", ModeSourceEnv),
 		slog.String("source", w.instanceID),
 		slog.String("business_day", day),
 	)

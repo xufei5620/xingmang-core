@@ -44,6 +44,8 @@ func pgStore(t *testing.T) (*PgStore, *pgxpool.Pool) {
 		"cards.webhook_event",
 		"cards.card_challenge",
 		"cards.withdraw_request", "cards.withdraw_address", "cards.withdraw_limit",
+		// XM-CARD-VISIBILITY：按账号暂停同步的开关（迁移 000055）。
+		"cards.account_sync_pause",
 	} {
 		if _, err := pool.Exec(context.Background(), "TRUNCATE "+table); err != nil {
 			t.Fatal(err)
@@ -1476,5 +1478,70 @@ VALUES ($1,$2,$3,'****0000','h','a','active','USD',0,$4,$4,$4,$5,$6,$7)`,
 		if f.Token == "USDT" && f.AmountText != "2.5" {
 			t.Errorf("CHRIS 的 USDT 开卡费 = %q, want \"2.5\"", f.AmountText)
 		}
+	}
+}
+
+// 按账号暂停开关的落库往返（XM-CARD-VISIBILITY，迁移 000055）。
+//
+// SQL 只有对着真实 Postgres 跑过才算数：列名、参数位、ON CONFLICT 目标
+// 全是运行时才炸的东西，而这个开关一旦写不进去，运营点了「暂停」之后
+// 同步照旧打上游——按钮看起来生效了，实际什么都没发生。
+func TestPgStoreAccountSyncPauseRoundTrip(t *testing.T) {
+	store, _ := pgStore(t)
+	ctx := context.Background()
+
+	paused, err := store.PausedAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paused) != 0 {
+		t.Fatalf("初始应为空（行缺席 = 未暂停），实际 %v", paused)
+	}
+
+	want := AccountSyncPause{
+		Account:  "LINFENG",
+		Paused:   true,
+		Reason:   "上游拒绝待查 XM-CARD-VISIBILITY",
+		PausedBy: "human:ops",
+		PausedAt: issueNow,
+	}
+	if err := store.SetAccountSyncPause(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+
+	paused, err = store.PausedAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := paused["LINFENG"]
+	if !ok {
+		t.Fatalf("暂停后应读得到，实际 %v", paused)
+	}
+	if got.Reason != want.Reason || got.PausedBy != want.PausedBy {
+		t.Fatalf("读回的记录 = %+v, want %+v", got, want)
+	}
+	if !got.PausedAt.Equal(issueNow) {
+		t.Fatalf("paused_at = %v, want %v（时间一律 UTC 存取）", got.PausedAt, issueNow)
+	}
+	if got.PausedAt.Location() != time.UTC {
+		t.Fatalf("读回的时间不是 UTC: %v", got.PausedAt.Location())
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Fatalf("本片不实现自动恢复，expires_at 应为空，实际 %v", got.ExpiresAt)
+	}
+
+	// 恢复：同一行覆盖（last-write-wins），且不再出现在暂停清单里，
+	// 但 reason 仍然留在库里供事后追查「上次为什么停过」。
+	resumed := want
+	resumed.Paused = false
+	if err := store.SetAccountSyncPause(ctx, resumed); err != nil {
+		t.Fatal(err)
+	}
+	paused, err = store.PausedAccounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := paused["LINFENG"]; ok {
+		t.Fatalf("恢复后不该再出现在暂停清单里，实际 %v", paused)
 	}
 }

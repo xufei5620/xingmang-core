@@ -222,7 +222,7 @@ func serviceObserveHandler(store *Store) action.Handler {
 	}
 }
 
-// --- registry.connector.create（L2：Foundation-A 下会被内核拒绝）---
+// --- registry.connector.create（L2：落审批单后由人触发执行）---
 
 func connectorCreateDef() action.Definition {
 	return action.Definition{

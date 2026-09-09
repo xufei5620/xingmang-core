@@ -1,6 +1,7 @@
 import { PageState } from "@xingmang/ui-admin";
 import type { ReactElement, ReactNode } from "react";
 import { ApiError, FeatureNotMountedError } from "../api/client";
+import { errorCodeNextStep, errorCodeNote } from "../lib/labels";
 
 export interface ApiStateViewProps {
   isPending: boolean;
@@ -85,7 +86,10 @@ function ApiErrorView({
   return (
     <PageState
       kind="error"
-      message={`${error.message}（错误码 ${error.code}）`}
+      message={`${error.message}（${errorCodeNote(error.code)}）`}
+      // description 是 PageState 里 message 之后那一行可见文字。给了下一步的
+      // 码把它摆出来；没给的码连这个属性都不传，避免多出一个空段落。
+      {...(errorCodeNextStep(error.code) ? { description: errorCodeNextStep(error.code) } : {})}
       {...(error.retryable ? { onRetry } : {})}
       {...(footnote ? { footnote } : {})}
       compact={compact}

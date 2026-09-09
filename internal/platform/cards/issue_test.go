@@ -35,6 +35,10 @@ type memStore struct {
 	spentToday     string
 	// spentByAccount 非空时按账号取值，否则回落到 spentToday。
 	spentByAccount map[string]string
+	// pauses 是按账号的同步暂停开关（XM-CARD-VISIBILITY）。
+	pauses map[string]AccountSyncPause
+	// pauseReadErr 让测试模拟「开关读不出来」，验证那时整轮 fail closed。
+	pauseReadErr error
 }
 
 func newMemStore() *memStore {
@@ -51,8 +55,28 @@ func newMemStore() *memStore {
 		addresses:      make(map[string]WithdrawAddress),
 		withdrawals:    make(map[string]WithdrawRecord),
 		withdrawLimits: make(map[string]Limits),
+		pauses:         make(map[string]AccountSyncPause),
 		spentToday:     "0",
 	}
+}
+
+func (m *memStore) SetAccountSyncPause(ctx context.Context, p AccountSyncPause) error {
+	m.pauses[p.Account] = p
+	return nil
+}
+
+// PausedAccounts 只回**当前正暂停**的，与 PgStore 同口径。
+func (m *memStore) PausedAccounts(ctx context.Context) (map[string]AccountSyncPause, error) {
+	if m.pauseReadErr != nil {
+		return nil, m.pauseReadErr
+	}
+	out := make(map[string]AccountSyncPause, len(m.pauses))
+	for id, p := range m.pauses {
+		if p.Paused {
+			out[id] = p
+		}
+	}
+	return out, nil
 }
 
 func (m *memStore) BeginOperation(ctx context.Context, op Operation) (Operation, bool, error) {

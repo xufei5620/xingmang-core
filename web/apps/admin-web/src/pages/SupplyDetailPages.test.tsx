@@ -71,24 +71,73 @@ function upstreamAccount(over: Record<string, unknown> = {}) {
 
 function upstreamSummary(over: Record<string, unknown> = {}) {
   return {
-    id: "up-1", name: "relay-a", supplier_key: "", system_type: "sub2api", access_method: "upstream_key",
+    // supplier_key 不留空：后端逐行都会给（`system_type|base_url`，没有 base_url
+    // 时退回 `account|<id>`），上游详情页正是按它归并「这个上游名下有几条渠道」。
+    id: "up-1", name: "relay-a", supplier_key: "sub2api|https://relay-a.example.com",
+    system_type: "sub2api", access_method: "upstream_key",
     base_url: "https://relay-a.example.com", recharge_cost_rate: "0.869565217", credential_ref: "",
-    status: "active", token_count: 2, usage_revenue: null, supply_cost: null, gross_profit: null,
-    coverage: { row_count: 1, revenue_known_rows: 0, cost_known_rows: 0, account_grain_rows: 0, mixed_currency: false, complete: false },
-    observed: { cost_observed_at: null, revenue_observed_at: null, updated_at: null, source: "" },
+    status: "active", token_count: 2,
+    usage_revenue: { amount_minor: "8000000", currency: "CNY", scale: 6 },
+    supply_cost: { amount_minor: "5000000", currency: "CNY", scale: 6 },
+    gross_profit: { amount_minor: "3000000", currency: "CNY", scale: 6 },
+    coverage: { row_count: 1, revenue_known_rows: 1, cost_known_rows: 1, account_grain_rows: 0, mixed_currency: false, complete: true },
+    observed: { cost_observed_at: "2026-08-28T02:00:00Z", revenue_observed_at: "2026-08-28T03:00:00Z", updated_at: null, source: "finance.profit_window" },
     runway: { days: 12, level: "warning", reason: "", window_days: 7, covered_days: 7, daily_average: null, balance: { amount_minor: "123450000", currency: "CNY", scale: 6 }, balance_observed_at: "2026-08-28T08:30:00Z" },
     ...over,
   };
 }
 
-function stubDetailApi(handlers: { services?: unknown[]; channels?: unknown[]; accounts?: unknown[]; summaries?: unknown[] }) {
+function money(minor: string, currency = "CNY", scale = 6) {
+  return { amount_minor: minor, currency, scale };
+}
+
+/** 逐渠道汇总的一行。**id 与登记簿、供给汇总是同一个** `upstream_account.id`
+ *  ——后端 `channelToItem` / `upstreamToItem` 都取 `s.Account.ID`，上游详情页按
+ *  它把三条列表端点对上同一个上游。 */
+function channelSummary(over: Record<string, unknown> = {}) {
+  return {
+    id: "up-1", name: "relay-a", system_type: "sub2api", access_method: "upstream_key", metered: true,
+    base_url: "https://relay-a.example.com", platform_id: "sub2api", credential_ref: "secret://xm/upstream/a",
+    recharge_ratio: "1.15", recharge_cost_rate: "0.869565217", business_day_tz: "+08:00",
+    status: "active", token_count: 2,
+    usage_revenue: money("8000000"), supply_cost: money("5000000"), gross_profit: money("3000000"),
+    gross_margin: "0.375000",
+    coverage: { row_count: 1, revenue_known_rows: 1, cost_known_rows: 1, account_grain_rows: 0, mixed_currency: false, complete: true },
+    observed: { cost_observed_at: "2026-08-28T02:00:00Z", revenue_observed_at: "2026-08-28T03:00:00Z", updated_at: null, source: "finance.profit_window" },
+    runway: { days: 12, level: "warning", reason: "", window_days: 7, covered_days: 7, daily_average: null, balance: null, balance_observed_at: null },
+    ...over,
+  };
+}
+
+function subscriptionBatch(over: Record<string, unknown> = {}) {
+  return {
+    id: "batch-1", upstream_account_id: "up-1",
+    paid: money("29990000", "USD"), surcharge: money("0", "USD"), refunded: money("0", "USD"),
+    cost_basis: money("29990000", "USD"), account_share: money("29990000", "USD"),
+    daily_amortization: money("967419", "USD"), currency: "USD",
+    starts_on: "2026-08-01", expires_on: "2026-08-31", effective_days: 31,
+    refunded_on: null, terminated_on: null, account_count: 1, proxy_asset_id: null,
+    ...over,
+  };
+}
+
+function stubDetailApi(handlers: {
+  services?: unknown[];
+  channels?: unknown[];
+  accounts?: unknown[];
+  summaries?: unknown[];
+  channelSummaries?: unknown[];
+  batches?: unknown[];
+}) {
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
       if (url.includes("/api/v1/services")) return Promise.resolve(fakeResponse({ items: handlers.services ?? [ACTIVE_SERVICE] }));
       if (url.includes("/platforms/sub2api/channels")) return Promise.resolve(fakeResponse(channelPage(handlers.channels ?? [boundChannelRow()])));
       if (url.includes("/finance/upstream-accounts")) return Promise.resolve(fakeResponse({ items: handlers.accounts ?? [upstreamAccount()] }));
-      if (url.includes("/finance/upstreams/summary")) return Promise.resolve(fakeResponse({ items: handlers.summaries ?? [upstreamSummary()], from: "", to: "", runway_coverage: {}, runway_thresholds: {} }));
+      if (url.includes("/finance/upstreams/summary")) return Promise.resolve(fakeResponse({ items: handlers.summaries ?? [upstreamSummary()], from: "2026-08-28", to: "2026-08-28", runway_coverage: {}, runway_thresholds: {} }));
+      if (url.includes("/finance/channels/summary")) return Promise.resolve(fakeResponse({ items: handlers.channelSummaries ?? [channelSummary()], from: "2026-08-28", to: "2026-08-28" }));
+      if (url.includes("/finance/subscription-batches")) return Promise.resolve(fakeResponse({ items: handlers.batches ?? [], truncated: false, limit: 200, as_of: "2026-08-28" }));
       return Promise.resolve(fakeResponse({ items: [] }));
     }),
   );
@@ -500,26 +549,117 @@ describe("渠道详情：2026-09-02 起接真实渠道目录 + 上游映射", ()
   });
 });
 
-describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着上游管理并入渠道管理页改名", () => {
-  it("上游详情明确展示比例、余额、成本和凭据边界，返回入口指向渠道管理页", () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
 
-    renderPage(
-      "/platforms/newapi/suppliers/upstream-a",
+/** 顶部计数格：按 StatTile 的标题定位到那一格，再在格内找值。
+ *  不用全局 getByText 找金额——同一个数在格子与下方明细里各出现一次，
+ *  全局断言会在「格子空着但明细有值」时照样通过。 */
+function statTile(label: string): HTMLElement {
+  const article = screen.getByRole("heading", { name: label, level: 3 }).closest("article");
+  if (!article) throw new Error(`「${label}」不是一个 StatTile`);
+  return article as HTMLElement;
+}
+
+describe("上游详情：2026-09-08 起接成本登记簿与两条窗口汇总", () => {
+  it("登记簿事实与汇总金额都是真数据，页面不再说「读契约尚未接入」", async () => {
+    stubDetailApi({});
+    renderQueryPage(
+      "/platforms/sub2api/suppliers/up-1",
       <UpstreamDetailPage />,
       "/platforms/:serviceType/suppliers/:upstreamId",
     );
 
-    expect(screen.getByRole("heading", { name: "上游详情", level: 2 })).not.toBeNull();
-    expect(screen.getAllByText("upstream-a").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getByText("充值比例与成本口径")).not.toBeNull();
-    expect(screen.getByText("上游全部分组")).not.toBeNull();
+    // 登记簿字段（旧实现这几格全是「未接入」，所以这些断言在旧实现下必红）
+    expect((await screen.findAllByText("Relay 甲")).length).toBeGreaterThan(0);
+    expect(screen.getByText("https://relay-a.example.com")).not.toBeNull();
+    expect(screen.getByText("1.15")).not.toBeNull();
+    expect(screen.getByText("0.869565217")).not.toBeNull();
+    // 两处：本页的「上游凭据」表，以及挂载进来的 UpstreamAccountDetail 的基本信息
+    expect(screen.getAllByText("secret://xm/upstream/a")).toHaveLength(2);
+    expect(screen.getAllByText("已配置").length).toBeGreaterThan(0);
+
+    // 供给汇总：余额来自 runway.balance（scale-6 微单位 → ¥123.45）
+    expect(within(statTile("上游余额")).getByText("¥123.45")).not.toBeNull();
+    // 逐渠道汇总：本期消耗/利润与毛利率
+    expect(within(statTile("本期总消耗")).getByText("¥8.00")).not.toBeNull();
+    expect(within(statTile("本期总利润")).getByText("¥3.00")).not.toBeNull();
+    expect(screen.getByText("0.375000")).not.toBeNull();
+    // 「这个上游名下有几条渠道」按后端给的 supplier_key 归并，不在前端拼键
+    expect(within(statTile("接入渠道")).getByText("1")).not.toBeNull();
+    // 窗口跟着汇总响应的 from/to 说出来，不写死「今天」
+    expect(screen.getAllByText(/窗口 2026-08-28 ~ 2026-08-28/).length).toBeGreaterThan(0);
+
+    expect(
+      screen.getByRole("link", { name: "返回 Sub2API 上游管理" }).getAttribute("href"),
+    ).toBe("/platforms/sub2api?tab=upstream");
+    // 凭据边界那句话必须留着：接了真数据不等于可以回显明文
     expect(screen.getByText(/上游账号密码、API Key 与 Token 永不回显/)).not.toBeNull();
-    const link = screen.getByRole("link", { name: "返回 NewAPI 上游管理" });
-    expect(link.getAttribute("href")).toBe("/platforms/newapi?tab=upstream");
-    expect(screen.queryAllByRole("button")).toHaveLength(0);
-    expect(fetchMock).not.toHaveBeenCalled();
+
+    // 缺席断言，已做变异验证（把那句话加回 UpstreamDetailPage 后本行转红）：
+    // 上面已 await 到真数据锚点，所以这一行不会在「还没渲染完」时假绿。
+    expect(screen.queryByText(/上游详情读契约尚未接入/)).toBeNull();
+  });
+
+  it("孤儿组件 UpstreamAccountDetail 挂上了：订阅批次表与退款/终止入口在这一页点得到", async () => {
+    stubDetailApi({
+      accounts: [upstreamAccount({ access_method: "subscription_account", metered: false })],
+      batches: [subscriptionBatch()],
+    });
+    renderQueryPage(
+      "/platforms/sub2api/suppliers/up-1",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
+    );
+
+    const batches = within(await screen.findByRole("table", { name: "订阅批次：付款、摊销与有效期" }));
+    expect(batches.getByText("2026-08-01 → 2026-08-31")).not.toBeNull();
+    // 这四个对话框自 3c97057 起在整个后台里点不到（组件没有调用方）。
+    // 断言它们出现在**这一页**上，正是本片要修的那件事。
+    expect(batches.getByRole("button", { name: "记退款" })).not.toBeNull();
+    expect(batches.getByRole("button", { name: "终止" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "登记/续费新增批次" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "登记代理资产" })).not.toBeNull();
+  });
+
+  it("计量型账号不画订阅批次表，而是说清它的成本是怎么算的", async () => {
+    stubDetailApi({ batches: [subscriptionBatch()] });
+    renderQueryPage(
+      "/platforms/sub2api/suppliers/up-1",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
+    );
+
+    expect(await screen.findByText(/这是计量型账号/)).not.toBeNull();
+    // 对照组：上一条用例证明有批次时表会出现，所以这条不是恒真的
+    expect(screen.queryByRole("table", { name: "订阅批次：付款、摊销与有效期" })).toBeNull();
+  });
+
+  it("登记簿列表里没有这个 ID 时说清楚，不给一张字段全空的详情", async () => {
+    stubDetailApi({ accounts: [upstreamAccount({ id: "someone-else" })], summaries: [], channelSummaries: [] });
+    renderQueryPage(
+      "/platforms/sub2api/suppliers/up-1",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
+    );
+
+    expect(await screen.findByText("上游登记簿里没有这一条")).not.toBeNull();
+    expect(screen.getByText(/共 1 条.*没有 ID 为 up-1 的上游账号/)).not.toBeNull();
+    // 缺席断言，已做变异验证（把 !account 那一支改成照常渲染 body 后本行转红）
+    expect(screen.queryByText("充值比例与成本口径")).toBeNull();
+  });
+
+  it("URL 的平台段与登记簿 system_type 对不上时，不按 URL 的平台把它画出来", async () => {
+    stubDetailApi({});
+    renderQueryPage(
+      "/platforms/newapi/suppliers/up-1",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
+    );
+
+    expect(await screen.findByText("这个上游不属于 NewAPI")).not.toBeNull();
+    expect(screen.getByText(/系统类型是 sub2api，不是 newapi/)).not.toBeNull();
+    // 缺席断言，已做变异验证（去掉 system_type 判定后本行转红）：
+    // 归属错了而每个数都对，是最难被发现的一种错
+    expect(screen.queryByText("充值比例与成本口径")).toBeNull();
   });
 
   it("`suppliers/new` 只读字段蓝图已按产品负责人 2026-09-03 裁定下线，落回上游详情自带的 not-found 兜底", () => {
@@ -535,6 +675,22 @@ describe("上游详情 / 添加上游：仍是 UI-only 壳，返回入口跟着�
     expect(screen.getByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
     expect(screen.getByText(/新增上游/)).not.toBeNull();
     expect(screen.queryByRole("heading", { name: "添加上游", level: 2 })).toBeNull();
+    // 平台段与 ID 都还没验完就发请求是不对的：这一支在渲染前就短路了
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("未知平台不渲染成另一平台的上游详情，且不发请求", () => {
+    const fetchMock = vi.fn(() => Promise.reject(new Error("must not fetch")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage(
+      "/platforms/cpa/suppliers/up-1",
+      <UpstreamDetailPage />,
+      "/platforms/:serviceType/suppliers/:upstreamId",
+    );
+
+    expect(screen.getByRole("heading", { name: "页面不存在", level: 2 })).not.toBeNull();
+    expect(screen.getByText(/平台 cpa 不支持上游详情/)).not.toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

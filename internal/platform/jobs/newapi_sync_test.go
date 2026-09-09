@@ -29,12 +29,30 @@ var newapiMetricKeys = []string{
 	newapi.MetricUsersTotal,
 }
 
+// newapiEnvFakeConfig 是「这个部署没有后台行，按 env 缺省 fake 跑」的生效
+// 配置，等价于静态工厂 NewNewAPIClientFactory(NewAPIModeFake, …) 回传的那一份。
+var newapiEnvFakeConfig = EffectiveConnectorConfig{
+	Platform: ConnectorPlatformNewAPI,
+	Mode:     string(NewAPIModeFake),
+	Source:   ModeSourceEnv,
+}
+
+// newapiFakeFactory 造一个 Fake 客户端，并报「env 缺省 fake 即本轮生效」——
+// 与静态工厂（NewNewAPIClientFactory）那条路上的口径逐字相同。
 func newapiFakeFactory(opts newapi.FakeOptions) NewAPIClientFactory {
+	return newapiFakeFactoryWithConfig(opts, newapiEnvFakeConfig)
+}
+
+// newapiFakeFactoryWithConfig 让测试指定工厂回传的**本轮生效配置**。
+//
+// 它的存在本身就是被测的那件事：生效模式来自工厂这一轮解析的结果，
+// 而不是 worker 手里某个启动时拷来的字段（后者已经被删掉了）。
+func newapiFakeFactoryWithConfig(opts newapi.FakeOptions, eff EffectiveConnectorConfig) NewAPIClientFactory {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return fixedNow }
 	}
-	return func(context.Context) (newapi.ReadClientV2, error) {
-		return newapi.NewFake(opts), nil
+	return func(context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error) {
+		return newapi.NewFake(opts), eff, nil
 	}
 }
 
@@ -46,7 +64,6 @@ func newTestNewAPISyncWorker(
 		Logger:      logger,
 		Environment: "staging",
 		InstanceID:  DefaultNewAPIInstanceID,
-		Mode:        NewAPIModeFake,
 		Store:       store,
 		NewClient:   factory,
 		Now:         func() time.Time { return fixedNow },
@@ -207,7 +224,6 @@ func TestNewAPISyncRealModeRecordsNotSupported(t *testing.T) {
 	worker := NewNewAPISyncWorker(NewAPISyncOptions{
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
-		Mode:        NewAPIModeReal,
 		Store:       store,
 		NewClient:   NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{}),
 		Now:         func() time.Time { return fixedNow },
@@ -239,7 +255,7 @@ func TestNewAPISyncRealModeRecordsNotSupported(t *testing.T) {
 
 func TestNewAPIClientFactoryClassifiesModes(t *testing.T) {
 	// real：not_supported，且根因可被 errors.Is 追溯（供日志与排查用）
-	_, err := NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{})(context.Background())
+	_, _, err := NewNewAPIClientFactory(NewAPIModeReal, NewAPIRealConfig{})(context.Background())
 	if err == nil {
 		t.Fatal("配置未就绪的 real 模式必须返回错误")
 	}
@@ -265,15 +281,24 @@ func TestNewAPIClientFactoryClassifiesModes(t *testing.T) {
 
 	// 未知模式归 internal：那是我们自己的配置/装配问题，不是上游不支持。
 	// 两者分开归类，运维一看 error_code 就知道该去补配置还是去改配置。
-	_, err = NewNewAPIClientFactory(NewAPIMode("bogus"), NewAPIRealConfig{})(context.Background())
+	var bogusEff EffectiveConnectorConfig
+	_, bogusEff, err = NewNewAPIClientFactory(NewAPIMode("bogus"), NewAPIRealConfig{})(context.Background())
 	if got := connector.KindOf(err); got != connector.KindInternal {
 		t.Fatalf("未知模式 KindOf = %q, want %q", got, connector.KindInternal)
 	}
+	// 模式定不下来时生效配置必须说「不知道」，而不是回一个看起来正常的
+	// mode="bogus"——日志里那个字段是给人当真话读的。
+	if bogusEff.Mode != "" || bogusEff.Source != ModeSourceUnknown {
+		t.Fatalf("未知模式的生效配置 = %+v, want mode=\"\" source=unknown", bogusEff)
+	}
 
-	// fake：拿得到一个可用的客户端
-	client, err := NewNewAPIClientFactory(NewAPIModeFake, NewAPIRealConfig{})(context.Background())
+	// fake：拿得到一个可用的客户端，并且如实报 env 缺省即生效。
+	client, fakeEff, err := NewNewAPIClientFactory(NewAPIModeFake, NewAPIRealConfig{})(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("fake 模式应返回可用客户端: %v", err)
+	}
+	if fakeEff.Mode != "fake" || fakeEff.Source != ModeSourceEnv || fakeEff.Platform != ConnectorPlatformNewAPI {
+		t.Fatalf("静态工厂的生效配置 = %+v, want platform=newapi mode=fake source=env", fakeEff)
 	}
 }
 
@@ -299,7 +324,7 @@ func TestNewAPIClientFactoryRealBuildsClient(t *testing.T) {
 		Timeout:         DefaultNewAPIRequestTimeout,
 		Secrets:         provider,
 	}
-	client, err := NewNewAPIClientFactory(NewAPIModeReal, cfg)(context.Background())
+	client, _, err := NewNewAPIClientFactory(NewAPIModeReal, cfg)(context.Background())
 	if err != nil || client == nil {
 		t.Fatalf("配置齐全时应造出真实客户端: client=%v err=%v", client, err)
 	}
@@ -309,7 +334,7 @@ func TestNewAPIClientFactoryRealBuildsClient(t *testing.T) {
 	// 去翻用户 id。
 	withUser := cfg
 	withUser.UserID = "1"
-	if _, err := NewNewAPIClientFactory(NewAPIModeReal, withUser)(context.Background()); err != nil {
+	if _, _, err := NewNewAPIClientFactory(NewAPIModeReal, withUser)(context.Background()); err != nil {
 		t.Fatalf("配了 user id 也应造得出客户端: %v", err)
 	}
 
@@ -318,7 +343,7 @@ func TestNewAPIClientFactoryRealBuildsClient(t *testing.T) {
 	// 就知道该去补配置还是去改配置。
 	bad := cfg
 	bad.Endpoint = "http://xm.example.test"
-	if _, err := NewNewAPIClientFactory(NewAPIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
+	if _, _, err := NewNewAPIClientFactory(NewAPIModeReal, bad)(context.Background()); connector.KindOf(err) != connector.KindInternal {
 		t.Fatalf("配错的连接配置应归 internal, got %v (%v)", connector.KindOf(err), err)
 	}
 }
@@ -347,7 +372,6 @@ func TestNewAPISyncFailurePreservesLastSuccess(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
 		InstanceID:  DefaultNewAPIInstanceID,
-		Mode:        NewAPIModeFake,
 		Store:       store,
 		NewClient:   newapiFakeFactory(newapi.FakeOptions{FailWith: connector.KindUnavailable}),
 		Now:         func() time.Time { return later },
@@ -431,11 +455,11 @@ func (c newapiPartialFailClient) ModelUsages(ctx context.Context, day string) ([
 func TestNewAPISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (newapi.ReadClientV2, error) {
+	factory := func(context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error) {
 		return newapiPartialFailClient{
 			PaymentsReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
 			usagesErr:          connector.NewError(connector.KindRateLimited, "newapi.models.usage_read", nil),
-		}, nil
+		}, newapiEnvFakeConfig, nil
 	}
 	worker := newTestNewAPISyncWorker(store, factory, &logs)
 	if err := worker.Work(context.Background(), newapiSyncJob()); err != nil {
@@ -468,11 +492,11 @@ func TestNewAPISyncPartialFailureKeepsGoodMetrics(t *testing.T) {
 func TestNewAPISyncOrdersFailureTakesBothMoneyMetrics(t *testing.T) {
 	store := newMemoryStore()
 	var logs bytes.Buffer
-	factory := func(context.Context) (newapi.ReadClientV2, error) {
+	factory := func(context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error) {
 		return newapiPartialFailClient{
 			PaymentsReadClient: newapi.NewFake(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
 			ordersErr:          connector.NewError(connector.KindBadResponse, "newapi.orders.read", nil),
-		}, nil
+		}, newapiEnvFakeConfig, nil
 	}
 	if err := newTestNewAPISyncWorker(store, factory, &logs).
 		Work(context.Background(), newapiSyncJob()); err != nil {
@@ -574,7 +598,6 @@ func TestNewAPISyncAppendsSampleForEveryObservation(t *testing.T) {
 		Logger:      slog.New(slog.NewJSONHandler(&logs, nil)),
 		Environment: "staging",
 		InstanceID:  DefaultNewAPIInstanceID,
-		Mode:        NewAPIModeFake,
 		Store:       store,
 		NewClient:   newapiFakeFactory(newapi.FakeOptions{FailWith: connector.KindUnavailable}),
 		Now:         func() time.Time { return later },

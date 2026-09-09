@@ -43,23 +43,82 @@ const (
 
 	// DefaultNewAPIRequestTimeout 是**单次**上游 HTTP 读取的超时。
 	//
-	// 比 newapiReadTimeout(20s) 小是有意的：一轮同步要串行发很多次请求
-	// （四个读方法，其中渠道错误率还要逐渠道两次 COUNT），一个卡死的连接
-	// 不该把整轮的读取预算独吞。两层超时各管一段——这层管「一次请求」，
-	// 外面那层管「这一轮」。
+	// 比一组读取的预算小是有意的：一轮同步要串行发很多次请求（五个读方法，
+	// 其中渠道错误率还要逐渠道两次 COUNT），一个卡死的连接不该把整组的读取
+	// 预算独吞。两层超时各管一段——这层管「一次请求」，外面那层管「一组」。
 	//
 	// 比 Sub2API 的 10s 略紧一点没有意义，取同一个值：两条采集链路的
 	// 网络特征相同，两个不同的数字只会让人猜哪个才是「对的」。
 	DefaultNewAPIRequestTimeout = 10 * time.Second
 
-	// newapiReadTimeout 只约束「读上游」这一段，不约束整个 Work。
+	// newapiStallAllowancePerGroup 是**每一组读取**允许有多少次请求走到满额
+	// 单次超时、仍不判这一组失败。取 2：一次偶发卡顿 + 一次余量。
 	//
-	// 分开是有意的：读超时必须还留得下时间把「同步失败」写进库。如果让
-	// River 的 JobTimeout（默认 1 分钟）直接掐掉整个 Work，超时那一轮就
-	// 什么都写不进去，看板只能靠 observed_at 变旧间接察觉——那是降级信号，
-	// 不是失败信号。20s 之后仍有约 40s 用于 5 次 upsert，绰绰有余。
-	newapiReadTimeout = 20 * time.Second
+	// 这是本条链路上唯一一个「拍」出来的数，其余全部由它与单次超时推导
+	// （newapiGroupBudget / newapiReadBudget / newapiSyncJobTimeout）。
+	newapiStallAllowancePerGroup = 2
+
+	// newapiWriteReserve 是读完之后把观测（含历史样本，同一事务）写进库的余量。
+	// 它只进 JobTimeout，不进读取预算——两段各管各的。
+	newapiWriteReserve = 20 * time.Second
 )
+
+// newapiReadStepNames 是一轮同步的串行读取链，顺序即执行顺序。
+//
+// 三处同一份名单：整轮预算按它的长度推导（newapiReadBudget）、每组的
+// deadline 按它切分、日志里的 read_step 取自它。往读取链里加第六组时预算
+// 自动跟着加，不会出现「加了读取、预算还按五组算」的静默漂移。
+// TestNewAPIReadStepsCoverEveryReadErrorField 让「加了读取忘了加步骤名」
+// 在 CI 就红。
+var newapiReadStepNames = []string{"stats", "orders", "channels", "usages", "payments"}
+
+// newapiReadStepMetricKeys 给每组读取列出它喂的指标键，只用于日志定位。
+//
+// 是**复数**而不是 brief 里的单数 metric_key：orders 一组同时喂
+// newapi.recharge.daily 与 newapi.subscription.daily，单数字段在这一组
+// 必然说谎。
+var newapiReadStepMetricKeys = map[string][]string{
+	"stats":    {newapi.MetricUsersTotal},
+	"orders":   {newapi.MetricRechargeDaily, newapi.MetricSubscriptionDaily},
+	"channels": {newapi.MetricChannelsStatus},
+	"usages":   {newapi.MetricModelsUsage},
+	"payments": {newapi.MetricPaymentsDaily},
+}
+
+// newapiGroupBudget 是**一组**读取的独立预算。
+//
+// 旧版只有一个 20s 的整轮预算，五组共用：前两组慢一点就把它用光，排在后面
+// 的三组还没开始就被判 unavailable——2026-09-08 那三条 NewAPI 失败恰好就是
+// 排在最后的三组（见 docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md 二表
+// 第一行）。给每组自己的 deadline，一组慢再也吃不到别组的份。
+func newapiGroupBudget(perRequestTimeout time.Duration) time.Duration {
+	if perRequestTimeout <= 0 {
+		perRequestTimeout = DefaultNewAPIRequestTimeout
+	}
+	return perRequestTimeout * newapiStallAllowancePerGroup
+}
+
+// newapiReadBudget = 组数 × 每组预算，是「读上游」这一整段的墙钟上限。
+//
+// 组数由调用方从 newapiReadStepNames 数出来而不是写死 5。余量是**比例**
+// 而不是一个绝对常数：单元测试得以把单次超时缩到毫秒级，跑出与生产同构的
+// 「预算耗尽」形态，而不是真等 100 秒。steps <= 0 时按一组算（fail closed：
+// 给零预算会让每一轮秒失败）。
+func newapiReadBudget(perRequestTimeout time.Duration, steps int) time.Duration {
+	if steps <= 0 {
+		steps = 1
+	}
+	return newapiGroupBudget(perRequestTimeout) * time.Duration(steps)
+}
+
+// newapiSyncJobTimeout 覆盖 River 的默认 JobTimeout（1 分钟）。
+//
+// 不覆盖的话读预算抬过 ~40s 就等于没抬：River 会在读完之前掐掉整个 Work，
+// 那一轮连「同步失败」都写不进库——看板从「正在失败」退化成「数据静静变旧」，
+// 正是规格 §9.1 明令禁止的失败模式。先例见 financeCollectJobTimeout。
+func newapiSyncJobTimeout(perRequestTimeout time.Duration) time.Duration {
+	return newapiReadBudget(perRequestTimeout, len(newapiReadStepNames)) + newapiWriteReserve
+}
 
 // NewAPIMode 决定周期任务用哪个 ReadClient 实现。
 type NewAPIMode string
@@ -86,12 +145,21 @@ const (
 var ErrNewAPIRealClientUnavailable = errors.New(
 	"newapi 真实只读客户端未配置：缺少只读端点/allowlist/凭据引用")
 
-// NewAPIClientFactory 按需构造一个只读客户端。
+// NewAPIClientFactory 按需构造一个只读客户端，并说出**本轮生效**的接入配置。
 //
 // 用工厂而不是直接持有一个 ReadClient：真实实现（XM-0038）需要在每轮同步时
 // 解析 CredentialRef、按连接配置建传输层，那是有生命周期的东西，不该在进程
 // 启动时构造一次然后一直握着——凭据会轮换，握着的连接不会知道。
-type NewAPIClientFactory func(ctx context.Context) (newapi.ReadClientV2, error)
+//
+// 第二个返回值是这次调用**实际用来建客户端**的那一份配置（XM-OPS-TRUTH）。
+// 它必须由工厂带出来，不能让调用方事后再查一次库：动态工厂的读取缓存 TTL
+// 是 30s（DefaultConnectorConfigCacheTTL），而一轮读取的预算已经超过它，
+// 两次查询会跨过 TTL 边界拿到不同的行——那就是把「日志说的模式」和「实际读
+// 的上游」重新劈成两个事实，正是本片要消灭的东西。
+//
+// 客户端构造失败时第二个返回值仍尽量说得出模式（工厂已经解析过了）；
+// 连模式都定不下来时它是零值，Source 为 ModeSourceUnknown。
+type NewAPIClientFactory func(ctx context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error)
 
 // NewAPIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
 //
@@ -155,17 +223,26 @@ func (c NewAPIRealConfig) missing() []string {
 // connector.KindOf 归类后写成 SyncFailed 观测，看板显示「同步失败」
 // 并说得出失败原因，而不是数据静静停更（规格 §9.1）。
 func NewNewAPIClientFactory(mode NewAPIMode, cfg NewAPIRealConfig) NewAPIClientFactory {
+	// 这条路上 env 缺省**就是**生效配置（没有动态来源可读），如实标注 env。
+	eff := EffectiveConnectorConfig{
+		Platform:      ConnectorPlatformNewAPI,
+		Mode:          string(mode),
+		Source:        ModeSourceEnv,
+		EndpointHost:  endpointHost(cfg.Endpoint),
+		CredentialRef: cfg.CredentialRef,
+		AllowlistSize: len(cfg.TargetAllowlist),
+	}
 	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
 	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
-	return func(context.Context) (newapi.ReadClientV2, error) {
+	return func(context.Context) (newapi.ReadClientV2, EffectiveConnectorConfig, error) {
 		switch mode {
 		case NewAPIModeFake:
 			// 固定值即可：Fake 的意义是让上层不被真实凭据阻塞，不是模拟真实波动。
 			// 随机化只会让「这条数据是假的」更难被看出来。
-			return newapi.NewFake(newapi.FakeOptions{}), nil
+			return newapi.NewFake(newapi.FakeOptions{}), eff, nil
 		case NewAPIModeReal:
 			if missing := cfg.missing(); len(missing) > 0 {
-				return nil, connector.NewError(
+				return nil, eff, connector.NewError(
 					connector.KindNotSupported, "newapi.client.real",
 					fmt.Errorf("缺少 %s: %w", strings.Join(missing, ", "), ErrNewAPIRealClientUnavailable))
 			}
@@ -177,7 +254,7 @@ func NewNewAPIClientFactory(mode NewAPIMode, cfg NewAPIRealConfig) NewAPIClientF
 			if id := strings.TrimSpace(cfg.UserID); id != "" {
 				opts = append(opts, newapi.WithUserID(id))
 			}
-			return newapi.NewClient(connector.Config{
+			client, err := newapi.NewClient(connector.Config{
 				ServiceInstanceID: cfg.InstanceID,
 				Environment:       cfg.Environment,
 				Endpoint:          cfg.Endpoint,
@@ -185,10 +262,18 @@ func NewNewAPIClientFactory(mode NewAPIMode, cfg NewAPIRealConfig) NewAPIClientF
 				TargetAllowlist:   cfg.TargetAllowlist,
 				Timeout:           cfg.Timeout,
 			}, cfg.Secrets, opts...)
+			if err != nil {
+				// 显式回 nil 接口：直接把类型化的 nil 指针塞进接口会让
+				// 调用方的 `client == nil` 判断恒假。
+				return nil, eff, err
+			}
+			return client, eff, nil
 		default:
-			return nil, connector.NewError(
-				connector.KindInternal, "newapi.client.mode",
-				fmt.Errorf("未知的 newapi 模式 %q", string(mode)))
+			// 模式定不下来：连「按什么在跑」都答不出，如实标 unknown。
+			return nil, EffectiveConnectorConfig{Platform: ConnectorPlatformNewAPI, Source: ModeSourceUnknown},
+				connector.NewError(
+					connector.KindInternal, "newapi.client.mode",
+					fmt.Errorf("未知的 newapi 模式 %q", string(mode)))
 		}
 	}
 }
@@ -242,12 +327,24 @@ type NewAPISyncOptions struct {
 	Environment string
 	// InstanceID 会成为观测的 Source。
 	InstanceID string
-	// Mode 只用于日志标注，不参与任何判定——真正决定读谁的是 NewClient。
-	// 运维必须能从日志里一眼看出这批数字是不是 Fake 产的。
-	Mode  NewAPIMode
+	// 这里**没有** Mode 字段（XM-OPS-TRUTH 删掉了它）。
+	//
+	// 它曾经「只用于日志标注」，装的是进程启动时从环境变量拷来的缺省值。
+	// XM-CRED0 之后生效模式每轮从 core.connector_config 读，这个字段就再也
+	// 不是它自称的那个东西了：2026-09-08 生产上明明跑着 real，日志里的
+	// newapi_mode 却一直打 fake，排查因此走偏。本轮生效模式改由 NewClient
+	// 一并带回（见 NewAPIClientFactory）。物理上删掉字段而不是加注释，
+	// 是为了让下一个人根本没得可打。
 	Store ObservationStore
 	// NewClient 是 XM-0038 的注入点，也是单元测试注入 FakeOptions 的地方。
 	NewClient NewAPIClientFactory
+	// RequestTimeout 是**单次**上游请求的超时，同时是读取预算的推导基数
+	// （见 newapiReadBudget）。零值回落 DefaultNewAPIRequestTimeout。
+	//
+	// 它与 NewAPIRealConfig.Timeout 是同一个数，由 client.go 从同一个
+	// Config.NewAPIRequestTimeout 分发到两处：客户端拿它约束一次请求，
+	// 本任务拿它推导一组与一轮的墙钟上限。
+	RequestTimeout time.Duration
 	// Now 可注入固定时钟；默认 time.Now。
 	Now func() time.Time
 	// ExpectedInterval is the effective cadence of this writer.  It is copied
@@ -265,9 +362,9 @@ type NewAPISyncWorker struct {
 	logger           *slog.Logger
 	environment      string
 	instanceID       string
-	mode             NewAPIMode
 	store            ObservationStore
 	newClient        NewAPIClientFactory
+	requestTimeout   time.Duration
 	now              func() time.Time
 	expectedInterval time.Duration
 }
@@ -286,16 +383,27 @@ func NewNewAPISyncWorker(opts NewAPISyncOptions) *NewAPISyncWorker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.RequestTimeout <= 0 {
+		opts.RequestTimeout = DefaultNewAPIRequestTimeout
+	}
 	return &NewAPISyncWorker{
 		logger:           opts.Logger,
 		environment:      opts.Environment,
 		instanceID:       opts.InstanceID,
-		mode:             opts.Mode,
 		store:            opts.Store,
 		newClient:        opts.NewClient,
+		requestTimeout:   opts.RequestTimeout,
 		now:              opts.Now,
 		expectedInterval: opts.ExpectedInterval,
 	}
+}
+
+// Timeout 放宽本任务的执行期限，理由见 newapiSyncJobTimeout。
+//
+// **必须**跟着读取预算一起改：River 的默认 JobTimeout 是 1 分钟，读预算一旦
+// 抬过它，没有这个方法的结果是那一轮连「同步失败」都写不进库。
+func (w *NewAPISyncWorker) Timeout(*river.Job[NewAPISyncArgs]) time.Duration {
+	return newapiSyncJobTimeout(w.requestTimeout)
 }
 
 // Work 执行一轮同步。
@@ -320,7 +428,7 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 	// 显式声明为 UTC，而不是跟着进程所在机器的本地时区漂。
 	day := now.Format(newapi.BusinessDayLayout)
 
-	reads, readErrs := w.read(ctx, day)
+	reads, readErrs, effective := w.read(ctx, job, day)
 
 	// 上下文被取消说明是本进程在关机，不是上游出问题。把它记成 failed 会让
 	// 看板把一次正常重启显示成同步故障——那是**假的**失败信号，比没有信号更糟。
@@ -374,7 +482,14 @@ func (w *NewAPISyncWorker) Work(ctx context.Context, job *river.Job[NewAPISyncAr
 		errorCode = string(connector.KindOf(readErrs.first()))
 	}
 	w.logJob(ctx, job, level, "job_completed", failed == 0, errorCode,
-		slog.String("newapi_mode", string(w.mode)),
+		// newapi_mode 是**本轮生效**模式（工厂这一轮从 core.connector_config
+		// 解析出来、并且真的拿去建客户端的那一个），不是 XM_NEWAPI_MODE。
+		// 缺省值只出现在 worker_started 的 newapi_mode_default 里。
+		// 字段名刻意不变：既有的 grep、runbook 与验收脚本指向的就是这个名字，
+		// 让它开始说真话比再造一个名字好。
+		slog.String("newapi_mode", effective.Mode),
+		slog.String("newapi_mode_source", effective.Source),
+		slog.Int("newapi_config_version", effective.Version),
 		slog.String("source", w.instanceID),
 		slog.String("business_day", day),
 		slog.Int("metrics_total", len(observations)),
@@ -448,18 +563,22 @@ func (e newapiReadErrors) first() error {
 var errNewAPIPaymentsCapabilityUnavailable = errors.New("newapi: client does not implement PaymentsReadClient")
 
 // read 读取五组数据。客户端构造失败时五组一起归到同一个失败分类。
-func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, newapiReadErrors) {
-	// 读上游单独限时，留出时间把失败写进库（见 newapiReadTimeout 注释）。
-	readCtx, cancel := context.WithTimeout(ctx, newapiReadTimeout)
+//
+// 第三个返回值是本轮生效的接入配置，由工厂带出来（见 NewAPIClientFactory）。
+func (w *NewAPISyncWorker) read(
+	ctx context.Context, job *river.Job[NewAPISyncArgs], day string,
+) (newapiReads, newapiReadErrors, EffectiveConnectorConfig) {
+	// 读上游单独限时，留出时间把失败写进库（见 newapiReadBudget 注释）。
+	readCtx, cancel := context.WithTimeout(ctx, newapiReadBudget(w.requestTimeout, len(newapiReadStepNames)))
 	defer cancel()
 
-	client, err := w.newClient(readCtx)
+	client, effective, err := w.newClient(readCtx)
 	if err != nil {
 		// 配置未就绪的 real 模式走这一支：全部指标写成 not_supported
 		// 的失败观测，而不是静静地什么都不采。
 		return newapiReads{}, newapiReadErrors{
 			stats: err, orders: err, channels: err, usages: err, payments: err,
-		}
+		}, effective
 	}
 
 	var reads newapiReads
@@ -467,21 +586,116 @@ func (w *NewAPISyncWorker) read(ctx context.Context, day string) (newapiReads, n
 	// 读取串行：真实客户端在一轮里共用同一个 quota_per_unit 缓存与
 	// 同一次凭据解析，并发跑只会让第一轮多打几次 /api/status 与 Provider，
 	// 换不到什么——这条链路的瓶颈是上游的 COUNT，不是往返次数。
-	reads.stats, errs.stats = client.UserStats(readCtx)
-	reads.orders, errs.orders = client.DailyOrders(readCtx, day)
-	reads.directory, errs.channels = client.ChannelDirectory(readCtx)
-	reads.usages, errs.usages = client.ModelUsages(readCtx, day)
-
-	// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
-	// 生产装配（NewNewAPIClientFactory）返回的客户端始终满足它，断言只在
-	// 测试用的窄接口客户端上才会落空，见 errNewAPIPaymentsCapabilityUnavailable。
-	if pc, ok := client.(newapi.PaymentsReadClient); ok {
-		reads.payments, errs.payments = pc.DailyPaymentSummary(readCtx, day)
-	} else {
-		errs.payments = connector.NewError(connector.KindNotSupported,
-			"newapi.payments.daily_read", errNewAPIPaymentsCapabilityUnavailable)
+	//
+	// 每一组各开自己的 deadline（newapiGroupBudget），而不是五组共用一个：
+	// 共用那份预算正是 2026-09-08 的失败形态——前两组慢一点，排在后面的三组
+	// 还没开始就被判 unavailable。整轮 readCtx 仍是上限，两层都在。
+	steps := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"stats", func(c context.Context) error {
+			reads.stats, errs.stats = client.UserStats(c)
+			return errs.stats
+		}},
+		{"orders", func(c context.Context) error {
+			reads.orders, errs.orders = client.DailyOrders(c, day)
+			return errs.orders
+		}},
+		{"channels", func(c context.Context) error {
+			reads.directory, errs.channels = client.ChannelDirectory(c)
+			return errs.channels
+		}},
+		{"usages", func(c context.Context) error {
+			reads.usages, errs.usages = client.ModelUsages(c, day)
+			return errs.usages
+		}},
+		// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
+		// 生产装配（NewNewAPIClientFactory）返回的客户端始终满足它，断言只在
+		// 测试用的窄接口客户端上才会落空，见 errNewAPIPaymentsCapabilityUnavailable。
+		{"payments", func(c context.Context) error {
+			pc, ok := client.(newapi.PaymentsReadClient)
+			if !ok {
+				errs.payments = connector.NewError(connector.KindNotSupported,
+					"newapi.payments.daily_read", errNewAPIPaymentsCapabilityUnavailable)
+				return errs.payments
+			}
+			reads.payments, errs.payments = pc.DailyPaymentSummary(c, day)
+			return errs.payments
+		}},
 	}
-	return reads, errs
+	// 步骤名单（newapiReadStepNames）与这条链是同一份事实的两半：预算按前者
+	// 的长度算、执行按后者走。两边漂开时预算会按旧组数默默算，不报错——
+	// TestNewAPIReadChainMatchesDeclaredSteps 从跑出来的 upstream_read 日志
+	// 反过来钉住这份名单，TestNewAPIReadStepsCoverEveryReadErrorField 再把它
+	// 钉到 newapiReadErrors 的字段数上。
+	groupBudget := newapiGroupBudget(w.requestTimeout)
+	for i, step := range steps {
+		remaining := time.Duration(0)
+		if deadline, ok := readCtx.Deadline(); ok {
+			remaining = time.Until(deadline)
+		}
+		groupCtx, cancelGroup := context.WithTimeout(readCtx, groupBudget)
+		started := time.Now()
+		stepErr := step.run(groupCtx)
+		elapsed := time.Since(started)
+		cancelGroup()
+		w.logUpstreamRead(ctx, job, i, step.name, elapsed, remaining, groupBudget, stepErr)
+	}
+	return reads, errs, effective
+}
+
+// logUpstreamRead 为每一组上游读取打一条耗时行。
+//
+// 级别是 Info 而不是 Debug，这不是偏好：worker 的 slog handler 是
+// slog.NewJSONHandler(os.Stdout, nil)——HandlerOptions 为 nil，级别锁死在
+// Info，没有任何环境变量能调。打成 Debug 等于一条都不落盘，下次出同样的问题
+// 还得重新发版加日志，正是 2026-09-08「没有生产的逐次耗时数据」那个坑。
+//
+// 也**不**只在失败时打：区分「整轮预算耗尽」与「上游那几个接口坏了」靠的正是
+// 「成功但很慢」那几行——只打失败会把关键证据丢掉。
+//
+// round_remaining_ms 是把两种解释一刀切开的那个字段（本组**开始前**整轮预算
+// 还剩多少）：预算耗尽预测「靠后的组 round_remaining_ms 趋近 0、elapsed_ms
+// 也趋近 0」，上游故障预测「每组都有实际往返、余量还宽裕」。只打 elapsed_ms
+// 区分不掉「快速失败」与「还没轮到」。
+func (w *NewAPISyncWorker) logUpstreamRead(
+	ctx context.Context, job *river.Job[NewAPISyncArgs],
+	index int, step string, elapsed, roundRemaining, groupBudget time.Duration, err error,
+) {
+	logger := w.logger
+	if logger == nil {
+		logger = structuredDefaultLogger()
+	}
+	environment := w.environment
+	if strings.TrimSpace(environment) == "" {
+		environment = "unknown"
+	}
+	jobID := int64(0)
+	if job != nil && job.JobRow != nil {
+		jobID = job.ID
+	}
+	status, errorCode := "ok", ""
+	if err != nil {
+		status = "failed"
+		errorCode = string(connector.KindOf(err))
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "upstream_read",
+		slog.String("event", "upstream_read"),
+		slog.String("module", newapiSyncModule),
+		slog.String("environment", environment),
+		slog.String("principal_id", newapiSyncPrincipalID),
+		slog.Int64("job_id", jobID),
+		slog.String("job_kind", NewAPISyncJobKind),
+		slog.String("read_step", step),
+		slog.Int("sequence", index+1),
+		slog.String("metric_keys", strings.Join(newapiReadStepMetricKeys[step], ",")),
+		slog.Int64("elapsed_ms", elapsed.Milliseconds()),
+		slog.String("status", status),
+		slog.String("error_code", errorCode),
+		slog.Int64("group_budget_ms", groupBudget.Milliseconds()),
+		slog.Int64("round_remaining_ms", roundRemaining.Milliseconds()),
+	)
 }
 
 // failureObservation 把一条成功形态的观测改写为失败观测。

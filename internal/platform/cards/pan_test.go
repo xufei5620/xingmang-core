@@ -31,7 +31,7 @@ func TestSyncFetchesPANOnceForActiveCards(t *testing.T) {
 		SyncOptions{UnknownGrace: 30 * time.Minute, Now: func() time.Time { return issueNow }})
 
 	// 第一轮：卡刚 active，明文还没拉过
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if counting.calls != 1 {
@@ -43,7 +43,7 @@ func TestSyncFetchesPANOnceForActiveCards(t *testing.T) {
 
 	// 第二、三轮：已经有了，绝不能再拉
 	for i := 0; i < 2; i++ {
-		if err := syncer.RunOnce(context.Background()); err != nil {
+		if _, err := syncer.RunOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -67,7 +67,7 @@ func TestSyncSkipsPANFetchForInactiveCards(t *testing.T) {
 	syncer := NewSyncer([]Account{{ID: testAccount, Client: counting}}, store,
 		SyncOptions{UnknownGrace: 30 * time.Minute, Now: func() time.Time { return issueNow }})
 
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if counting.calls != 0 {
@@ -88,9 +88,27 @@ func TestSyncPANFetchFailureDoesNotAbortTheRound(t *testing.T) {
 	syncer := NewSyncer([]Account{{ID: testAccount, Client: failing}}, store,
 		SyncOptions{UnknownGrace: 30 * time.Minute, Now: func() time.Time { return issueNow }})
 
-	err := syncer.RunOnce(context.Background())
-	if err == nil {
-		t.Fatal("拉明文失败应作为错误上报，让作业重试")
+	round, err := syncer.RunOnce(context.Background())
+	// XM-CARD-VISIBILITY：这一条此前断言「整轮报错」。现在的契约是
+	// **部分成功不算作业失败**——同一轮里发现与刷新都成功了，把整轮判失败
+	// 会让 River 重试三次再落一条 discarded，而重试解决不了 reveal 失败。
+	// 失败本身没有被吞掉：它在 RoundResult 里，由 cards.sync.failed 按
+	// 「同一账号同一步骤连续 N 轮」挑出来。
+	if err != nil {
+		t.Fatalf("拉明文失败不该让整轮报错（其余步骤成功了）: %v", err)
+	}
+	failures := round.Failures()
+	if len(failures) == 0 {
+		t.Fatal("拉明文失败必须留在结果里，不能被静默")
+	}
+	if failures[0].Step != StepFetchSecrets {
+		t.Fatalf("失败的步骤 = %q, want %q", failures[0].Step, StepFetchSecrets)
+	}
+	if !round.AnySucceeded() {
+		t.Fatal("同一轮里刷新卡状态是成功的，AnySucceeded 应为真")
+	}
+	if round.AllFailed() {
+		t.Fatal("只有一步失败不该算整轮失败")
 	}
 	// 但卡状态该刷新的还是刷新了
 	if store.cards[res.CardID].Status != "active" {

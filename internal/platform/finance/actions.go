@@ -638,9 +638,37 @@ func domainError(err error) error {
 		errors.Is(err, money.ErrFormat),
 		errors.Is(err, money.ErrUnknownCurrency):
 		return action.NewError(action.CodeInvalidParams, err.Error(), err)
+
+	// 「累计退款额只增不减」是一个**参数**问题：调用方把这一格当成「本次新增」
+	// 填了，改成不低于已登记值的累计总额就能过。与上面那一支同归 INVALID_PARAMS
+	// （→ 400），但**不能直接用 err.Error()**：仓储把金额按 scale-6 微单位包进了
+	// 文案（"5000000 < 已登记的 8000000"），那串数字对填表的人没有意义，只会让人
+	// 以为自己少填了三个零。所以这里给一句写全「该怎么办」的话，原始错误仍作为
+	// cause 进服务端日志。
+	case errors.Is(err, ErrRefundNotDecreasing):
+		return action.NewError(action.CodeInvalidParams,
+			"累计退款额只增不减：这一格填的是累计总额，不是本次新增，必须不低于已登记的累计退款额。", err)
+
+	// 「已经终止过」不是参数问题——换任何一个终止日都还是这个答案，所以归
+	// CONFLICT（→ 409）而不是 INVALID_PARAMS：它与审批中心的「审批单已经执行过」
+	// （approval/service.go）是同一个形状，一次性操作被做了第二次。
+	//
+	// 顺带修掉一个更要紧的毛病：落 default 分支时结果码是 EXECUTION_FAILED（502），
+	// 而前端 ApiError.retryable 对 >= 500 一律判可重试（api/client.ts）——一个
+	// 永远不会成功的写操作被当成瞬时故障反复重发。409 不可重试。
+	case errors.Is(err, ErrAlreadyTerminated):
+		return action.NewError(action.CodeConflict,
+			"该批次或代理已经终止过：终止日决定结转的损失金额，登记之后不可再改，平台也没有撤销终止的 Action。", err)
 	default:
-		// 库层 CHECK 违反等落这里：它们的文本带约束名，对调用方没用，
-		// 由 WriteError 统一收敛成 INTERNAL 并隐藏细节。
+		// 库层 CHECK 违反等落这里：它们的文本带约束名，对调用方没用。
+		//
+		// 原样返回**裸错误**（不包 *action.Error）是刻意的：内核看到非
+		// *Error 的失败会归一成 EXECUTION_FAILED 并换掉文案
+		// （action/kernel.go，XM-KERNEL-ERRCODE0），细节只进服务端日志。
+		//
+		// 注：这里曾写「由 WriteError 统一收敛成 INTERNAL」——**那是过期的**。
+		// 收敛发生在内核而不是 WriteError，结果码是 EXECUTION_FAILED（502）
+		// 而不是 INTERNAL（500）。行为一直如此，只是注释没跟上。
 		return err
 	}
 }

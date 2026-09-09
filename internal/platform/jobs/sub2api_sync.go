@@ -44,19 +44,51 @@ const (
 
 	// DefaultSub2APIRequestTimeout 是**单次**上游 HTTP 读取的超时。
 	//
-	// 比 sub2apiReadTimeout(20s) 小是有意的：三次读取串行跑，一个卡死的连接
-	// 不该把整轮的读取预算独吞。两层超时各管一段——这层管「一次请求」，
-	// 外面那层管「这一轮」。
+	// 比一组读取的预算小是有意的：四组读取串行跑，一个卡死的连接不该把整组
+	// 的读取预算独吞。两层超时各管一段——这层管「一次请求」，外面那层管
+	// 「一组」。
 	DefaultSub2APIRequestTimeout = 10 * time.Second
 
-	// sub2apiReadTimeout 只约束「读上游」这一段，不约束整个 Work。
-	//
-	// 分开是有意的：读超时必须还留得下时间把「同步失败」写进库。如果让
-	// River 的 JobTimeout（默认 1 分钟）直接掐掉整个 Work，超时那一轮就
-	// 什么都写不进去，看板只能靠 observed_at 变旧间接察觉——那是降级信号，
-	// 不是失败信号。20s 之后仍有约 40s 用于 5 次 upsert，绰绰有余。
-	sub2apiReadTimeout = 20 * time.Second
+	// sub2apiStallAllowancePerGroup / sub2apiWriteReserve 与 NewAPI 侧同型，
+	// 理由逐字见 newapi_sync.go 的同名常量。两条采集链路的网络特征相同，
+	// 两个不同的数字只会让人猜哪个才是「对的」。
+	sub2apiStallAllowancePerGroup = 2
+	sub2apiWriteReserve           = 20 * time.Second
 )
+
+// sub2apiReadStepNames 是一轮同步的串行读取链，顺序即执行顺序。
+// 用途与 newapiReadStepNames 逐字相同（预算长度 / 每组 deadline / 日志名）。
+var sub2apiReadStepNames = []string{"stats", "orders", "balances", "payments"}
+
+// sub2apiReadStepMetricKeys 给每组读取列出它喂的指标键，只用于日志定位。
+var sub2apiReadStepMetricKeys = map[string][]string{
+	"stats":    {sub2api.MetricUsersTotal, sub2api.MetricUsersBalance},
+	"orders":   {sub2api.MetricRevenueDaily, sub2api.MetricCostDaily},
+	"balances": {sub2api.MetricChannelBalance, sub2api.MetricChannelsStatus},
+	"payments": {sub2api.MetricPaymentsDaily},
+}
+
+// sub2apiGroupBudget 是**一组**读取的独立预算，见 newapiGroupBudget。
+func sub2apiGroupBudget(perRequestTimeout time.Duration) time.Duration {
+	if perRequestTimeout <= 0 {
+		perRequestTimeout = DefaultSub2APIRequestTimeout
+	}
+	return perRequestTimeout * sub2apiStallAllowancePerGroup
+}
+
+// sub2apiReadBudget = 组数 × 每组预算，见 newapiReadBudget。
+func sub2apiReadBudget(perRequestTimeout time.Duration, steps int) time.Duration {
+	if steps <= 0 {
+		steps = 1
+	}
+	return sub2apiGroupBudget(perRequestTimeout) * time.Duration(steps)
+}
+
+// sub2apiSyncJobTimeout 覆盖 River 的默认 JobTimeout（1 分钟），见
+// newapiSyncJobTimeout：不覆盖的话读预算抬过 ~40s 就等于没抬。
+func sub2apiSyncJobTimeout(perRequestTimeout time.Duration) time.Duration {
+	return sub2apiReadBudget(perRequestTimeout, len(sub2apiReadStepNames)) + sub2apiWriteReserve
+}
 
 // Sub2APIMode 决定周期任务用哪个 ReadClient 实现。
 type Sub2APIMode string
@@ -98,12 +130,16 @@ type ObservationStore interface {
 	UpsertWithSample(ctx context.Context, o ops.Observation) (ops.Observation, error)
 }
 
-// Sub2APIClientFactory 按需构造一个只读客户端。
+// Sub2APIClientFactory 按需构造一个只读客户端，并说出**本轮生效**的接入配置。
 //
 // 用工厂而不是直接持有一个 ReadClient：真实实现（XM-0017）需要在每轮同步
 // 时解析 CredentialRef、按连接配置建传输层，那是有生命周期的东西，不该在
 // 进程启动时构造一次然后一直握着。
-type Sub2APIClientFactory func(ctx context.Context) (sub2api.ReadClientV2, error)
+//
+// 第二个返回值的理由逐字见 NewAPIClientFactory：生效模式必须由工厂带出来，
+// 让调用方事后再查一次库会跨过 30s 的读取缓存 TTL，把「日志说的模式」和
+// 「实际读的上游」重新劈成两个事实。
+type Sub2APIClientFactory func(ctx context.Context) (sub2api.ReadClientV2, EffectiveConnectorConfig, error)
 
 // Sub2APIRealConfig 是 real 模式构造真实只读客户端所需的全部输入。
 //
@@ -160,17 +196,26 @@ func (c Sub2APIRealConfig) missing() []string {
 // connector.KindOf 归类后写成 SyncFailed 观测，看板显示「同步失败」
 // 并说得出失败原因，而不是数据静静停更（规格 §9.1）。
 func NewSub2APIClientFactory(mode Sub2APIMode, cfg Sub2APIRealConfig) Sub2APIClientFactory {
+	// 这条路上 env 缺省**就是**生效配置（没有动态来源可读），如实标注 env。
+	eff := EffectiveConnectorConfig{
+		Platform:      ConnectorPlatformSub2API,
+		Mode:          string(mode),
+		Source:        ModeSourceEnv,
+		EndpointHost:  endpointHost(cfg.Endpoint),
+		CredentialRef: cfg.CredentialRef,
+		AllowlistSize: len(cfg.TargetAllowlist),
+	}
 	// 形参是 context.Context 而不是具名 ctx：真实客户端的构造不做任何 I/O，
 	// 凭据在首次读取时才解析——那时用的是**请求的** ctx，取消才管用。
-	return func(context.Context) (sub2api.ReadClientV2, error) {
+	return func(context.Context) (sub2api.ReadClientV2, EffectiveConnectorConfig, error) {
 		switch mode {
 		case Sub2APIModeFake:
 			// 固定值即可：Fake 的意义是让上层不被真实凭据阻塞，不是模拟真实波动。
 			// 随机化只会让「这条数据是假的」更难被看出来。
-			return sub2api.NewFake(sub2api.FakeOptions{}), nil
+			return sub2api.NewFake(sub2api.FakeOptions{}), eff, nil
 		case Sub2APIModeReal:
 			if missing := cfg.missing(); len(missing) > 0 {
-				return nil, connector.NewError(
+				return nil, eff, connector.NewError(
 					connector.KindNotSupported, "sub2api.client.real",
 					fmt.Errorf("缺少 %s: %w", strings.Join(missing, ", "), ErrSub2APIRealClientUnavailable))
 			}
@@ -178,7 +223,7 @@ func NewSub2APIClientFactory(mode Sub2APIMode, cfg Sub2APIRealConfig) Sub2APICli
 			// 与配置**没写**分开归类：前者由客户端归 internal——是我们自己的部署
 			// 配置有问题，不是上游不支持；后者归 not_supported（见上面的 missing）。
 			// 凭据解析失败两者都不是，它在首次读取时归 auth。
-			return sub2api.NewClient(connector.Config{
+			client, err := sub2api.NewClient(connector.Config{
 				ServiceInstanceID: cfg.InstanceID,
 				Environment:       cfg.Environment,
 				Endpoint:          cfg.Endpoint,
@@ -186,10 +231,18 @@ func NewSub2APIClientFactory(mode Sub2APIMode, cfg Sub2APIRealConfig) Sub2APICli
 				TargetAllowlist:   cfg.TargetAllowlist,
 				Timeout:           cfg.Timeout,
 			}, cfg.Secrets)
+			if err != nil {
+				// 显式回 nil 接口：直接把类型化的 nil 指针塞进接口会让
+				// 调用方的 `client == nil` 判断恒假。
+				return nil, eff, err
+			}
+			return client, eff, nil
 		default:
-			return nil, connector.NewError(
-				connector.KindInternal, "sub2api.client.mode",
-				fmt.Errorf("未知的 sub2api 模式 %q", string(mode)))
+			// 模式定不下来：连「按什么在跑」都答不出，如实标 unknown。
+			return nil, EffectiveConnectorConfig{Platform: ConnectorPlatformSub2API, Source: ModeSourceUnknown},
+				connector.NewError(
+					connector.KindInternal, "sub2api.client.mode",
+					fmt.Errorf("未知的 sub2api 模式 %q", string(mode)))
 		}
 	}
 }
@@ -243,12 +296,15 @@ type Sub2APISyncOptions struct {
 	Environment string
 	// InstanceID 会成为观测的 Source。
 	InstanceID string
-	// Mode 只用于日志标注，不参与任何判定——真正决定读谁的是 NewClient。
-	// 运维必须能从日志里一眼看出这批数字是不是 Fake 产的。
-	Mode  Sub2APIMode
+	// 这里**没有** Mode 字段（XM-OPS-TRUTH 删掉了它），理由逐字见
+	// NewAPISyncOptions 同一位置的注释：它装的是 env 缺省，而 XM-CRED0 之后
+	// 生效模式每轮从库读，留着它只会让下一个人继续打一个说谎的字段。
 	Store ObservationStore
 	// NewClient 是 XM-0017 的注入点，也是单元测试注入 FakeOptions 的地方。
 	NewClient Sub2APIClientFactory
+	// RequestTimeout 是**单次**上游请求的超时，同时是读取预算的推导基数
+	// （见 sub2apiReadBudget）。零值回落 DefaultSub2APIRequestTimeout。
+	RequestTimeout time.Duration
 	// Now 可注入固定时钟；默认 time.Now。
 	Now func() time.Time
 	// ExpectedInterval is the effective cadence of this writer.  It is copied
@@ -266,9 +322,9 @@ type Sub2APISyncWorker struct {
 	logger           *slog.Logger
 	environment      string
 	instanceID       string
-	mode             Sub2APIMode
 	store            ObservationStore
 	newClient        Sub2APIClientFactory
+	requestTimeout   time.Duration
 	now              func() time.Time
 	expectedInterval time.Duration
 }
@@ -287,16 +343,24 @@ func NewSub2APISyncWorker(opts Sub2APISyncOptions) *Sub2APISyncWorker {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.RequestTimeout <= 0 {
+		opts.RequestTimeout = DefaultSub2APIRequestTimeout
+	}
 	return &Sub2APISyncWorker{
 		logger:           opts.Logger,
 		environment:      opts.Environment,
 		instanceID:       opts.InstanceID,
-		mode:             opts.Mode,
 		store:            opts.Store,
 		newClient:        opts.NewClient,
+		requestTimeout:   opts.RequestTimeout,
 		now:              opts.Now,
 		expectedInterval: opts.ExpectedInterval,
 	}
+}
+
+// Timeout 放宽本任务的执行期限，理由见 sub2apiSyncJobTimeout。
+func (w *Sub2APISyncWorker) Timeout(*river.Job[Sub2APISyncArgs]) time.Duration {
+	return sub2apiSyncJobTimeout(w.requestTimeout)
 }
 
 // Work 执行一轮同步。
@@ -326,7 +390,7 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 	// 显式声明为 UTC，而不是跟着进程所在机器的本地时区漂。
 	day := now.Format(sub2apiBusinessDayLayout)
 
-	stats, orders, directory, payments, readErrs := w.read(ctx, day)
+	stats, orders, directory, payments, readErrs, effective := w.read(ctx, job, day)
 
 	// 上下文被取消说明是本进程在关机，不是上游出问题。把它记成 failed 会让
 	// 看板把一次正常重启显示成同步故障——那是**假的**失败信号，比没有信号更糟。
@@ -380,7 +444,12 @@ func (w *Sub2APISyncWorker) Work(ctx context.Context, job *river.Job[Sub2APISync
 		errorCode = string(connector.KindOf(readErrs.first()))
 	}
 	w.logJob(ctx, job, level, "job_completed", failed == 0, errorCode,
-		slog.String("sub2api_mode", string(w.mode)),
+		// sub2api_mode 是**本轮生效**模式，不是 XM_SUB2API_MODE；
+		// 缺省值只出现在 worker_started 的 sub2api_mode_default 里。
+		// 理由逐字见 newapi_sync.go 的同一处。
+		slog.String("sub2api_mode", effective.Mode),
+		slog.String("sub2api_mode_source", effective.Source),
+		slog.Int("sub2api_config_version", effective.Version),
 		slog.String("source", w.instanceID),
 		slog.String("business_day", day),
 		slog.Int("metrics_total", len(observations)),
@@ -439,44 +508,117 @@ func (e sub2apiReadErrors) first() error {
 var errPaymentsCapabilityUnavailable = errors.New("sub2api: client does not implement PaymentsReadClient")
 
 // read 读取四组数据。客户端构造失败时四组一起归到同一个失败分类。
-func (w *Sub2APISyncWorker) read(ctx context.Context, day string) (
+//
+// 最后一个返回值是本轮生效的接入配置，由工厂带出来（见 Sub2APIClientFactory）。
+func (w *Sub2APISyncWorker) read(ctx context.Context, job *river.Job[Sub2APISyncArgs], day string) (
 	sub2api.UserStats, sub2api.OrderSummary, sub2api.ManagedChannelDirectory, sub2api.DailyPaymentSummary,
-	sub2apiReadErrors,
+	sub2apiReadErrors, EffectiveConnectorConfig,
 ) {
-	// 读上游单独限时，留出时间把失败写进库（见 sub2apiReadTimeout 注释）。
-	readCtx, cancel := context.WithTimeout(ctx, sub2apiReadTimeout)
+	// 读上游单独限时，留出时间把失败写进库（见 sub2apiReadBudget 注释）。
+	readCtx, cancel := context.WithTimeout(ctx, sub2apiReadBudget(w.requestTimeout, len(sub2apiReadStepNames)))
 	defer cancel()
 
-	client, err := w.newClient(readCtx)
+	client, effective, err := w.newClient(readCtx)
 	if err != nil {
 		return sub2api.UserStats{}, sub2api.OrderSummary{}, sub2api.ManagedChannelDirectory{}, sub2api.DailyPaymentSummary{},
-			sub2apiReadErrors{stats: err, orders: err, balances: err, payments: err}
+			sub2apiReadErrors{stats: err, orders: err, balances: err, payments: err}, effective
 	}
 
-	stats, statsErr := client.UserStats(readCtx)
-	orders, ordersErr := client.DailyOrders(readCtx, day)
-	directory, balancesErr := client.ChannelDirectory(readCtx)
-
-	// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
-	// 生产装配（NewSub2APIClientFactory）返回的客户端始终满足它，断言只在
-	// 测试用的窄接口客户端上才会落空，见 errPaymentsCapabilityUnavailable。
 	var (
-		payments    sub2api.DailyPaymentSummary
-		paymentsErr error
+		stats     sub2api.UserStats
+		orders    sub2api.OrderSummary
+		directory sub2api.ManagedChannelDirectory
+		payments  sub2api.DailyPaymentSummary
+		errs      sub2apiReadErrors
 	)
-	if pc, ok := client.(sub2api.PaymentsReadClient); ok {
-		payments, paymentsErr = pc.DailyPaymentSummary(readCtx, day)
-	} else {
-		paymentsErr = connector.NewError(connector.KindNotSupported,
-			"sub2api.payments.daily_read", errPaymentsCapabilityUnavailable)
+	// 每一组各开自己的 deadline，理由逐字见 newapi_sync.go 的 read：
+	// 四组共用一个整轮预算时，前面几组慢一点就会把后面几组判成 unavailable。
+	steps := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{"stats", func(c context.Context) error {
+			stats, errs.stats = client.UserStats(c)
+			return errs.stats
+		}},
+		{"orders", func(c context.Context) error {
+			orders, errs.orders = client.DailyOrders(c, day)
+			return errs.orders
+		}},
+		{"balances", func(c context.Context) error {
+			directory, errs.balances = client.ChannelDirectory(c)
+			return errs.balances
+		}},
+		// PaymentsReadClient 是叠加在 ReadClientV2 之上的独立切片（XM-PAY0）；
+		// 生产装配（NewSub2APIClientFactory）返回的客户端始终满足它，断言只在
+		// 测试用的窄接口客户端上才会落空，见 errPaymentsCapabilityUnavailable。
+		{"payments", func(c context.Context) error {
+			pc, ok := client.(sub2api.PaymentsReadClient)
+			if !ok {
+				errs.payments = connector.NewError(connector.KindNotSupported,
+					"sub2api.payments.daily_read", errPaymentsCapabilityUnavailable)
+				return errs.payments
+			}
+			payments, errs.payments = pc.DailyPaymentSummary(c, day)
+			return errs.payments
+		}},
+	}
+	groupBudget := sub2apiGroupBudget(w.requestTimeout)
+	for i, step := range steps {
+		remaining := time.Duration(0)
+		if deadline, ok := readCtx.Deadline(); ok {
+			remaining = time.Until(deadline)
+		}
+		groupCtx, cancelGroup := context.WithTimeout(readCtx, groupBudget)
+		started := time.Now()
+		stepErr := step.run(groupCtx)
+		elapsed := time.Since(started)
+		cancelGroup()
+		w.logUpstreamRead(ctx, job, i, step.name, elapsed, remaining, groupBudget, stepErr)
 	}
 
-	return stats, orders, directory, payments, sub2apiReadErrors{
-		stats:    statsErr,
-		orders:   ordersErr,
-		balances: balancesErr,
-		payments: paymentsErr,
+	return stats, orders, directory, payments, errs, effective
+}
+
+// logUpstreamRead 为每一组上游读取打一条耗时行，字段与理由逐字见
+// NewAPISyncWorker.logUpstreamRead。
+func (w *Sub2APISyncWorker) logUpstreamRead(
+	ctx context.Context, job *river.Job[Sub2APISyncArgs],
+	index int, step string, elapsed, roundRemaining, groupBudget time.Duration, err error,
+) {
+	logger := w.logger
+	if logger == nil {
+		logger = structuredDefaultLogger()
 	}
+	environment := w.environment
+	if strings.TrimSpace(environment) == "" {
+		environment = "unknown"
+	}
+	jobID := int64(0)
+	if job != nil && job.JobRow != nil {
+		jobID = job.ID
+	}
+	status, errorCode := "ok", ""
+	if err != nil {
+		status = "failed"
+		errorCode = string(connector.KindOf(err))
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "upstream_read",
+		slog.String("event", "upstream_read"),
+		slog.String("module", sub2apiSyncModule),
+		slog.String("environment", environment),
+		slog.String("principal_id", sub2apiSyncPrincipalID),
+		slog.Int64("job_id", jobID),
+		slog.String("job_kind", Sub2APISyncJobKind),
+		slog.String("read_step", step),
+		slog.Int("sequence", index+1),
+		slog.String("metric_keys", strings.Join(sub2apiReadStepMetricKeys[step], ",")),
+		slog.Int64("elapsed_ms", elapsed.Milliseconds()),
+		slog.String("status", status),
+		slog.String("error_code", errorCode),
+		slog.Int64("group_budget_ms", groupBudget.Milliseconds()),
+		slog.Int64("round_remaining_ms", roundRemaining.Milliseconds()),
+	)
 }
 
 // failureObservation 把一条成功形态的观测改写为失败观测。

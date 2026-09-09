@@ -247,17 +247,47 @@ try:
         fail("Worker 日志中没有可解析事件")
 except (OSError, json.JSONDecodeError):
     fail("无法解析本轮验证数据")
+# worker_started 只回答「这条采集链路开没开、来源标识是什么」。
+#
+# 它**不再**参与模式判定（XM-OPS-TRUTH）：那一行里的 {platform}_mode_default
+# 是环境变量给的缺省，后台热切换模式不重启容器它永远不变，与 --mode 期望
+# 什么本来就没关系。生产 env 缺省恰好一直是 fake，所以旧版这条判定在
+# --mode real 时本该一直红——它没红，只是因为没人在生产上跑过。
 starts = {}
 for row in worker_lines:
     if row.get("event") != "worker_started" or row.get("environment") != environment:
         continue
     for platform in platforms:
         source = row.get(f"{platform}_source")
-        if row.get(f"{platform}_sync_enabled") is True and row.get(f"{platform}_mode") == worker_mode and source:
+        if row.get(f"{platform}_sync_enabled") is True and source:
             starts[platform] = source
 missing_starts = [p for p in platforms if p not in starts]
 if missing_starts:
-    fail("worker mode/source mismatch: " + ",".join(missing_starts))
+    fail("worker sync disabled or source missing: " + ",".join(missing_starts))
+
+# 生效模式的判定改到这里：connector_config_applied 是 worker **每轮**用
+# jobs.ResolveEffectiveMode 解析出来、并且真的拿去建客户端的那一份配置
+# （ACCEPTANCE-LOG :82/:86 记的「需改为读 connector_config_applied」）。
+applied = {}
+for row in worker_lines:
+    if row.get("event") != "connector_config_applied" or row.get("environment") != environment:
+        continue
+    platform = row.get("platform")
+    if platform in platforms:
+        applied[platform] = row
+missing_applied = [p for p in platforms if p not in applied]
+if missing_applied:
+    fail("missing connector_config_applied: " + ",".join(missing_applied))
+applied_mismatch = []
+for platform in platforms:
+    row = applied[platform]
+    if row.get("mode") != worker_mode:
+        applied_mismatch.append(f"{platform}={row.get('mode')}")
+    elif requested_mode == "real" and row.get("config_source") != "database":
+        # real 必须来自后台那张表，不能是「env 缺省恰好也是 real」。
+        applied_mismatch.append(f"{platform}=source:{row.get('config_source')}")
+if applied_mismatch:
+    fail(f"effective mode mismatch (expected {worker_mode}): " + ",".join(applied_mismatch))
 
 # core.connector_config 校验：这是本轮真正生效的模式来源（XM-CRED0，worker
 # 每轮读取、切换不重启），与上面 worker 启动日志的快照是两件事——一次热切换
@@ -281,12 +311,16 @@ for row in connector_config_items:
         db_mode_by_platform[platform] = row_mode
 db_mode_mismatch = []
 for platform in platforms:
-    actual = db_mode_by_platform.get(platform, "fake")
-    if actual != worker_mode:
+    # 没有行时**不猜**（XM-OPS-TRUTH）：旧版这里写 .get(platform, "fake")，
+    # 是「没有行就是 fake」那套猜法的第四份拷贝。它只在「worker 的 env 缺省
+    # 恰好也是 fake」时答对，靠的是别处的事实。生效模式已经由上面的
+    # connector_config_applied 判定过了，这里只校验**存在的**行。
+    actual = db_mode_by_platform.get(platform)
+    if actual is not None and actual != worker_mode:
         db_mode_mismatch.append(f"{platform}={actual}")
 if db_mode_mismatch:
     fail(f"core.connector_config mode mismatch (expected {worker_mode}): " + ",".join(db_mode_mismatch))
-connector_config_summary = ",".join(f"{p}:{db_mode_by_platform.get(p, 'fake')}" for p in platforms)
+connector_config_summary = ",".join(f"{p}:{db_mode_by_platform.get(p, 'none')}" for p in platforms)
 
 if requested_mode == "real":
     demo = [p for p, source in starts.items() if source.endswith("-staging")]

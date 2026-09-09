@@ -52,7 +52,8 @@ func e2ePool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	if _, err := pool.Exec(ctx,
-		"TRUNCATE alerts.alert, alerts.alert_silence; TRUNCATE ops.metric_observation, ops.metric_observation_sample",
+		"TRUNCATE alerts.alert, alerts.alert_silence, alerts.upstream_version_ack; "+
+			"TRUNCATE ops.metric_observation, ops.metric_observation_sample",
 	); err != nil {
 		t.Fatalf("清空测试表失败: %v", err)
 	}
@@ -200,8 +201,12 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		// 账号，所以它每轮返回空清单——R5 因此不产出命中，前四条规则的
 		// 端到端断言不受影响。用真实现而不是内存假货，是为了让「装配起得来」
 		// 也被这条 e2e 覆盖到。
+		// 已核对的上游版本来源同样用真 Store（就是上面那一个）：本片新增的
+		// alerts.upstream_version.acknowledge 写进去的那张表，评估器读的必须
+		// 是同一张。用内存假货会让「Action 写了但规则读不到」这类装配错误
+		// 在端到端层继续隐身。
 		Evaluator: alerts.NewEvaluator(
-			opsStore, finance.NewSummaryStore(pool, nil), alerts.RuleConfig{}),
+			opsStore, finance.NewSummaryStore(pool, nil), alertStore, alerts.RuleConfig{}),
 		Notifier: e2eNotifier(t, bot),
 		Logger:   discardTestLogger(),
 		// 固定时钟：让「第二轮」「第三轮」之间的时间推进是可控的，
@@ -212,6 +217,34 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 }
 
 func (f *e2eFixture) tick(d time.Duration) { f.now = f.now.Add(d) }
+
+// writeRound 写一轮采集：最新态 + 一条历史样本，与生产的 sync worker 走的是
+// 同一个方法（UpsertWithSample）。
+//
+// 迟滞判据读的是**样本**，只写最新态的话规则看不到历史——那样这条 e2e 会
+// 因为「一条样本都没有」而恒不命中，看起来像迟滞坏了，其实是夹具没写全。
+func (f *e2eFixture) writeRound(t *testing.T, o ops.Observation) {
+	t.Helper()
+	if _, err := f.ops.UpsertWithSample(context.Background(), o); err != nil {
+		t.Fatalf("写观测 %s: %v", o.MetricKey, err)
+	}
+}
+
+// openFailure 跑满迟滞门槛，让 R1 真的开出来；返回最后一轮的结果。
+//
+// 轮数从 DefaultRuleConfig() 取，不写字面量：N 只有一处定义。
+func (f *e2eFixture) openFailure(t *testing.T) alerts.Result {
+	t.Helper()
+	var res alerts.Result
+	for i := 0; i < alerts.DefaultRuleConfig().SyncFailedHysteresisRounds; i++ {
+		if i > 0 {
+			f.tick(time.Minute)
+		}
+		f.writeRound(t, failedObservation(f.now))
+		res = f.reconcile(t)
+	}
+	return res
+}
 
 func (f *e2eFixture) reconcile(t *testing.T) alerts.Result {
 	t.Helper()
@@ -228,8 +261,10 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 	f := newE2EFixture(t)
 	ctx := context.Background()
 
+	n := alerts.DefaultRuleConfig().SyncFailedHysteresisRounds
+
 	// --- 第一轮：健康，一条告警都不该有 ---
-	writeObservation(t, f.ops, healthyObservation(f.now))
+	f.writeRound(t, healthyObservation(f.now))
 	if res := f.reconcile(t); res.Findings != 0 || res.Opened != 0 {
 		t.Fatalf("健康时不该产生告警: %+v", res)
 	}
@@ -237,12 +272,33 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 		t.Fatalf("健康时不该投递任何消息，实际 %d 条", len(f.bot.sent()))
 	}
 
-	// --- 第二轮：上游挂了 ---
+	// --- 上游挂了：**头 N-1 轮不报**（迟滞），第 N 轮才开 ---
+	//
+	// 这几轮是 2026-09-08 那格「一失败下一分钟就报、一成功下一分钟就撤」的
+	// 直接反例。suppressed 必须逐轮可见，否则迟滞本身就成了一个安静的抑制器。
 	f.tick(time.Minute)
-	writeObservation(t, f.ops, failedObservation(f.now))
+	for i := 1; i < n; i++ {
+		f.writeRound(t, failedObservation(f.now))
+		res := f.reconcile(t)
+		if res.Opened != 0 || res.Findings != 0 {
+			t.Fatalf("第 %d 轮失败（未满 %d 轮）不该开告警: %+v", i, n, res)
+		}
+		if res.HysteresisSuppressed != 1 {
+			t.Fatalf("被迟滞压住的命中必须计数可见: %+v", res)
+		}
+		if len(f.bot.sent()) != 0 {
+			t.Fatalf("未满门槛不该投递，实际 %d 条", len(f.bot.sent()))
+		}
+		f.tick(time.Minute)
+	}
+
+	f.writeRound(t, failedObservation(f.now))
 	res := f.reconcile(t)
 	if res.Opened != 1 {
-		t.Fatalf("应新开一条告警: %+v", res)
+		t.Fatalf("连续第 %d 轮失败应新开一条告警: %+v", n, res)
+	}
+	if res.HysteresisSuppressed != 0 {
+		t.Fatalf("门槛已过就不该再算作被压住: %+v", res)
 	}
 	if res.Delivered != 1 {
 		t.Fatalf("应投递一条: %+v", res)
@@ -285,12 +341,12 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 		t.Fatalf("chat_id 不对: %v", sent[0]["chat_id"])
 	}
 
-	// --- 第三轮：问题还在。去重成一条，且**不重复投递** ---
+	// --- 下一轮：问题还在。去重成一条，且**不重复投递** ---
 	f.tick(time.Minute)
-	writeObservation(t, f.ops, failedObservation(f.now))
+	f.writeRound(t, failedObservation(f.now))
 	res = f.reconcile(t)
 	if res.Opened != 0 || res.Merged != 1 {
-		t.Fatalf("第三轮应合并而不是新开: %+v", res)
+		t.Fatalf("持续命中应合并而不是新开: %+v", res)
 	}
 	if res.Delivered != 0 {
 		t.Fatalf("已投递过的告警不该每轮重发: %+v", res)
@@ -308,12 +364,36 @@ func TestEndToEndRealAlertFiresAndDelivers(t *testing.T) {
 			len(active), active[0].FireCount)
 	}
 
-	// --- 第四轮：上游恢复。告警自动 RESOLVED ---
+	// --- 上游恢复：**头 N-1 轮不撤**，第 N 轮才自动 RESOLVED ---
+	//
+	// 这一段是迟滞的另一半，也是整条链路上最容易写成恒真的地方：它依赖
+	// Reconciler 把「本轮开始时还活着的告警」传进 Evaluate。在 Evaluator 层
+	// 单测里那个集合是测试自己伪造的，怎么写都会绿；只有从 Reconciler
+	// （这里连真库）打进来，才证明那条线真的接上了。
+	for i := 1; i < n; i++ {
+		f.tick(time.Minute)
+		f.writeRound(t, healthyObservation(f.now))
+		res = f.reconcile(t)
+		if res.Resolved != 0 {
+			t.Fatalf("只恢复了 %d 轮（不足 %d 轮）不该解决: %+v", i, n, res)
+		}
+		if res.HysteresisHeld != 1 {
+			t.Fatalf("被迟滞保持的告警必须计数可见: %+v", res)
+		}
+		stillActive, err := f.alerts.ListActive(ctx, e2eEnv)
+		if err != nil {
+			t.Fatalf("ListActive: %v", err)
+		}
+		if len(stillActive) != 1 {
+			t.Fatalf("恢复未满门槛时告警应仍在: %+v", stillActive)
+		}
+	}
+
 	f.tick(time.Minute)
-	writeObservation(t, f.ops, healthyObservation(f.now))
+	f.writeRound(t, healthyObservation(f.now))
 	res = f.reconcile(t)
 	if res.Resolved != 1 {
-		t.Fatalf("恢复后应自动解决: %+v", res)
+		t.Fatalf("连续恢复 %d 轮后应自动解决: %+v", n, res)
 	}
 	active, err = f.alerts.ListActive(ctx, e2eEnv)
 	if err != nil {
@@ -340,8 +420,7 @@ func TestEndToEndNotifyFailurePersistsWithoutLeakingToken(t *testing.T) {
 	ctx := context.Background()
 	f.bot.setFail(true)
 
-	writeObservation(t, f.ops, failedObservation(f.now))
-	res := f.reconcile(t)
+	res := f.openFailure(t)
 	if res.Opened != 1 {
 		t.Fatalf("应新开一条告警: %+v", res)
 	}
@@ -383,7 +462,7 @@ func TestEndToEndNotifyFailurePersistsWithoutLeakingToken(t *testing.T) {
 	// --- 下一轮自动重试；这次通了 ---
 	f.bot.setFail(false)
 	f.tick(time.Minute)
-	writeObservation(t, f.ops, failedObservation(f.now))
+	f.writeRound(t, failedObservation(f.now))
 	res = f.reconcile(t)
 	if res.Delivered != 1 {
 		t.Fatalf("投递失败的告警下一轮应自动重试并成功: %+v", res)
@@ -412,8 +491,7 @@ func TestEndToEndSilenceSuppressesDelivery(t *testing.T) {
 		t.Fatalf("CreateSilence: %v", err)
 	}
 
-	writeObservation(t, f.ops, failedObservation(f.now))
-	res := f.reconcile(t)
+	res := f.openFailure(t)
 	if res.Opened != 1 {
 		t.Fatalf("静默不阻止告警落库（只是不投递）: %+v", res)
 	}
@@ -431,7 +509,7 @@ func TestEndToEndSilenceSuppressesDelivery(t *testing.T) {
 
 	// --- 窗口过期，条件仍成立 ---
 	f.tick(31 * time.Minute)
-	writeObservation(t, f.ops, failedObservation(f.now))
+	f.writeRound(t, failedObservation(f.now))
 	res = f.reconcile(t)
 	if res.Opened != 0 {
 		t.Fatalf("窗口过期不该新开一条——它从头到尾就是同一个问题: %+v", res)

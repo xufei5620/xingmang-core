@@ -164,7 +164,12 @@ func domainError(err error) error {
 	case errors.Is(err, ErrDeclarationNotActive):
 		return action.NewError(action.CodePreconditionFailed, "该声明当前不是 active 状态（已取消，不能更新/重复取消）", err)
 	case errors.Is(err, ErrVersionConflict):
-		return action.NewError(action.CodePreconditionFailed, "expected_version 与当前版本不一致，请刷新后重试", err)
+		// REVISION_CONFLICT（409）而不是 PRECONDITION_FAILED（412）：
+		// 412 在 RFC 9110 里是给**条件请求头**（If-Match 之类）用的，而
+		// expected_version 是请求体里的字段；「资源在你读它之后被人改过」
+		// 正是 409 的经典场景。finance 的 channel binding 是同一个概念，
+		// 两处用同一个码（见 finance/channel_binding_actions.go）。
+		return action.NewError(action.CodeRevisionConflict, "expected_version 与当前版本不一致，请刷新后重试", err)
 	default:
 		return action.NewError(action.CodeExecutionFailed, "检测任务仓储写入失败", err)
 	}
