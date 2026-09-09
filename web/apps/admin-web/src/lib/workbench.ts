@@ -521,16 +521,19 @@ export interface FocusRow {
  *  理由不是审美：一个 87 分的看板没法回答「我现在该去修哪个」，而把三条
  *  相互无关的信号平均起来，任何一条恶化都会被另外两条稀释掉。 */
 export function focusRows(alerts: readonly AlertItem[]): FocusRow[] {
-  const active = alerts.filter((a) => a.status !== "RESOLVED");
+  // 与 `urgentCount` 同一口径：已确认的不算「未处理」。第四轮把「紧急」格改成
+  // 不数已确认的之后，这一行若仍按「未解决」数，同一屏会出现「紧急 0」旁边写着
+  // 「1 条严重告警未解决」——两处说的是同一批告警，口径必须只有一个。
+  const active = alerts.filter((a) => a.status !== "RESOLVED" && a.status !== "ACKNOWLEDGED");
   const critical = active.filter((a) => a.severity === "critical").length;
   const warning = active.filter((a) => a.severity === "warning").length;
 
   const reliability: FocusRow =
     critical > 0
-      ? { domain: "可靠性", count: critical + warning, tone: "danger", state: "严重", detail: `${critical} 条严重告警未解决` }
+      ? { domain: "可靠性", count: critical + warning, tone: "danger", state: "严重", detail: `${critical} 条严重告警未处理` }
       : warning > 0
-        ? { domain: "可靠性", count: warning, tone: "warning", state: "需关注", detail: `${warning} 条警告未解决` }
-        : { domain: "可靠性", count: 0, tone: "success", state: "正常", detail: "当前没有未解决的告警" };
+        ? { domain: "可靠性", count: warning, tone: "warning", state: "需关注", detail: `${warning} 条警告未处理` }
+        : { domain: "可靠性", count: 0, tone: "success", state: "正常", detail: "当前没有未处理的告警（已确认的不算）" };
 
   return [
     reliability,

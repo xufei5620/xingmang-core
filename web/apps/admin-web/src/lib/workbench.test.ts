@@ -736,6 +736,18 @@ describe("运营焦点：三个领域分开，绝不合成总健康分", () => {
     expect(focusRows([])[0]?.state).toBe("正常");
   });
 
+  it("可靠性与「紧急」同一口径：已确认的严重告警不算，已静默的仍算", () => {
+    // 第四轮把「紧急」改成不数已确认的之后，这一行若仍按「未解决」数，
+    // 同一屏会并排出现「紧急 0」与「1 条严重告警未解决」。判据只能有一个。
+    const acknowledged = focusRows([alert({ severity: "critical", status: "ACKNOWLEDGED" })])[0];
+    expect(acknowledged?.state).toBe("正常");
+    expect(acknowledged?.count).toBe(0);
+    expect(acknowledged?.detail).toContain("已确认的不算");
+    // 对照组：没被确认的照常数；静默只是捂嘴，没人认领，仍要算
+    expect(focusRows([alert({ severity: "critical", status: "OPEN" })])[0]?.detail).toBe("1 条严重告警未处理");
+    expect(focusRows([alert({ severity: "critical", status: "SILENCED" })])[0]?.state).toBe("严重");
+  });
+
   it("财务与安全没有数据源，计数是 undefined 而不是 0", () => {
     // 0 会被读成「这一类没有问题」，而事实是我们还没接这条线
     const rows = focusRows([alert({ severity: "critical" })]);
