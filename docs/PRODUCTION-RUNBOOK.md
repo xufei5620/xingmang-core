@@ -73,13 +73,16 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 > 历来都是绕过去的，只是没人写回来。下一个人照抄会以为自己的环境坏了，所以
 > 先列在这里；每条都给出实测结论，不是猜测。
 >
-> **① `git verify-commit HEAD` 从来没通过过。** 它带 `throw`，要求源码提交本身
-> 已签名。实测 `v0.1.0-rc100/101/102/103-signed` 四个 tag 各自指向的提交，
+> **① `git verify-commit HEAD` 从来没通过过——2026-09-09 已修，本条留作记述。**
+> 它带 `throw`，要求源码提交本身已签名。实测
+> `v0.1.0-rc100/101/102/103-signed` 四个 tag 各自指向的提交，
 > `%G?` **全是 `N`（无签名）**，包括生产在跑的 `331777a`。实际做法一直是
 > **tag 签名、提交不签**（`commit.gpgsign` 未设，`user.signingkey` 倒是配了
 > `~/.ssh/invoice_release_signing_ed25519`、`gpg.format=ssh`）。
-> **要么真的开始签提交，要么把这一步改成实情——现在这样是最坏的：**
-> 文档写着一道闸，而没人过得去。
+> 负责人 2026-09-09 定案：**改文档，不改成签提交**。下面镜像门禁那段已删掉
+> `git verify-commit HEAD` 及其 `throw`，判据换成「`git verify-tag` Good
+> **且** 签名 tag 剥离后的提交逐字等于 HEAD」——这两步本来就在，只是从没被
+> 认作那道闸。为什么信任锚是 tag 不是提交，写在那段代码块后面。
 >
 > **② RC49–52 失败证据锚点必须在证据所在的工作树里跑。** 四个
 > `verify-rcNN-failure-evidence.ps1` 检查的是 `release/` 下的目录名集合，而
@@ -199,21 +202,42 @@ $statusLines = @(git status --porcelain=v1)
 $statusExit = $LASTEXITCODE
 if ($statusExit -ne 0) { throw "RC100 git status failed with exit $statusExit" }
 if ($statusLines.Count -ne 0) { throw 'RC100 source worktree is dirty' }
-git verify-commit HEAD
-$commitVerifyExit = $LASTEXITCODE
-if ($commitVerifyExit -ne 0) { throw "RC100 source commit signature verification failed with exit $commitVerifyExit" }
+# 这里**没有** `git verify-commit HEAD`。本仓库的信任锚是**签名 tag**，不是提交：
+# 提交本身从不签名（`commit.gpgsign` 未设），四版实测 `%G?` 全是 `N`。判据换成
+# 下面三步的合取——签名 tag 打出来、`git verify-tag` 回 Good、该 tag 剥离后的提交
+# 逐字等于 HEAD——三步齐了才算「这份源码被发布者签过」。理由见本代码块后一段。
+# 2026-09-09 负责人定案：改文档，不改成签提交。
 git tag -s -a v0.1.0-rc107-signed -m 'RC100 image-security release candidate'
 $tagCreateExit = $LASTEXITCODE
 if ($tagCreateExit -ne 0) { throw "RC100 signed tag creation failed with exit $tagCreateExit" }
+# 信任锚 (1/2)：tag 上的 Ed25519 签名必须 Good。
 git verify-tag refs/tags/v0.1.0-rc107-signed
 $tagVerifyExit = $LASTEXITCODE
 if ($tagVerifyExit -ne 0) { throw "RC100 tag signature verification failed with exit $tagVerifyExit" }
+# 信任锚 (2/2)：tag 剥离后的提交必须逐字等于候选 HEAD，否则签的不是这份源码。
 $tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc107-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 $headLines = @(git rev-parse --verify HEAD)
 $headExit = $LASTEXITCODE
 if ($tagHeadExit -ne 0 -or $headExit -ne 0 -or ($tagHeadLines -join '').Trim() -cne ($headLines -join '').Trim()) { throw 'RC100 signed tag does not peel to candidate HEAD' }
 ```
+
+**为什么信任锚是 tag 而不是提交。** 一版 RC 的提交不是一个人、一次坐下来产出的：
+每个切片跑在自己的工作流/子代理里，各自提交、各自合并，最后才由主控者把它们
+收成一版。给这样一串提交逐个签名，等于把发布签名密钥摊给每一条产线，密钥的
+使用面从「一版一次」变成「一版几十次」，而它保护的东西并没有变多——真正要证明的
+是「**这一个**提交状态被发布者认可为可发布」，那是一个点，不是一条链。所以密钥
+只在发布当天由主控者用一次：`git tag -s` 把发布身份钉在候选提交上，`git verify-tag`
+证明签名有效，剥离比对证明它钉的就是眼前这份源码。提交由谁写、经过几次合并，
+都被这一次签名一并覆盖。
+
+脚本侧一直就是这么做的：`scripts/verify-release-image-artifacts.ps1`
+带 `-RequireTransferReady` 时，要求那个名字解析成 annotated tag 对象、
+`git verify-tag` 通过、剥离得到一个 commit，再拿这个提交跟产物清单里记录的
+git HEAD 比对（`Assert-TransferReadyManifest -ExpectedGitHead`）。
+`scripts/release-image-gate.ps1` 自己**不**碰 tag，绑定全在这一步。
+**仓库里没有任何脚本调用 `git verify-commit`**（`git grep` 过，只有文档里有）。
+手册与门禁脚本从这一版起说同一句话。
 
 Then complete the RC100 image gate from that exact signed source.  It builds all
 nine manifest-bound images: API, PDF scanner, tools, web, source agent, derived
@@ -2879,7 +2903,9 @@ keys. After traffic is accepted:
 - stop user/source ingress before restoring a database;
 - preserve current database/documents/audit as incident evidence;
 - application images may be rolled back only if their declared migration
-  compatibility includes the current schema;
+  compatibility includes the current schema; when the version being rolled back
+  **added a migration**, redeploying the previous image alone is not a rollback
+  and the old image will refuse to start—follow 12.1 instead;
 - after migration 0013 or 0014 is registered, never roll back to the pre-RC39 invoice
   API image: its readiness path scans the parked-event backlog. Keep ingress
   closed and forward-fix, or restore the complete matched pre-RC39 snapshot in
@@ -2904,6 +2930,107 @@ keys. After traffic is accepted:
   `CONSOLE_ASSERTION_ENABLED`/`OIDC_ADMIN_LOGIN_ENABLED` was most recently
   changed back to its prior value and restart `api`; zero migration,
   zero schema change, Keycloak unaffected either direction.
+
+### 12.1 带迁移的发布如何回滚
+
+**「重新部署上一版镜像即可」对带新迁移的版本是假的。** API 启动时
+`backend/internal/migrate/migrate.go:75,147` 把 `public.schema_migrations` 里的
+记录与**二进制内嵌**的迁移文件集合做**精确比对**：库里多出一条二进制没有的，
+直接返回 `database contains unknown migration <文件名>` 并拒绝启动。所以新迁移
+一旦打上，前一版镜像就**起不来**——不是慢、不是降级，是起不来。
+
+适用范围：任何「本版新增了 `backend/migrations/*.sql`」的 RC。已知的两笔——
+RC107 的 `0032_eligibility_freezes_open_revision_index.sql`（部分索引），
+以及 L2 待发的 `0033`（`ALTER TABLE` 加列）。
+
+回滚是**两步**，不是一步，顺序不能反：
+
+**第一步：撤掉迁移账本记录（owner 角色）。** 只有 owner 能写
+`public.schema_migrations`——`invoice_app` 对它是
+`has_table_privilege` 逐项实测的 `t|f|f|f|f|f|f`，**只有 SELECT**（3.1 节留有取证）。
+
+**唯一的路是进 `postgres` 容器用 `psql`。** 第 11 节 `document-gc` /
+`oidc-logout-retention` 那套
+`--database-url-file /run/secrets/invoice_owner_database_url` 的 tools 镜像写法
+**在这里用不了**：`invoice-system-tools` 里只有十四个具名 Go 二进制加 qpdf
+（`backend/Dockerfile` 的 `tools` 阶段），**没有 psql、也没有任何执行任意 SQL 的
+入口**；`--profile tools` 能起的七个一次性作业（`migrate`、`permissions`、
+`bootstrap-settings`、`bootstrap-sources`、`document-gc`、`oidc-logout-retention`、
+`oidc-preflight`）没有一个会删账本记录。owner 连接串那个 secret 文件因此与本步骤
+无关，不要为了它去翻 `secrets/`。
+
+**先 `SELECT`，确认它只命中一行**，再 `DELETE` 那一行。命中零行说明库里根本没有
+这条迁移（回滚对象搞错了）；命中多行说明账本本身已经坏了。两种情况都停下来上报，
+不要继续：
+
+```bash
+# 与本手册 3.1 节取证用的是同一形状。先看：
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At \
+  -c "SELECT name FROM public.schema_migrations WHERE name='0032_eligibility_freezes_open_revision_index.sql'"
+
+# 确认输出恰好是那一个文件名、恰好一行之后，再删：
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
+  -f deploy/docker-compose.prod.yml exec -T postgres \
+  psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
+  -c "DELETE FROM public.schema_migrations WHERE name='0032_eligibility_freezes_open_revision_index.sql'"
+```
+
+**表结构变更按需还原，分两类判断：**
+
+- **加索引**（如 `0032` 的 `eligibility_freezes_open_revision_idx`）：**可以留着**。
+  旧版二进制不认识它，但索引不改变查询结果，只影响计划；留着无害，回滚路径越短
+  越好。要干净就 `DROP INDEX IF EXISTS <索引名>;`。
+- **加列**（如 `0033` 的 `ALTER TABLE`）：`DROP COLUMN` **之前先评估数据**。新版
+  在这段时间里往新列写过的东西，`DROP COLUMN` 之后不可恢复。若旧版对该列有默认
+  值、非空或触发器上的依赖，`DROP COLUMN` 还可能连带失败。可行时优先**留列不删**
+  ——旧版二进制不 SELECT 它就不受影响；确需删除时，先把该列的现值导出留证。
+- **改列类型、删列、加非空约束**：不在本节的「两步」范围内。这类迁移不可逆，
+  回滚只能走第 11 节的「恢复匹配的数据库+文档备份到隔离栈」，按§12 的常规条款走。
+
+**第二步：按常规 roll-forward 到旧版。** 账本记录撤掉之后，旧版镜像的迁移集合
+与库里的记录重新一致，才能启动：
+
+```bash
+bash deploy/roll-forward.sh <旧版 release commit sha>
+```
+
+它的 `[0/6]` migrate 与 `[0b/6]` permissions 会照常跑；旧版的迁移集合是新版的
+真子集，migrate 一步不会再做任何事，permissions 一步幂等。
+
+**两步都是 Platform Lifecycle Operation，都需负责人批准后执行。** 第一步是对生产
+账本的写操作，第二步是生产版本切换；不要因为第一步「只有一条 DELETE」就把它当
+例行操作。执行前后各留一份 `SELECT name,checksum FROM public.schema_migrations
+ORDER BY name` 的快照进部署记录目录。
+
+**L2（`0033`，`ALTER TABLE` 加列）发布前必须先演练一次这条流程。** RC107 之所以
+把 L2 留到下一版，正是因为 `0032` 打上之后当天没有可回滚的目标构建、这条流程也
+还没写下来。
+
+**仓库里没有现成脚本能直接跑这场演练**，要按下面的判据手工搭一次隔离栈。两个现成
+脚本各只给了半边形状，都不能当载体，别指望它们：
+
+- `deploy/backup/restore-drill.sh`（第 11 节）只起一个 `invoice-postgres` 容器把
+  签名备份恢复进去，再跑几个 `invoice-backup-verify` 一次性作业，**从不起 api**，
+  也**不把 schema 推到候选版迁移集**（恢复出来的就是当前运行版的迁移集），
+  收尾时 cleanup trap 把它建的网络和容器全拆掉。可抄的是它的隔离方式。
+- `deploy/rehearsal/shadow-eval.sh`（11.2 节）确实会用候选 tools 镜像的
+  `invoice-migrate` 把恢复出来的库推到**候选版**迁移集——正是演练需要的前半段
+  ——但它随后只跑资格投影评估器，同样**不起 api**、不做版本切换，退出即拆。
+
+演练必须**依次**证明四件事，缺一件就不算过：
+
+1. 隔离栈的库处在候选版迁移集上：`schema_migrations` 里查得到 `0033` 那一行；
+2. 在同一个隔离栈上起**上一版**的 api 镜像，它**确实起不来**，日志里是
+   `database contains unknown migration 0033_...`——不是超时，不是别的错。
+   **这一条是在证演练本身没做空**：少了它，后面两条可以在一个根本没打过 `0033`
+   的库上全绿；
+3. 按第一步做完 `SELECT` 核对与 `DELETE`，并按加列那条做完 `DROP COLUMN` 的数据
+   评估（导出现值留证，或明确记下「留列不删」及理由）；
+4. 上一版镜像在**同一个**隔离栈里起得来，healthz/readyz 到 200。
+
+演练不过，`0033` 不发。演练记录连同第 2 条的原始容器日志一并进部署记录目录。
 
 ## 13. Final go/no-go
 
