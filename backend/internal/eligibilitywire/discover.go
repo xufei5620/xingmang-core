@@ -213,7 +213,14 @@ func scanPackageDir(scan *StatusScan, dir, rel string) error {
 		files = append(files, file)
 		relOf[file] = rel + "/" + name
 	}
-	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	// Uses is recorded alongside Types because the passthrough rule has to ask
+	// what the BASE of a selector resolves to -- a package, a variable, or
+	// nothing at all. Identifier resolution survives the errors that the stub
+	// importer causes for cross-package TYPES; see passthrough.go.
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{},
+		Uses:  map[*ast.Ident]types.Object{},
+	}
 	config := types.Config{
 		Importer:    stubImporter{},
 		FakeImportC: true,
@@ -251,7 +258,7 @@ func scanTypedFile(scan *StatusScan, fset *token.FileSet, info *types.Info, file
 			record(value, LiteralAssignment, expr.Pos(), fn)
 			return nil
 		}
-		if isStatusPassthrough(expr) {
+		if isStatusPassthrough(info, expr) {
 			return nil
 		}
 		return fmt.Errorf(
@@ -269,7 +276,7 @@ func scanTypedFile(scan *StatusScan, fset *token.FileSet, info *types.Info, file
 			switch typed := n.(type) {
 			case *ast.AssignStmt:
 				for i, lhs := range typed.Lhs {
-					if !isStatusPassthrough(lhs) {
+					if !isStatusField(lhs) {
 						continue
 					}
 					if len(typed.Lhs) != len(typed.Rhs) {
@@ -357,12 +364,44 @@ func constantString(info *types.Info, expr ast.Expr) (string, bool) {
 	return "", false
 }
 
-// isStatusPassthrough reports whether expr is `<anything>.EligibilityStatus`.
-// On the left it selects the field being written; on the right it is a value
-// copied from another status field, which introduces no new vocabulary.
-func isStatusPassthrough(expr ast.Expr) bool {
-	selector, ok := ast.Unparen(expr).(*ast.SelectorExpr)
-	return ok && selector.Sel != nil && selector.Sel.Name == "EligibilityStatus"
+// isStatusField reports whether expr is `<anything>.EligibilityStatus`. This is
+// the POSITION test: on the left of an assignment it selects the field being
+// written, and a write to another package's status field is still a write this
+// scan has to account for, so the name alone is the right question here.
+//
+// Pointer derefs are unwrapped, matching what isUnitCodeExpr does on the other
+// scan. Without that, `*row.EligibilityStatus` was not a status position at all,
+// which happened to make it refused for the WRONG reason -- and a probe written
+// against that shape passes whether the passthrough rule is right or not. A
+// deref of a `*string` status field is an ordinary read; whether it counts as a
+// copy is isStatusPassthrough's decision to make, not this function's.
+func isStatusField(expr ast.Expr) bool {
+	for {
+		switch typed := ast.Unparen(expr).(type) {
+		case *ast.StarExpr:
+			expr = typed.X
+		case *ast.SelectorExpr:
+			return typed.Sel != nil && typed.Sel.Name == "EligibilityStatus"
+		default:
+			return false
+		}
+	}
+}
+
+// isStatusPassthrough reports whether expr READS a status from a value this
+// scan can account for, which introduces no new vocabulary.
+//
+// This is a different question from isStatusField, and conflating the two is
+// the bug this function had until the unit-code scan's review turned it up:
+// `l.EligibilityStatus = zzelsewhere.EligibilityStatus` ends in the right name,
+// so it counted as "a copy of another status field" -- but the thing being
+// copied lives in a package this scan never reads, and its vocabulary is
+// therefore unknown. That is what the refusal path exists for.
+//
+// The base-of-the-selector rule is shared with the unit-code scan; see
+// passthrough.go.
+func isStatusPassthrough(info *types.Info, expr ast.Expr) bool {
+	return isStatusField(expr) && isCopyOfAReadableValue(info, expr)
 }
 
 // --- persisted statuses, discovered from the migrations -------------------

@@ -611,65 +611,17 @@ func isUnitCodeKey(key ast.Expr) bool {
 // isUnitCodePassthrough reports whether expr is a unit code copied from a value
 // this scan can see -- which introduces no new vocabulary.
 //
-// The name alone is NOT enough, and the first cut of this function getting that
-// wrong is what review caught: it accepted any `<something>.UnitCode`, so
+// Naming the field is not enough, and the first cut of this function getting
+// that wrong is what review caught: it accepted any `<something>.UnitCode`, so
 // `m.UnitCode = zzelsewhere.WalletUnitCode` -- another package's variable, whose
-// contents this scan never reads -- was waved through as "a copy". A value that
-// comes from outside the scanned source is precisely what the refusal path
-// exists for, and calling it a copy is the silent-gap answer wearing the name
-// of a safe one.
+// contents this scan never reads -- was waved through as "a copy".
 //
-// So the BASE of the selector has to resolve, here, to something that is not a
-// package:
-//
-//   - `payload.UnitCode`, `*payload.WalletUnitCode`, `unitCode` -- the base is a
-//     variable or parameter in this package, so the value came from somewhere
-//     this scan walked (or from a caller, which the contract gate covers by
-//     going red when nothing emits a declared code). Passthrough.
-//   - `somepkg.WalletUnitCode` -- the base resolves to a *types.PkgName.
-//     Refused.
-//   - `zzelsewhere.WalletUnitCode` where zzelsewhere is not imported at all --
-//     the base resolves to nothing. Also refused: "I could not tell what this
-//     is" must never share an answer with "this is fine".
-//
-// Identifier resolution is used rather than the base's TYPE on purpose. The
-// stub importer leaves every imported type invalid, so a type-based rule would
-// refuse `item.UnitCode` for an `item` whose struct type lives in another
-// package -- ordinary, correct code all over postgresstore and application.
+// The second half of the judgement lives in passthrough.go and is shared with
+// the eligibility_status scan, which had the identical hole. One rule, one
+// place: two near-identical copies of a judgement like this drift, and the one
+// nobody is looking at is the one that stays wrong.
 func isUnitCodePassthrough(info *types.Info, expr ast.Expr) bool {
-	if !isUnitCodeExpr(expr) {
-		return false
-	}
-	base, ok := leftmostIdent(expr)
-	if !ok {
-		// `f().UnitCode`, `<-ch.UnitCode`: no identifier to ask about.
-		return false
-	}
-	object, resolved := info.Uses[base]
-	if !resolved || object == nil {
-		return false
-	}
-	_, isPackage := object.(*types.PkgName)
-	return !isPackage
-}
-
-// leftmostIdent walks down the left spine of a selector/deref/index chain to
-// the identifier everything else hangs off. `*a.b[0].UnitCode` yields `a`.
-func leftmostIdent(expr ast.Expr) (*ast.Ident, bool) {
-	for {
-		switch typed := ast.Unparen(expr).(type) {
-		case *ast.Ident:
-			return typed, true
-		case *ast.SelectorExpr:
-			expr = typed.X
-		case *ast.StarExpr:
-			expr = typed.X
-		case *ast.IndexExpr:
-			expr = typed.X
-		default:
-			return nil, false
-		}
-	}
+	return isUnitCodeExpr(expr) && isCopyOfAReadableValue(info, expr)
 }
 
 // DiscoverUnitCodes is the vocabulary the code introduces, for the contract

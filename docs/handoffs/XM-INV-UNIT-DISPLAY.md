@@ -1,10 +1,44 @@
 # XM-INV-UNIT-DISPLAY —— 用户端不再显示后台记账刻度，改显示上游的真实余额
 
-- status: ready-for-review（第二轮复审意见已处理；未推送，未合入发布线）
+- status: ready-for-review（第二、三轮复审意见已处理；未推送，未合入发布线）
 - branch: `ai/claude/XM-INV-UNIT-DISPLAY`
 - base: `faadf87`（RC106 上线后的发布线）
 - commit: 见分支末条
 - worktree: `K:/发票/wt-XM-INV-UNIT-DISPLAY`
+
+## 第三轮：把同款透传洞在 discover.go 一并堵上
+
+第二轮我把「`discover.go` 的 `isStatusPassthrough` 有同款跨包洞」记成了
+follow_up 9。主控者要求就在本分支修掉，不留欠账——**对的**：一个已经知道位置、
+知道修法的洞留在 follow_up 里，等于把它交给「以后会有人看」这件事，
+而这道闸恰恰是随 RC106 上线、正在生产里跑的那一道。
+
+判据不再各写一份，抽进 `backend/internal/eligibilitywire/passthrough.go`：
+
+```
+isCopyOfAReadableValue(info, expr)
+  选择器基名必须解析到一个非包对象
+  解析成 *types.PkgName（包已导入） -> 不是复制
+  什么都解析不到（包没导入）       -> 不是复制
+```
+
+两侧各自只保留「这个表达式是不是我关心的那个字段」：
+`isUnitCodePassthrough = isUnitCodeExpr && isCopyOfAReadableValue`，
+`isStatusPassthrough = isStatusField && isCopyOfAReadableValue`。
+`discover.go` 的 `types.Info` 相应补上 `Uses`。
+
+**顺带修正了一处「位置识别」与「透传判断」的混用**：`discover.go` 原来用同一个
+`isStatusPassthrough` 兼任两职——左值上判「这是不是一个状态位置」，右值上判
+「这是不是一次复制」。第三轮把左值那一职拆成 `isStatusField`（只看名字，因为
+写另一个包的状态字段仍然是一次这道闸要管的写入），右值才走共用判据。
+
+**这次差点写出一条恒真的测试，记下来**：跨包 red 用例里那条
+`l.EligibilityStatus = *zzelsewhere.EligibilityStatus`，第一版在变异（退回只看名字）
+下**仍然绿**——因为老的 `isStatusField` 不解引用，`*x.EligibilityStatus` 压根不算
+状态位置，于是它是被**另一条**规则拒掉的，跟透传判据对不对无关。给
+`isStatusField` 补上解引用（对齐 `isUnitCodeExpr` 的做法）之后，同一个变异让
+四个子用例全红。变异验证的价值就在这儿：不做这一步，这条用例会一直看起来在守着
+它其实没守的东西。
 
 ## 第二轮（复审意见）
 
@@ -116,13 +150,20 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 - `web/src/styles.css` —— 换算后的数字号 9px → 12px，新增
   `.service-unit-converted`（管理端折合提示）。来源口径那个 span **不另写规则**，
   它落在既有的 `.eligibility-unit-grid span` 上。
+- `backend/internal/eligibilitywire/discover.go`（第三轮）—— `isStatusPassthrough`
+  改用共用判据；左值那一职拆成 `isStatusField`（并补上解引用）；`types.Info` 加
+  `Uses`。
+- `backend/internal/eligibilitywire/discover_test.go`（第三轮）—— 跨包状态选择器的
+  拒绝用例与 `item.EligibilityStatus` 的对照用例。
 
 新增：
 
 - `backend/internal/eligibilitywire/unitcodes.go` —— 单位码发现闸：范围发现
-  （`DiscoverGoPackageDirs`）、两张识别网、拒绝路径、委托校验、跨包判据。
+  （`DiscoverGoPackageDirs`）、两张识别网、拒绝路径、委托校验。
 - `backend/internal/eligibilitywire/unitcodes_test.go` —— 识别规则测试、范围覆盖
   探针、契约闸。
+- `backend/internal/eligibilitywire/passthrough.go`（第三轮）—— 两道闸共用的
+  「这是不是一次可读的复制」判据 `isCopyOfAReadableValue` 与 `leftmostIdent`。
 - `web/src/lib/service-units.ts` —— BigInt 换算与展示视图。
 - `web/src/lib/service-units.test.ts` —— 换算精确性与降级。
 - `web/src/App.service-unit-cells.test.tsx` —— 两格与管理端提示的渲染文案。
@@ -194,13 +235,14 @@ stub importer 让所有跨包类型都是 invalid，按类型判会把 `item.Uni
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 06:17:24 | 06:17:27 | 3s | exit 0 |
-| `cd web && npm test -- --run` | 06:17:27 | 06:17:29 | 2s（vitest 自报 631ms） | exit 0，22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 06:17:14 | 06:17:15 | 1s | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:17:15 | 06:17:18 | 3s | exit 0，两个包 ok |
+| `cd web && npm run typecheck` | 06:25:18 | 06:25:20 | 2s | exit 0 |
+| `cd web && npm test -- --run` | 06:25:21 | 06:25:22 | 1s（vitest 自报 656ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 06:25:08 | 06:25:08 | <1s（缓存命中） | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:25:09 | 06:25:12 | 3s | exit 0，两个包 ok |
 
-第二轮内先后跑过两次：代码改动后 06:11、`USDExchangeRate` 措辞改动后 06:17，
-两次四条全绿。上表是后一次。
+上表是第三轮改动之后那一次。此前跑过：第一轮 05:40、除数定稿后 05:48、
+第二轮代码后 06:11、`USDExchangeRate` 措辞后 06:17，每次四条全绿。
+第三轮只动 Go 侧，前端两条属于回归确认。
 
 前两轮的记录（结果都是四条全绿）：第一轮 05:40，NEWAPI_QUOTA description 更新后
 05:48（typecheck 4s / web test 1s / vet <1s / go test 3s）。
@@ -211,7 +253,18 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 ## 变异验证（逐条 red → 还原 → green）
 
 每条都是先改坏实现、跑到红、再还原；还原后用 `diff` 与备份逐字节核对过。
-R2-* 是第二轮新加的。
+R2-* / R3-* 是第二、三轮新加的。
+
+### 第三轮
+
+| # | 变异 | 变红的断言 | 结果 |
+| --- | --- | --- | --- |
+| R3-M25 | `isStatusPassthrough` 退回只看名字（`return isStatusField(expr)`） | `TestScanRefusesACrossPackageStatusSelector` 4 个子用例全红 | red → green |
+| R3-M26 | 把共用判据 `isCopyOfAReadableValue` 的包/非包判断取反 | 13 处，**两道闸同时红**：状态侧 3 条（含既有的 `TestScanStillSeesBareLiteralsAndPassthroughs`）、单位码侧 4 条、加四道契约/发现断言。这一条同时证明了「共用」是真的共用，不是抄了两份 | red → green |
+
+R3-M25 第一次跑只红了 3 个子用例，「跨包 + 解引用」那条仍绿——它被老的
+`isStatusField`（不解引用）以另一条理由拒掉，与透传判据对不对无关，
+是一条恒真断言。给 `isStatusField` 补上解引用后重跑，四条全红。
 
 ### 第二轮
 
@@ -364,10 +417,11 @@ R2-M24 钉的就是这个。
    所以欠费账号在这两格上本来就是 0，换算之后显示 `0.00`。这是**既有行为**，不是这次
    引入的；但换算之后它更像一个「确实是零」的断言了，如果产品认为欠费要看得出来，
    得让摘要接口把 deficit 也带上，属于协议层改动。
-9. **`discover.go` 的 `isStatusPassthrough` 有和本轮 major 2 同款的洞**：它同样只看
-   `.EligibilityStatus` 这个名字后缀，所以跨包选择器在那道闸里仍然被当作「复制」放行。
-   那道闸随 RC106 上线，这一轮没动它。修法与 `isUnitCodePassthrough` 完全一样
-   （基名解析到非包对象），可以直接照搬。
+9. ~~**`discover.go` 的 `isStatusPassthrough` 有和第二轮 major 2 同款的洞**~~ ——
+   **已完成（第三轮）**：判据抽进 `passthrough.go` 的 `isCopyOfAReadableValue()`，
+   两道闸共用一份；`discover.go` 的 `types.Info` 补上 `Uses`，左值那一职拆成
+   `isStatusField`。跨包 red 用例与 `item.EligibilityStatus` 对照用例都补齐，
+   变异 R3-M25 / R3-M26 见变异章节。
 10. **给 `USDExchangeRate` 补一道护栏**（对应 risks 3）：把它加进
     `contracts/newapi-source-projection-grants.postgresql.sql` 的 cfg 检查，
     和 `QuotaPerUnit` / `Price` 同样断言等于 1，值一变就拒绝出数。

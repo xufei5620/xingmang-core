@@ -99,6 +99,99 @@ func override(l *lot, base lot) dto {
 	}
 }
 
+// TestScanRefusesACrossPackageStatusSelector closes the hole the unit-code
+// scan's review found on its side of the package. isStatusPassthrough used to
+// look only at the NAME after the dot, so a status read out of ANOTHER package
+// -- whose contents this scan never reads, and whose vocabulary is therefore
+// unknown -- counted as "a copy of another status field" and was skipped
+// silently. Both spellings are refused: the package imported (what real code
+// would look like) and the package not imported at all (what the type checker
+// cannot resolve, which must not be read as "fine").
+func TestScanRefusesACrossPackageStatusSelector(t *testing.T) {
+	for name, source := range map[string]string{
+		"imported package": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = zzelsewhere.EligibilityStatus
+}
+`,
+		"package not imported at all": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = zzelsewhere.EligibilityStatus
+}
+`,
+		"cross-package value in a composite literal": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func build() lot {
+	return lot{EligibilityStatus: zzelsewhere.EligibilityStatus}
+}
+`,
+		"cross-package value behind a deref": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = *zzelsewhere.EligibilityStatus
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := scanProbePackage(t, source)
+			if err == nil {
+				t.Fatal("a status read out of another package must be refused, not counted as a passthrough")
+			}
+			if !strings.Contains(err.Error(), "probe/probe.go:") {
+				t.Fatalf("the refusal must name file:line, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestScanStillAcceptsInPackageStatusCopies is the control case, and it is the
+// half a careless fix would break. The scan type-checks with stubImporter, so
+// every type reached through an import is invalid; a rule written against the
+// base's TYPE rather than its identity would refuse `item.EligibilityStatus`
+// for an `item` whose struct is declared elsewhere -- which is exactly what
+// application and httpapi do when they copy a store row's status into a DTO.
+func TestScanStillAcceptsInPackageStatusCopies(t *testing.T) {
+	scan, err := scanProbePackage(t, `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type dto struct{ EligibilityStatus string }
+
+type lot struct{ EligibilityStatus string }
+
+// item's type comes from an imported package, so the checker cannot type it
+// here. The VALUE still comes from a variable, not from a package.
+func toDTO(item zzelsewhere.Row, l lot, rows []lot) dto {
+	out := dto{EligibilityStatus: item.EligibilityStatus}
+	out.EligibilityStatus = l.EligibilityStatus
+	out.EligibilityStatus = rows[0].EligibilityStatus
+	return out
+}
+`)
+	if err != nil {
+		t.Fatalf("copying a status from an in-package variable must stay a passthrough: %v", err)
+	}
+	if len(literalValues(scan, LiteralAssignment)) != 0 {
+		t.Fatalf("a copy introduces no vocabulary, got %v", literalValues(scan, LiteralAssignment))
+	}
+}
+
 func TestScanRefusesAnAssignmentItCannotEvaluate(t *testing.T) {
 	// Review mutation V7, reproduced: the status comes out of a helper. There
 	// is no constant to fold, so the scan must not answer at all -- an answer
