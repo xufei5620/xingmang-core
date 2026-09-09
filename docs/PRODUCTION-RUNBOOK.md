@@ -606,6 +606,13 @@ stale or unsigned evidence is NO-GO.
   before the operator. Any new external account, verified binding proof, or
   bulk transition out of `parked_identity` is NO-GO. This freeze remains until
   the separate parked-backlog cutover is approved.
+- **2026-09-09 负责人决定（追加，上面原文不删）**：上面这条冻结对
+  **「一次一个、低峰、有人盯 /readyz」的代为绑定（`operator_attested`）解除**。
+  解除只覆盖这一种做法，不覆盖批量释放 `parked_identity`——批量仍然 NO-GO，
+  仍然要等那个单独的 parked-backlog cutover 获批。也就是说：用
+  `cmd/account-bind` 一次绑一个账号是允许的；写脚本一次绑一批、或直接对
+  `source_ingest_events` 批量改状态，仍然不允许。做法见本文
+  「代为绑定（`operator_attested`）」一节。
 - Create a fresh encrypted and Ed25519-signed full backup with the existing
   `deploy/backup/backup.sh` package using `BACKUP_SCHEMA_MODE=post-0011` and
   `BACKUP_LOCAL_KEYCLOAK=true`. It must contain the invoice PostgreSQL dump,
@@ -2385,6 +2392,305 @@ New API 的 `top_ups` 状态只有 `pending` / `success` / `failed` / `expired`�
 
 **核对建议**：每月对一次账——把当月手动退款清单与管理端的冻结/调额记录逐条
 对上。这件事今天没有自动化，也没有任何告警会提醒。
+
+## 9c. 代为绑定（`operator_attested`）
+
+**这是运营方替尚未登录过的真实客户建立绑定、让对账跑起来的唯一许可做法。**
+设计见 `docs/handoffs/XM-INV-SHADOW-BINDING-DESIGN.md` 方案一，负责人
+2026-09-09 拍板；对应本文 3.1 节里那条冻结的解除范围，见该节 2026-09-09
+的追加决定。交接见 `docs/handoffs/XM-INV-SHADOW-BINDING.md`。
+
+> **镜像下限：tools 镜像必须 ≥ `0.1.0-rc108`。** `invoice-account-bind` 从 RC108
+> 起才进 tools 镜像；rc107 及更早的 `/usr/local/bin` 里没有这个二进制，命令会以
+> "executable file not found" 失败。注意 3. 节那条「确认镜像 ID 与发布清单一致」
+> **拦不住这件事**——rc107 的镜像 ID 与 rc107 的清单当然是一致的。所以下面命令
+> 里的 `$INVOICE_IMAGE_TAG` 必须是 rc108 或更新的标签。
+
+### 先读这三条，再往下看命令
+
+1. **绑不回来。** 系统没有解绑接口；唤醒会把该账号策略起点之前的用量/余额事实
+   永久改写成 `PRE_POLICY_SKIPPED`；硬删被 `ON DELETE RESTRICT` 挡住。已批准的
+   撤回档位只有 (a)：**保留绑定，客户日后自己登录时直接认领**。档位 (b)
+   （把 `invoice_users.status` 改成非 active）会让客户登录被拒，
+   `TestShadowBoundAccountLoginIsRejectedWhenTheShadowUserIsDisabled` 就是钉这
+   件事的；不要拿它当「撤销」用。
+2. **一次一个。** 唤醒一个账号会一次性放出几百到几千条停放事实。补数期间同一
+   来源上**所有**客户读到 `source_unavailable`，这是预期，不是故障。工具自己
+   带时机门（见下），上一次的积压没排干时下一次 `--apply` 会被直接拒绝。
+3. **绝不以影子用户身份提交申请、绝不上传文档。** 全系统只有两条通向真人的外发
+   路径（企微 `request.submitted` 通知、`AttachDocument` 邮件），这两条都只在
+   提交/上传时触发。绑定、冻结、撤销本身只写 `audit_events`，客户看不到。
+
+### 时机门（工具自己查，dry-run 与 apply 都查）
+
+`--apply` 只有在下面两条同时成立时才被接受，不成立直接报错退出：
+
+- `source_ingest_events` 里**没有未被冻结兜住的 dead 事件**（即 `/readyz` 不会
+  因 `source_ingest_dead_events` 变红）。判据用的就是 `/readyz` 用的那一个方法
+  `SourceIngestHealth.UncontainedDead()`，不是另抄一份。
+- `source_ingest_events` 里**没有 pending 事件**（`Pending=0`）。这一条比
+  `/readyz` 更严：`/readyz` 会宽容十五分钟以内的积压，代绑定不宽容，因为
+  「一次一个」的意义就在于之后出现的每一条 pending 都能算到这次绑定头上。
+
+dry-run 在门关着的时候**仍然会打出完整计划**并标 `timing gate: NO-GO`——预演
+本来就是用来问「现在能不能做」的。除此之外还要人工确认：低峰时段、有人盯
+`/readyz`、上游后台里这个用户 id 是逐字复制来的（工具无法校验上游是否真有这个
+用户）、排除用户 34。
+
+### 命令
+
+先按 3. 节的办法确认镜像 ID 与发布清单一致，然后：
+
+```bash
+docker run --rm --pull=never --network invoice-system-prod_invoice_db \
+  --user 10001:10001 \
+  --env-file "$PRODUCTION_ENV_FILE" \
+  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
+  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
+  --entrypoint /usr/local/bin/invoice-account-bind \
+  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  `# ↑ 这个 tag 必须 ≥ 0.1.0-rc108：更早的 tools 镜像里没有这个二进制` \
+  --database-url-file=/run/secrets/invoice_owner_database_url \
+  --field-keyring-file=/run/secrets/invoice_field_keyring \
+  --platform=sub2api --external-user-id='<上游后台逐字复制的用户 id>'
+  # 计划看对了，再加 --apply --operator-id=<admin-uuid> 重跑一次
+```
+
+两个 secret 都是只读挂载，都不打印内容。`--network` 必须是
+`invoice-system-prod_invoice_db`（`deploy/docker-compose.prod.yml` 的
+`name: invoice-system-prod` 加上内部库网络 `invoice_db`），否则连不上库。
+`--pull=never` 与 `--rm` 与本文其它工具容器一致：生产从不拉取、不构建。
+
+**`--env-file "$PRODUCTION_ENV_FILE"` 不能省，也不能换成 `-e SUB2API_LOGIN_BASE_URL`。**
+这两个变量只写在 `.env.production` 里，交互 shell 里没有 export；`-e VAR` 这种
+不带 `=值` 的写法遇到未设置的变量**什么也不传**，容器里就是空的。工具读不到
+`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` 时会**直接拒绝运行**（不再回落
+到编译进去的默认值——那个默认值今天恰好等于配置值，等哪天变量改了就会静默写错）。
+这个值会成为 `invoice_users.oidc_issuer`，客户的会话标识、审计身份哈希、邮箱 AAD
+全从它派生；写错了不会当场报错，客户日后登录仍然能认领到这一行（认领走的是外部
+账号，不是 issuer），但那个错误的 issuer 会永久留在库里
+（`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong`）。
+
+工具还会把这个 issuer 与**该来源上已有的「平台登录铸出来的」身份的 issuer** 对一遍：
+对不上直接拒绝，对得上则在 `issuer:` 行标
+`(matches every platform-login identity on this source)`。
+
+比对范围只取「在这个 source 上持有 `platform_password_login` 或 `operator_attested`
+绑定」的身份——**不是该平台的全部身份**。生产里还有由中心 OIDC 铸出、随后认领了
+平台身份的用户（issuer 是 `auth.solov.cc/realms/solov`，绑定是
+`source_signed_oidc_projection`），他们的 issuer 本来就该不一样，不构成矛盾。按
+「该平台全部身份」去比会看到两个 issuer，从而拒绝掉**每一次** sub2api 代绑定。
+
+只有该来源上**第一个**平台登录身份没有东西可比，那一行会标
+`<- FIRST platform-login identity on this source`，必须人工核对。
+
+`--email` 可选，存的是密文且 `email_verified` 保持 FALSE——运营在终端里敲进去的
+地址不构成验证，真正的收件地址仍然要客户自己验。**它只在这次调用真的新建
+`invoice_users` 行时才写得进去**：底层 UPSERT 只有在新值被标记为已验证时才替换已有
+密文，而本工具永远传 FALSE，所以对一个已存在的身份重跑并加上 `--email`是**静默空
+操作**，不会补写。要补邮箱只能走客户自己的邮箱验证流程。**注意 `--email` 的值会明文留在
+root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要么别传，要么命令前加
+一个空格并确认 `HISTCONTROL` 含 `ignorespace`。
+
+### 代绑定给客户留下的两个代价（要提前知道）
+
+**一、客户日后登录不会自动获得已验证收件邮箱，必须自己走邮箱挑战。**
+
+没被代绑过的客户首次平台登录走的是「建号」路径，`EnsureUser` 会把平台带回来的
+邮箱直接记成已验证收件地址；被代绑过的客户走的是「认领」路径，那条路径**从不
+调用 `EnsureUser`**，所以邮箱进不了 `verified_emails`。结果是：他要提交开票申请，
+得先在页面上自己验证一次邮箱。
+
+这**不是本片引入的**——任何被投影管道提前绑定过的账号，首次登录都是这个样子。
+本片没有去改认领路径，理由是那属于登录热路径上的行为变更，会同时影响所有被投影
+绑定的账号，而「已验证收件地址」正是发票真正寄出去的地方，改它需要单独一片带自己
+的评审。何况对一个**由运营代建**的身份来说，要求客户自己证明收件地址，本来也更
+稳妥而不是更差。
+
+`--email` 填了也不改变这一点：那个值存的是密文且 `email_verified=FALSE`。
+
+**二、身份投影事件与代绑定用的不是同一对身份。**
+
+`identity_binding` 类事件按**中心 OIDC** 的 issuer/subject 解析属主，而代绑定用的
+是（平台登录 origin，上游 id）——不同的一对，因此影子身份**满足不了**这类事件：
+投影返回 ErrForbidden，被判为 `PROJECTION_FAILED`（既不算依赖等待也不算瞬态），
+八次尝试用完变死信，`/readyz` 对所有人 503 且解不掉。
+
+这个形状同样**不是本片引入的**（客户首次平台密码登录会造成同样的局面），而且
+2026-09-09 只读普查显示生产没有现实触发面：全库 `identity_binding` 事件只有 2 条，
+都在 identities 流、都已 processed（最后一条 2026-08-26），没有任何停放/排队/失败。
+但代绑定让运营可以**主动**对着最容易踩的那批账号触发它，所以工具加了护栏：
+摘要打印 `identity_binding open (whole deployment)`，非 0 时 `--apply` 直接拒绝。
+
+那一行是**全库计数，不是这个客户的**——停放的 `identity_binding` 事件按中心 OIDC
+的盲索引挂依赖，工具手上只有平台 origin 与上游 id，事件载荷又是加密的，从这里
+根本无法判断某条属于哪个上游客户。所以它只能回答「全局有没有卡住的身份投影」，
+不要把它读成「这个客户有没有」。
+
+### 退出码
+
+| 码 | 含义 | 该做什么 |
+| --- | --- | --- |
+| 0 | 成功（apply 已提交；或 dry-run 正常出计划，**包括门关着标 NO-GO 的 dry-run**） | 按下面「怎么读」核对 |
+| 1 | 操作失败：连不上库、迁移集不匹配、绑定被拒（已绑他人 / platform 不符 / issuer 与库里矛盾 / **该 id 已有非 operator_attested 绑定** / **有未处理的 identity_binding 事件**）、序列化冲突 | 读错误信息，不要重试到它自己好 |
+| 2 | **位置参数**多余，或三个路径参数不是绝对路径 | 改命令 |
+| 3 | `--apply` 被时机门拒绝 | **请求本身没问题**，等下一个安静窗口再来 |
+
+3 单独分出来，就是为了让脚本和人不要把「现在不是时候」读成「出错了」。
+
+**注意 2 的范围比想当然的窄。** 只有「多给了位置参数」和「路径不是绝对路径」这两类
+在解析旗标时就退 2；**旗标的值**非法（`--platform=sub3api`、`--external-user-id=alice`、
+`--operator-id=bob`）一律退 **1**，因为那些校验在打开数据库之前、但在 `run()` 里做。
+写脚本时不要用「退 2 就是我命令写错了」来分流。
+
+### dry-run 输出怎么读
+
+**逐行核对，不要只看 `timing gate`。** 摘要里能拦住不可逆误操作的就这几行：
+
+- **`issuer:`** —— 必须等于 api 容器实际在用的值。行尾要么是
+  `(matches every platform-login identity on this source)`（库已经替你对过了；比对
+  范围只含平台登录/代绑定铸的身份，中心 OIDC 用户不算矛盾），要么是
+  `<- FIRST platform-login identity on this source`（**库里没有可比对象，只有你能
+  把关**）。后一种情况先跑一次这个再继续：
+
+  ```bash
+  docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+    exec -T api printenv SUB2API_LOGIN_BASE_URL NEWAPI_LOGIN_BASE_URL
+  ```
+
+  两边逐字一致才往下走。
+- **`external_user_id:`** —— 与上游后台里那一行逐字比对。**没有任何自动检查能
+  替你做这件事**，原因见下一条。工具只能保证它是纯数字（两个平台的用户 id 都是
+  十进制整数），把邮箱或用户名粘进来会被当场拒绝。
+- **`identity_binding open (whole deployment):`** —— 必须是 0，否则 `--apply`
+  会被拒。这是**全库**计数，不是这个客户的；含义见上面「两个代价」第二条。
+- **`facts ever seen:` 与 `WARNING`** —— 这个上游 id 在本库出现过的事实条数
+  （现在停放的 + 以前唤醒过的）。为 0 时工具会打
+  `WARNING: no parked facts for this external id`，那**通常就是 id 敲错了**。
+  但反过来不成立：**非 0 也不能证明 id 是对的**——敲错的 id 完全可能落在另一个
+  真实的、尚未绑定的客户身上，那种情况所有权守卫也不会拦（它只拦「已经被别人
+  绑走」的 id）。所以两种情况都要回上游后台再核一次。
+- **`ingest waiting:`** —— 全库停放中的事件总数。把它和 `released to queued` +
+  `PRE_POLICY_SKIPPED` 之和比一比：如果这个客户的数字占了全库停放量的绝大部分，
+  而你以为他只是个小客户，那多半是绑错人了；如果全库 `ingest waiting` 是几十万
+  而这个客户只有 0，参考上一条。
+- **`PRE_POLICY_SKIPPED:`** —— **不可逆的那一半**，策略起点之前、会被永久写成
+  已处理的用量/余额条数。数字大不代表出错（起点前的事实对开票没用），但按下
+  `--apply` 就回不来了。
+- **`released to queued:`** —— 会被放出来交给 worker 的条数，也就是接下来补数
+  的规模，以及同来源其他客户读到 `source_unavailable` 的时长量级。
+- `invoice_user_id` / `external_account_id` 后面标 `created` 还是 `reused` /
+  `updated in place`：第一次做应该都是 `created`。
+- `timing gate` 要是 `GO`。
+
+后两个数是**实测的**，不是估的：dry-run 在同一个事务里真的执行了那两条 UPDATE，
+然后整体回滚。所以 dry-run 也会短暂持有这些行的锁，请和 `--apply` 一样放在低峰
+窗口做。
+
+**什么情况必须停手**：`issuer:` 与 api 不一致；`external_user_id` 与上游后台对不
+上；出现 `WARNING` 而你无法解释为什么这个客户在本库一条事实都没有；
+`timing gate` 是 `NO-GO`；`identity_binding open` 非 0。
+
+**工具会自己拒绝、不用你判断的两种情况**（看到就照错误信息处理，别想办法绕过）：
+
+- **该上游 id 已经有一个不是 `operator_attested` 的绑定。** 最常见的原因是客户
+  自己已经用平台密码登录过了——那次登录**本身就是所有权证明**，记录在
+  `binding_method=platform_password_login` 里。再代绑一次会把这条记录覆盖成
+  `operator_attested`、`verified_at` 重置成现在，事后再也分不出当初是客户自证还是
+  运营代建，而且没有任何办法恢复。这种情况下本来也无事可做：账号已经绑好了，
+  停放事实在那次登录时就放出来了，直接去管理端账本看即可。
+- **有未处理的 `identity_binding` 事件**（见上面「两个代价」第二条）。
+
+### 观察窗口（每个客户一次）
+
+先把 `--apply` 摘要里的三个值存成变量——后面每条命令都用它们，其中
+`dependency_key_hmac` 是盲索引，**人手算不出来，只能从摘要里抄**。
+
+> **必须抄 `--apply` 那一次的输出，不能抄 dry-run 的。** dry-run 也会打出
+> `invoice_user_id` 与 `external_account_id`，但那两个 id 随事务回滚一起作废，
+> `--apply` 会铸出**不同**的 id。拿 dry-run 的 id 去跑下面的查询，结果会全空，
+> 看起来就像绑定失败了。dry-run 输出里这两行带 `(rolled back; --apply will mint
+> different ids)` 后缀，就是提醒这件事。（`dependency_key_hmac` 只由来源与上游 id
+> 决定，两次一样，但为了不出错，三个值一律抄 apply 那次。）
+
+```bash
+BIND_DEP_KEY='<摘要里的 dependency_key_hmac，形如 h1:...>'  # 见下方警告：三个值都要抄 --apply 那次的
+BIND_ACCOUNT_ID='<摘要里的 external_account_id>'
+BIND_USER_ID='<摘要里的 invoice_user_id>'
+```
+
+**T+0：停放事实已经放出来。** `parked_identity` 应为 0，`queued` 是刚放出的量：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT processing_status,count(*) FROM source_ingest_events
+      WHERE dependency_key_hmac='$BIND_DEP_KEY' OR catchup_key_hmac='$BIND_DEP_KEY'
+      GROUP BY 1 ORDER BY 1"
+```
+
+**T+0：影子身份长成了该有的样子。** `platform` / `platform_user_id` 已填、
+`status` 是 `active`、`email_verified` 是 `f`（即使传了 `--email`）：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT u.oidc_issuer,u.platform,u.platform_user_id,u.status,u.email_verified,
+             a.binding_method,a.binding_status
+      FROM invoice_users u JOIN external_accounts a ON a.invoice_user_id=u.id
+      WHERE u.id='$BIND_USER_ID'"
+```
+
+`binding_method` 必须是 `operator_attested`——这是日后唯一能把「代建」与「客户
+自证」分开的痕迹，管理端账本里看不到它。
+
+**补数期间：盯死信。** 每几分钟跑一次；`dead` 一旦从 0 变正，**立刻停止后续
+绑定**，按 9. 节「Contained dead events」与死信段处置：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT count(*) FILTER (WHERE processing_status='dead') AS dead,
+             count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')) AS pending
+      FROM source_ingest_events"
+```
+
+同时看 `/readyz`。**它只有 200 和 503 两种结果**，没有中间态；503 的 body 里
+`check` 字段说明是哪一道闸（读法见 9. 节「Reading a 503 from `/readyz`」）。
+在开票主机上直接打本地端口，不必绕公网：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:58088/readyz
+# 想看 503 的 check 字段就去掉 -o /dev/null：
+curl -s http://localhost:58088/readyz
+```
+
+`http://localhost:58088/readyz`（主机上的映射端口）与 9. 节里用的
+`https://invoice.solov.cc/readyz`（公网入口）打到的是同一个 api 容器、同一段
+判定逻辑，结果等价；差别只是后者还要经过 Nginx 和证书，盯守时用前者少一层噪声。
+
+补数期间同来源**其他**客户读到 `source_unavailable` 是预期的，不是故障。
+
+**bootstrap 完成的标志**是 `source_account_eligibility_state` 出现该账号的行。
+在那之前管理端 `/admin/accounts/{id}/ledger` 看不到它（那个查询 INNER JOIN 这张
+表），所以「后台还看不见」不等于失败：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT bootstrap_kind,cutover_at,finalized_through,finalization_delay_seconds
+      FROM source_account_eligibility_state WHERE external_account_id='$BIND_ACCOUNT_ID'"
+```
+
+出行之后还有 15 分钟的 finalization 延迟才会首次评估。「几十分钟到一小时」是
+设计稿的估算，**未实测**；本次做的时候把 `--apply` 时刻、这张表出行时刻、首次
+评估时刻都记进发布记录，把这条从估算变成事实。
+
+**判断「能不能开票」**只能用管理端账本
+`GET /api/v1/admin/accounts/$BIND_ACCOUNT_ID/ledger` 的
+`block_state` / `block_reason` / `invoiceable_now_minor` / `threshold_reached`
+做只读近似。它**不含**五流新鲜度、邮箱已验证、
+profile 校验——真判据只在提交时跑，而提交这件事这里是禁止的。
 
 ## 10. Canary acceptance
 

@@ -870,16 +870,20 @@ func validateSourceIngestRuntimeReadiness(health postgresstore.SourceIngestHealt
 	if now.IsZero() {
 		return errors.New("source ingestion readiness clock is unavailable")
 	}
-	// XM-INV-DEAD-CONTAINMENT: this single line is what pinned /readyz at 503
-	// for thirty hours on 2026-09-07 while the three dead events involved
+	// XM-INV-DEAD-CONTAINMENT: this single judgment is what pinned /readyz at
+	// 503 for thirty hours on 2026-09-07 while the three dead events involved
 	// already had open freezes containing them. Contained dead events are
 	// subtracted; the remainder still fails closed, and a report whose
 	// contained count its dead count cannot support is rejected outright
-	// rather than allowed to subtract its way past the gate.
-	if health.DeadContained < 0 || health.DeadContained > health.Dead {
+	// rather than allowed to subtract its way past the gate. The subtraction
+	// itself lives on SourceIngestHealth (XM-INV-SHADOW-BINDING) because
+	// cmd/account-bind's timing gate has to ask the same question, and a
+	// second copy of it here would drift silently.
+	uncontainedDead, consistent := health.UncontainedDead()
+	if !consistent {
 		return errors.New("source ingestion dead-event evidence is inconsistent")
 	}
-	if health.Dead-health.DeadContained > 0 {
+	if uncontainedDead > 0 {
 		return errSourceIngestDeadEvents
 	}
 	if health.Pending == 0 {

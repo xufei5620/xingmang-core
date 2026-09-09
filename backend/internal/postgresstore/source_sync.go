@@ -93,6 +93,24 @@ type SourceIngestHealth struct {
 	OldestPending time.Time
 }
 
+// UncontainedDead reports the dead ingest events that no open eligibility
+// freeze answers for -- the number /readyz actually fails closed on -- and
+// ok=false when the two counts cannot both be true (a report that could
+// otherwise subtract its way past a gate).
+//
+// This subtraction used to live only inside cmd/api's
+// validateSourceIngestRuntimeReadiness. It is a method here because a second
+// caller now needs the same judgment (cmd/account-bind's timing gate refuses
+// to bind while /readyz would be red), and a gate whose predicate is a copy
+// of another layer's rule does not fail when the two drift -- it quietly
+// keeps answering the older question.
+func (h SourceIngestHealth) UncontainedDead() (int64, bool) {
+	if h.DeadContained < 0 || h.DeadContained > h.Dead {
+		return 0, false
+	}
+	return h.Dead - h.DeadContained, true
+}
+
 // SourceFreshnessPolicy protects irreversible operations from using an old
 // projection. Accepted-batch heartbeats and proven economic watermarks have
 // independent budgets; identities carry the authority to use economic state.
@@ -1069,15 +1087,32 @@ func (s *Store) MarkSourceEventBusy(ctx context.Context, claim SourceEventClaim,
 }
 
 func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC string) (int64, error) {
-	if (kind != "invoice_oidc_user" && kind != "source_external_account" && kind != "source_funding_lot" && kind != "source_eligibility_cutover" && kind != "source_cutover_manifest") ||
-		!dependencyHMACPattern.MatchString(keyHMAC) {
-		return 0, errors.New("invalid source dependency wakeup")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	_, released, err := requeueSourceDependencyTx(ctx, tx, kind, keyHMAC)
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return released, nil
+}
+
+// requeueSourceDependencyTx is RequeueSourceDependency's whole body, minus
+// the transaction boundary, and additionally reports how many rows the
+// pre-policy acknowledgement wrote off. OperatorBindExternalAccount runs it
+// as step four of its single transaction and prints both numbers: a shadow
+// bind's PRE_POLICY_SKIPPED count is irreversible, so an operator has to see
+// it in the dry run before deciding to apply.
+func requeueSourceDependencyTx(ctx context.Context, tx pgx.Tx, kind, keyHMAC string) (prePolicySkipped, released int64, err error) {
+	if (kind != "invoice_oidc_user" && kind != "source_external_account" && kind != "source_funding_lot" && kind != "source_eligibility_cutover" && kind != "source_cutover_manifest") ||
+		!dependencyHMACPattern.MatchString(keyHMAC) {
+		return 0, 0, errors.New("invalid source dependency wakeup")
+	}
 	if kind == "invoice_oidc_user" || kind == "source_external_account" {
 		// XM-INV-POLICY-ANCHOR 2.2: an identity wake can release a large
 		// backlog of parked usage/balance facts that predate the invoice
@@ -1090,17 +1125,19 @@ func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC strin
 		var policyStartAt time.Time
 		if err = tx.QueryRow(ctx, `SELECT eligibility_start_at FROM invoice_eligibility_policy
 			WHERE singleton_id=1`).Scan(&policyStartAt); err != nil {
-			return 0, err
+			return 0, 0, err
 		}
-		if _, err = tx.Exec(ctx, `
+		skipped, execErr := tx.Exec(ctx, `
 			UPDATE source_ingest_events SET processing_status='processed',processing_error='PRE_POLICY_SKIPPED',
 				processed_at=now(),lease_token=NULL,lease_expires_at=NULL,
 				dependency_kind=NULL,dependency_key_hmac=NULL,updated_at=now()
 			WHERE processing_status IN ('waiting_dependency','parked_identity') AND dependency_kind=$1 AND dependency_key_hmac=$2
 				AND entity_type IN ('usage_event','balance_checkpoint') AND observed_at<$3`,
-			kind, keyHMAC, policyStartAt); err != nil {
-			return 0, err
+			kind, keyHMAC, policyStartAt)
+		if execErr != nil {
+			return 0, 0, execErr
 		}
+		prePolicySkipped = skipped.RowsAffected()
 	}
 	command, err := tx.Exec(ctx, `
 		UPDATE source_ingest_events SET processing_status='queued',processing_error=NULL,
@@ -1110,27 +1147,52 @@ func (s *Store) RequeueSourceDependency(ctx context.Context, kind, keyHMAC strin
 		WHERE processing_status IN ('waiting_dependency','parked_identity') AND dependency_kind=$1 AND dependency_key_hmac=$2`,
 		kind, keyHMAC)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	released := command.RowsAffected()
-	if err = tx.Commit(ctx); err != nil {
-		return 0, err
-	}
-	return released, nil
+	return prePolicySkipped, command.RowsAffected(), nil
 }
 
 func (s *Store) SourceIngestHealth(ctx context.Context) (SourceIngestHealth, error) {
+	return sourceIngestHealth(ctx, s.pool)
+}
+
+// sourceIngestHealthTx reads the same aggregate inside a caller's
+// transaction, so OperatorBindExternalAccount's timing gate is evaluated
+// against the very snapshot its own writes will be applied to rather than a
+// separate, earlier read that could already be stale by the time it commits.
+func sourceIngestHealthTx(ctx context.Context, tx pgx.Tx) (SourceIngestHealth, error) {
+	return sourceIngestHealth(ctx, tx)
+}
+
+func sourceIngestHealth(ctx context.Context, q rowQuerier) (SourceIngestHealth, error) {
 	var out SourceIngestHealth
-	err := s.pool.QueryRow(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT count(*) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),
 			`+sourceDeadEventCountColumnsSQL("count(*)", "sie")+`,
 			count(*) FILTER (WHERE sie.processing_status IN ('waiting_dependency','parked_identity')),
 			COALESCE(min(sie.created_at) FILTER (WHERE sie.processing_status IN ('queued','failed','processing')),'epoch'::timestamptz)
-		FROM source_ingest_events sie`).Scan(&out.Pending, &out.Dead, &out.DeadContained, &out.Waiting, &out.OldestPending)
+		FROM source_ingest_events sie`)
+	if err != nil {
+		return SourceIngestHealth{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err = rows.Err(); err != nil {
+			return SourceIngestHealth{}, err
+		}
+		return SourceIngestHealth{}, errors.New("source ingest health aggregate returned no row")
+	}
+	if err = rows.Scan(&out.Pending, &out.Dead, &out.DeadContained, &out.Waiting, &out.OldestPending); err != nil {
+		return SourceIngestHealth{}, err
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return SourceIngestHealth{}, err
+	}
 	if out.OldestPending.Equal(time.Unix(0, 0).UTC()) {
 		out.OldestPending = time.Time{}
 	}
-	return out, err
+	return out, nil
 }
 
 func maximumHeartbeatAgeForStream(policy SourceFreshnessPolicy, streamID string) time.Duration {

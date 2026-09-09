@@ -319,17 +319,10 @@ func (s *Service) RevokeVerifiedEmail(ctx context.Context, principalID, email st
 
 func (s *Service) BindExternalAccount(ctx context.Context, record postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error) {
 	if record.ExternalSubjectHMAC == "" && record.BindingMethod == "platform_password_login" {
-		// external_accounts carries UNIQUE NULLS NOT DISTINCT
-		// (source_instance_id, external_subject_hmac): at most ONE row per
-		// source may hold a NULL subject HMAC. Platform-password bindings
-		// have no OIDC provider subject, so the first such binding used up
-		// that slot and the second real user's first login failed with
-		// SQLSTATE 23505 (found by the RC55 production canary). Give each
-		// platform binding a deterministic blind index in its own
-		// namespace -- distinct from the projection's
-		// "external-oidc/<source>" namespace so a password binding can
-		// never collide with an OIDC-subject binding.
-		subjectHMAC, err := s.keys.BlindIndex("external-platform/"+record.SourceInstanceID, record.ExternalUserID)
+		// See PlatformBindingSubjectIndex (binding_keys.go) for why a
+		// platform binding may never leave this column NULL, and why the
+		// namespace it uses is defined in exactly one place.
+		subjectHMAC, err := PlatformBindingSubjectIndex(s.keys, record.SourceInstanceID, record.ExternalUserID)
 		if err != nil {
 			return postgresstore.ExternalAccountRecord{}, fmt.Errorf("derive platform binding subject index: %w", err)
 		}

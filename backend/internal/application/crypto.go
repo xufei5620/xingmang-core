@@ -8,8 +8,11 @@ import (
 	"invoice-system/backend/internal/postgresstore"
 )
 
+// userEmailAAD is kept as this package's spelling, but the definition itself
+// now lives in binding_keys.go's exported UserEmailAAD so cmd/account-bind
+// binds to the same physical string instead of hand-keeping a copy of it.
 func userEmailAAD(issuer, subject string) string {
-	return "invoice-user-email\n" + issuer + "\n" + subject
+	return UserEmailAAD(issuer, subject)
 }
 
 func verifiedEmailAAD(principalID, normalizedEmailHMAC string) string {
