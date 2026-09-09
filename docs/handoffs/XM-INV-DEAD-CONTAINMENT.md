@@ -398,6 +398,165 @@ dead 时被解掉（哪怕是绕过所有代码路径的裸 SQL），等待就�
     直接 UPDATE 冻结状态的语句，这三条规则看不见它。今天没有这种迁移（`grep` 过），
     但这是规则的真实边界，写在这里而不是假装它覆盖一切。
 
+## 收尾轮（第三刀，`80d5774` + 合并 `f8386f8`）
+
+### 本轮改了什么
+
+复审两轮之后行为修复已被确认，剩下的 2 条 major 都指向同一件事：**撑住行为修复
+的那道发现型闸，自己有静默出口**。复审在 `backend/internal/postgresstore/` 下种了
+第六扇门（非测试 `.go`、不调关卡），四种写法里三种没红，第四种靠一行注释混过去。
+
+1. **`freezeResolutionPattern` 收紧。** 从
+   `UPDATE eligibility_freezes(?: \w+)? SET status='resolved'` 改成
+   `(?i)UPDATE eligibility_freezes(?: (?:AS )?\w+)? SET (?:[^;]{0,160}?, ?)?\bstatus ?= ?'resolved'`。
+   四段分别对应大小写、`AS 别名`（旧的 `(?: \w+)?` 只吃一个词，吃不下 `AS ef`）、
+   SET 列序调换、`=` 两侧空格。`\b` 让 `prior_status='resolved'` 不算解冻——下划线
+   是单词字符，那里没有边界，而 `ef.status` 有。四种逃逸写法连同「小写 + 别名 +
+   列序」三者叠加的那种全部进了自测数组，另配三条「不该命中」的反向桩。
+
+2. **关卡命中判据不再看源码文本。** 新增 `declCallsFunction`，走 `go/ast` 找
+   `*ast.CallExpr`；注释、SQL 字符串、同名标识符（`...Note`）都不再算调用。
+   同一处修法也用在 `TestContainmentCorrelationIsWrittenInOnePlace` 的 `callers`
+   计数上——`consumption.go` 的查询注释里就写着那个函数名，旧写法会让「还有人调用」
+   这条空转检查在最后一个真调用消失之后仍然满足。另外扫描时统一把 Go 注释抹成空格
+   （`blankComments`），任何规则都不必自己记得忽略注释；SQL 字符串里的 `--` 不是
+   Go 注释，不受影响。新增 `TestDeclCallsFunctionIgnoresCommentsAndStrings`，
+   六条反向桩 + 五条正向桩 + 两条边界桩钉住它。
+
+3. **dead 聚合的判据从「拼法」换成「判据本身」。** `deadStatusTestSource` 覆盖
+   `::text` 强转、反写 `'dead'=col`、`= ANY(ARRAY[...])`、以及 IN 列表里 `'dead'`
+   不在首位；聚合外壳除 `FILTER` 外补上 `sum(CASE WHEN ... THEN 1 ELSE 0 END)`。
+
+### 第 3 条是一次有意的规则改动，不是纯收紧
+
+把匹配面拓宽之后，`consumption.go` 的 `tryPublishEconomicScanCyclesTx` 被照出来了：
+它手写了一个带 `processing_status IN ('failed','dead')` 的聚合（数「未完成事件」），
+**但紧接着就调 `sourceEventContainedByOpenFreezeSQL` 把已兜住的死信排除掉**。
+它是对的，只是旧正则根本看不见它——也就是说「这条规则今天没报警」有一部分是靠
+看不见，不是靠没问题。
+
+它需要的列形状与两列渲染函数不同，硬塞进 `sourceDeadEventCountColumnsSQL` 只会更糟。
+所以规则改成它真正要守的那句话：**dead 聚合必须在同一段表达式里问一次 containment**。
+渲染函数是标准做法、四个健康面都走它；周期发布这种需要别的列形状的，内联问一次
+也算数。allowance 的绳子只有 240 字符，并且两侧都配了桩：同一个 `FILTER` 里问过就
+放行，隔得远（桩里隔了约 460 字符）就照样报——避免退化成「函数体里问过一次就整体
+豁免」。测试同步改名
+`TestEveryDeadEventCountIsRenderedFromOneDefinition` →
+`TestEveryDeadEventAggregateConsultsContainment`，`source_sync.go` 里引用它的注释
+一并改。
+
+### 变异表（13 条：M36–M48）
+
+做法与前两刀一致：在 `backend/internal/postgresstore/` 下种一个非测试 `.go`
+文件当第六扇门 / 手写健康面，跑三条树级规则，跑完删掉。这一轮**每条都在修复前后
+各跑一次**（用 `git show HEAD:` 取出修复前的测试文件换进去跑，再换回来），所以
+「修后红」不是孤证，「修前绿」是同一条变异在同一棵树上的实测。
+
+| # | 变异 | 修前 | 修后 | 修后变红的测试 |
+| --- | --- | --- | --- | --- |
+| M36 | `SET status = 'resolved'`（`=` 两侧空格） | 绿 | 红 | `EveryFreezeResolutionPassesTheDeadEventGuard` |
+| M37 | `AS zz SET status='resolved'`（显式别名） | 绿 | 红 | 同上 |
+| M38 | `SET resolved_at=now(), status='resolved'`（列序调换） | 绿 | 红 | 同上 |
+| M39 | `update ... set status='resolved'`（全小写） | 绿 | 红 | 同上 |
+| M40 | 一字不差的 UPDATE + 关卡名**只**出现在注释里 | 绿 | 红 | 同上（这条是 `declCallsFunction` 的树级证据） |
+| M41 | 对照：同上但真的调关卡 | 绿 | 绿 | —— |
+| M42 | `processing_status::text='dead'` | 绿 | 红 | `EveryDeadEventAggregateConsultsContainment` |
+| M43 | `'dead'=sie.processing_status`（反写） | 绿 | 红 | 同上 |
+| M44 | `= ANY(ARRAY['dead'])` | 绿 | 红 | 同上 |
+| M45 | `sum(CASE WHEN ...='dead' THEN 1 ELSE 0 END)` | 绿 | 红 | 同上 |
+| M46 | `IN ('failed','dead')`（`'dead'` 不在首位） | 绿 | 红 | 同上 |
+| M47 | 对照：dead 聚合 + 同段内联 containment | **红** | 绿 | —— |
+| M48 | 对照：不种任何东西 | 绿 | 绿 | —— |
+
+**M47 修前红、修后绿是第 3 条规则改动本身，不是回归。** 旧规则说「除渲染函数外
+不许出现 dead FILTER」，所以一个内联问过 containment 的聚合在旧规则下也是错的；
+新规则说「必须问 containment」，它就合法了。这一格是这次规则改动唯一的行为差异，
+特意留在表里而不是把对照组换成一个两边都绿的。
+
+**M41 / M48 是两条不该变红的对照**，都确认没红——否则「目标变异红了」可能只是
+种进去的文件本身编译不过。
+
+### 合并 RC106 的取舍
+
+派工预判 `web/src/App.tsx`、`web/src/lib/http-api.ts`、`web/src/lib/mock-api.ts`、
+`web/src/types.ts`、`docs/PRODUCTION-RUNBOOK.md` 五处冲突。**实际零冲突标记，
+git 全部自动合上。** 文本无冲突不等于语义正确，所以逐个核对了两侧都在：
+
+| 文件 | RC106 这一侧 | L1 这一侧 | 取舍 |
+| --- | --- | --- | --- |
+| `web/src/types.ts` | lot / summary 的资格状态与 reason 换成契约生成的联合类型 | `SourceStreamHealth.containedDeadEvents` | 两处在不同 interface、不相邻，都保留 |
+| `web/src/lib/http-api.ts` | 重写 `mapLot` / `mapEligibilitySummary` / `mapEligibilityFreeze`，加形状校验与未知值降级 | 改的是 `mapSourceHealth`（可选字段 `contained_dead_events`、`?? 0`、指纹数组多带一位） | 都保留；三处 L1 标记与 RC106 的 `eligibility-wire.generated` 引用都实测在树上 |
+| `web/src/App.tsx` | 资格摘要面板、来源账号面板 | 同步流健康表：`EVENTS_DEAD_CONTAINED` 文案、「已兜住 N」、渲染条件放宽成 `!item.ready \|\| containedDeadEvents > 0` | 都保留 |
+| `web/src/lib/mock-api.ts` | 另一个 fixture | `containedDeadEvents: 0` | 都保留 |
+| `docs/PRODUCTION-RUNBOOK.md` | rc105→rc106 发布身份替换 | L1 这一侧没动过这个文件 | 单边，直接取 RC106 |
+
+**专门查过的一件事**：RC106 新增了 `web/src/lib/source-labels.ts`，如果它把
+`sourceReasonLabels` 从 `App.tsx` 挪了过去，L1 那条 `EVENTS_DEAD_CONTAINED` 文案
+就会落进一份死副本——文本照样无冲突，页面上永远不出现。实测 RC106 没有挪，
+`sourceReasonLabels` 仍在 `App.tsx:5845`，L1 的文案在 `:5853`，渲染条件在 `:6157`。
+
+**契约（`contracts/invoice-eligibility-wire.v1.json`）本轮不需要改。** L1 唯一新增
+的枚举值是 `EVENTS_DEAD_CONTAINED`，它是**同步流就绪原因**，不是 lot 资格状态、
+不是冻结原因、也不是摘要 reason。该契约管的是 `lot_eligibility_status` /
+`lot_reason_code` / `summary_status` / `summary_reason` 四族，就绪原因不在其中；
+`backend/internal/eligibilitywire` 的探针也只扫 `eligibility_status` 与
+`reason_code`。判断依据是实跑门禁而不是读代码推断：
+`go test ./internal/eligibilitywire/... ./internal/httpapi/...` 全绿。
+`web/src/lib/eligibility-wire.generated.ts` 未重新生成，因为契约未变。
+
+### 门禁（全部实测，UTC）
+
+| 门禁 | 命令 | 开始 | 结束 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 前端依赖 | `npm ci`（本工作树原本没有 `node_modules`） | 05:42:00 | 05:42:08 | 8s | 57 包，0 漏洞 |
+| 后端静态 | `go vet ./...` | 05:44:07 | 05:44:08 | 1s | exit 0 |
+| 后端全量 | `env -u <八个代理变量> INVOICE_TEST_DATABASE_URL=...invoice_test_l1merge go test -p 1 -count=1 ./...` | 05:44:16 | 05:51:33 | 7m17s | exit 0，30 包 ok + 5 包无用例，零 FAIL |
+| 前端类型 | `npm run typecheck` | 05:51:51 | 05:51:53 | 2s | exit 0 |
+| 前端用例 | `npm test -- --run` | 05:51:53 | 05:51:55 | 2s | 20 文件 / 330 例全绿 |
+| 密钥扫描 | `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 05:52:00 | 05:52:01 | 1s | exit 0 |
+
+后端全量里耗时靠前的包（`go test` 自报，单位秒）：
+
+| 包 | 耗时 |
+| --- | --- |
+| `internal/postgresstore` | 317.521 |
+| `internal/application` | 27.686 |
+| `internal/testdb` | 25.105 |
+| `cmd/eligibility-repair` | 14.732 |
+| `internal/auth` | 10.096 |
+| `internal/migrate` | 7.442 |
+| `internal/oidcretention` | 4.767 |
+| `internal/adminsettings` | 3.906 |
+| `cmd/identity-migrate` | 1.926 |
+| `internal/backupverify` | 1.121 |
+
+测试库 `invoice_test_l1merge` 是本轮新建的（`docker exec invoice-test-pg psql -U postgres
+-c "CREATE DATABASE invoice_test_l1merge"`），没有复用跑过别的分支迁移的库。
+
+### 本轮对上面 risks / follow_ups 的更新
+
+- **第 4 条「前端未构建」已闭环一半。** 本工作树跑了 `npm ci`，typecheck 与 vitest
+  都实测全绿。但「没有前端测试守 `EVENTS_DEAD_CONTAINED` 的渲染条件」这半条**仍然
+  成立**：本轮没有新增前端用例（不在派工范围内），那条 `!item.ready ||
+  item.containedDeadEvents > 0` 至今只有代码注释在说明它为什么必要。合入后仍建议
+  人工看一眼后台来源健康页，或单独补一条组件用例——注意它是「元素应当出现」型断言，
+  别写成缺席型。
+- **第 7 条「迁移编号」已闭环。** 同事在 L2 分支上发现 `0032` 漏进迁移排除表，
+  提交 `3d95168` 属于 L1 范围，本轮已 cherry-pick 进来（`b39a123`）。
+  `TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExposure`
+  故意排除 `0009` 及其依赖，而 `0032` 在 `0009` 建的 `eligibility_freezes` 上建索引，
+  `CREATE INDEX IF NOT EXISTS` 不救场（它只抑制「索引已存在」，不抑制「表不存在」）。
+- **第 12 条「扫描范围是 `backend/` 下的 Go 源码」仍然成立，边界更清楚了一点。**
+  本轮补上的是「注释与字符串不算数」，扫描范围没有变：SQL 迁移里若将来出现直接
+  UPDATE 冻结状态的语句，这三条规则依然看不见它。
+- **新增一条边界（本轮引入，写在这里而不是假装没有）**：dead 聚合的 containment
+  allowance 是按**归一化文本里 240 字符的窗口**判定的，不是按「同一个 SQL 括号」。
+  归一化后的声明文本是 SQL 与 Go 拼接混在一起的，读不出精确的括号配对。方向是安全
+  的一侧——问得太远会**报错**而不是被忽略——但如果将来有人写了一个很长的 `FILTER`、
+  containment 调用落在 240 字符之外，他会看到一条需要重排而不是需要修 bug 的红。
+
 ## 提交
 
-提交消息与 trailer 见 `git log -1`。本片未推送 GitHub、未部署、未连接生产库。
+提交消息与 trailer 见 `git log`。本片未推送 GitHub、未部署、未连接生产库。
+收尾轮三个提交：`b39a123`（cherry-pick 0032 排除表）、`80d5774`（发现型闸的
+四个静默出口）、`f8386f8`（合并 RC106）。
