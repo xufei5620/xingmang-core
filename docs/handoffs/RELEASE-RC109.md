@@ -29,7 +29,7 @@ RC108（tag `v0.1.0-rc108-signed` = `c347396`）四片齐全、源码门禁与�
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 |---|---|---|---|---|
-| 源码门禁 `scripts/verify.ps1`（经 `release/run-rc109-gate.ps1` + `run-detached.ps1`） | 待跑 | | | |
+| 源码门禁 `scripts/verify.ps1`（经 `release/run-rc109-gate.ps1` + `run-detached.ps1`；`rc109-gate`，树 `2157b8f`） | 13:54:08 | 14:02:21 | 8m13s | **PASS**（exit 0；postgresstore 236.6s） |
 | 签名 tag `v0.1.0-rc109-signed` | 待打 | | | |
 | 镜像门禁（`wt-XM-INV-AUTOLOGIN` detached 到 tag，`run-rc109-image-gate.ps1`） | 待跑 | | | 预期 exit 42 |
 | 产物验证（普通 + `-RequireTransferReady -SignedReleaseTag v0.1.0-rc109-signed`） | 待跑 | | | |
