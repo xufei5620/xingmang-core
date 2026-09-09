@@ -2183,9 +2183,20 @@ on its own. Requeue it with the same repair binary the projection path uses,
 under a different `--kind`:
 
 ```bash
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
+# Same container shape as section 9c: the tools image, both secrets mounted
+# read-only, on the internal database network. /app/bin and the secret names
+# `invoice-db-url`/`field-keyring.json` used to appear here; neither exists --
+# backend/Dockerfile installs to /usr/local/bin, and the compose secrets are
+# `invoice_owner_database_url` and `invoice_field_keyring` (XM-INV-SHADOW-BINDING
+# review round 1).
+docker run --rm --pull=never --network invoice-system-prod_invoice_db \
+  --user 10001:10001 \
+  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
+  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
+  --entrypoint /usr/local/bin/invoice-eligibility-repair \
+  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  --database-url-file=/run/secrets/invoice_owner_database_url \
+  --field-keyring-file=/run/secrets/invoice_field_keyring \
   --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
 
@@ -2247,9 +2258,15 @@ dead job never revives on its own (a new fact for that account advances its
 pending work but leaves it dead); recover it with:
 
 ```bash
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
+# Same container shape as the ingest-requeue-dead block above.
+docker run --rm --pull=never --network invoice-system-prod_invoice_db \
+  --user 10001:10001 \
+  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
+  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
+  --entrypoint /usr/local/bin/invoice-eligibility-repair \
+  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  --database-url-file=/run/secrets/invoice_owner_database_url \
+  --field-keyring-file=/run/secrets/invoice_field_keyring \
   --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
 
@@ -2414,9 +2431,9 @@ dry-run 在门关着的时候**仍然会打出完整计划**并标 `timing gate:
 ```bash
 docker run --rm --pull=never --network invoice-system-prod_invoice_db \
   --user 10001:10001 \
+  --env-file "$PRODUCTION_ENV_FILE" \
   -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
   -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
-  -e SUB2API_LOGIN_BASE_URL -e NEWAPI_LOGIN_BASE_URL \
   --entrypoint /usr/local/bin/invoice-account-bind \
   "invoice-system-tools:$INVOICE_IMAGE_TAG" \
   --database-url-file=/run/secrets/invoice_owner_database_url \
@@ -2430,44 +2447,157 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
 `name: invoice-system-prod` 加上内部库网络 `invoice_db`），否则连不上库。
 `--pull=never` 与 `--rm` 与本文其它工具容器一致：生产从不拉取、不构建。
 
-`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` **必须与 api 容器一致**地传
-进去（不传则用与 `cmd/api` 相同的默认值）。这个值会成为
-`invoice_users.oidc_issuer`，客户的会话标识、审计身份哈希、邮箱 AAD 全从它派
-生。写错了不会当场报错：客户日后登录仍然能认领到这一行（认领走的是外部账号，
-不是 issuer），但那个错误的 issuer 会永久留在库里。
-`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong` 就是钉这个
-结论的。
+**`--env-file "$PRODUCTION_ENV_FILE"` 不能省，也不能换成 `-e SUB2API_LOGIN_BASE_URL`。**
+这两个变量只写在 `.env.production` 里，交互 shell 里没有 export；`-e VAR` 这种
+不带 `=值` 的写法遇到未设置的变量**什么也不传**，容器里就是空的。工具读不到
+`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` 时会**直接拒绝运行**（不再回落
+到编译进去的默认值——那个默认值今天恰好等于配置值，等哪天变量改了就会静默写错）。
+这个值会成为 `invoice_users.oidc_issuer`，客户的会话标识、审计身份哈希、邮箱 AAD
+全从它派生；写错了不会当场报错，客户日后登录仍然能认领到这一行（认领走的是外部
+账号，不是 issuer），但那个错误的 issuer 会永久留在库里
+（`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong`）。
+
+工具还会把这个 issuer 与**库里该平台已有身份的 issuer** 对一遍：对不上直接拒绝，
+对得上则在 `issuer:` 行标 `(matches every existing identity for this platform)`。
+只有该平台**第一个**身份没有东西可比，那一行会标
+`<- FIRST identity for this platform`，必须人工核对。
 
 `--email` 可选，存的是密文且 `email_verified` 保持 FALSE——运营在终端里敲进去的
-地址不构成验证，真正的收件地址仍然要客户自己验。
+地址不构成验证，真正的收件地址仍然要客户自己验。**注意 `--email` 的值会明文留在
+root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要么别传，要么命令前加
+一个空格并确认 `HISTCONTROL` 含 `ignorespace`。
+
+### 退出码
+
+| 码 | 含义 | 该做什么 |
+| --- | --- | --- |
+| 0 | 成功（apply 已提交；或 dry-run 正常出计划，**包括门关着标 NO-GO 的 dry-run**） | 按下面「怎么读」核对 |
+| 1 | 操作失败：连不上库、迁移集不匹配、绑定被拒（已绑他人 / platform 不符 / issuer 与库里矛盾）、序列化冲突 | 读错误信息，不要重试到它自己好 |
+| 2 | 命令行本身写错（参数非法、路径不是绝对路径） | 改命令 |
+| 3 | `--apply` 被时机门拒绝 | **请求本身没问题**，等下一个安静窗口再来 |
+
+3 单独分出来，就是为了让脚本和人不要把「现在不是时候」读成「出错了」。
 
 ### dry-run 输出怎么读
 
-- `timing gate` 要是 `GO`。
+**逐行核对，不要只看 `timing gate`。** 摘要里能拦住不可逆误操作的就这几行：
+
+- **`issuer:`** —— 必须等于 api 容器实际在用的值。行尾要么是
+  `(matches every existing identity for this platform)`（库已经替你对过了），
+  要么是 `<- FIRST identity for this platform`（**库里没有可比对象，只有你能
+  把关**）。后一种情况先跑一次这个再继续：
+
+  ```bash
+  docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+    exec -T api printenv SUB2API_LOGIN_BASE_URL NEWAPI_LOGIN_BASE_URL
+  ```
+
+  两边逐字一致才往下走。
+- **`external_user_id:`** —— 与上游后台里那一行逐字比对。**没有任何自动检查能
+  替你做这件事**，原因见下一条。
+- **`facts ever seen:` 与 `WARNING`** —— 这个上游 id 在本库出现过的事实条数
+  （现在停放的 + 以前唤醒过的）。为 0 时工具会打
+  `WARNING: no parked facts for this external id`，那**通常就是 id 敲错了**。
+  但反过来不成立：**非 0 也不能证明 id 是对的**——敲错的 id 完全可能落在另一个
+  真实的、尚未绑定的客户身上，那种情况所有权守卫也不会拦（它只拦「已经被别人
+  绑走」的 id）。所以两种情况都要回上游后台再核一次。
+- **`ingest waiting:`** —— 全库停放中的事件总数。把它和 `released to queued` +
+  `PRE_POLICY_SKIPPED` 之和比一比：如果这个客户的数字占了全库停放量的绝大部分，
+  而你以为他只是个小客户，那多半是绑错人了；如果全库 `ingest waiting` 是几十万
+  而这个客户只有 0，参考上一条。
+- **`PRE_POLICY_SKIPPED:`** —— **不可逆的那一半**，策略起点之前、会被永久写成
+  已处理的用量/余额条数。数字大不代表出错（起点前的事实对开票没用），但按下
+  `--apply` 就回不来了。
+- **`released to queued:`** —— 会被放出来交给 worker 的条数，也就是接下来补数
+  的规模，以及同来源其他客户读到 `source_unavailable` 的时长量级。
 - `invoice_user_id` / `external_account_id` 后面标 `created` 还是 `reused` /
   `updated in place`：第一次做应该都是 `created`。
-- `PRE_POLICY_SKIPPED`：**这是不可逆的那一半**，是策略起点之前、会被永久写成
-  已处理的用量/余额条数。数字大不代表出错（起点前的事实对开票没用），但要在
-  按 `--apply` 之前看一眼，因为按下去就回不来了。
-- `released to queued`：会被放出来交给 worker 的条数，也就是接下来补数的规模。
+- `timing gate` 要是 `GO`。
 
-这两个数是**实测的**，不是估的：dry-run 在同一个事务里真的执行了那两条 UPDATE，
+后两个数是**实测的**，不是估的：dry-run 在同一个事务里真的执行了那两条 UPDATE，
 然后整体回滚。所以 dry-run 也会短暂持有这些行的锁，请和 `--apply` 一样放在低峰
 窗口做。
 
+**什么情况必须停手**：`issuer:` 与 api 不一致；`external_user_id` 与上游后台对不
+上；出现 `WARNING` 而你无法解释为什么这个客户在本库一条事实都没有；
+`timing gate` 是 `NO-GO`。
+
 ### 观察窗口（每个客户一次）
 
-- T+0：该 key 的 `source_ingest_events` 从 `parked_identity` 变 `queued`。
-- T+分钟级到数十分钟：worker 每 2 秒认领 100 条逐条处理。**盯 `Dead` 计数**——
-  一出现死信立刻停止后续绑定，按 9. 节的死信段处置。
-- bootstrap 完成的标志是 `source_account_eligibility_state` 出现该账号的行；
-  在那之前管理端 `/admin/accounts/{id}/ledger` 看不到它（那个查询 INNER JOIN
-  这张表）。
-- 之后还有 15 分钟的 finalization 延迟才会首次评估。「几十分钟到一小时」是设计
-  稿的估算，**未实测**；本次做的时候把实际时间记进发布记录。
-- 判断「能不能开票」只能用管理端账本的 `block_state` / `block_reason` /
-  `invoiceable_now_minor` / `threshold_reached` 做只读近似。它**不含**五流新鲜度、
-  邮箱已验证、profile 校验——真判据只在提交时跑，而提交这件事这里是禁止的。
+先把 `--apply` 摘要里的三个值存成变量——后面每条命令都用它们，其中
+`dependency_key_hmac` 是盲索引，**人手算不出来，只能从摘要里抄**：
+
+```bash
+BIND_DEP_KEY='<摘要里的 dependency_key_hmac，形如 h1:...>'
+BIND_ACCOUNT_ID='<摘要里的 external_account_id>'
+BIND_USER_ID='<摘要里的 invoice_user_id>'
+```
+
+**T+0：停放事实已经放出来。** `parked_identity` 应为 0，`queued` 是刚放出的量：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT processing_status,count(*) FROM source_ingest_events
+      WHERE dependency_key_hmac='$BIND_DEP_KEY' OR catchup_key_hmac='$BIND_DEP_KEY'
+      GROUP BY 1 ORDER BY 1"
+```
+
+**T+0：影子身份长成了该有的样子。** `platform` / `platform_user_id` 已填、
+`status` 是 `active`、`email_verified` 是 `f`（即使传了 `--email`）：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT u.oidc_issuer,u.platform,u.platform_user_id,u.status,u.email_verified,
+             a.binding_method,a.binding_status
+      FROM invoice_users u JOIN external_accounts a ON a.invoice_user_id=u.id
+      WHERE u.id='$BIND_USER_ID'"
+```
+
+`binding_method` 必须是 `operator_attested`——这是日后唯一能把「代建」与「客户
+自证」分开的痕迹，管理端账本里看不到它。
+
+**补数期间：盯死信。** 每几分钟跑一次；`dead` 一旦从 0 变正，**立刻停止后续
+绑定**，按 9. 节「Contained dead events」与死信段处置：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT count(*) FILTER (WHERE processing_status='dead') AS dead,
+             count(*) FILTER (WHERE processing_status IN ('queued','failed','processing')) AS pending
+      FROM source_ingest_events"
+```
+
+同时看 `/readyz`。它只有 200 和 503 两种结果，503 的 body 里 `check` 字段说明是
+哪一道闸（读法见 9. 节「Reading a 503 from `/readyz`」）：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://invoice.solov.cc/readyz
+```
+
+补数期间同来源**其他**客户读到 `source_unavailable` 是预期的，不是故障。
+
+**bootstrap 完成的标志**是 `source_account_eligibility_state` 出现该账号的行。
+在那之前管理端 `/admin/accounts/{id}/ledger` 看不到它（那个查询 INNER JOIN 这张
+表），所以「后台还看不见」不等于失败：
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT bootstrap_kind,cutover_at,finalized_through,finalization_delay_seconds
+      FROM source_account_eligibility_state WHERE external_account_id='$BIND_ACCOUNT_ID'"
+```
+
+出行之后还有 15 分钟的 finalization 延迟才会首次评估。「几十分钟到一小时」是
+设计稿的估算，**未实测**；本次做的时候把 `--apply` 时刻、这张表出行时刻、首次
+评估时刻都记进发布记录，把这条从估算变成事实。
+
+**判断「能不能开票」**只能用管理端账本
+`GET /api/v1/admin/accounts/$BIND_ACCOUNT_ID/ledger` 的
+`block_state` / `block_reason` / `invoiceable_now_minor` / `threshold_reached`
+做只读近似。它**不含**五流新鲜度、邮箱已验证、
+profile 校验——真判据只在提交时跑，而提交这件事这里是禁止的。
 
 ## 10. Canary acceptance
 

@@ -30,8 +30,8 @@
 - `backend/internal/postgresstore/operator_bind.go` —— 单事务四步：解析该平台唯一
   enabled 的 `source_instance` → `ensureUserTx` → `claimPlatformIdentityTx` →
   `bindExternalAccountTx` → `requeueSourceDependencyTx`。
-- `backend/internal/application/binding_keys.go` —— 两个 HMAC 命名空间的**唯一**
-  定义处，导出给 CLI 用。
+- `backend/internal/application/binding_keys.go` —— 两个 HMAC 命名空间与
+  `UserEmailAAD` 的**唯一**定义处，导出给 CLI 用。
 - 三个测试文件（见第 4 节）。
 
 **改了（都是抽取，不改行为）**
@@ -43,9 +43,11 @@
   `PRE_POLICY_SKIPPED` 条数；`SourceIngestHealth` 加 `UncontainedDead()` 方法。
 - `cmd/api/runtime.go`：`validateSourceIngestRuntimeReadiness` 改成调用
   `UncontainedDead()`，不再自己做减法。
-- `application/service.go`、`application/source_processor.go`：改成调用
-  `binding_keys.go` 里的导出函数。
+- `application/service.go`、`application/source_processor.go`、
+  `application/crypto.go`：改成调用 `binding_keys.go` 里的导出函数。
 - `backend/Dockerfile`：tools 镜像加 `invoice-account-bind`。
+- `docs/PRODUCTION-RUNBOOK.md` 2186/2250 两处既有的 eligibility-repair 命令：
+  路径与 secret 名本来就是错的，一并改正（见第 4b 节 minor 8）。
 
 ## 3. 三个设计上的判断，以及为什么
 
@@ -99,8 +101,20 @@ X」的世界里也成立。
 置非 active 之后客户登录被拒（撤回档位 (b) 的代价）。
 
 `backend/cmd/account-bind/main_test.go` —— CLI 接线、参数拒绝、
-`platformLoginOrigin` 与 `cmd/api` 的默认值逐字一致、`userEmailAAD` 与
-`application/crypto.go` 逐字一致、dry-run 不写库、apply 端到端。
+`platformLoginOrigin` 缺变量时拒绝运行且归一化方式与 `cmd/api` 一致、
+AAD 直接调 `application.UserEmailAAD`、issuer 与库矛盾时拒绝、退出码分级、
+dry-run 不写库、apply 端到端。
+
+复审后新增的（见第 4b 节）：
+
+| 测试 | 钉住什么 |
+| --- | --- |
+| `TestOperatorBindTimingGateRefusesAPendingBacklog` | `Pending > 0` 分支（原来零覆盖）；用刚建的 queued 事件证明比 `/readyz` 严，排干后门重开 |
+| `TestOperatorBindRefusesAnIssuerTheDatabaseContradicts` | issuer 与库里该平台已有身份矛盾 → 拒绝；第一个身份空过也断言了 |
+| `TestOperatorBindCountsFactsEverSeen` | `facts ever seen` 要含已唤醒过的（否则正确的重跑会误报告警） |
+| `TestPlatformLoginOriginRefusesAnUnsetVariable` | 缺环境变量不再静默用默认值 |
+| `TestRunRefusesAnIssuerThatDisagreesWithTheDatabase` | 同上，端到端走一遍 |
+| `TestExitCodeSeparatesTheTimingGateFromRealFailures` | 时机门拒绝退 3，其它失败退 1 |
 
 **变异验证（每条都真跑过，红→改回→绿）**
 
@@ -113,10 +127,83 @@ X」的世界里也成立。
 | 5 | 删掉时机门的 apply 拒绝 | 红：`apply was allowed while an uncontained dead event was present` |
 | 6 | 让 dry-run 也提交 | 红：`dry run reported applied` |
 | 7 | 关掉 `runtime.go` 的认领分支 | 红：`login did not report taking the claim path` |
+| 8 | 删掉时机门的 `Pending > 0` 分支（复审第 4 条） | 红：`gate reported satisfied with a pending backlog` |
+| 9 | 恢复 `platformLoginOrigin` 的静默默认值（复审第 1 条） | 红：`silently used a default origin "https://api.solov.cc" instead of refusing` |
+| 10 | 关掉 issuer 与库矛盾的拒绝 | 红：store 层与 CLI 层各红一条 |
+| 11 | `FactsEverSeen` 只数 `dependency_key_hmac`、不数 `catchup_key_hmac` | 红：`a released fact stopped being counted after the wake: 0` |
 
 变异 7 顺带查出一件对运行手册有用的事：影子用户是按「真登录会铸的同一对
 (issuer, subject)」建的，所以**即使认领分支不存在**，`ResolveOrCreate` 也会找到
 同一行。也就是说「不会铸第二个用户」有两道独立保障，不止认领路径一道。
+
+## 4b. 第一轮对抗复审（运维 / CLI 安全视角）修了什么
+
+复审判 FAIL。四条 major 全部修完；四条 minor 修完三条，一条转 follow_up。
+
+**major 1：issuer 会被静默写错。** 手册原来写
+`docker run -e SUB2API_LOGIN_BASE_URL`（不带 `=值`）。这两个变量只在
+`.env.production` 里，交互 shell 没有 export，`-e VAR` 遇到未设置的变量什么也不
+传——工具于是回落到编译进去的默认值。而那个默认值今天**恰好**等于
+`.env.production.example` 里的值，所以错误完全不可见；等哪天变量改了就会把错的
+issuer 永久写进 `invoice_users.oidc_issuer`，而我自己那条
+`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong` 已经证明登录
+不会修正它。典型的「条件恰好为真」。
+
+修了三处，比复审要求的多一处：
+
+- 工具侧删掉默认值，变量缺失直接拒绝运行——两种模式都拒，dry-run 也不例外：
+  预演出来的 issuer 要是错的，它教给运维的就是错的。测试
+  `TestPlatformLoginOriginRefusesAnUnsetVariable`。
+- 手册改用 `--env-file "$PRODUCTION_ENV_FILE"`，并写清为什么 `-e VAR` 不行。
+- **额外加的** `checkPlatformIssuerConsistency`：把 issuer 与库里该平台已有身份的
+  issuer 对一遍，不一致直接拒绝。只做前两条的话，issuer 的正确性仍然完全押在
+  「运维传对了文件」上；这一条让判据自己为自己负责。它的边界也写明了：该平台
+  第一个身份没有可比对象，检查空过，所以摘要把那一行标成
+  `<- FIRST identity for this platform` 交人工核对。测试
+  `TestOperatorBindRefusesAnIssuerTheDatabaseContradicts`（含空过分支）与
+  `TestRunRefusesAnIssuerThatDisagreesWithTheDatabase`。
+
+**major 2：dry-run 清单漏了两条能救命的行。** 补了 `issuer:` 与
+`ingest waiting:`，写清怎么比、什么情况必须停手。并按复审建议加了显式告警：
+`facts ever seen` 为 0 且是新建绑定时打
+`WARNING: no parked facts for this external id`。
+
+要说清它**不是**什么：非 0 不能证明 id 是对的。敲错的 id 落在另一个真实但未绑定
+的客户身上时计数很健康，所有权守卫也不拦（它只拦已被别人绑走的 id）。所以告警
+文案与手册都明写「两种情况都要回上游后台再核一次」，没有把它包装成一道守卫。
+测试 `TestOperatorBindCountsFactsEverSeen`。
+
+**major 3：观察窗口没有可执行命令。** 全部换成能直接粘的 psql 块，沿用手册既有
+的 `docker compose ... exec -T postgres psql -X -v ON_ERROR_STOP=1` 写法——不是
+复审提到的 `docker exec -i invoice-system-prod-postgres-1 ... -f -`，手册里没有
+那种写法，我按实际存在的房子风格来。`dependency_key_hmac` 人手算不出来，所以
+摘要现在把它打出来、手册让运维存成变量再粘进查询；它是盲索引、库里本来就以明文
+存着，打印不泄露任何东西。另外补了一条用 `invoice_user_id` 查影子身份形状的查询
+（`binding_method` 必须是 `operator_attested`）。
+
+**major 4：`Pending > 0` 分支零测试。** 复审删掉那三行全绿，确实如此。补
+`TestOperatorBindTimingGateRefusesAPendingBacklog`：用一条**刚建的** queued 事件
+（`/readyz` 会宽容的那种）证明这道门确实比 `/readyz` 严，再排干确认门会重新打开
+——否则「拒绝」有可能是 fixture 里别的原因造成的。
+
+**minor 5（修了）**：时机门拒绝改用 sentinel `ErrOperatorBindTimingGate`，CLI
+退出码 3；手册加退出码表。「现在不是时候」与「出错了」对脚本是两件事。
+
+**minor 6（修了）**：手册加 `--email` 会明文留在 shell 历史与 `ps` 里的提醒。
+
+**minor 7（修了）**：`userEmailAAD` 收进 `application.UserEmailAAD`，
+`application/crypto.go` 与 CLI 都调它，CLI 的本地拷贝删除。复审说得对，原来那个
+测试是自证循环。`auth/identity_migrate.go` 里第三份**没动**：package auth 是独立
+身份边界、不导入 application（`auth/doc.go`），并进来要新开一个叶子包，超出本片
+范围——见第 7 节 follow_up。
+
+**minor 8（修了，但结论与复审给的两个分支都不同）**：手册 2186/2250 两处
+`/app/bin/invoice-eligibility-repair` + `/run/secrets/invoice-db-url` +
+`field-keyring.json` **本来就是错的**，不是「docker exec 进 api 容器」的另一种
+语境。`/app/bin` 在整个仓库里只出现在这两处；`backend/Dockerfile` 装到
+`/usr/local/bin`；compose secret 叫 `invoice_owner_database_url` /
+`invoice_field_keyring`；api 镜像里也没有 tools 二进制。所以直接改正，改成与 9c
+相同的 docker run 形状并加注说明。
 
 ## 5. 偏离与未证实
 
@@ -154,3 +241,19 @@ X」的世界里也成立。
   不唤醒。这次是自己在 CLI 侧补的，不是改那两个判断——改它们会影响真实登录路径。
 - 时机门里 `Pending=0` 这一条会让「连着绑第二个」在上一个排干之前直接失败。这是
   设计意图，`TestOperatorBindIsIdempotent` 里那段 drain 的注释解释了。
+
+## 7. Follow-up（本片没做，记在这里）
+
+- **`userEmailAAD` 还有第三份。** `auth/identity_migrate.go:81` 的
+  `userEmailAADForMigration` 与 `application.UserEmailAAD` 是同一个字面量。没并是
+  因为 package auth 刻意不导入 application（`auth/doc.go` 写了理由），要并就得把
+  这个串挪进一个新的叶子包，两边都导入它。三份里现在有两份是同一处定义；剩下这
+  一份漂开的后果与前面一样：加密当场成功，客户第一次登录时解密失败。
+- **补数实际耗时仍未实测。** 第一次生产代绑定时把 `--apply` 时刻、
+  `source_account_eligibility_state` 出行时刻、首次评估时刻记进发布记录，把设计稿
+  那句「几十分钟到一小时」的估算换成事实。手册 9c 观察窗口一节已经写了要记。
+- **`checkPlatformIssuerConsistency` 在每个平台的第一个身份上空过。** 这是无法
+  消除的：库里没有可比对象。缓解是摘要把那一行标出来交人工核对。等两个平台各有
+  一个真实身份之后，这道检查才真正开始生效。
+- **管理端仍然看不到 `binding_method`。** 影子清单只能人工另存，设计稿 §B 风险 7
+  说过，本片没有改变。真要治，得让账本 wire 带上 `binding_method`，那是另一片。

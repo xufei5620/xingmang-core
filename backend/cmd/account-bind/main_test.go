@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +14,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"invoice-system/backend/internal/application"
 	"invoice-system/backend/internal/migrate"
+	"invoice-system/backend/internal/postgresstore"
 	"invoice-system/backend/internal/testdb"
 )
 
@@ -95,23 +99,36 @@ func TestRunRefusesBadInputBeforeTouchingTheDatabase(t *testing.T) {
 	}
 }
 
-// TestPlatformLoginOriginMatchesTheApiRuntime is the byte-for-byte contract
-// with cmd/api's buildPlatformLogin: same variables, same defaults, same
-// trailing-slash trim. The stored oidc_issuer comes from here, and a mismatch
-// does not fail now -- it surfaces months later as a customer whose identity
-// hash and email AAD were derived from the wrong origin.
-func TestPlatformLoginOriginMatchesTheApiRuntime(t *testing.T) {
+// TestPlatformLoginOriginRefusesAnUnsetVariable is the first review's finding
+// turned into a test.
+//
+// The runbook passed `docker run -e SUB2API_LOGIN_BASE_URL` with no value.
+// That variable lives only in .env.production and is not exported in an
+// operator's shell, so nothing reached the container and the tool fell back to
+// a compiled-in default -- which happens to equal today's configured value, so
+// the mistake was invisible. It becomes permanent damage the day the variable
+// changes, because no later login repairs oidc_issuer. There is now no default
+// to fall back to. The mutation that must turn this red is restoring the
+// fallback: the loop below then gets a value instead of an error.
+func TestPlatformLoginOriginRefusesAnUnsetVariable(t *testing.T) {
 	t.Setenv("SUB2API_LOGIN_BASE_URL", "")
 	t.Setenv("NEWAPI_LOGIN_BASE_URL", "")
-	for platform, want := range map[string]string{"sub2api": "https://api.solov.cc", "newapi": "https://xm.solov.cc"} {
+	for _, platform := range []string{"sub2api", "newapi"} {
 		got, err := platformLoginOrigin(platform)
-		if err != nil {
-			t.Fatal(err)
+		if err == nil {
+			t.Fatalf("%s: silently used a default origin %q instead of refusing", platform, got)
 		}
-		if got != want {
-			t.Fatalf("%s default origin is %q, want %q (cmd/api/runtime.go buildPlatformLogin)", platform, got, want)
+		if !strings.Contains(err.Error(), "LOGIN_BASE_URL") || !strings.Contains(err.Error(), "--env-file") {
+			t.Fatalf("%s: the error does not tell the operator how to fix it: %v", platform, err)
 		}
 	}
+}
+
+// TestPlatformLoginOriginNormalizesLikeTheApiRuntime keeps the surviving half
+// of the contract with cmd/api's buildPlatformLogin: same variables, same
+// trailing-slash trim, same exact-HTTPS-origin rule. Only the default is
+// deliberately not shared.
+func TestPlatformLoginOriginNormalizesLikeTheApiRuntime(t *testing.T) {
 	t.Setenv("SUB2API_LOGIN_BASE_URL", "https://api.example.test/")
 	got, err := platformLoginOrigin("sub2api")
 	if err != nil {
@@ -120,19 +137,26 @@ func TestPlatformLoginOriginMatchesTheApiRuntime(t *testing.T) {
 	if got != "https://api.example.test" {
 		t.Fatalf("trailing slash was not trimmed: %q", got)
 	}
+	t.Setenv("NEWAPI_LOGIN_BASE_URL", "https://xm.example.test")
+	if got, err = platformLoginOrigin("newapi"); err != nil || got != "https://xm.example.test" {
+		t.Fatalf("newapi origin is %q (%v)", got, err)
+	}
 	t.Setenv("SUB2API_LOGIN_BASE_URL", "http://api.example.test")
 	if _, err = platformLoginOrigin("sub2api"); err == nil {
 		t.Fatal("accepted a non-HTTPS login origin")
 	}
 }
 
-// TestUserEmailAADMatchesTheApplicationPackage guards the hand-mirrored AAD.
-// application/crypto.go's userEmailAAD is unexported and this package
-// deliberately does not import that package, so the only thing keeping the
-// two in step is this literal.
-func TestUserEmailAADMatchesTheApplicationPackage(t *testing.T) {
+// TestUserEmailAADIsTheApplicationPackagesOwn proves the CLI encrypts under
+// the definition the api decrypts with, not under a copy of it.
+//
+// The first review pointed out that the previous shape was circular: a local
+// copy plus a test asserting that same local copy stayed green no matter what
+// application/crypto.go did. The definition now lives once, in
+// application.UserEmailAAD, and this calls it.
+func TestUserEmailAADIsTheApplicationPackagesOwn(t *testing.T) {
 	const want = "invoice-user-email\nhttps://api.solov.cc\n7788"
-	if got := userEmailAAD("https://api.solov.cc", "7788"); got != want {
+	if got := application.UserEmailAAD("https://api.solov.cc", "7788"); got != want {
 		t.Fatalf("AAD is %q, want %q", got, want)
 	}
 }
@@ -157,9 +181,17 @@ func TestRunDryRunAgainstAnEmptyDatabaseReportsAPlan(t *testing.T) {
 		"issuer:              https://api.solov.cc",
 		"external_user_id:    7788",
 		"source_instance_id:  " + cliSourceID,
+		"dependency_key_hmac: h1:",
 		"timing gate:         GO",
 		"binding:             operator_attested / verified",
 		"PRE_POLICY_SKIPPED:  0 (irreversible)",
+		"facts ever seen:     0",
+		// The two lines the first review found missing from the runbook's
+		// checklist, plus the warning that makes the dangerous case visible
+		// without an operator having to compare numbers by eye.
+		"ingest waiting:      0",
+		"FIRST identity for this platform",
+		"WARNING: no parked facts for this external id",
 		"Re-run with --apply",
 	} {
 		if !strings.Contains(printed, want) {
@@ -230,5 +262,71 @@ func TestRunApplyWritesTheShadowBinding(t *testing.T) {
 	}
 	if users != 1 {
 		t.Fatalf("%d invoice_users rows after two applies, want 1", users)
+	}
+}
+
+// TestRunRefusesAnIssuerThatDisagreesWithTheDatabase is the durable half of
+// the first review's issuer finding. Refusing an unset variable stops the
+// silent-default case; this stops the case where a variable IS set and is
+// simply wrong, by checking it against the issuer every existing identity for
+// the platform already carries -- i.e. against what the running api actually
+// minted, rather than against configuration.
+func TestRunRefusesAnIssuerThatDisagreesWithTheDatabase(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir, pool := setupBindCLIEnv(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	t.Setenv("SUB2API_LOGIN_BASE_URL", "https://api.solov.cc")
+	var first bytes.Buffer
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir,
+		bindOptions{platform: "sub2api", externalUserID: "7788", apply: true, operatorID: cliOperatorID}, &first); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(first.String(), "FIRST identity for this platform") {
+		t.Fatalf("the first bind did not flag that nothing corroborates its issuer:\n%s", first.String())
+	}
+
+	// Now the deployment's variable is changed (or mistyped) and a second
+	// account is bound. The database already knows better.
+	t.Setenv("SUB2API_LOGIN_BASE_URL", "https://api.moved.example")
+	var second bytes.Buffer
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir,
+		bindOptions{platform: "sub2api", externalUserID: "9911", apply: true, operatorID: cliOperatorID}, &second)
+	if err == nil {
+		t.Fatal("accepted an issuer that disagrees with every existing identity for the platform")
+	}
+	if !strings.Contains(err.Error(), "does not match the issuer every existing") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var users int64
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM invoice_users`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 {
+		t.Fatalf("%d invoice_users rows after the refusal, want 1", users)
+	}
+
+	// The corroborated case must still pass, and say so.
+	t.Setenv("SUB2API_LOGIN_BASE_URL", "https://api.solov.cc")
+	var third bytes.Buffer
+	if err = run(ctx, databaseURLFile, keyringFile, migrationsDir,
+		bindOptions{platform: "sub2api", externalUserID: "9911"}, &third); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(third.String(), "matches every existing identity for this platform") {
+		t.Fatalf("a corroborated issuer was not reported as such:\n%s", third.String())
+	}
+}
+
+// TestExitCodeSeparatesTheTimingGateFromRealFailures pins the exit contract the
+// runbook documents. "Come back in the next quiet window" and "this failed"
+// need different answers from a script, and previously both were 1.
+func TestExitCodeSeparatesTheTimingGateFromRealFailures(t *testing.T) {
+	gateErr := fmt.Errorf("wrapped: %w", postgresstore.ErrOperatorBindTimingGate)
+	if got := exitCodeFor(gateErr); got != exitTimingGateRefused {
+		t.Fatalf("timing gate refusal exits %d, want %d", got, exitTimingGateRefused)
+	}
+	if got := exitCodeFor(errors.New("database is unreachable")); got != exitOperationFailed {
+		t.Fatalf("ordinary failure exits %d, want %d", got, exitOperationFailed)
 	}
 }

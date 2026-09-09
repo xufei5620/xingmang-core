@@ -32,6 +32,13 @@ const BindingMethodOperatorAttested = "operator_attested"
 // create this binding on the customer's behalf".
 const operatorBoundAction = "external_account.operator_bound"
 
+// ErrOperatorBindTimingGate is returned when --apply is refused because the
+// deployment is not in a state to accept a bind. It is a sentinel so the CLI
+// can exit with its own code: "come back in the next quiet window" is a
+// different instruction from "this failed", and an operator reading only the
+// exit status must be able to tell them apart.
+var ErrOperatorBindTimingGate = errors.New("source ingestion timing gate is not satisfied")
+
 // blindIndexPattern matches securefields.Keyring.BlindIndex output. This
 // package deliberately has no securefields dependency (see
 // eligibility_repair.go), so the caller derives both HMACs and this only
@@ -75,6 +82,34 @@ type OperatorBindResult struct {
 	BindingStatus     string
 	PrePolicySkipped  int64
 	Released          int64
+
+	// FactsEverSeen counts the source_ingest_events rows this external id has
+	// ever been associated with -- parked on this binding right now
+	// (dependency_key_hmac), or released by an earlier wake
+	// (catchup_key_hmac). Zero on a freshly created binding means this
+	// database has never heard of this id at all, which is what a mistyped
+	// upstream id usually looks like.
+	//
+	// It is NOT a proof of correctness, and the summary must not present it
+	// as one. An id mistyped into a DIFFERENT real but never-bound customer
+	// has a perfectly healthy non-zero count, and no query here can tell that
+	// apart from the intended customer -- only the operator copying the id
+	// verbatim out of the upstream console can.
+	FactsEverSeen int64
+
+	// PlatformIssuerInUse is the oidc_issuer that every existing
+	// invoice_users row for this platform already carries, or "" when this
+	// bind is creating the first row for the platform. See
+	// checkPlatformIssuerConsistency for why it is checked at all.
+	PlatformIssuerInUse string
+
+	// DependencyKeyHMAC is echoed back so the runbook's observation-window
+	// queries have something to paste: the parked rows are keyed by this
+	// blind index and an operator cannot derive it by hand. It is an HMAC of
+	// (source instance, external user id) under the index key, already stored
+	// in plaintext in source_ingest_events, so echoing it discloses nothing
+	// the database does not already hold.
+	DependencyKeyHMAC string
 }
 
 // OperatorBindExternalAccount is the shadow binding of design
@@ -139,10 +174,18 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	}
 	result.GateSatisfied, result.GateReason = operatorBindTimingGate(result.Health)
 	if in.Apply && !result.GateSatisfied {
-		return OperatorBindResult{}, fmt.Errorf("source ingestion timing gate is not satisfied: %s", result.GateReason)
+		return OperatorBindResult{}, fmt.Errorf("%w: %s", ErrOperatorBindTimingGate, result.GateReason)
 	}
 
 	if result.SourceInstanceID, err = getEnabledSourceInstanceID(ctx, tx, platform); err != nil {
+		return OperatorBindResult{}, err
+	}
+	result.DependencyKeyHMAC = in.DependencyKeyHMAC
+
+	if result.PlatformIssuerInUse, err = checkPlatformIssuerConsistency(ctx, tx, platform, issuer); err != nil {
+		return OperatorBindResult{}, err
+	}
+	if result.FactsEverSeen, err = countFactsEverSeen(ctx, tx, in.DependencyKeyHMAC); err != nil {
 		return OperatorBindResult{}, err
 	}
 
@@ -219,6 +262,69 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	}
 	result.Applied = true
 	return result, nil
+}
+
+// checkPlatformIssuerConsistency refuses an issuer that disagrees with the one
+// every existing invoice_users row for this platform already carries, and
+// returns that in-use issuer (or "" when this platform has no rows yet).
+//
+// The issuer reaching this function came from the operator's environment, and
+// a wrong one is written permanently: the customer's later real login claims
+// the shadow row through the external account, never through (issuer,
+// subject), so it does not repair the column -- proved by cmd/api's
+// TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong. Every
+// session identity hash and the email AAD derive from it.
+//
+// So rather than trusting the environment, the value is checked against what
+// the running api demonstrably minted for earlier logins on the same platform.
+// Note honestly what this cannot do: on a platform whose first-ever row this
+// bind is creating, there is nothing to compare against and the check passes
+// vacuously. That first bind's issuer line has to be read by a human -- which
+// is exactly why the runbook's dry-run checklist names it.
+func checkPlatformIssuerConsistency(ctx context.Context, tx pgx.Tx, platform, issuer string) (string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT oidc_issuer FROM invoice_users WHERE platform=$1 ORDER BY oidc_issuer LIMIT 5`, platform)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var inUse []string
+	for rows.Next() {
+		var value string
+		if err = rows.Scan(&value); err != nil {
+			return "", err
+		}
+		inUse = append(inUse, value)
+	}
+	if err = rows.Err(); err != nil {
+		return "", err
+	}
+	if len(inUse) == 0 {
+		return "", nil
+	}
+	if len(inUse) > 1 {
+		return "", fmt.Errorf(
+			"invoice_users already holds %d different oidc_issuer values for platform %q (%s); refusing to add another until that is explained",
+			len(inUse), platform, strings.Join(inUse, ", "))
+	}
+	if inUse[0] != issuer {
+		return "", fmt.Errorf(
+			"issuer %q does not match the issuer every existing %s identity carries (%q); the login origin this tool read from the environment is not the one the running api uses",
+			issuer, platform, inUse[0])
+	}
+	return inUse[0], nil
+}
+
+// countFactsEverSeen counts the ingest events this external id is or was
+// associated with: still parked on the binding (dependency_key_hmac), or
+// already released by an earlier wake (catchup_key_hmac). See
+// OperatorBindResult.FactsEverSeen for what this can and cannot prove.
+func countFactsEverSeen(ctx context.Context, tx pgx.Tx, dependencyKeyHMAC string) (int64, error) {
+	var count int64
+	err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM source_ingest_events
+		WHERE dependency_key_hmac=$1 OR catchup_key_hmac=$1`, dependencyKeyHMAC).Scan(&count)
+	return count, err
 }
 
 // operatorBindTimingGate is design XM-INV-SHADOW-BINDING section B guardrail

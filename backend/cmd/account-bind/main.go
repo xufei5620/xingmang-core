@@ -105,8 +105,33 @@ func main() {
 	}
 	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, options, os.Stdout); err != nil {
 		slog.Error("account-bind failed", "error", err)
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// Exit codes. They are distinct because the operational responses are
+// distinct, and because the runbook documents them: 3 means "come back later,
+// nothing was wrong with what you typed", which is the single most likely
+// outcome of a first attempt and must not be confused with a real failure.
+//
+//	0  success (an apply that committed, or a dry run -- including a dry run
+//	   whose timing gate is NO-GO, which still prints a complete plan)
+//	1  the operation failed: database unreachable, migration set mismatch,
+//	   a refused bind (ErrForbidden), a serialization conflict, an issuer that
+//	   disagrees with the identities already in the database
+//	2  the command line itself is wrong (bad flags, relative paths)
+//	3  --apply was refused by the ingest timing gate: nothing was wrong with
+//	   the request, the deployment is simply not in a state to accept it
+const (
+	exitTimingGateRefused = 3
+	exitOperationFailed   = 1
+)
+
+func exitCodeFor(err error) int {
+	if errors.Is(err, postgresstore.ErrOperatorBindTimingGate) {
+		return exitTimingGateRefused
+	}
+	return exitOperationFailed
 }
 
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, options bindOptions, out io.Writer) error {
@@ -177,7 +202,7 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 		// email_verified stays FALSE: an operator typing an address into a
 		// terminal has not verified it, and a verified delivery address is
 		// what the invoice is actually sent to.
-		ciphertext, encErr := keyring.Encrypt([]byte(email), userEmailAAD(issuer, externalUserID))
+		ciphertext, encErr := keyring.Encrypt([]byte(email), application.UserEmailAAD(issuer, externalUserID))
 		if encErr != nil {
 			return fmt.Errorf("encrypt platform email: %w", encErr)
 		}
@@ -196,36 +221,42 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 }
 
 // platformLoginOrigin reads the platform's login origin from the same
-// environment variables cmd/api's buildPlatformLogin reads, including their
-// defaults and the same trailing-slash trim. It must agree byte for byte:
-// this value becomes invoice_users.oidc_issuer, and the customer's eventual
-// real login looks up their identity by exactly (issuer, subject). A shadow
-// row minted under a different issuer is not claimed -- it is orphaned, and a
-// second invoice_user appears beside it.
+// environment variables cmd/api's buildPlatformLogin reads, with the same
+// trailing-slash trim -- but deliberately WITHOUT their compiled-in defaults.
+//
+// cmd/api can afford a default: a wrong origin there produces a login that
+// fails loudly and immediately. Here the same value is written permanently
+// into invoice_users.oidc_issuer, and the customer's later real login claims
+// the row through the external account rather than through (issuer, subject),
+// so it never repairs the column -- cmd/api's
+// TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong proves
+// that.
+//
+// The first review of this tool found exactly how a default goes wrong here.
+// The runbook passed `docker run -e SUB2API_LOGIN_BASE_URL` with no value; the
+// variable lives only in .env.production and is not exported in an operator's
+// shell, so `-e VAR` passed nothing and the tool silently used its default.
+// That default happens to equal today's configured value, so the mistake would
+// have stayed invisible until somebody changed the variable. A default that is
+// right only by coincidence is worse than no default, so this refuses instead.
+// checkPlatformIssuerConsistency then checks the supplied value against what
+// the running api demonstrably minted for earlier logins.
 func platformLoginOrigin(platform string) (string, error) {
 	variable := "SUB2API_LOGIN_BASE_URL"
-	fallback := "https://api.solov.cc"
 	if platform == "newapi" {
-		variable, fallback = "NEWAPI_LOGIN_BASE_URL", "https://xm.solov.cc"
+		variable = "NEWAPI_LOGIN_BASE_URL"
 	}
 	value := strings.TrimSpace(os.Getenv(variable))
 	if value == "" {
-		value = fallback
+		return "", fmt.Errorf("%s is not set: pass the api's own environment with "+
+			`docker run --env-file "$PRODUCTION_ENV_FILE", because this value is written `+
+			"permanently into invoice_users.oidc_issuer and no later login repairs it", variable)
 	}
 	value = strings.TrimRight(value, "/")
 	if !strings.HasPrefix(value, "https://") || strings.ContainsAny(value, " \r\n\t") {
 		return "", fmt.Errorf("%s must be one exact HTTPS origin", variable)
 	}
 	return value, nil
-}
-
-// userEmailAAD must byte-for-byte match application/crypto.go's unexported
-// userEmailAAD -- the same "mirror by hand rather than widen an interface"
-// precedent cmd/identity-migrate's userEmailAADForMigration already follows.
-// A mismatch here does not fail now: it produces a ciphertext the api can
-// never decrypt, which surfaces only when the customer first logs in.
-func userEmailAAD(issuer, subject string) string {
-	return "invoice-user-email\n" + issuer + "\n" + subject
 }
 
 func modeLabel(apply bool) string {
@@ -235,6 +266,17 @@ func modeLabel(apply bool) string {
 	return "dry run"
 }
 
+// issuerProvenance annotates the issuer line with whether anything in the
+// database corroborates it. On a platform's first-ever identity there is
+// nothing to compare against, and the operator is the only check -- the line
+// says so rather than looking as verified as a corroborated one.
+func issuerProvenance(result postgresstore.OperatorBindResult) string {
+	if result.PlatformIssuerInUse == "" {
+		return "   <- FIRST identity for this platform: nothing in the database corroborates this. Verify it by hand."
+	}
+	return "   (matches every existing identity for this platform)"
+}
+
 func printSummary(out io.Writer, platform, issuer, externalUserID string, result postgresstore.OperatorBindResult) {
 	mode := "DRY RUN (nothing was changed)"
 	if result.Applied {
@@ -242,9 +284,13 @@ func printSummary(out io.Writer, platform, issuer, externalUserID string, result
 	}
 	fmt.Fprintf(out, "account-bind XM-INV-SHADOW-BINDING: %s\n\n", mode)
 	fmt.Fprintf(out, "platform:            %s\n", platform)
-	fmt.Fprintf(out, "issuer:              %s\n", issuer)
+	fmt.Fprintf(out, "issuer:              %s%s\n", issuer, issuerProvenance(result))
 	fmt.Fprintf(out, "external_user_id:    %s\n", externalUserID)
-	fmt.Fprintf(out, "source_instance_id:  %s\n\n", result.SourceInstanceID)
+	fmt.Fprintf(out, "source_instance_id:  %s\n", result.SourceInstanceID)
+	// Echoed so the runbook's observation-window queries have a key to paste:
+	// the parked rows are found by this blind index and it cannot be derived
+	// by hand.
+	fmt.Fprintf(out, "dependency_key_hmac: %s\n\n", result.DependencyKeyHMAC)
 
 	gate := "GO"
 	if !result.GateSatisfied {
@@ -268,7 +314,21 @@ func printSummary(out io.Writer, platform, issuer, externalUserID string, result
 	fmt.Fprintf(out, "binding:             %s / %s\n\n", result.BindingMethod, result.BindingStatus)
 
 	fmt.Fprintf(out, "PRE_POLICY_SKIPPED:  %d (irreversible)\n", result.PrePolicySkipped)
-	fmt.Fprintf(out, "released to queued:  %d\n\n", result.Released)
+	fmt.Fprintf(out, "released to queued:  %d\n", result.Released)
+	fmt.Fprintf(out, "facts ever seen:     %d\n\n", result.FactsEverSeen)
+
+	// "released: 0" reads identically for "this customer had nothing parked"
+	// and "this id belongs to nobody because a digit was mistyped". The
+	// ownership guard does not separate them either: it only refuses an id
+	// already bound to SOMEBODY, and a mistyped id that lands on a real but
+	// never-bound customer is exactly the case it lets through. Say so.
+	if result.BindingCreated && result.FactsEverSeen == 0 {
+		fmt.Fprintf(out, "WARNING: no parked facts for this external id, and none were ever released for it.\n"+
+			"  This database has never heard of %q on this source. That is what a mistyped\n"+
+			"  upstream id normally looks like. Re-copy the id from the upstream console before\n"+
+			"  applying. A non-zero count would NOT have proved the id is right either -- it can\n"+
+			"  belong to a different, never-bound customer -- so verify the id either way.\n\n", externalUserID)
+	}
 
 	if result.Applied {
 		fmt.Fprintf(out, "applied. Watch /readyz and the dead-event count until the released events drain;\n"+

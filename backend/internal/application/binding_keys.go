@@ -34,3 +34,22 @@ func PlatformBindingSubjectIndex(keys securefields.Keyring, sourceInstanceID, ex
 func SourceDependencyKeyHMAC(keys securefields.Keyring, kind, sourceInstanceID, value string) (string, error) {
 	return keys.BlindIndex("source-dependency/"+kind, sourceInstanceID+"\n"+value)
 }
+
+// UserEmailAAD is the additional authenticated data binding an
+// invoice_users.email_ciphertext to the identity that owns it. Exported for
+// the same reason as the two blind indexes above: cmd/account-bind writes that
+// column for a shadow identity and must produce a ciphertext the api can later
+// decrypt. A drifted copy of this string fails nowhere near the mistake -- the
+// encrypt succeeds, and the customer's first real login is where the decrypt
+// fails.
+//
+// auth/identity_migrate.go's userEmailAADForMigration is a third spelling of
+// the same string and is deliberately left in place: package auth is the
+// invoice service's independent identity boundary and does not import
+// application (auth/doc.go), and that copy carries its own comment saying so.
+// Collapsing it too would mean moving this string into a new leaf package both
+// can import -- a larger change than this slice should make. Recorded as a
+// follow-up in docs/handoffs/XM-INV-SHADOW-BINDING.md.
+func UserEmailAAD(issuer, subject string) string {
+	return "invoice-user-email\n" + issuer + "\n" + subject
+}

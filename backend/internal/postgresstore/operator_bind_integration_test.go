@@ -501,3 +501,153 @@ func TestOperatorBindRefusesApplyWithoutAnOperator(t *testing.T) {
 		t.Fatal("applied without an approving operator id")
 	}
 }
+
+// TestOperatorBindTimingGateRefusesAPendingBacklog covers the gate's OTHER
+// branch, which the first adversarial review found completely untested: the
+// reviewer deleted the Pending>0 check and every test still passed.
+//
+// That branch is the only mechanical enforcement of the design's "one account
+// at a time" rule. Everything else about the rule is prose in a runbook, and
+// prose does not stop a second `--apply` typed sixty seconds after the first
+// while several thousand released facts are still draining.
+//
+// It is deliberately stricter than /readyz, which forgives a backlog younger
+// than fifteen minutes so the api can stay in rotation while the worker
+// catches up. This gate forgives none, so the assertion uses a freshly created
+// queued event -- one /readyz would tolerate -- to prove the extra strictness
+// is real and not an accident of the fixture's clock.
+//
+// The mutation that must turn this red: delete the Pending>0 branch, or
+// weaken it to `>= 1000`.
+func TestOperatorBindTimingGateRefusesAPendingBacklog(t *testing.T) {
+	store, ctx, policyStart := seedShadowBindFixture(t)
+	parkEvent(t, store, ctx, "82000000-0000-4000-8000-0000000000e1", "usage_event", shadowExternalID, policyStart.Add(time.Hour))
+	// A single queued event, created just now: /readyz would return 200 for
+	// this (Pending=1 but OldestPending is well inside its fifteen-minute
+	// budget), and this gate must still refuse.
+	if _, err := store.pool.Exec(ctx, `
+		INSERT INTO source_ingest_events(source_instance_id,stream_id,event_id,first_batch_id,entity_type,operation,
+			payload_hash,payload_ciphertext,observed_at,processing_status,attempt_count,created_at,updated_at)
+		VALUES($1,'usage','82000000-0000-4000-8000-0000000000e2',$2,'usage_event','upsert',$3,
+			decode(repeat('11',16),'hex'),now(),'queued',0,now(),now())`,
+		shadowSourceID, shadowBatchID, strings.Repeat("e", 64)); err != nil {
+		t.Fatal(err)
+	}
+
+	dry, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, false), shadowActor())
+	if err != nil {
+		t.Fatalf("dry run must still produce a plan while a backlog drains: %v", err)
+	}
+	if dry.GateSatisfied {
+		t.Fatalf("gate reported satisfied with a pending backlog: %+v", dry.Health)
+	}
+	if !strings.Contains(dry.GateReason, "EVENTS_PENDING") {
+		t.Fatalf("gate reason %q does not name the pending backlog", dry.GateReason)
+	}
+	if dry.Health.Dead != 0 {
+		t.Fatalf("fixture has %d dead events; this test must fail on pending alone", dry.Health.Dead)
+	}
+
+	_, err = store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if !errors.Is(err, ErrOperatorBindTimingGate) {
+		t.Fatalf("apply returned %v, want ErrOperatorBindTimingGate", err)
+	}
+	if bindings := countShadowBindings(t, store, ctx); bindings != 0 {
+		t.Fatalf("%d bindings written despite the refusal", bindings)
+	}
+
+	// Draining the backlog reopens the gate -- proving the refusal is about
+	// the backlog and not about something permanent in the fixture.
+	if _, err = store.pool.Exec(ctx, `
+		UPDATE source_ingest_events SET processing_status='processed',processed_at=now(),updated_at=now()
+		WHERE source_instance_id=$1 AND processing_status='queued'`, shadowSourceID); err != nil {
+		t.Fatal(err)
+	}
+	drained, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatalf("apply still refused after the backlog drained: %v", err)
+	}
+	if !drained.Applied {
+		t.Fatal("apply reported not applied after the backlog drained")
+	}
+}
+
+// TestOperatorBindRefusesAnIssuerTheDatabaseContradicts is the durable guard
+// behind the first review's issuer finding. cmd/account-bind now refuses an
+// unset login-origin variable, but a variable that is SET and wrong is still
+// possible, and a wrong issuer is written permanently. So the value is also
+// checked against what the running api demonstrably minted for this platform.
+//
+// The vacuous case is asserted on purpose: on a platform's first identity
+// there is nothing to compare against and the bind is allowed. Pretending
+// otherwise would make this look like a complete guard when it is not -- the
+// summary flags that first bind for human review instead.
+func TestOperatorBindRefusesAnIssuerTheDatabaseContradicts(t *testing.T) {
+	store, ctx, _ := seedShadowBindFixture(t)
+
+	first, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.PlatformIssuerInUse != "" {
+		t.Fatalf("the first identity for a platform reported corroboration %q it cannot have", first.PlatformIssuerInUse)
+	}
+
+	moved := shadowBindInput("8899", true)
+	moved.Issuer = "https://api.moved.example"
+	if _, err = store.OperatorBindExternalAccount(ctx, moved, shadowActor()); err == nil {
+		t.Fatal("accepted an issuer that contradicts every existing identity for the platform")
+	}
+	if countUsers(t, store, ctx) != 1 {
+		t.Fatalf("the refused bind left rows behind: %d", countUsers(t, store, ctx))
+	}
+
+	agreeing, err := store.OperatorBindExternalAccount(ctx, shadowBindInput("8899", true), shadowActor())
+	if err != nil {
+		t.Fatalf("an agreeing issuer was refused: %v", err)
+	}
+	if agreeing.PlatformIssuerInUse != shadowIssuer {
+		t.Fatalf("corroborating issuer is %q, want %q", agreeing.PlatformIssuerInUse, shadowIssuer)
+	}
+}
+
+// TestOperatorBindCountsFactsEverSeen backs the summary's mistyped-id warning.
+// The count must include facts an earlier wake already released, not only the
+// ones parked right now -- otherwise a re-run of a correct bind would print
+// the "this database has never heard of this id" warning and teach operators
+// to ignore it.
+func TestOperatorBindCountsFactsEverSeen(t *testing.T) {
+	store, ctx, policyStart := seedShadowBindFixture(t)
+	parkEvent(t, store, ctx, "82000000-0000-4000-8000-0000000000e3", "usage_event", shadowExternalID, policyStart.Add(time.Hour))
+
+	unknown, err := store.OperatorBindExternalAccount(ctx, shadowBindInput("404404", false), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unknown.FactsEverSeen != 0 {
+		t.Fatalf("an id with no facts reported %d", unknown.FactsEverSeen)
+	}
+
+	known, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known.FactsEverSeen != 1 {
+		t.Fatalf("a parked fact was not counted: %d", known.FactsEverSeen)
+	}
+
+	// After the wake the row is no longer parked; it carries catchup_key_hmac
+	// instead. A re-run must still see it.
+	if _, err = store.pool.Exec(ctx, `
+		UPDATE source_ingest_events SET processing_status='processed',processed_at=now(),updated_at=now()
+		WHERE source_instance_id=$1 AND processing_status='queued'`, shadowSourceID); err != nil {
+		t.Fatal(err)
+	}
+	repeat, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, false), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeat.FactsEverSeen != 1 {
+		t.Fatalf("a released fact stopped being counted after the wake: %d", repeat.FactsEverSeen)
+	}
+}
