@@ -548,6 +548,50 @@ printenv 且含 Do NOT rely on --env-file」。
 `invoice_users.oidc_issuer` 的操作，正是 4b 节加它的目的。错的只是它和手册给出的
 补救办法。
 
+## 4h. 首次生产代绑定的实测（账号 2823，2026-09-09）
+
+主控者在生产执行，我未碰生产。数据由主控者提供，机制部分我复核过。
+
+| 项 | 值 |
+|---|---|
+| dry-run | 14:43:28Z，origins 从 api 容器 `printenv` 复制 |
+| issuer | `https://api.solov.cc`，标 `matches every platform-login identity on this source` |
+| 时机门 | GO；pending 0 / dead 0 / waiting 647,541 / identity_binding open 0 |
+| `PRE_POLICY_SKIPPED` | **0** |
+| `released to queued` / `facts ever seen` | **552** / 552 |
+| apply | 14:54:26Z，与 dry-run 逐字一致（waiting 648,022、released 552） |
+| 新建 | invoice_user `c7e5bb12…`、external_account `eb233095…`、`operator_attested`/`verified`（`verified_at` 14:54:29.025Z） |
+| T+3s | `source_account_eligibility_state` 已出行（`syncing`，catchup 键在，`finalized_through` = 08-31 16:00Z） |
+| T+23s | 41 processed / 59 processing / 452 queued；全库 dead 0 |
+
+`PRE_POLICY_SKIPPED=0` 是对的：2823 是 09-03 注册，两笔订单与四百多条用量全在策略
+起点（08-31 16:00Z）之后，没有起点前的事实可写off。dry-run 与 apply 的数字逐字一致，
+也印证了「dry-run 的数是实测不是估算」这条设计。
+
+### 顺带查实的一件事：补数窗口内 `/readyz` 必然是 503，而且与死信无关
+
+主控者报「readyz 503（预期）」。我去核了机制，结论是**确实预期，但我的手册没写，而且
+写反了**——原文让运维「同时看 `/readyz`」，把状态码当死信信号用。
+
+原因：`readyz` 的 `source_ingest` 那道闸判的是 `min(created_at)` 距今多久（>15 分钟
+即不健康），而**唤醒不会重置 `created_at`**（`requeueSourceDependencyTx` 里没有这一列）。
+放出来的 552 条带的还是它们当初入库的时间，一放出来就立刻越线。所以窗口一开就红、
+一直红到排空，`check` 是 `source_ingest`；只有 `check` 是 `source_ingest_dead_events`
+才是真出事。
+
+连带影响也核了（都不影响服务，但事先不知道会慌）：
+
+- api 容器 healthcheck 打的就是 `/readyz`（`interval: 10s`、`retries: 12`），所以约
+  **2 分钟后 `docker ps` 会显示 api 为 `unhealthy`**，直到排空。**不会被重启**——
+  compose 是 `restart: unless-stopped`，Docker 不会因 unhealthy 重启容器。
+- **用户流量不受影响**：Nginx 只透传 `/readyz`，页面与 API 是另外的 `location`；
+  `ingest-proxy` 对 api 的依赖是 `service_started` 而非 `service_healthy`，不级联。
+
+手册观察窗口段据此改了三处：盯死信改用 SQL 并明说别用状态码；新增「readyz 整窗口
+恒红 + 怎么用 `check` 字段区分良性与真出事」；新增「api 会显示 unhealthy、不会重启、
+流量不受影响」，并提醒**开工前跟订阅了 readyz/容器健康的告警值班人打招呼**，否则每次
+代绑定都会稳定误报一次。
+
 ## 5. 偏离与未证实
 
 **偏离**

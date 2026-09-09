@@ -2643,8 +2643,9 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
 `binding_method` 必须是 `operator_attested`——这是日后唯一能把「代建」与「客户
 自证」分开的痕迹，管理端账本里看不到它。
 
-**补数期间：盯死信。** 每几分钟跑一次；`dead` 一旦从 0 变正，**立刻停止后续
-绑定**，按 9. 节「Contained dead events」与死信段处置：
+**补数期间：盯死信——用这条 SQL，不要用 `/readyz` 的状态码**（下面会讲为什么它这段
+时间恒红）。每几分钟跑一次；`dead` 一旦从 0 变正，**立刻停止后续绑定**，按 9. 节
+「Contained dead events」与死信段处置：
 
 ```bash
 docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
@@ -2654,21 +2655,40 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
       FROM source_ingest_events"
 ```
 
-同时看 `/readyz`。**它只有 200 和 503 两种结果**，没有中间态；503 的 body 里
-`check` 字段说明是哪一道闸（读法见 9. 节「Reading a 503 from `/readyz`」）。
-在开票主机上直接打本地端口，不必绕公网：
+**`/readyz` 在整个补数窗口都会是 503，这是预期的，而且原因不是死信。** 所以这段
+时间**不要拿状态码当信号**，要读 body 里的 `check` 字段：
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:58088/readyz
-# 想看 503 的 check 字段就去掉 -o /dev/null：
 curl -s http://localhost:58088/readyz
+# 补数期间的正常样子（良性）：
+# {"error":{...,"check":"source_ingest"}}
+# 必须立刻停手的样子：
+# {"error":{...,"check":"source_ingest_dead_events"}}
 ```
+
+`source_ingest` 这道闸判的是「待处理事件里最老的一条有多久了」，而唤醒**不会重置
+`created_at`**——放出来的 552 条事件带的还是它们当初入库的时间（2823 这个账号是
+09-03 起的），一放出来就立刻越过那道 15 分钟的线。所以窗口一开就红，一直红到队列
+排空为止，与死信无关。`check` 是 `source_ingest_dead_events` 才是真出事了，按 9. 节
+死信段处置。
 
 `http://localhost:58088/readyz`（主机上的映射端口）与 9. 节里用的
 `https://invoice.solov.cc/readyz`（公网入口）打到的是同一个 api 容器、同一段
 判定逻辑，结果等价；差别只是后者还要经过 Nginx 和证书，盯守时用前者少一层噪声。
 
-补数期间同来源**其他**客户读到 `source_unavailable` 是预期的，不是故障。
+**连带的两件事，事先知道就不会慌：**
+
+- api 容器的 healthcheck 打的就是 `/readyz`（10 秒一次、12 次判定），所以开工约
+  **2 分钟后 `docker ps` 会把 api 显示成 `unhealthy`**，一直到排空。**它不会被重启**
+  （compose 是 `restart: unless-stopped`，Docker 不会因为 unhealthy 重启容器），
+  也不会被摘出路由。
+- **用户流量不受影响**：Nginx 只是把 `/readyz` 透传，页面与 API 路由是另外的
+  `location`，与就绪状态无关；`ingest-proxy` 对 api 的依赖是 `service_started`
+  而不是 `service_healthy`，不会级联。
+- 补数期间同来源**其他**客户读到 `source_unavailable` 是预期的，不是故障。
+
+如果有外部告警订阅了 `/readyz` 或容器健康状态，**开工前先跟它的值班人打招呼**，
+否则这一窗口会稳定误报一次。
 
 **bootstrap 完成的标志**是 `source_account_eligibility_state` 出现该账号的行。
 在那之前管理端 `/admin/accounts/{id}/ledger` 看不到它（那个查询 INNER JOIN 这张
