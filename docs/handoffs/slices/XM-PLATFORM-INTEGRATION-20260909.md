@@ -100,19 +100,43 @@
 改名**（该分支自己的注释写明了）：R4 从「连续 K 轮」改成「最近 W 轮里失败
 ≥ K 轮」的滑动窗口，新字段叫 `ChronicFailureThreshold`，默认 9。
 
-**取舍：卡片规则改接 `SyncFailedHysteresisRounds`（默认 3）。**
+**取舍：给卡片规则自己的阈值，不复用任何一条既有规则的旋钮。**
 
-理由是语义，不是就近：`cards.sync.failed` 数的确实是**连续串**
-（见 `cardSyncStreakOf`／`cardSyncStreak.open`），而替换之后仍然表示
-「连续 N 轮失败」的字段是 `SyncFailedHysteresisRounds`，默认值 3 也与被删掉的
-`DefaultConsecutiveFailureThreshold` 相同，判据与数字都没变。
+- 新增 `RuleConfig.CardSyncConsecutiveRounds`，默认常量
+  `DefaultCardSyncConsecutiveRounds = 3` 放在 `rules_cards.go`（与规则声明、
+  判定同一个文件），`Condition` 文案与 `For` 都引用它；
+- `normalized()` 补上「< 1 回落到默认」的守卫；
+- `DefaultRuleConfig()` 补上该字段；
+- `cards_rule_test.go` 六处改引用 `DefaultCardSyncConsecutiveRounds`。
 
-**接到 `ChronicFailureThreshold` 上会编译通过**，然后把判据从「连续 3 轮」
-悄悄变成「连续 9 轮」——量纲还对不上（那个数是窗口内次数，不是连续轮数），
-这条告警会晚三倍才响，而且没有任何东西会报错。
+**不把 R4 的旧字段加回来**：R4 的语义已经变了，重新引进一个表示
+「窗口内 K 次」的名字只会让下一个人以为它还是「连续 K 轮」。
 
-同步改：`cards_rule_test.go` 六处 `DefaultConsecutiveFailureThreshold` →
-`DefaultSyncFailedHysteresisRounds`。
+**也不共用 R1 的 `SyncFailedHysteresisRounds`**——这是本次修正掉的第一版做法。
+两个数默认都是 3、语义也都是「连续 N 轮」，接上去全量门禁会全绿，但那等于
+让两条规则共用一个旋钮：谁去调 R1 的迟滞，卡片告警的判据就跟着变，
+而且不会有任何东西报错。默认值相同是巧合，不是同一个事实。
+
+**接到 `ChronicFailureThreshold` 上同样会编译通过**，然后把判据从
+「连续 3 轮」悄悄变成「连续 9 轮」——量纲还对不上（那个数是窗口内次数，
+不是连续轮数），这条告警会晚三倍才响。
+
+生产上这个字段取不到值就是 0，而 `streak.open` 里 `failures >= 0` 恒真，
+那会让这条告警对窗口里出现过的每个 (账号, 步骤) 当场开一条。
+`jobs.NewClient` 构造 `RuleConfig` 时只填三个字段，所以 `normalized()` 的
+回落是它在生产上取到 3 的**唯一**途径；两个 `NewEvaluator*` 构造函数都调了
+`cfg.normalized()`，这条路径已确认是通的。
+
+配套新增两条测试（`cards_rule_test.go`）：
+
+- `TestCardSyncConsecutiveRoundsNormalization`：0 与负数回落到默认，
+  合法值原样保留（否则归一化就成了「永远用默认值」，旋钮白加）。
+- `TestCardSyncThresholdIsItsOwnKnob`：把 R1 的迟滞轮数调开，卡片规则的
+  `Condition` 文案与 `For` 都必须不动。**这条做过变异验证**——把实现改回
+  共用 `SyncFailedHysteresisRounds` 后它确实变红
+  （报「连续 7 轮失败」而期望「连续 3 轮失败」），改回后恢复绿。
+  不做这次验证的话它是一条恒真断言：两个默认值都是 3，
+  共用与不共用在默认配置下表现完全相同。
 
 ### 6. `internal/platform/alerts/rules.go` —— `Evaluate` 的卡片分支（语义冲突）
 
@@ -140,24 +164,31 @@
 
 顺带修正 CATALOG 里 `cards.sync.failed` 那行的一句话：原文写「阈值与
 『同步连续失败』同一个」，而「同步连续失败」已被 `XM-OPS-TRUTH` 改名为
-「同步长期失败」且换成了滑动窗口判据。改成「与『指标同步失败』的连续轮数
-同一个，默认 3 轮」，与第 5 条的取舍一致。
+「同步长期失败」且换成了滑动窗口判据，那句话指向的东西已经不存在。
+按第 5 条的取舍改成说它自己的数：「连续 3 轮失败（这条规则自己的阈值，
+与其它规则不共用）」。README 那一行同样点明阈值是
+`CardSyncConsecutiveRounds`、不与 R1/R4 共用。
 
 ## tests_run（全量门禁，实测时间）
 
 测试库：`bash scripts/dev/worktree-testdb.sh` 建 `xm_test_wt_xm_integration`，
 迁移全量应用成功（7 条新迁移一次过，无缺号）。
 
+下表是**卡片阈值改成独立字段之后**重跑的那一轮（终态代码），不是第一轮的数。
+
 | 门禁 | 开始 UTC | 结束 UTC | 耗时 | 结果 |
 |---|---|---|---|---|
-| `go build ./...` | 2026-09-09T06:03:37Z | 06:03:40Z | 2s | 通过 |
-| `go vet ./...` | 06:03:45Z | 06:03:46Z | 1s | 通过 |
-| `go test -p 1 -count=1 ./...`（去代理变量） | 06:03:53Z | 06:05:13Z | 80s | 通过 |
-| `pnpm --filter admin-web run typecheck` | 06:05:19Z | 06:05:25Z | 6s | 通过 |
-| `pnpm --filter admin-web run test` | 06:05:30Z | 06:05:49Z | 19s | 通过，143 文件 / 2208 用例 |
-| `pnpm --filter ui-admin run test` | 06:05:54Z | 06:05:57Z | 3s | 通过，17 文件 / 262 用例 |
-| `bash scripts/check-governance.sh` | 06:06:02Z | 06:06:06Z | 4s | 通过 |
-| `gitleaks detect --source . --no-git --redact` | 06:06:10Z | 06:06:12Z | 2s | 11 条，与基线相同 |
+| `go build ./...` | 2026-09-09T06:20:13Z | 06:20:14Z | 1s | 通过 |
+| `go vet ./...` | 06:20:14Z | 06:20:15Z | 1s | 通过 |
+| `go test -p 1 -count=1 ./...`（去代理变量） | 06:20:15Z | 06:21:29Z | 74s | 通过 |
+| `pnpm --filter admin-web run typecheck` | 06:21:36Z | 06:21:42Z | 6s | 通过 |
+| `pnpm --filter admin-web run test` | 06:21:42Z | 06:22:03Z | 21s | 通过，143 文件 / 2208 用例 |
+| `pnpm --filter ui-admin run test` | 06:22:03Z | 06:22:07Z | 4s | 通过，17 文件 / 262 用例 |
+| `bash scripts/check-governance.sh` | 06:22:12Z | 06:22:15Z | 3s | 通过 |
+| `gitleaks detect --source . --no-git --redact` | 06:22:15Z | 06:22:16Z | 1s | 11 条，与基线相同 |
+
+第一轮（合并刚完成、卡片阈值还接在 R1 上时）同样全绿，用时相近：
+`go test` 80s、admin-web 测试 19s、其余各 1–6s。
 
 前端三段都带 `--config.verify-deps-before-run=false`；`node_modules` 用 junction
 镜像自 `wt-XM-I18N`（六处：根、`web/apps/admin-web`、`web/apps/ui-storybook`、
@@ -247,9 +278,11 @@
 
 1. **本分支带的内容远多于五个切片**（见下节第 1 条）。这是最大的风险，
    不是技术风险而是审读范围的风险。
-2. **卡片告警阈值的取舍是我做的判断**（第 5 条）。判据是「哪个字段在替换后
-   仍表示连续轮数」，数字没变（3），但这是一次跨切片的语义选择，
-   建议 `XM-CARD-VISIBILITY` 与 `XM-OPS-TRUTH` 的作者各看一眼。
+2. **卡片告警阈值新增了一个配置字段**（第 5 条）。`RuleConfig` 多了
+   `CardSyncConsecutiveRounds`，默认 3，与卡片规则原来的语义和数值一致，
+   对生产行为没有改变。它没有环境变量入口（R1/R4 的三个阈值同样没有），
+   要调只能改代码常量。建议 `XM-CARD-VISIBILITY` 与 `XM-OPS-TRUTH` 的作者
+   各看一眼这个字段的归属是否合意。
 3. **失败作业聚合端点造好了没人用**。后端多算一份 24 小时聚合、前端继续用
    会被挤满的 20 条列表，两边都在跑。这不是错误，是白花的成本加一个仍然存在
    的盲区。

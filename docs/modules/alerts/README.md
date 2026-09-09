@@ -42,7 +42,7 @@
 | `upstream.runway.low` | 上游可用天数不足 | `finance.balance_history` ÷ `finance.profit_daily`（近 7 个完整业务日的日均消耗，设计稿 §10.4） | 计量型上游的可用天数**算得出来**且 ≤ warning 档（默认 10 天） | 0 | warning（≤ critical 档 5 天升为 **critical**） | 天数回到告警档之上，或不再算得出天数 | `upstream.runway.low:<env>:<upstream_account_id>` |
 | `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致，且这个版本**没有被人核对过** | 0（立即） | warning | 有人执行 `alerts.upstream_version.acknowledge` 核对了这个版本，或下一轮不再变化 | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
 | `approval.pending.too_long` | 审批单挂太久 | `platform.approval.queue` 的 `oldest_pending_age_seconds`（XM-0030c） | 最久那张**未过期**的 `PENDING` 审批单已等待 ≥ 4 小时 | 0（观测本身就是一个持续量） | warning | 最久那张降回门槛以内（有人批了或驳了），或队列清空 | `approval.pending.too_long:<env>:queue` |
-| `cards.sync.failed` | 卡片同步连续失败 | `cards.sync.status` 的 `value_json.accounts[].steps[]`（XM-CARD-VISIBILITY） | 同一账号的**同一步骤**连续 3 轮失败（被暂停同步的账号一条都不报） | 3 个采集周期（默认 900s） | **critical** | 同一账号同一步骤**连续 2 轮**成功（1 轮走运不算），或该账号被暂停同步 | `cards.sync.failed:<env>:<account>/<step>` |
+| `cards.sync.failed` | 卡片同步连续失败 | `cards.sync.status` 的 `value_json.accounts[].steps[]`（XM-CARD-VISIBILITY） | 同一账号的**同一步骤**连续 3 轮失败（这条规则自己的阈值 `CardSyncConsecutiveRounds`，不与 R1/R4 共用；被暂停同步的账号一条都不报） | 3 个采集周期（默认 900s） | **critical** | 同一账号同一步骤**连续 2 轮**成功（1 轮走运不算），或该账号被暂停同步 | `cards.sync.failed:<env>:<account>/<step>` |
 
 > 上面两行都是 `TestEveryRuleHasARowInBothDocs` 补出来的。
 > `approval.pending.too_long` 从 XM-0030c 起就在 `Rules()` 里，却一直没写进

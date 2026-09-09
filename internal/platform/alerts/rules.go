@@ -248,6 +248,14 @@ type RuleConfig struct {
 	ApprovalPendingThreshold time.Duration
 	// ApprovalQueueMetricKey 是审批规则读的观测键。
 	ApprovalQueueMetricKey string
+	// CardSyncConsecutiveRounds 是 cards.sync.failed 的连续失败轮数
+	// （XM-CARD-VISIBILITY）。声明与判定都在 rules_cards.go，默认值见
+	// DefaultCardSyncConsecutiveRounds。
+	//
+	// 它与 SyncFailedHysteresisRounds 当前数值相同但**是两个旋钮**：
+	// 那个是 R1 的迟滞，这个是卡片规则的开门阈值。共用一个会让调 R1 的人
+	// 顺手改掉卡片告警，而且不报错。
+	CardSyncConsecutiveRounds int
 	// Owner 是这批规则的负责人（§9.3 要求每条规则都有）。
 	Owner string
 }
@@ -266,6 +274,7 @@ func DefaultRuleConfig() RuleConfig {
 		RunwayThresholds:           finance.DefaultRunwayThresholds(),
 		ApprovalPendingThreshold:   DefaultApprovalPendingThreshold,
 		ApprovalQueueMetricKey:     DefaultApprovalQueueMetricKey,
+		CardSyncConsecutiveRounds:  DefaultCardSyncConsecutiveRounds,
 		Owner:                      "platform-ops",
 	}
 }
@@ -325,6 +334,13 @@ func (c RuleConfig) normalized() RuleConfig {
 	}
 	if strings.TrimSpace(c.ApprovalQueueMetricKey) == "" {
 		c.ApprovalQueueMetricKey = d.ApprovalQueueMetricKey
+	}
+	if c.CardSyncConsecutiveRounds < 1 {
+		// **零必须一起挡住**（同 SyncFailedHysteresisRounds 的理由）：
+		// 生产用字面量构造 RuleConfig 且不填这个字段（见 jobs.NewClient），
+		// 所以这条回落是它在生产上取到 3 的唯一途径。轮数为 0 或 1 等于
+		// 「一轮失败就响」，会把这条规则退回成刷屏的样子。
+		c.CardSyncConsecutiveRounds = d.CardSyncConsecutiveRounds
 	}
 	if strings.TrimSpace(c.Owner) == "" {
 		c.Owner = d.Owner

@@ -3,6 +3,7 @@ package alerts
 // cards.sync.failed 的判定用例（XM-CARD-VISIBILITY）。
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +85,7 @@ func cardSyncSource(current ops.Observation, samples ...ops.Observation) *fakeMe
 // 在生产上不成立（迟滞那条用例就是这么假绿了三天的）。
 func TestCardSyncFailedNeedsNConsecutiveRounds(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	round := func(back int) ops.Observation {
 		return cardSyncSample(now.Add(-time.Duration(back)*5*time.Minute), true,
@@ -126,7 +127,7 @@ func TestCardSyncFailedNeedsNConsecutiveRounds(t *testing.T) {
 // 两个账号同时坏 → 两条不同的 finding，不塌成一条。
 func TestCardSyncFailedSplitsByAccountAndStep(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	// 同一个账号的两种失败也必须分开：只带账号的去重键会让它们塌成一条，
 	// 于是静默批量查状态的同时把拉明文的失败也一起静默了。
@@ -159,7 +160,7 @@ func TestCardSyncFailedSplitsByAccountAndStep(t *testing.T) {
 // 步骤交替失败不算连续：判据是「同一账号同一步骤」，不是「失败了 N 次」。
 func TestCardSyncFailedRequiresSameStep(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	steps := []string{"batch_status", "fetch_secrets", "batch_status", "fetch_secrets"}
 	var samples []ops.Observation
@@ -184,7 +185,7 @@ func TestCardSyncFailedRequiresSameStep(t *testing.T) {
 // Reconciler 当轮把告警恢复掉。声明写着 2 轮，实际是 1 轮。
 func TestCardSyncFailedHasRecoveryHysteresis(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	// 失败 N 轮（最新的那轮在 now-2 个周期）。
 	var failed []ops.Observation
@@ -233,7 +234,7 @@ func TestCardSyncFailedHasRecoveryHysteresis(t *testing.T) {
 // 结果一定是把整条规则静默——那会连带丢掉其余账号的信号。
 func TestCardSyncFailedSuppressesPausedAccounts(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	var samples []ops.Observation
 	for i := 0; i < threshold; i++ {
@@ -267,7 +268,7 @@ func TestCardSyncFailedSuppressesPausedAccounts(t *testing.T) {
 // 在评估时打出十几次查询。
 func TestCardSyncFailedReadsSamplesOncePerRound(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultSyncFailedHysteresisRounds
+	threshold := DefaultCardSyncConsecutiveRounds
 
 	// 观测状态记 ok：三步失败但整轮不算失败，正是本片写观测的生产形状
 	// （writeObservation 只在整轮全砸时记 failed）。顺带让 R4 不去回看，
@@ -347,5 +348,58 @@ func TestCardSyncStepParsingHandlesRealShape(t *testing.T) {
 	}
 	if len(cardSyncPausedAccounts(value)) != 0 {
 		t.Fatal("没有 skipped 的步骤时不该判成暂停")
+	}
+}
+
+// TestCardSyncConsecutiveRoundsNormalization：轮数配成 0 或负数时回落到默认值。
+//
+// 这条不是补齐仪式。生产用字面量构造 RuleConfig 且**不填这个字段**
+// （jobs.NewClient 只填三项），所以这条回落是它在生产上取到 3 的唯一途径。
+// 少了它，卡片规则的阈值在生产上就是 0——streak.open 里 failures >= 0 恒真，
+// 这条告警会对窗口里出现过的每个 (账号, 步骤) 当场开一条。
+func TestCardSyncConsecutiveRoundsNormalization(t *testing.T) {
+	for _, bad := range []int{0, -1} {
+		got := RuleConfig{CardSyncConsecutiveRounds: bad}.normalized().CardSyncConsecutiveRounds
+		if got != DefaultCardSyncConsecutiveRounds {
+			t.Fatalf("轮数 %d 应当回落到默认值 %d，got %d",
+				bad, DefaultCardSyncConsecutiveRounds, got)
+		}
+	}
+	// 合法值原样保留——否则这条归一化就成了「永远用默认值」，
+	// 那个旋钮就白加了。
+	if got := (RuleConfig{CardSyncConsecutiveRounds: 7}).normalized().CardSyncConsecutiveRounds; got != 7 {
+		t.Fatalf("合法轮数被改掉了：%d", got)
+	}
+}
+
+// TestCardSyncThresholdIsItsOwnKnob：卡片阈值必须独立于 R1 的迟滞轮数。
+//
+// 这条钉的是集成合并 2026-09-09 的取舍。两个数默认都是 3，所以「共用一个
+// 字段」与「各有一个字段」在默认配置下**表现完全相同**——只有把 R1 的 N
+// 调开才分得出来。不钉住的话，将来有人图省事把 CardSyncConsecutiveRounds
+// 删掉改回 SyncFailedHysteresisRounds，全仓门禁照样全绿。
+func TestCardSyncThresholdIsItsOwnKnob(t *testing.T) {
+	cfg := DefaultRuleConfig()
+	cfg.SyncFailedHysteresisRounds = DefaultCardSyncConsecutiveRounds + 4
+	cfg.CollectionInterval = time.Minute
+
+	var found bool
+	for _, r := range Rules(cfg) {
+		if r.Key != RuleCardSyncFailed {
+			continue
+		}
+		found = true
+		// 文案与 For 都必须还说卡片自己的轮数，不能跟着 R1 走。
+		want := fmt.Sprintf("连续 %d 轮失败", DefaultCardSyncConsecutiveRounds)
+		if !strings.Contains(r.Condition, want) {
+			t.Fatalf("调 R1 的迟滞轮数不该改动卡片规则的条件文案：%q（应含 %q）",
+				r.Condition, want)
+		}
+		if got, wantFor := r.For, time.Duration(DefaultCardSyncConsecutiveRounds)*cfg.CollectionInterval; got != wantFor {
+			t.Fatalf("卡片规则的 For 跟着 R1 漂了：got %s, want %s", got, wantFor)
+		}
+	}
+	if !found {
+		t.Fatal("Rules() 里没有 cards.sync.failed，这个测试就失去意义了")
 	}
 }

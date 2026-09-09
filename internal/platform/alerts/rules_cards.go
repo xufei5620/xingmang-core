@@ -8,14 +8,11 @@ package alerts
 // 「LINFENG 的批量查状态连着 12 轮被拒」与「同步这条指标偶尔抖一下」
 // 是两件事，混成一条会让前者永远被后者的沉默盖住。
 //
-// 阈值取 SyncFailedHysteresisRounds（集成合并 2026-09-09 的取舍）。
-// 本片原本借的是 ConsecutiveFailureThreshold，而 XM-OPS-TRUTH 把那个字段
-// **替换**掉了：R4 从「连续 K 轮」改成了「最近 W 轮里失败 ≥ K 轮」的滑动
-// 窗口，改名叫 ChronicFailureThreshold（默认 9）。本规则数的确实是**连续**
-// 串（见 cardSyncStreakOf），所以不能顺手接到 ChronicFailureThreshold 上——
-// 那会把判据从「连续 3 轮」悄悄变成「连续 9 轮」，量纲还对不上，编译不会
-// 报错，只是这条告警晚三倍才响。SyncFailedHysteresisRounds 是替换之后仍然
-// 表示「连续 N 轮失败」的那一个，默认值 3 也与旧默认相同。
+// 阈值是本规则自己的 RuleConfig.CardSyncConsecutiveRounds，默认见
+// DefaultCardSyncConsecutiveRounds。不要改接到 R4 的 ChronicFailureThreshold
+// （那是「窗口内 K 次」，量纲不同，接上去编译照样过、告警晚三倍才响），
+// 也不要共用 R1 的 SyncFailedHysteresisRounds（数值相同但那是另一条规则的
+// 旋钮）。理由写在那个常量的注释里。
 //
 // 本文件只放规则声明与命中判定；规则键常量 RuleCardSyncFailed 必须留在
 // rules.go——web/apps/admin-web/src/lib/labels.reconcile.test.ts 只读那一个
@@ -41,6 +38,20 @@ import (
 // 同时看得见两边，任何一边改了键名都会当场失败（同
 // DefaultApprovalQueueMetricKey 的既有做法）。
 const DefaultCardSyncMetricKey = "cards.sync.status"
+
+// DefaultCardSyncConsecutiveRounds 是本规则的开门阈值：同一账号的同一步骤
+// 连续几轮失败才响。
+//
+// **它是这条规则自己的旋钮，不是借来的。** 本片最初借的是 R4 的
+// ConsecutiveFailureThreshold，而 XM-OPS-TRUTH 把 R4 从「连续 N 轮」改成了
+// 「最近 W 轮里失败 ≥ K 轮」的滑动窗口，那个字段随之消失。集成合并
+// 2026-09-09 没有把旧字段加回来，也没有改接到 SyncFailedHysteresisRounds
+// （R1 的迟滞轮数，数值恰好也是 3）——那样等于让两条规则共用一个旋钮：
+// 谁去调 R1 的迟滞，卡片告警的判据就跟着变，而且不会有任何东西报错。
+//
+// 取 3 是沿用本片原来的数值与语义（连续 3 轮，5 分钟一轮即 15 分钟）。
+// 与 R1 的 N 现在数值相同纯属巧合，两者可以各自独立调整。
+const DefaultCardSyncConsecutiveRounds = 3
 
 const (
 	// cardSyncRecoverySamples 是**迟滞**：要连续几轮成功才算恢复。
@@ -69,8 +80,8 @@ func cardSyncRules(cfg RuleConfig) []Rule {
 			Title:  "卡片同步连续失败",
 			Source: DefaultCardSyncMetricKey + " 的 value_json.accounts[].steps[]",
 			Condition: fmt.Sprintf("同一账号的同一步骤连续 %d 轮失败（被暂停的账号不计）",
-				cfg.SyncFailedHysteresisRounds),
-			For:      time.Duration(cfg.SyncFailedHysteresisRounds) * cfg.CollectionInterval,
+				cfg.CardSyncConsecutiveRounds),
+			For:      time.Duration(cfg.CardSyncConsecutiveRounds) * cfg.CollectionInterval,
 			Severity: SeverityCritical,
 			Recovery: fmt.Sprintf("同一账号同一步骤连续 %d 轮成功，或该账号被暂停同步",
 				cardSyncRecoverySamples),
@@ -143,7 +154,7 @@ func (e *Evaluator) cardSyncFindings(
 			continue
 		}
 		streak := cardSyncStreakOf(rounds, key)
-		if !streak.open(e.cfg.SyncFailedHysteresisRounds) {
+		if !streak.open(e.cfg.CardSyncConsecutiveRounds) {
 			continue
 		}
 		out = append(out, Finding{
@@ -151,7 +162,7 @@ func (e *Evaluator) cardSyncFindings(
 			DedupKey:        dedupKey(RuleCardSyncFailed, environment, key.account+"/"+key.step),
 			Severity:        SeverityCritical,
 			Title:           cardSyncTitle(key, streak),
-			Detail:          cardSyncDetail(key, streak, e.cfg.SyncFailedHysteresisRounds),
+			Detail:          cardSyncDetail(key, streak, e.cfg.CardSyncConsecutiveRounds),
 			SourceMetricKey: o.MetricKey,
 		})
 	}
