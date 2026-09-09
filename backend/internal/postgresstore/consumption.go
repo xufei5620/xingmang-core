@@ -684,8 +684,13 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 	// Accounts with no job row at all are inserted as before: a conflict there
 	// can only be with another concurrent enqueue, which is short-lived.
 	_, err := tx.Exec(ctx, `
-		WITH targets AS (
+		WITH balances_frontier AS (
+			SELECT max(c.scan_ceiling_at) AS newest_published
+			FROM source_economic_scan_cycles c
+			WHERE c.source_instance_id=$1 AND c.stream_id='balances' AND c.cycle_status='published'
+		), targets AS (
 			SELECT eas.external_account_id,eas.finalized_through,
+				eas.eligibility_status,eas.pending_reconciliation_consecutive_matches,
 				GREATEST(eas.cutover_at,$2::timestamptz-
 					make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
 			FROM source_account_eligibility_state eas
@@ -703,6 +708,57 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				OR EXISTS (SELECT 1 FROM balance_reconciliation_checkpoints b
 					WHERE b.external_account_id=t.external_account_id
 						AND b.as_of>t.finalized_through AND b.as_of<=t.requested_through)
+				-- XM-INV-PENDING-RECON C1: an idle not_invoiceable_pending_reconciliation
+				-- account one matched evaluation short of auto-exit has no facts of its
+				-- own to be enqueued on -- that is exactly its problem. A production
+				-- account reached pending_reconciliation_consecutive_matches=1 and then
+				-- went quiet: no usage, no credit, no payment, and (because the source
+				-- agent only emits balance rows whose units/negative flag/deficit
+				-- actually changed) no further checkpoint either. Every finalization
+				-- pass therefore fell through to the empty-advance UPDATE below, which
+				-- moves finalized_through past the published balances cycles that
+				-- ensureBalanceCarryForwardProofTx could otherwise still have derived an
+				-- idle carry-forward proof from -- burning, once per pass, the very
+				-- evidence the account needs in order to leave the state.
+				--
+				-- Enqueueing here is what stops that: a job row exists, so the
+				-- empty-advance UPDATE's own NOT EXISTS skips this account and the cycle
+				-- survives until the worker (C2's idle branch) can derive from it.
+				-- Deliberately narrow, per the 2026-09-09 ruling on design section 7 D2:
+				-- only accounts already at N-1. The same threshold is enforced again
+				-- inside the derivation itself (pendingReconciliationIdleMinMatches) --
+				-- a job has other sources than this predicate, so a gate that lives
+				-- only here is not a gate.
+				--
+				-- The cycle test reads a scalar CTE computed once for the whole pass,
+				-- never a per-account correlated subquery. This statement runs inside
+				-- tryPublishEconomicScanCyclesTx, holding the stream's scan-cycle and
+				-- watermark rows under the runtime role's lock_timeout=5s -- the exact
+				-- position that took the balances stream down for 29 minutes on
+				-- 2026-09-04 (see the note above). source_economic_scan_cycles has no
+				-- index that serves "published cycles of this stream by ceiling". The
+				-- primary key is (source_instance_id, stream_id, scan_cycle_id): its
+				-- first two columns do narrow to this stream, and an EXPLAIN shows the
+				-- planner using exactly that prefix -- but scan_ceiling_at is not in it,
+				-- so every published cycle of the stream is read and filtered. The only
+				-- other index is partial on cycle_status IN ('receiving','processing'),
+				-- which excludes published rows entirely. A correlated
+				-- EXISTS there would re-scan the stream's whole cycle history -- one row
+				-- per source per minute, ~500k rows a year -- once for every pending
+				-- account matched. As a CTE it is one aggregate for the pass. Adding
+				-- the index instead would be a migration, which this release does not
+				-- carry.
+				--
+				-- Only the lower bound is tested. "The newest published cycle is above
+				-- finalized_through" is implied by (and weaker than) "a cycle exists
+				-- inside the window", so this never misses an account the window test
+				-- would have caught; it enqueues a few extra when every published cycle
+				-- is still above requested_through. Those jobs derive nothing (the
+				-- derivation applies the real window), publish finalized_through as any
+				-- job does, and cost one row for the handful of accounts sitting at N-1.
+				OR (t.eligibility_status='not_invoiceable_pending_reconciliation'
+					AND t.pending_reconciliation_consecutive_matches>=$4
+					AND (SELECT newest_published FROM balances_frontier)>t.finalized_through)
 			)
 		), held AS (
 			SELECT j.external_account_id FROM eligibility_projection_jobs j
@@ -736,7 +792,8 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				ELSE now()
 			END,
 			updated_at=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.updated_at ELSE now() END`,
-		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
+		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds(),
+		pendingReconciliationIdleMinMatches)
 	if err != nil {
 		return err
 	}
@@ -1344,7 +1401,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
 				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
+				"balance_checkpoint", in.CheckpointID, detail, false, actor); err != nil {
 				return err
 			}
 		}
@@ -1509,7 +1566,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
 				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
+				"balance_checkpoint", in.CheckpointID, detail, false, actor); err != nil {
 				return err
 			}
 		}
@@ -2563,9 +2620,38 @@ const pendingReconciliationExitMatches = 2
 // actually resolve the gap -- but preserves the original
 // pending_reconciliation_since so operators can see how long the account has
 // been unreconciled, not just since its most recent negative item.
-func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, reason, triggerType, triggerID, detail string, actor AuditActor) error {
+//
+// preserveStreak (XM-INV-PENDING-RECON C4) is the one exception to that
+// reset, and it exists because the reset's own justification does not always
+// apply. Evidence whose magnitude is unknown -- balance evidence sealed
+// before the bridge started reporting deficits -- never produces a difference
+// at all, so it cannot be "a fresh negative difference" showing that the
+// streak failed to resolve anything. It says only that the account is
+// negative by an amount nobody can state. Resetting on it discards a real
+// streak on the strength of no arithmetic, and because every carry-forward
+// proof restates its prior verbatim, one such item during a replay becomes
+// one per published cycle: a production account collected 419 `entered` audit
+// rows exactly that way. With preserveStreak the counter survives, and when
+// the account was already in this state no second `entered` row is written --
+// restating that an already-pending account is still pending is not an event.
+// Evidence that does state a magnitude and disagrees with the ledger keeps
+// the original behaviour exactly: reset, and a fresh `entered`.
+func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, reason, triggerType, triggerID, detail string, preserveStreak bool, actor AuditActor) error {
 	if strings.TrimSpace(triggerID) == "" {
 		triggerID = accountID
+	}
+	// Whether this is a first entry or a re-entry decides whether an
+	// `entered` audit row is written, and the UPDATE below cannot report it:
+	// its RowsAffected only separates "frozen" from "not frozen", and a
+	// RETURNING (xmax=0) test does not survive a HOT update. So the status is
+	// read first, under the same row lock the evaluator's own caller already
+	// holds -- taking it here as well costs nothing and keeps this function
+	// correct when called from a path that does not.
+	var alreadyPending bool
+	if err := tx.QueryRow(ctx, `SELECT eligibility_status='not_invoiceable_pending_reconciliation'
+		FROM source_account_eligibility_state WHERE external_account_id=$1 FOR UPDATE`,
+		accountID).Scan(&alreadyPending); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
 	}
 	command, err := tx.Exec(ctx, `
 		UPDATE source_account_eligibility_state
@@ -2577,10 +2663,12 @@ func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, rea
 			pending_reconciliation_since=CASE
 				WHEN eligibility_status='not_invoiceable_pending_reconciliation'
 				THEN pending_reconciliation_since ELSE now() END,
-			pending_reconciliation_consecutive_matches=0,
+			pending_reconciliation_consecutive_matches=CASE
+				WHEN $6 AND eligibility_status='not_invoiceable_pending_reconciliation'
+				THEN pending_reconciliation_consecutive_matches ELSE 0 END,
 			projection_version=projection_version+1,updated_at=now()
 		WHERE external_account_id=$1 AND eligibility_status<>'frozen'`,
-		accountID, reason, triggerType, triggerID, detail)
+		accountID, reason, triggerType, triggerID, detail, preserveStreak)
 	if err != nil {
 		return err
 	}
@@ -2590,6 +2678,13 @@ func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, rea
 	if command.RowsAffected() == 0 {
 		// Frozen priority: a real, distinct freeze already governs this
 		// account -- do not downgrade or overwrite its trigger detail.
+		return nil
+	}
+	if preserveStreak && alreadyPending {
+		// The trigger detail above was still refreshed to this item, so an
+		// operator sees the most recent evidence; what is suppressed is only
+		// the audit row claiming the account entered a state it was in
+		// already.
 		return nil
 	}
 	return writeAudit(ctx, tx, actor, "eligibility.pending_reconciliation.entered", "external_account", accountID,
@@ -3579,6 +3674,297 @@ func finishEligibilityProjectionJobRowTx(ctx context.Context, tx pgx.Tx, account
 	return nil
 }
 
+// carryCandidate is one published balances scan cycle that
+// ensureBalanceCarryForwardProofTx could derive a delta carry-forward proof
+// from for a single account, with the account's own prior real checkpoint
+// (the row the proof must restate verbatim, enforced by migration 0026's
+// trigger) and both exclusion flags already resolved by the candidate query.
+// Package-level rather than function-local since XM-INV-PENDING-RECON, so
+// insertBalanceCarryForwardProofTx can be shared by the fact-driven merge
+// loop and the idle re-evaluation branch instead of the insert being written
+// twice.
+type carryCandidate struct {
+	cycleID, batchID, snapshotID, cursor, revision string
+	priorID, balance                               string
+	priorDeficit                                   *string
+	asOf, watermark, observed                      time.Time
+	snapshotRows, sequence                         int64
+	negative, baselineMember, hasRealCheckpoint    bool
+	// hasStrandedCheckpoint (XM-INV-DEAD-CONTAINMENT A2) marks a cycle
+	// that carries a balance_checkpoint event for this account which is
+	// failed or dead behind an open freeze. See the candidate query and the
+	// pending returns in ensureBalanceCarryForwardProofTx.
+	hasStrandedCheckpoint bool
+}
+
+// insertBalanceCarryForwardProofTx writes one derived carry-forward proof for
+// `item`, or -- when this account already has a proof at that cycle -- verifies
+// that the existing row says exactly the same thing and leaves it alone. It is
+// the single writer both of ensureBalanceCarryForwardProofTx's derivation paths
+// go through: the fact-driven merge loop, and (XM-INV-PENDING-RECON C2) the
+// idle re-evaluation branch, which sets idleReevaluation so the audit row says
+// which path derived it. Callers must have already established that the cycle
+// carries neither a real checkpoint nor a stranded one for this account.
+//
+// A conflicting existing row is domain.ErrConflict, never a silent overwrite:
+// the (external_account_id, scan_cycle_id) uniqueness plus migration 0014's
+// mutually exclusive proof/checkpoint contract make a proof immutable once
+// written, so two different answers for the same cycle is a real inconsistency.
+func insertBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount,
+	item carryCandidate, idleReevaluation bool, actor AuditActor) error {
+	proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
+	proofID := randomUUID()
+	command, err := tx.Exec(ctx, `
+		INSERT INTO balance_carry_forward_proofs(
+			id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
+			scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
+			baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
+			source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::numeric)
+		ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
+		account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
+		item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
+		item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
+		item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC(), item.priorDeficit)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		var existingKey, existingPrior, existingRevision string
+		if err = tx.QueryRow(ctx, `SELECT proof_key,prior_checkpoint_id::text,source_revision_hash
+			FROM balance_carry_forward_proofs
+			WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`,
+			account.ExternalAccountID, item.cycleID).Scan(&existingKey, &existingPrior, &existingRevision); err != nil {
+			return err
+		}
+		if existingKey != proofKey || existingPrior != item.priorID || existingRevision != item.revision {
+			return domain.ErrConflict
+		}
+		return nil
+	}
+	after := map[string]any{
+		"proof_key": proofKey, "scan_cycle_id": item.cycleID,
+		"prior_checkpoint_id": item.priorID, "source_revision": item.revision,
+	}
+	if idleReevaluation {
+		after["idle_reevaluation"] = true
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.balance_carry_forward.derived",
+		"balance_carry_forward_proof", proofID, nil, after)
+}
+
+// pendingReconciliationIdleMinMatches is the consecutive-match streak at which
+// idle re-evaluation becomes allowed: one short of the exit. Both halves of
+// the feature read it -- finalizeSourceAccountsTx's enqueue predicate and
+// deriveIdlePendingCarryForwardProofTx's own gate -- because a threshold that
+// lives only in the enqueue is not a threshold at all. A projection job has
+// several other sources (a real checkpoint landing in the window enqueues one
+// regardless of any streak), and each of them reaches the derivation.
+const pendingReconciliationIdleMinMatches = pendingReconciliationExitMatches - 1
+
+// balanceEvidenceFloorCTE, pendingBalanceCheckpointPredicate and
+// pendingBalanceProofPredicate are evaluatePendingBalanceEvidenceTx's own
+// selection of "evidence I still owe a verdict on", rendered once so that
+// nothing can hold a private copy of it. $1 is the account, $2 the window end.
+//
+// The floor is XM-INV-PREANCHOR-BALANCE's. Balance evidence dated before a
+// POLICY_ANCHOR account's own cutover_at is not evidence about that account's
+// ledger, because the ledger does not exist before the anchor: evaluating it
+// anyway builds the expected balance from an empty window
+// (buildEligibilityProjectionTx floors every fact query at cutover_at), so
+// expected comes out 0, the whole reported balance reads as an unexplained
+// positive difference, and balanceEvidenceTrustIntervalTx has no interval to
+// anchor a synthesis against -- SOURCE_GAP, permanently. It is a fixed point,
+// not a transient: RepairBalanceAnchorEligibility resolves the freeze and
+// deletes the evaluation so the item goes pending again, the next projection
+// redoes the identical arithmetic, and the freeze comes straight back.
+// Production account 98cce4c8 sat there with four such checkpoints, from the
+// 21 hours between its own first post-policy checkpoint and the RC68 deploy
+// that first taught the system to bootstrap an anchor at all. This mirrors
+// the fact side, which XM-INV-PREANCHOR-USAGE already taught to skip rather
+// than freeze for the same reason (observeEligibilityFact's BootstrapKind
+// guard). A legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account keeps the old
+// behaviour: its cutover replays real history to a known point, so evidence
+// before it genuinely is a gap.
+//
+// Because that evidence is permanently out of scope, a count that omits the
+// bound reports work that will never be done -- and anything gating on the
+// count being zero then gates forever. The upper bound (as_of <= the window
+// end) matters the same way in the other direction: evidence above the window
+// is not this pass's work either.
+const (
+	balanceEvidenceFloorCTE = `evidence_floor AS (
+		SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
+			THEN state.cutover_at ELSE '-infinity'::timestamptz END AS anchor_floor
+		FROM source_account_eligibility_state state
+		WHERE state.external_account_id=$1
+	)`
+	pendingBalanceCheckpointPredicate = `checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<=$2
+			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id)`
+	// unevaluatedCheckpointAboveFloorPredicate deliberately drops the upper
+	// bound. "Does the evaluator still owe a verdict on real evidence?" is not
+	// the same question as "what will it judge in this pass", and for the idle
+	// derivation only the first one is safe: a checkpoint the finalization
+	// delay is still holding back is precisely the one an account must not be
+	// released ahead of. Bounding this by the window reopens the durable form
+	// of the backfill failure -- the account goes active while the newest thing
+	// the source said about it sits on file, unevaluated, disagreeing.
+	unevaluatedCheckpointAboveFloorPredicate = `checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id)`
+	pendingBalanceProofPredicate = `proof.external_account_id=$1 AND proof.as_of<=$2
+			  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
+				WHERE evaluation.proof_id=proof.id)`
+)
+
+// countUnevaluatedBalanceEvidenceTx counts the balance evidence the evaluator
+// still owes this account a verdict on, split by kind, using the predicates
+// above -- literally the same text evaluatePendingBalanceEvidenceTx selects
+// its work with. It has exactly two callers on purpose: the idle-derivation
+// guard below, and invoice-eligibility-repair --kind=pending-reevaluate's own
+// report. An operator reading "unevaluated: 0" and the code deciding whether
+// to derive must be answering the same question with the same query.
+//
+// It used to carry its own copy that omitted both bounds, and the anchor floor
+// is the one that bites: evidence below a POLICY_ANCHOR account's own anchor
+// is never selected by the evaluator and therefore never gets an evaluation
+// row, so such an account counted >0 forever. Both callers gate on zero, so
+// the idle derivation would have been closed for that account permanently and
+// the repair tool would have refused it permanently -- while telling the
+// operator "the worker will handle it", which it never would.
+//
+// preAnchorCheckpoints is that excluded population, reported separately so the
+// tool can say which of the two situations an operator is looking at instead
+// of pretending the rows are not there.
+type unevaluatedBalanceEvidence struct {
+	// Owed is every real checkpoint at or above the anchor floor that has no
+	// evaluation row -- whether or not this pass's window reaches it. This is
+	// the number the idle-derivation guard and the repair tool gate on.
+	Owed int
+	// InWindowCheckpoints/InWindowProofs are the subset the current window
+	// actually selects: what the evaluator will judge in this pass.
+	InWindowCheckpoints int
+	InWindowProofs      int
+	// PreAnchor is the population the evaluator will never judge at all.
+	PreAnchor int
+}
+
+func countUnevaluatedBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string,
+	through time.Time) (counts unevaluatedBalanceEvidence, err error) {
+	err = tx.QueryRow(ctx, `
+		WITH `+balanceEvidenceFloorCTE+`
+		SELECT (SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE `+unevaluatedCheckpointAboveFloorPredicate+`),
+			(SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE `+pendingBalanceCheckpointPredicate+`),
+			(SELECT count(*) FROM balance_carry_forward_proofs proof
+			WHERE `+pendingBalanceProofPredicate+`),
+			(SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id))`,
+		accountID, through.UTC()).Scan(&counts.Owed, &counts.InWindowCheckpoints,
+		&counts.InWindowProofs, &counts.PreAnchor)
+	return counts, err
+}
+
+// deriveIdlePendingCarryForwardProofTx is XM-INV-PENDING-RECON C2: for an
+// account parked in not_invoiceable_pending_reconciliation whose window
+// carried no facts at all, derive one carry-forward proof so the state can
+// clear instead of waiting forever for evidence the source will never send.
+//
+// Every gate below exists because the first review demonstrated the failure it
+// prevents, on a real fixture. They are in this order and none may be skipped:
+//
+//  1. The streak gate. The acceptance ruling of 2026-09-09 (design section 7
+//     D2(a)) narrowed idle re-evaluation to accounts already one match from
+//     exiting; that narrowing was implemented only in the enqueue predicate,
+//     which bounds nothing, because an ordinary real checkpoint landing in the
+//     window enqueues the account whatever its streak is. A zero-streak
+//     account was reaching this code and being released.
+//
+//  2. No unevaluated real checkpoint. This is the one that matters most. A
+//     positive difference the ledger cannot explain is not classified on the
+//     spot: XM-INV-BALANCE-BLIP defers it and waits for the *next independent*
+//     piece of evidence to confirm or disconfirm it. An idle proof is not
+//     independent of that checkpoint -- it restates it, at a later cycle
+//     ceiling, against a projection that by construction has not moved, so the
+//     difference is identical and the confirmation cannot fail. One upstream
+//     observation then confirms itself, synthesizes a credit for the whole
+//     unexplained amount, and releases the account. So: if the evaluator still
+//     owes this account a verdict on real evidence, it gets to give it first.
+//
+//  3. Never below a real checkpoint. The candidates are walked newest-first,
+//     and if the newest one already carries a real checkpoint the derivation
+//     stops rather than falling back to an older empty cycle. Backfilling
+//     under a newer checkpoint dates a restatement of stale numbers below
+//     evidence that disagrees with them; the evaluator reads the stale proof
+//     first, counts it as the exit match, and clears the pending columns --
+//     including pending_reconciliation_since, which enterPendingReconciliationTx
+//     promises to preserve across a re-entry -- before it ever reads the
+//     checkpoint that disagrees. In the durable form of it the newer
+//     checkpoint is not yet finalizable at all, so the account is released to
+//     invoiceable while the newest thing the source said about it sits on file
+//     unevaluated.
+//
+//  4. XM-INV-DEAD-CONTAINMENT A2 wins over deriving. If the cycle carries a
+//     stranded balance_checkpoint for this account, wait: writing an immutable
+//     "no checkpoint arrived here" proof would make migration 0014's
+//     reject_real_checkpoint_after_carry_forward trigger refuse that
+//     checkpoint forever, and an idle account stuck one more cycle is never
+//     worth losing a replayable balance fact.
+//
+//  5. An open eligibility_freezes row suppresses derivation entirely.
+//     advancePendingReconciliationMatchTx refuses to exit while one is open,
+//     so a proof derived now could only produce evidence nobody can act on --
+//     and every proof is immutable and burns its cycle's exclusivity
+//     permanently.
+func deriveIdlePendingCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount,
+	carryCandidates []carryCandidate, requested time.Time, actor AuditActor) error {
+	if len(carryCandidates) == 0 {
+		return nil
+	}
+	var matches int
+	if err := tx.QueryRow(ctx, `SELECT pending_reconciliation_consecutive_matches
+		FROM source_account_eligibility_state WHERE external_account_id=$1`,
+		account.ExternalAccountID).Scan(&matches); err != nil {
+		return err
+	}
+	if matches < pendingReconciliationIdleMinMatches {
+		return nil
+	}
+	unevaluated, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, account.ExternalAccountID, requested)
+	if err != nil {
+		return err
+	}
+	if unevaluated.Owed > 0 {
+		return nil
+	}
+	item := carryCandidates[len(carryCandidates)-1]
+	if item.hasRealCheckpoint {
+		return nil
+	}
+	if item.hasStrandedCheckpoint {
+		return errBalanceCarryForwardProofPending
+	}
+	var hasOpenFreeze bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM eligibility_freezes WHERE external_account_id=$1 AND status='open')`,
+		account.ExternalAccountID).Scan(&hasOpenFreeze); err != nil {
+		return err
+	}
+	if hasOpenFreeze {
+		return nil
+	}
+	return insertBalanceCarryForwardProofTx(ctx, tx, account, item, true, actor)
+}
+
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
 	// XM-INV-PROOF-CONTENTION 2: the caller (processEligibilityProjectionJob)
 	// deliberately does NOT hold the per-account advisory lock or a row lock
@@ -3678,19 +4064,6 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	rows.Close()
 
-	type carryCandidate struct {
-		cycleID, batchID, snapshotID, cursor, revision string
-		priorID, balance                               string
-		priorDeficit                                   *string
-		asOf, watermark, observed                      time.Time
-		snapshotRows, sequence                         int64
-		negative, baselineMember, hasRealCheckpoint    bool
-		// hasStrandedCheckpoint (XM-INV-DEAD-CONTAINMENT A2) marks a cycle
-		// that carries a balance_checkpoint event for this account which is
-		// failed or dead behind an open freeze. See the query below and the
-		// pending return in the merge loop.
-		hasStrandedCheckpoint bool
-	}
 	// XM-INV-PROOF-CONTENTION 4: set-based evaluation, replacing what used to
 	// be up to two queries issued per entry of `visibilities` (each ~42ms on
 	// production, up to ~1,150 checkpoints in the contention incident's
@@ -3869,6 +4242,48 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	carryRows.Close()
 
+	// XM-INV-PENDING-RECON C2: idle re-evaluation. Everything above derives
+	// proofs only at the visibility instants of real facts -- usage, credits,
+	// cash lots. That is an efficiency rule, not a correctness one: it exists
+	// so an account with nothing happening does not accumulate proofs nobody
+	// needs. For an account sitting in not_invoiceable_pending_reconciliation
+	// it is also the reason the state cannot clear. Exiting needs
+	// pendingReconciliationExitMatches consecutive matched evaluations of real
+	// balance evidence, and an idle account produces neither kind: the source
+	// agent emits no checkpoint while its balance/negative flag/deficit are
+	// unchanged, and with no facts there are no visibilities, so no proof is
+	// derived either. A production account sat at one match short for days.
+	//
+	// So when this account is pending and the window carried no facts at all,
+	// derive exactly one proof from the newest published balances cycle that
+	// can still take one. This does not relax any exit rule: the proof is an
+	// ordinary carry-forward proof (migration 0026's trigger still forces it
+	// to restate the latest real checkpoint verbatim, deficit included), it is
+	// evaluated by the ordinary evaluator, and it counts exactly as much as
+	// any other item. The acceptance ruling of 2026-09-09 (design section 7
+	// D1(a)) accepted that for an idle account the second of the N matches is
+	// a restatement of the first, and recorded that trade explicitly.
+	//
+	// Ordering here is deliberate and is the whole reason this block sits
+	// after the candidate query rather than before it:
+	//
+	//  1. XM-INV-DEAD-CONTAINMENT A2 wins. If the cycle we would derive from
+	//     carries a stranded balance_checkpoint for this account, we wait,
+	//     exactly as the merge loop does -- writing an immutable "no
+	//     checkpoint arrived here" proof would make migration 0014's
+	//     reject_real_checkpoint_after_carry_forward trigger refuse that
+	//     checkpoint forever. An idle account being stuck one more cycle is
+	//     never worth losing a replayable balance fact.
+	//  2. An open eligibility_freezes row suppresses derivation entirely.
+	//     advancePendingReconciliationMatchTx refuses to exit while one is
+	//     open, so a proof derived now could only produce evidence that
+	//     cannot be acted on -- and every proof is immutable and burns its
+	//     cycle's exclusivity permanently. Nothing is lost by waiting: once
+	//     the freeze resolves, the next published cycle derives normally.
+	if len(visibilities) == 0 && account.Status == "not_invoiceable_pending_reconciliation" {
+		return deriveIdlePendingCarryForwardProofTx(ctx, tx, account, carryCandidates, requested, actor)
+	}
+
 	coveredVisibility := account.FinalizedThrough.UTC()
 	realIndex, carryIndex := 0, 0
 	for _, visibility := range visibilities {
@@ -3905,41 +4320,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		if item.hasStrandedCheckpoint {
 			return errBalanceCarryForwardProofPending
 		}
-		proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
-		proofID := randomUUID()
-		command, insertErr := tx.Exec(ctx, `
-			INSERT INTO balance_carry_forward_proofs(
-				id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
-				scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
-				baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
-				source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::numeric)
-			ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
-			account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
-			item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
-			item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
-			item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC(), item.priorDeficit)
-		if insertErr != nil {
-			return insertErr
-		}
-		if command.RowsAffected() == 0 {
-			var existingKey, existingPrior, existingRevision string
-			if err = tx.QueryRow(ctx, `SELECT proof_key,prior_checkpoint_id::text,source_revision_hash
-				FROM balance_carry_forward_proofs
-				WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`,
-				account.ExternalAccountID, item.cycleID).Scan(&existingKey, &existingPrior, &existingRevision); err != nil {
-				return err
-			}
-			if existingKey != proofKey || existingPrior != item.priorID || existingRevision != item.revision {
-				return domain.ErrConflict
-			}
-			continue
-		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.balance_carry_forward.derived",
-			"balance_carry_forward_proof", proofID, nil, map[string]any{
-				"proof_key": proofKey, "scan_cycle_id": item.cycleID,
-				"prior_checkpoint_id": item.priorID, "source_revision": item.revision,
-			}); err != nil {
+		if err = insertBalanceCarryForwardProofTx(ctx, tx, account, item, false, actor); err != nil {
 			return err
 		}
 	}
@@ -4062,43 +4443,48 @@ const balanceEvidenceBoundaryTolerance = time.Second
 // forward progress instead of looping.
 const balanceBlipRebaselineCap = 3
 
+// signedExpectedUnits (XM-INV-PENDING-RECON C5, acceptance ruling 2026-09-09
+// on design section 7 D4(a)) is the one balance the evaluator compares an
+// upstream report against: what the ledger expects the account to hold, minus
+// every unit of usage it could not charge to any pool.
+//
+// ExpectedBalance alone is not that number. It is floored at zero, because it
+// is also what the evaluation row's expected_service_units column stores and
+// that column carries a >=0 CHECK. The units below zero live in
+// UnallocatedUnits -- carried cash debts plus non-invoice-eligible shortfalls
+// -- and the source deducted every one of them, so an upstream balance has
+// already absorbed them.
+//
+// XM-INV-NEGATIVE-DEFICIT taught the negative branch to subtract them; the
+// positive branch was left comparing against the floored value, which is two
+// different definitions of "expected" in one function. The consequence is not
+// cosmetic: once an account's pools are exhausted, ExpectedBalance is pinned
+// at zero while UnallocatedUnits keeps growing, so any account that carries a
+// debt and is then topped up with non-cash credit reports a balance the
+// ledger reads as unexplainably high (or, once the sign flips, as case -1)
+// and is parked in pending reconciliation on every checkpoint. A production
+// account did exactly that for days.
+//
+// Every comparison in the evaluator goes through this function -- the first
+// classification, the blip-confirmation rebuild, the boundary rule, and the
+// negative branch -- so the definition is physically in one place and the
+// four cannot drift apart. Accounts with nothing unallocated (nearly all of
+// them) get the identical value they got before.
+func signedExpectedUnits(projection eligibilityProjection) *big.Int {
+	expected := new(big.Int).Set(projection.ExpectedBalance)
+	if projection.UnallocatedUnits != nil {
+		expected.Sub(expected, projection.UnallocatedUnits)
+	}
+	return expected
+}
+
 func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `
-		WITH evidence_floor AS (
-			-- XM-INV-PREANCHOR-BALANCE: balance evidence dated before a
-			-- POLICY_ANCHOR account's own cutover_at is not evidence about
-			-- this account's ledger, because that ledger does not exist
-			-- before the anchor. Evaluating it anyway builds the expected
-			-- balance from an empty window (buildEligibilityProjectionTx
-			-- floors every fact query at cutover_at), so expected comes out
-			-- 0, the whole reported balance reads as an unexplained positive
-			-- difference, and balanceEvidenceTrustIntervalTx has no interval
-			-- to anchor a synthesis against -- SOURCE_GAP, permanently.
-			--
-			-- It is a fixed point, not a transient: RepairBalanceAnchorEligibility
-			-- resolves the freeze and deletes the evaluation so the item goes
-			-- pending again, the next projection redoes the identical
-			-- arithmetic, and the freeze comes straight back. Production
-			-- account 98cce4c8 sat there with four such checkpoints, all
-			-- from the 21 hours between its own first post-policy checkpoint
-			-- and the RC68 deploy that first taught the system to bootstrap
-			-- an anchor at all.
-			--
-			-- This mirrors the fact side, which XM-INV-PREANCHOR-USAGE
-			-- already taught to skip rather than freeze for exactly the same
-			-- reason (see observeEligibilityFact's own BootstrapKind guard).
-			-- A legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account keeps the
-			-- old behaviour: its cutover replays real history to a known
-			-- point, so evidence before it genuinely is a gap.
-			SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
-				THEN state.cutover_at ELSE '-infinity'::timestamptz END AS anchor_floor
-			FROM source_account_eligibility_state state
-			WHERE state.external_account_id=$1
-		)
+		WITH `+balanceEvidenceFloorCTE+`
 		SELECT evidence_kind,id,evidence_key,external_event_id,as_of,balance_service_units,
 			balance_negative,deficit_service_units,source_sequence,source_cursor,stream_watermark_at,
 			source_revision_hash,observed_at
@@ -4110,21 +4496,14 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				checkpoint.source_sequence,checkpoint.source_cursor,
 				checkpoint.stream_watermark_at,checkpoint.source_revision_hash,checkpoint.observed_at
 			FROM balance_reconciliation_checkpoints checkpoint
-			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
-			  AND checkpoint.as_of<=$2
-			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
-			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
-				WHERE evaluation.checkpoint_id=checkpoint.id)
+			WHERE `+pendingBalanceCheckpointPredicate+`
 			UNION ALL
 			SELECT 'carry'::text,proof.id,proof.proof_key,proof.proof_key,
 				proof.as_of,proof.balance_service_units::text,proof.balance_negative,proof.deficit_service_units::text,
 				proof.source_sequence,proof.source_cursor,proof.stream_watermark_at,
 				proof.source_revision_hash,proof.observed_at
 			FROM balance_carry_forward_proofs proof
-			WHERE proof.external_account_id=$1 AND proof.as_of<=$2
-			  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
-			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
-				WHERE evaluation.proof_id=proof.id)
+			WHERE `+pendingBalanceProofPredicate+`
 		) pending
 		ORDER BY as_of,source_sequence,
 			CASE evidence_kind WHEN 'real' THEN 0 ELSE 1 END,id`, accountID, through)
@@ -4202,8 +4581,17 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		// an account not currently in that state.
 		return advancePendingReconciliationMatchTx(ctx, tx, accountID, actor)
 	}
-	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) error {
-		_, execErr := tx.Exec(ctx, `
+	// synthesizeUnknownPositive reports whether it actually inserted. The
+	// blip-confirmation path below needs to know: its rollback deletes the
+	// tentative credit, and "the tentative credit" means the row this
+	// transaction just wrote -- never a pre-existing row that happens to sit
+	// on the same synthetic event id. ON CONFLICT DO NOTHING makes those two
+	// things different, and an older row is not tentative at all: projections
+	// since have allocated consumption against it, and deleting it is refused
+	// by consumption_allocations' own FK RESTRICT -- which fails the whole
+	// account's projection job, on every retry, until it goes dead.
+	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) (bool, error) {
+		command, execErr := tx.Exec(ctx, `
 			INSERT INTO source_credit_events(
 				id,source_instance_id,external_account_id,external_event_id,external_credit_id,
 				event_time,service_units,unit_code,cutover_manifest_hash,configuration_hash,
@@ -4216,7 +4604,10 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			"unknown-positive:"+item.id, intervalStart.UTC(), amount.String(),
 			account.UnitCode, account.ManifestHash, account.ConfigurationHash,
 			item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
-		return execErr
+		if execErr != nil {
+			return false, execErr
+		}
+		return command.RowsAffected() == 1, nil
 	}
 
 	// pending holds a checkpoint/proof whose positive difference was not
@@ -4242,7 +4633,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		if projectionErr != nil {
 			return projectionErr
 		}
-		difference := new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
+		difference := new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(projection))
 
 		if pending != nil {
 			if !item.balanceNegative && difference.Sign() == 1 && difference.Cmp(pending.difference) == 0 {
@@ -4255,14 +4646,15 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// so recomputing its trust interval now would give the
 				// identical answer anyway), then rebuild -- not trust
 				// algebra -- to actually verify it.
-				if err = synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference); err != nil {
-					return err
+				inserted, synthErr := synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference)
+				if synthErr != nil {
+					return synthErr
 				}
 				confirmProjection, confirmErr := buildEligibilityProjectionTx(ctx, tx, account, item.asOf)
 				if confirmErr != nil {
 					return confirmErr
 				}
-				confirmDifference := new(big.Int).Sub(new(big.Int).Set(balance), confirmProjection.ExpectedBalance)
+				confirmDifference := new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(confirmProjection))
 				if confirmDifference.Sign() == 0 {
 					// The credit just inserted is dated at or before this
 					// item (pending.intervalStart <= pending.item.asOf <=
@@ -4297,14 +4689,31 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// difference/balanceNegative are unchanged since the top of
 				// this iteration -- the deferred item's credit never
 				// affected them; they were computed before it existed.
-				if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
-					return err
-				}
-				if _, err = tx.Exec(ctx, `
-					DELETE FROM source_credit_events
-					WHERE source_instance_id=$1 AND external_event_id=$2 AND credit_kind='UNKNOWN_POSITIVE'`,
-					account.SourceInstanceID, "unknown-positive:"+pending.item.externalEventID); err != nil {
-					return err
+				// Only what this transaction wrote. When the insert above was a
+				// no-op -- a credit already occupied that synthetic event id --
+				// there is no tentative credit to undo, and the row that is
+				// there is an older synthesis that projections have since
+				// allocated consumption against. Deleting it is refused by
+				// consumption_allocations' FK RESTRICT (SQLSTATE 23001), which
+				// fails the whole account's projection job on every retry until
+				// the failure grading gives up on it. RC108's shadow evaluation
+				// hit exactly that on a production account with 8,336
+				// allocations against four such credits.
+				//
+				// Not deleting it changes nothing else: the rebuild already
+				// proved the ledger does not reconcile with that credit in
+				// place, which is why this branch is running, and the deferred
+				// item is recorded ignored either way.
+				if inserted {
+					if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
+						return err
+					}
+					if _, err = tx.Exec(ctx, `
+						DELETE FROM source_credit_events
+						WHERE source_instance_id=$1 AND external_event_id=$2 AND credit_kind='UNKNOWN_POSITIVE'`,
+						account.SourceInstanceID, "unknown-positive:"+pending.item.externalEventID); err != nil {
+						return err
+					}
 				}
 				if err = writeEvaluation(pending.item, "positive_blip_ignored", pending.expected, pending.difference); err != nil {
 					return err
@@ -4314,6 +4723,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					"confirming_item_key":       item.key,
 					"confirming_raw_difference": difference.String(),
 					"reconciliation_residual":   confirmDifference.String(),
+					"tentative_credit_written":  inserted,
 				}); err != nil {
 					return err
 				}
@@ -4352,13 +4762,9 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				if deficitErr != nil {
 					return deficitErr
 				}
-				unallocated := new(big.Int)
-				if projection.UnallocatedUnits != nil {
-					unallocated.Set(projection.UnallocatedUnits)
-				}
 				// Signed arithmetic: the source reports -deficit; the ledger
 				// expects ExpectedBalance minus every unit it could not allocate.
-				expectedSigned := new(big.Int).Sub(new(big.Int).Set(projection.ExpectedBalance), unallocated)
+				expectedSigned := signedExpectedUnits(projection)
 				difference = new(big.Int).Sub(new(big.Int).Neg(deficit), expectedSigned)
 				if difference.Sign() == 0 {
 					status = "matched"
@@ -4369,8 +4775,14 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				}
 			}
 			if status == "negative_frozen" {
+				// XM-INV-PENDING-RECON C4: an item whose magnitude the source
+				// never reported produced no difference above, so it is not
+				// evidence that a previous streak of matches failed -- it
+				// keeps the streak and, if the account is already pending,
+				// does not log a second entry. An item that did report a
+				// magnitude and disagrees keeps the original reset.
 				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-					objectTypeOf(item), item.key, detail, actor); err != nil {
+					objectTypeOf(item), item.key, detail, item.deficitText == nil, actor); err != nil {
 					return err
 				}
 			}
@@ -4378,11 +4790,17 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			switch difference.Sign() {
 			case -1:
 				status = "negative_frozen"
+				// The signed expectation, not the floored ExpectedBalance, so
+				// the three numbers in the detail stay self-consistent
+				// (balance - expected = difference) and read the same way as
+				// the negative branch's own detail above.
 				detail := fmt.Sprintf("%s %s at %s reported balance %s, expected %s (difference %s)",
 					objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano),
-					balance.String(), projection.ExpectedBalance.String(), difference.String())
+					balance.String(), signedExpectedUnits(projection).String(), difference.String())
+				// A stated magnitude that disagrees with the ledger: the
+				// streak really did fail to resolve the gap, so it resets.
 				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-					objectTypeOf(item), item.key, detail, actor); err != nil {
+					objectTypeOf(item), item.key, detail, false, actor); err != nil {
 					return err
 				}
 			case 1:
@@ -4423,8 +4841,8 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					// XM-INV-ANCHOR-BALANCE's own tests require this exact
 					// behavior to keep working unchanged.
 					status = "positive_classified_non_cash"
-					if err = synthesizeUnknownPositive(item, intervalStart, difference); err != nil {
-						return err
+					if _, synthErr := synthesizeUnknownPositive(item, intervalStart, difference); synthErr != nil {
+						return synthErr
 					}
 				} else {
 					// XM-INV-BALANCE-BLIP: a positive difference on an
@@ -4525,7 +4943,11 @@ func resolveBalanceEvidenceBoundaryUsageTx(ctx context.Context, tx pgx.Tx, accou
 	if err != nil {
 		return nil, err
 	}
-	if new(big.Int).Sub(new(big.Int).Set(balance), adjusted.ExpectedBalance).Sign() != 0 {
+	// Compared against the same signed expectation every other comparison in
+	// the evaluator uses (signedExpectedUnits); the value returned is still
+	// the adjusted ExpectedBalance, because that is what the evaluation row's
+	// expected_service_units column stores and that column has a >=0 CHECK.
+	if new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(adjusted)).Sign() != 0 {
 		return nil, nil
 	}
 	return adjusted.ExpectedBalance, nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,6 +262,12 @@ func TestRunNarrowingFlagsRejectedForWrongKind(t *testing.T) {
 		{"event with pre-anchor kind", kindPreAnchorUsage, repairFilters{eventID: someUUID}},
 		{"account with queue-narrow kind", kindQueueNarrow, repairFilters{accountID: someUUID}},
 		{"include-blocked-cycles with projection kind", kindProjectionRequeueDead, repairFilters{includeBlockedCycles: true}},
+		{"event with pending-reevaluate kind", kindPendingReevaluate, repairFilters{eventID: someUUID, accountID: someUUID}},
+		{"include-blocked-cycles with pending-reevaluate kind", kindPendingReevaluate,
+			repairFilters{includeBlockedCycles: true, accountID: someUUID}},
+		// pending-reevaluate is never run unnarrowed: omitting --account is a
+		// refusal, not a default of "every pending account".
+		{"pending-reevaluate without an account", kindPendingReevaluate, repairFilters{}},
 	} {
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -283,6 +290,7 @@ func TestRunNarrowingFlagsRejectedForWrongKind(t *testing.T) {
 		{"account with ingest kind", kindIngestRequeueDead, repairFilters{accountID: someUUID}},
 		{"event with ingest kind", kindIngestRequeueDead, repairFilters{eventID: someUUID}},
 		{"include-blocked-cycles with ingest kind", kindIngestRequeueDead, repairFilters{includeBlockedCycles: true}},
+		{"account with pending-reevaluate kind", kindPendingReevaluate, repairFilters{accountID: someUUID}},
 	} {
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -346,18 +354,101 @@ func TestRunUnknownKindIsRejected(t *testing.T) {
 // "resolved_by = a caller-supplied operator id" requirements -- for every
 // repair kind.
 func TestRunApplyWithoutOperatorIDIsRejected(t *testing.T) {
-	for _, kind := range []string{kindPreAnchorUsage, kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead, kindIngestRequeueDead} {
+	const someUUID = "40000000-0000-4000-8000-000000000001"
+	// Every kind, including the two that require a narrowing flag of their
+	// own: those are given one, so the rejection under test is the missing
+	// operator id and not the missing --event/--account.
+	for _, testCase := range []struct {
+		kind    string
+		filters repairFilters
+	}{
+		{kindPreAnchorUsage, repairFilters{}},
+		{kindBalanceAnchor, repairFilters{}},
+		{kindBalanceBlip, repairFilters{}},
+		{kindQueueNarrow, repairFilters{}},
+		{kindPolicyStartReanchor, repairFilters{}},
+		{kindProjectionRequeueDead, repairFilters{}},
+		{kindIngestRequeueDead, repairFilters{}},
+		{kindIngestAcknowledgeUnreplayable, repairFilters{eventID: someUUID}},
+		{kindPendingReevaluate, repairFilters{accountID: someUUID}},
+	} {
 		databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
 		var out bytes.Buffer
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", kind, repairFilters{}, &out)
+		err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, "", testCase.kind, testCase.filters, &out)
 		cancel()
 		if err == nil {
-			t.Fatalf("--apply without --operator-id was accepted for --kind=%s", kind)
+			t.Fatalf("--apply without --operator-id was accepted for --kind=%s", testCase.kind)
 		}
 		if out.Len() != 0 {
-			t.Fatalf("rejected apply still printed output for --kind=%s: %s", kind, out.String())
+			t.Fatalf("rejected apply still printed output for --kind=%s: %s", testCase.kind, out.String())
 		}
+	}
+}
+
+// TestRunPendingReevaluateDryRunAgainstEmptyDatabaseReportsNothing is the
+// wiring smoke test for --kind=pending-reevaluate (XM-INV-PENDING-RECON):
+// against a freshly migrated, empty database the named account simply does
+// not exist, so the run must succeed, say so, and report nothing affected.
+func TestRunPendingReevaluateDryRunAgainstEmptyDatabaseReportsNothing(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPendingReevaluate,
+		repairFilters{accountID: "40000000-0000-4000-8000-000000000001"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "XM-INV-PENDING-RECON") || !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run output missing expected banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("dry run against an empty database found work: %s", printed)
+	}
+	if !strings.Contains(printed, "CHECKS") {
+		t.Fatalf("dry run must print its checks: %s", printed)
+	}
+}
+
+// TestPrintPendingReevaluateSummaryDistinguishesARefusedApply is a pure
+// formatting check (no database) for the one banner that must never be wrong:
+// a refused --apply reads REFUSED, not DRY RUN. An operator who typed --apply
+// and saw "DRY RUN (nothing was changed)" would reasonably conclude the flag
+// had not registered and run it again, rather than read the STOP line.
+func TestPrintPendingReevaluateSummaryDistinguishesARefusedApply(t *testing.T) {
+	refused := postgresstore.PendingReevaluateRepairResult{
+		ApplyRequested: true, Found: true, AccountID: "30000000-0000-4000-8000-000000000001",
+		Status: "active", ExitMatches: 2,
+		Checks: []postgresstore.PendingReevaluateCheck{{Name: "状态", Detail: "不在待对平", Blocker: true}},
+	}
+	var out bytes.Buffer
+	printPendingReevaluateSummary(&out, refused)
+	printed := out.String()
+	if !strings.Contains(printed, "REFUSED") || strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("a refused apply must not print the dry-run banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("a refused apply affected nothing: %s", printed)
+	}
+
+	out.Reset()
+	printPendingReevaluateSummary(&out, postgresstore.PendingReevaluateRepairResult{
+		Found: true, AccountID: "30000000-0000-4000-8000-000000000001", ExitMatches: 2})
+	if printed = out.String(); !strings.Contains(printed, "DRY RUN") || strings.Contains(printed, "REFUSED") {
+		t.Fatalf("an ordinary dry run must print the dry-run banner: %s", printed)
+	}
+
+	out.Reset()
+	printPendingReevaluateSummary(&out, postgresstore.PendingReevaluateRepairResult{
+		Applied: true, ApplyRequested: true, Queued: true, Found: true,
+		AccountID: "30000000-0000-4000-8000-000000000001", ExitMatches: 2})
+	printed = out.String()
+	if !strings.Contains(printed, "APPLIED") || strings.Contains(printed, "REFUSED") {
+		t.Fatalf("a successful apply must print APPLIED: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 1") {
+		t.Fatalf("a successful apply affected one account: %s", printed)
 	}
 }
 
@@ -435,5 +526,45 @@ func TestPrintProjectionRequeueDeadSummaryFormatsAccountsAndTotals(t *testing.T)
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)
 		}
+	}
+}
+
+// TestRunPendingReevaluateRefusedApplyIsNotSuccess is the first review's minor
+// finding 8. A refused apply used to return nil, so the process exited 0 and
+// any `set -e` wrapper or `$?` check read REFUSED as "done". The sibling kind
+// ingest-acknowledge-unreplayable already returned an error on refusal; this
+// one now does too, with its own sentinel so main can exit 3 (refused) rather
+// than 1 (something went wrong).
+func TestRunPendingReevaluateRefusedApplyIsNotSuccess(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	const operator = "70000000-0000-4000-8000-000000000001"
+	const account = "40000000-0000-4000-8000-000000000001"
+
+	// Against an empty database the account does not exist, so every apply is
+	// refused. The report is still printed -- the operator needs to see why.
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, operator, kindPendingReevaluate,
+		repairFilters{accountID: account}, &out)
+	cancel()
+	if !errors.Is(err, errRepairRefused) {
+		t.Fatalf("a refused apply must return the refusal sentinel, got %v", err)
+	}
+	if printed := out.String(); !strings.Contains(printed, "REFUSED") {
+		t.Fatalf("a refused apply must still print its report: %s", printed)
+	}
+
+	// Control: a dry run that finds the same blockers is not a refusal -- it
+	// was never going to write anything -- so it stays exit 0.
+	out.Reset()
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	err = run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPendingReevaluate,
+		repairFilters{accountID: account}, &out)
+	cancel()
+	if err != nil {
+		t.Fatalf("a dry run must not be a refusal: %v", err)
+	}
+	if printed := out.String(); !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run banner missing: %s", printed)
 	}
 }

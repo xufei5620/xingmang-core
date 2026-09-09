@@ -369,7 +369,7 @@ func (s *Store) repairQueueNarrowAccount(ctx context.Context, accountID string, 
 				"%s %s at %s reported balance difference %s against expected %s (rebuilt by XM-INV-ELIG-QUEUE-NARROW repair)",
 				eval.kind, eval.key, eval.asOf.UTC().Format(time.RFC3339Nano), eval.differenceUnits, eval.expectedUnits)
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				eval.kind, eval.key, detail, actor); err != nil {
+				eval.kind, eval.key, detail, false, actor); err != nil {
 				return QueueNarrowRepairAccount{}, err
 			}
 		}

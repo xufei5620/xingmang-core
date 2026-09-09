@@ -282,12 +282,127 @@ administrator queue above and neither is affected by "safe resolution":
   remains a valid `freeze_reason` value (for historical rows), but no code
   path opens a new freeze for it any more.
 
-Both states are invisible to `/readyz` and to
-`EligibilityProjectionHealth` by construction: entering or exiting either one
-happens inside the same eligibility-projection job that, on success,
-unconditionally deletes its own `eligibility_projection_jobs` row regardless
-of which status the account ends up in -- there is no separate queue entry
-for either state to get stuck in.
+Neither state can get *stuck* in `/readyz` or `EligibilityProjectionHealth`:
+entering or exiting either one happens inside the same eligibility-projection
+job that, on success, unconditionally deletes its own
+`eligibility_projection_jobs` row regardless of which status the account ends
+up in -- there is no separate queue entry for either state to sit in.
+
+Since XM-INV-PENDING-RECON (2026-09-09) they are no longer entirely invisible
+there, and the difference matters when reading a health snapshot. A
+`not_invoiceable_pending_reconciliation` account that is one matched
+evaluation short of auto-exit gets a projection job enqueued by each
+finalization pass that publishes a balances cycle it could still derive
+evidence from, and `invoice-eligibility-repair --kind=pending-reevaluate`
+enqueues one on demand. So `Queued`/`OldestPending` can show 1 or 2 for a few
+seconds. The worker takes 25 jobs every two seconds and
+`eligibility_projection_stuck` only fires after 15 minutes, so a healthy
+system clears these long before readiness notices. A pending-reconciliation
+account sitting in `Queued` for minutes is a real signal, not the expected
+state.
+
+### Idle re-evaluation (XM-INV-PENDING-RECON, 2026-09-09)
+
+Auto-exit needs two consecutive matched evaluations of real balance evidence,
+and an account with nothing happening to it produces neither kind: the source
+agent emits a checkpoint only when the balance, negative flag or deficit
+changes, and a carry-forward proof is derived only at the visibility instant
+of a real fact. A production account sat one match short for days while every
+finalization pass advanced `finalized_through` past the published balances
+cycles a proof could still have come from.
+
+Now, when such an account is one match short and the window carries no facts
+at all, the projection job derives one carry-forward proof from the newest
+published balances cycle that can still take one, and the ordinary evaluator
+judges it. Nothing about the exit rule changes: the proof restates the latest
+real checkpoint verbatim (migration 0026's trigger enforces that, deficit
+included), it is one evidence item, and it counts as one. The acceptance line
+accepted on 2026-09-09 that for an idle account the second of the two matches
+is a restatement of the first.
+
+Five things suppress the derivation, in this order, and every one of them is
+there because its absence released an account that should have stayed parked:
+
+1. **the consecutive-match streak is below one-short-of-the-exit** -- the
+   narrowing the acceptance line asked for, enforced in the derivation itself
+   and not only where jobs are enqueued (a job has other sources);
+2. **the evaluator still owes a verdict on a real checkpoint** -- including
+   one the finalization delay is still holding back. An idle proof restates
+   the evidence it is supposed to be independent of, so it would confirm a
+   deferred difference by construction;
+3. **the newest cycle in the window already carries a real checkpoint** -- the
+   derivation stops rather than backfilling a restatement of stale numbers
+   underneath newer evidence;
+4. **a `balance_checkpoint` event that is dead or failed in that cycle**
+   (XM-INV-DEAD-CONTAINMENT: writing a proof there would make migration 0014
+   refuse the real checkpoint forever);
+5. **an open `eligibility_freezes` row** -- the exit is blocked by the freeze
+   guard anyway, and a proof is immutable once written.
+
+Evidence dated below a POLICY_ANCHOR account's own anchor is outside all of
+this: the evaluator never selects it, so it never counts as owed and never
+blocks anything. The audit row for an idle derivation carries
+`idle_reevaluation: true`.
+
+**`invoice-eligibility-repair --kind=pending-reevaluate`** is the on-demand
+form, for when an account has not cleared on its own. It asks the projection
+worker to look at that one account again, now, by enqueueing its projection
+job -- and that is all it writes. No proof, no evaluation, no
+`eligibility_status`: the worker re-derives and re-evaluates through the
+ordinary path, so the two-consecutive-matches exit rule is untouched by it.
+Its `--apply` writes exactly one job row and one
+`eligibility.pending_reconciliation.reevaluation_requested` audit event.
+
+`--account` is required and names exactly one account. The dry run is the
+diagnosis and is usually the whole answer: the account's state and streak,
+open freezes, its job row, evidence already waiting for the evaluator, which
+published cycle an idle derivation would take, and this run's own recomputed
+verdict for the evidence it would produce -- computed from the ledger, never
+read back from a stored evaluation row. Checks printed as `STOP` refuse the
+apply: there is no eligibility state row for the account at all, the account
+is not pending, its consecutive-match streak is below the idle-derivation
+threshold (one short of the exit -- no tool advances a streak, only a real
+matched evaluation does), an open freeze would block the exit anyway, the job is
+`processing` or `dead` (`dead` is `--kind=projection-requeue-dead`'s decision,
+and this tool never revives one), the requeue window is empty, no cycle inside
+the window can be derived from, the one that can already carries a proof or a
+stranded checkpoint, the checkpoint to be restated has no magnitude, or the
+operator is the account's own invoice user. `docs/PRODUCTION-RUNBOOK.md` has
+the full table with what to do about each.
+
+The command is a `docker run` against the tools image -- there is no compose
+service for this binary. `docs/PRODUCTION-RUNBOOK.md` defines the
+`invoice_eligibility_repair` shell function used below (image tag, the
+`invoice-system-prod_invoice_db` network, and the two read-only secret
+mounts); copy that block first.
+
+```bash
+# dry run (default) -- the diagnosis, writes nothing
+invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid>
+
+# apply -- requires an approving operator id, and refuses if any check says STOP
+invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid> \
+  --apply --operator-id=<admin-uuid>
+```
+
+Read the report's `requeue window` line before applying even when nothing says
+`STOP`. The apply asks for the window a finalization pass would ask for --
+min(the source's four stream watermarks) minus the account's
+`finalization_delay_seconds`, and never lowers a window an existing job row
+already asks for -- and the derivation only happens inside it. When `newest
+published` is above that window the account is just waiting for the
+finalization delay to pass, and the automatic path will reach it anyway.
+
+> Every `invoice_eligibility_repair` snippet in this file is the shell
+> function `docs/PRODUCTION-RUNBOOK.md` defines under "Running
+> `invoice-eligibility-repair` in production" -- copy that block into the
+> shell first. These snippets used to spell out a command line
+> (`/app/bin/...` with `/run/secrets/invoice-db-url` and
+> `field-keyring.json`) whose three paths do not exist and never did: the
+> binary lives at `/usr/local/bin/invoice-eligibility-repair` and the compose
+> secrets are `invoice_owner_database_url` and `invoice_field_keyring`. The
+> RC104/RC105 runs used the `docker run` form; the written-down one was never
+> executed.
 
 ## Manual queue narrowing (XM-INV-ELIG-QUEUE-NARROW, 2026-09-03)
 
@@ -333,16 +448,10 @@ migration-period reasons (`EVENT_PAYLOAD_DRIFT`, `UNIT_MISMATCH`,
 
   ```
   # dry run (default) -- reports what would change, writes nothing
-  /app/bin/invoice-eligibility-repair \
-    --database-url-file=/run/secrets/invoice-db-url \
-    --field-keyring-file=/run/secrets/field-keyring.json \
-    --kind=queue-narrow
+  invoice_eligibility_repair --kind=queue-narrow
 
   # apply -- requires an approving operator id
-  /app/bin/invoice-eligibility-repair \
-    --database-url-file=/run/secrets/invoice-db-url \
-    --field-keyring-file=/run/secrets/field-keyring.json \
-    --kind=queue-narrow --apply --operator-id=<admin-uuid>
+  invoice_eligibility_repair --kind=queue-narrow --apply --operator-id=<admin-uuid>
   ```
 
 ## Policy-start anchoring (XM-INV-ELIG-POLICY-START-ANCHOR, 2026-09-03)
@@ -397,18 +506,12 @@ precisely predicts whether re-anchoring changes anything:
 Like `--kind=queue-narrow`, this processes one account per transaction, not
 the whole run in one transaction.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=policy-start-reanchor
+invoice_eligibility_repair --kind=policy-start-reanchor
 
 # apply -- requires an approving operator id
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=policy-start-reanchor --apply --operator-id=<admin-uuid>
+invoice_eligibility_repair --kind=policy-start-reanchor --apply --operator-id=<admin-uuid>
 ```
 
 Production sequence: apply migration 0021 first (it must be live before the
@@ -486,24 +589,15 @@ event (`eligibility.projection.requeued`). Like `--kind=queue-narrow`, this
 processes one account per transaction, so one account's own conflict never
 blocks any other account in the same run.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead
+invoice_eligibility_repair --kind=projection-requeue-dead
 
 # apply -- requires an approving operator id
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead --apply --operator-id=<admin-uuid>
+invoice_eligibility_repair --kind=projection-requeue-dead --apply --operator-id=<admin-uuid>
 
 # narrow to one account
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead --account=<external-account-uuid> \
+invoice_eligibility_repair --kind=projection-requeue-dead --account=<external-account-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
@@ -605,25 +699,16 @@ It deliberately changes nothing else:
   is unhealthy` instead of `contains dead events`) until the event actually
   reaches `processed`. That is accurate, not a regression.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead
+invoice_eligibility_repair --kind=ingest-requeue-dead
 
 # apply one specific, individually reviewed event
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead --event=<ingest-event-uuid> \
+invoice_eligibility_repair --kind=ingest-requeue-dead --event=<ingest-event-uuid> \
   --apply --operator-id=<admin-uuid>
 
 # narrow to one account (correlated through that account's open freezes)
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead --account=<external-account-uuid> \
+invoice_eligibility_repair --kind=ingest-requeue-dead --account=<external-account-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
@@ -743,18 +828,12 @@ Guardrails, because this writes off customer data:
 - Open freezes are untouched: closing the event is not the same judgment as
   declaring the account clean.
 
-```
+```bash
 # dry run (default) -- reports the event and why it is unreplayable
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid>
+invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid>
 
 # apply -- one reviewed event, with a named operator
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid> \
+invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
