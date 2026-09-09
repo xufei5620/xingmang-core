@@ -124,6 +124,7 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M30 | 派生回退到更旧的周期（旧 continue） | 直调派生的用例 | 红（回填到真实检查点之下） |
 | M31 | 账本文案退回「预期 %s」 | 文案用例 | 红 |
 | M32 | 被拒绝的 apply 不再返回哨兵错误 | CLI 退出码用例 | 红 |
+| M33 | 报告的连击闸从 STOP 降成 NOTE | 连击门槛用例 | 红 |
 
 M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
 漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
@@ -161,6 +162,9 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **交付前最后一次** `go vet ./...` | 12:05:35 | 12:05:36 | 1s |
 | **交付前最后一次** `go test -p 1 -count=1 ./...`（backend 全量） | **12:05:36** | **12:13:12** | **7m36s，exit 0，30 包全 ok** |
 | **交付前最后一次** `check-no-secrets.ps1` | 12:13:12 | 12:13:12 | exit 0 |
+| **终审 major 1 修复后** `go vet ./...` | 12:36:31 | 12:36:32 | 1s |
+| **终审 major 1 修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **12:36:32** | **12:44:09** | **7m37s，exit 0，30 包全 ok** |
+| **终审 major 1 修复后** `check-no-secrets.ps1` | 12:44:09 | 12:44:10 | exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
@@ -489,7 +493,22 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
 真实事实，不是等一个操作者。若后续认为过严，加 flag 是个小改动，但要连同「谁批准、审计里怎么
 记」一起设计。
 
-### 8.4 follow_up：ADMIN-CREDITS 切片必须带去重
+### 8.4 第二轮终审 major 1：报告必须复刻派生的连击闸
+
+报告把闲置派生的取周期与重算都复刻了，唯独漏掉派生自己的第一道闸——M3 新加的
+「连击 ≥ N−1」。原来连击只在「状态」那一项的 detail 里顺带印一下，不是 blocker。
+
+能走到的场景：账号 pending、连击 0（早先某张检查点判不平把它清零），随后账本被一次
+不产生新事实的人工修复改正（policy-start-reanchor、balance-anchor 这类），操作者跑
+`pending-reevaluate`——其余检查全绿，报告说会派生并 matched，apply 之后 worker 到连击闸
+前停下，什么都没发生。又是「APPLIED 却空转」，只是这次卡在连击而不是窗口。
+
+修法：报告新增 `streak_below_idle_threshold` 检查，与派生读**同一个常量**
+`pendingReconciliationIdleMinMatches`，不足即 STOP；STOP 表同步（`runbook_sync` 用例会逼
+着补）。手册与运维文档都写明这种账号该怎么办：**没有工具能替它推进连击，只有一次真实的
+matched 评估可以**，等下一张真实检查点。变异 M33 把它降成 NOTE 即红。
+
+### 8.5 follow_up：ADMIN-CREDITS 切片必须带去重
 
 当桥接把 `redeem_codes.type='admin_balance'` 放行、真实管理员加款作为额度事件进账本之后，
 用户 34 已有的四条 `UNKNOWN_POSITIVE` 合成额度会与真实加款**重复计数**（§6 第 4 条的实测值）：

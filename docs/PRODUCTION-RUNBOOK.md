@@ -2300,6 +2300,7 @@ Checks marked `STOP` refuse `--apply`:
 | --- | --- |
 | there is no eligibility state row for this account id | check the id -- it is `external_accounts.id`, not the upstream user id |
 | the account is not `not_invoiceable_pending_reconciliation` | nothing -- this tool has no work on it |
+| the consecutive-match streak is below the idle-derivation threshold (one short of the exit) | nothing -- no tool advances the streak; only a real matched evaluation does, so wait for the next real checkpoint. An apply here would enqueue a job the derivation's own gate then refuses |
 | open eligibility freezes > 0 | resolve the freeze first; the exit is blocked by the freeze guard regardless of evidence |
 | the projection job is `processing` | wait; a worker is holding the account right now |
 | the projection job is `dead` | run `--kind=projection-requeue-dead --account=<id>` first; this tool never revives a dead job |

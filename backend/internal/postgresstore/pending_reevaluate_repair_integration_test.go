@@ -539,3 +539,85 @@ func TestPendingReevaluateRefusesWhileARealCheckpointIsUnevaluated(t *testing.T)
 		t.Fatalf("control: with nothing unevaluated the check must pass: %+v", check)
 	}
 }
+
+// TestPendingReevaluateRefusesBelowTheIdleStreakThreshold is the second
+// review's first new finding. The report reproduced the derivation's cycle
+// selection and its arithmetic faithfully, but not its first gate: since M3
+// the derivation refuses below pendingReconciliationIdleMinMatches, and the
+// report only mentioned the streak in passing, as a passing check.
+//
+// The shape that reaches it: an account is pending with a zero streak (an
+// earlier item that did not reconcile reset it), the ledger is then corrected
+// by a repair that produces no new fact -- policy-start-reanchor,
+// balance-anchor -- and an operator runs this tool. Every other check passes,
+// the report promises a derivation and a matched verdict, and the worker stops
+// at the streak gate. APPLIED, one account affected, nothing moved: the same
+// "looks correct, fails silently" shape the first review caught on the window.
+//
+// Both sides read pendingReconciliationIdleMinMatches, so the report cannot
+// promise what the derivation will not do.
+func TestPendingReevaluateRefusesBelowTheIdleStreakThreshold(t *testing.T) {
+	f := newIdlePendingFixture(t)
+	// Reset the streak through a real path: a stated magnitude that disagrees.
+	resetAt := f.lastEvidenceAt.Add(idleCycleSpacing)
+	f.observeNegativeCheckpoint(t, "streak-gate-reset", resetAt, stringPtr("70"), 6)
+	f.project(t, resetAt.Add(time.Minute))
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.consecutiveMatches != 0 {
+		t.Fatalf("fixture: want a zero streak, got %+v", row)
+	}
+	// Everything else the tool looks at is in order: a published cycle inside
+	// a real window, nothing unevaluated, no freeze, no job row.
+	carryAt := resetAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 981, carryAt)
+	f.setWatermarks(t, carryAt.Add(10*time.Minute).Add(f.finalizationDelay(t)))
+	proofsBefore := f.proofCount(t)
+
+	report := f.runReevaluate(t, false, pendingReevaluateOperator)
+	check := requireCheck(t, report, "连击门槛")
+	if check.Passed || !check.Blocker {
+		t.Fatalf("a streak below the idle threshold must be a STOP: %+v", check)
+	}
+	if report.ConsecutiveMatches != 0 {
+		t.Fatalf("report streak=%d, want 0", report.ConsecutiveMatches)
+	}
+	// The rest of the report is still computed -- the operator needs to see
+	// that the only thing missing is the streak.
+	if report.TargetCycleID == "" {
+		t.Fatalf("the report must still describe the cycle it would have used: %+v", report)
+	}
+
+	result := f.runReevaluate(t, true, pendingReevaluateOperator)
+	if result.Applied || result.Queued {
+		t.Fatalf("apply must be refused below the idle streak threshold: %+v", result)
+	}
+	if _, exists := f.jobStatus(t); exists {
+		t.Fatal("a refused apply must not enqueue a job")
+	}
+	if got := f.proofCount(t); got != proofsBefore {
+		t.Fatalf("proofs=%d, want %d", got, proofsBefore)
+	}
+	if got := f.reevaluateAuditCount(t); got != 0 {
+		t.Fatalf("a refused apply wrote %d audit rows, want 0", got)
+	}
+
+	// Control: one real matched evaluation lifts the streak to the threshold,
+	// and the same account then passes -- so the STOP above is the threshold,
+	// not a check that always blocks.
+	// Two spacings, not one: setWatermarks above raised the balances watermark
+	// to carryAt+25m, and committing a cycle below a stream's own watermark is a
+	// STREAM_WATERMARK_REGRESSION -- which freezes the account and would make
+	// this control prove nothing.
+	matchAt := carryAt.Add(2 * idleCycleSpacing)
+	f.observeNegativeCheckpoint(t, "streak-gate-match", matchAt, stringPtr("50"), 8)
+	f.project(t, matchAt.Add(time.Minute))
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.consecutiveMatches != pendingReconciliationIdleMinMatches {
+		t.Fatalf("control: want a streak of %d, got %+v", pendingReconciliationIdleMinMatches, row)
+	}
+	nextAt := matchAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 982, nextAt)
+	f.setWatermarks(t, nextAt.Add(10*time.Minute).Add(f.finalizationDelay(t)))
+	control := f.runReevaluate(t, false, pendingReevaluateOperator)
+	if check := requireCheck(t, control, "连击门槛"); !check.Passed || check.Blocker {
+		t.Fatalf("control: at the threshold the check must pass: %+v", check)
+	}
+}

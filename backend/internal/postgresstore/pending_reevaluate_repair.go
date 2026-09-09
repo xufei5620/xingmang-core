@@ -72,6 +72,7 @@ type PendingReevaluateCheck struct {
 var PendingReevaluateBlockerCodes = []string{
 	"account_missing",
 	"not_pending",
+	"streak_below_idle_threshold",
 	"open_freeze",
 	"job_processing",
 	"job_dead",
@@ -404,6 +405,24 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		"当前 eligibility_status=%s；原因=%s 触发=%s/%s 起始=%s 连续匹配=%d/%d",
 		account.Status, result.Reason, result.TriggerType, result.TriggerID,
 		formatOptionalTime(result.Since), result.ConsecutiveMatches, pendingReconciliationExitMatches)
+
+	// Check 1b: the derivation's own first gate. deriveIdlePendingCarryForwardProofTx
+	// refuses below pendingReconciliationIdleMinMatches, and this report exists
+	// to say what an apply will do -- so it must apply the same threshold, read
+	// from the same constant. Without it the report can pass every other check,
+	// promise a derivation and a matched verdict, and the worker then stops at
+	// the streak gate and does nothing: APPLIED over an account that never
+	// moved, the exact shape the first review already caught once on the
+	// window.
+	//
+	// An account reaches a zero streak honestly -- an earlier item that did not
+	// reconcile reset the counter -- and nothing an operator can run advances
+	// it. Only a real matched evaluation does.
+	add("streak_below_idle_threshold", "连击门槛",
+		result.ConsecutiveMatches >= pendingReconciliationIdleMinMatches, true,
+		"连续匹配 %d，闲置派生要求至少 %d（退出线 %d）；不足时 worker 到闸前就停下，apply 会是一次空转。"+
+			"没有工具能替它推进连击——只有一次真实的 matched 评估可以，等下一张真实检查点",
+		result.ConsecutiveMatches, pendingReconciliationIdleMinMatches, pendingReconciliationExitMatches)
 
 	// Check 2: an open freeze would block the exit even with fresh evidence,
 	// and (this slice's own C2 guard) suppresses the derivation outright.

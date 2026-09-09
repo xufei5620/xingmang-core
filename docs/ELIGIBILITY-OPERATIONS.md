@@ -344,7 +344,9 @@ published cycle an idle derivation would take, and this run's own recomputed
 verdict for the evidence it would produce -- computed from the ledger, never
 read back from a stored evaluation row. Checks printed as `STOP` refuse the
 apply: there is no eligibility state row for the account at all, the account
-is not pending, an open freeze would block the exit anyway, the job is
+is not pending, its consecutive-match streak is below the idle-derivation
+threshold (one short of the exit -- no tool advances a streak, only a real
+matched evaluation does), an open freeze would block the exit anyway, the job is
 `processing` or `dead` (`dead` is `--kind=projection-requeue-dead`'s decision,
 and this tool never revives one), the requeue window is empty, no cycle inside
 the window can be derived from, the one that can already carries a proof or a
