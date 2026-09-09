@@ -234,6 +234,11 @@ func TestConsumptionMigrationClosesPreCutoverReservationsAndPreservesIssuedExpos
 	// 0031 (XM-INV-CLAIM-BINDING) indexes source_economic_scan_cycle_events,
 	// also created by the excluded 0009 -- same reason as 0022/0023 above.
 	delete(all, "0031_claim_binding_index.sql")
+	// 0032 (XM-INV-DEAD-CONTAINMENT) indexes eligibility_freezes, also created
+	// by the excluded 0009 (0009:497) -- same reason as 0031 above. Note that
+	// CREATE INDEX IF NOT EXISTS does not save this case: IF NOT EXISTS
+	// suppresses "index already exists", never "relation does not exist".
+	delete(all, "0032_eligibility_freezes_open_revision_index.sql")
 	if err = UpFS(ctx, pool, all); err != nil {
 		t.Fatal(err)
 	}
