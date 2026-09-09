@@ -11,6 +11,9 @@
 | ② | C5 有符号期望口径 | `e36fba5` |
 | ③ | C4 未知量级证据不重置连击 | `a14bcdf` |
 | ④ | C3 新 repair kind + C6 文档 | `bba9ac0` |
+| 追加 | 交接单补门禁实测时间 | `62b280f` |
+| 追加 | 被拒绝 apply 的横幅 | `1e08a76` |
+| 追加 | **第一轮复审修复**（重评窗口、报告同源、STOP 表同源、手册 SQL 与路径） | `41e65d8` |
 
 ---
 
@@ -25,8 +28,8 @@
 | D5 | (a) 新 kind 语义为 `pending-reevaluate`（排队 + 诊断，不绕判据） | `backend/internal/postgresstore/pending_reevaluate_repair.go`；读者 3 的方案 (b)（人替代第二次匹配）明确不实现，函数头注释写明它需要验收线重裁 |
 | D6 | L1 已随 RC107 上线，本切片直接建在其上 | C2 的闲置分支把 XM-INV-DEAD-CONTAINMENT A2 的死信 hold 排在自己之前，见下节 |
 | D7 | XM-INV-ADMIN-CREDITS 立项、另一片做 | 本切片不动桥接契约、不重钉哈希 |
-| D8 | (a) C2 允许包含下界（ceiling == finalized_through） | 候选查询本来就是 `scan_ceiling_at>=finalized_through`；`pending-reevaluate` 排的窗口 `requested_through=finalized_through` 正是靠它才够得着，用例 `TestPendingReevaluateApplyOnTheCeilingBoundaryDerivesEvidence` 钉死 |
-| D9 | (a) 部署后先等 C1 自动处理 | 运行手册写明：报告的 `in requeue window: false` 就是「等下一次 finalize」，此时 apply 不改变任何东西 |
+| D8 | (a) C2 允许包含下界（ceiling == finalized_through） | 候选查询是 `scan_ceiling_at>=finalized_through`，下界包含。**注意**：第一轮复审后 `pending-reevaluate` 排的窗口不再是 `finalized_through`（那让派生在生产不可达，见 §5 第 8 条），所以本决策对该工具已不再是「够不够得着」的关键；它仍决定 C1 排队后 worker 的候选下界 |
+| D9 | (a) 部署后先等 C1 自动处理 | 运行手册写明：报告的 `newest published` 高于 `requeue window` 时，最新周期还压在 finalization_delay 里，自动路径本来就会取到它 |
 
 ## 2. 实际改了什么
 
@@ -246,10 +249,12 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
 3. **C3 报告第 6 项的重算时刻**：设计写 `buildEligibilityProjectionTx(account, prior.as_of)`，
    实现用的是目标周期的天花板（= 派生出来的证明自己的 `as_of`，也是评估器实际会用的时刻）。
    闲置账号两者结果相同；非闲置时天花板更准。
-4. **C3 报告多了一条 `in requeue window`**：设计的报告第 5 项说「最新 published balances 周期
-   （ceiling ≥ finalized_through）」，但本工具排的作业窗口是 `requested_through = finalized_through`，
-   够得着的只有 ceiling **等于** finalized_through 的那一个。不写这条，报告会显示一个工具其实
-   到不了的周期，操作者 apply 之后看不到任何变化却以为工具坏了。加了这一行并在运行手册里点名。
+4. ~~**C3 报告多了一条 `in requeue window`**~~ —— **本条已被下面第 8 条取代，不要再照它读。**
+   当时的想法是：设计的报告第 5 项说「最新 published balances 周期（ceiling ≥
+   finalized_through）」，而工具排的窗口只够得着 ceiling 等于 finalized_through 的那一个，
+   所以加一行 `in requeue window` 提示操作者「这一个到不了，等 finalize」。第一轮复审证明
+   前提本身就是错的：窗口不该是 `finalized_through`。该字段与该行已删除，现在报告印的是
+   `requeue window`（apply 实际会写进作业行的那个窗口）。
 5. **CLI 输出语言**：横幅与定宽表沿用同仓库其它 kind 的英文（设计 §3 C3 明确要求「同
    `main.go:449-472` 风格」），检查项的解释文字用中文。
 6. **`TestRunApplyWithoutOperatorIDIsRejected` 的枚举**：设计 A12 说补到 9 种。实际改成
@@ -347,7 +352,7 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
   `eligibility.balance_carry_forward.evaluated{status:matched}` →
   `eligibility.pending_reconciliation.exited{consecutive_matches:2}`，状态转 `active`。
   若久未退出，先跑 `--kind=pending-reevaluate --account=<12>` 的 dry-run 看报告，
-  特别是「目标周期」与 `in requeue window` 两行，再决定要不要 apply。
+  特别是 `requeue window`、`target cycle`、`newest published` 三行，再决定要不要 apply。
 - **用户 34（C5）**：接下来两张真实检查点。若出现 `eligibility.balance_blip.rebaselined`，
   说明重建没有对平 —— 按 §5 第 2 条，签名口径之后这只可能是「合成额度写不进去」，
   停下来看 detail，不要用工具清状态。
