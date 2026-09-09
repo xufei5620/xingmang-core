@@ -10,7 +10,7 @@
 | ① | C1 + C2 闲置重评 | `7bc8b80` |
 | ② | C5 有符号期望口径 | `e36fba5` |
 | ③ | C4 未知量级证据不重置连击 | `a14bcdf` |
-| ④ | C3 新 repair kind + C6 文档 | 见本文档所在提交 |
+| ④ | C3 新 repair kind + C6 文档 | `bba9ac0` |
 
 ---
 
@@ -117,19 +117,39 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 
 ## 4. 门禁（实测 UTC 起止与耗时）
 
-| 门禁 | 开始 | 结束 | 耗时 |
+全部为 2026-09-09 的实测值，不是估计。
+
+| 门禁 | 开始 (UTC) | 结束 (UTC) | 耗时 |
 | --- | --- | --- | --- |
-| `go vet ./...`（每段各一次，最后一次） | — | — | < 10s |
-| `go test ./internal/postgresstore/`（C1+C2 后全量） | 09:05:43 | 09:10:54 | 5m11s |
-| `go test ./internal/postgresstore/`（C5 后全量） | 09:15:36 | 09:20:59 | 5m23s |
-| `go test ./internal/postgresstore/`（C4 后全量） | 09:42:01 | 09:47:36 | 5m35s |
-| `go test ./cmd/eligibility-repair/` | — | — | 19.1s |
-| `go test -p 1 -count=1 ./...` 全量 | 见本提交的发布记录段 | | |
-| `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 见本提交的发布记录段 | | |
+| `go vet ./...`（backend，最后一次） | 10:05:40 | 10:05:41 | 1s |
+| `go test ./internal/postgresstore/`（① C1+C2 后） | 09:05:43 | 09:10:54 | 5m11s |
+| `go test ./internal/postgresstore/`（② C5 后） | 09:15:36 | 09:20:59 | 5m23s |
+| `go test ./internal/postgresstore/`（③ C4 后） | 09:42:01 | 09:47:36 | 5m35s |
+| `go test ./cmd/eligibility-repair/`（④） | — | — | 19.1s |
+| **`go test -p 1 -count=1 ./...`（backend 全量，四段合入后）** | **10:15:20** | **10:23:17** | **7m57s** |
+| `go vet ./...` + `go test ./...`（agents 模块） | 10:23:31 | 10:23:36 | 5s |
+| `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 10:23:36 | 10:23:37 | 1s，exit 0 |
+
+全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
 集成测试用专用库 `invoice_test_pendrecon`
 （`INVOICE_TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/invoice_test_pendrecon?sslmode=disable`），
-八个代理变量全部 `env -u`。前端未改动，`web` 的门禁未跑。
+包列表放在 flag 之前，八个代理变量全部 `env -u`。
+
+**没跑的门禁，以及原因：**
+
+- `cd web && npm run typecheck && npm test -- --run`：本切片一个前端文件都没改
+  （`git diff --name-only b3ded69 -- web/` 为空）。
+- `scripts/verify.ps1` / `scripts/verify-postgres.ps1`：容器化的发布门禁，属于发布环节，
+  由主控者在打 RC 时跑。
+- **影子评估**：C5 属于评估器改动，按 XM-INV-ELIG-POLICY-START-ANCHOR 的纪律，
+  `deploy/rehearsal/shadow-eval.sh --reproject-all --reevaluate-evidence` **发布前必做**，
+  本切片没有跑（需要生产备份与 age 身份，不在实现范围内）。这不是可选项，见 §6 第 9 条。
+
+顺带一条实现现场的坑：`gofmt -w internal/postgresstore/` 会把整包文件的 CRLF 改成 LF，
+`git status` 于是显示 78 个文件被改。仓库 `core.autocrlf=true`，所以 `git diff` 对这些文件是
+空的、提交内容不受影响，但工作树会脏一大片。已用 `git checkout -- backend/internal/postgresstore/`
+还原；下次只对自己动过的文件跑 `gofmt -w`。
 
 ## 5. 偏离设计稿的地方（都是实现当下发现、当下记的）
 
