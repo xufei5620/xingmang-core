@@ -1375,7 +1375,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
 				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
+				"balance_checkpoint", in.CheckpointID, detail, false, actor); err != nil {
 				return err
 			}
 		}
@@ -1540,7 +1540,7 @@ func (s *Store) ObserveBalanceCheckpoint(ctx context.Context, in BalanceCheckpoi
 			detail := fmt.Sprintf("balance_checkpoint %s at %s reported a negative balance at account bootstrap",
 				in.CheckpointID, in.AsOf.UTC().Format(time.RFC3339Nano))
 			if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-				"balance_checkpoint", in.CheckpointID, detail, actor); err != nil {
+				"balance_checkpoint", in.CheckpointID, detail, false, actor); err != nil {
 				return err
 			}
 		}
@@ -2594,9 +2594,38 @@ const pendingReconciliationExitMatches = 2
 // actually resolve the gap -- but preserves the original
 // pending_reconciliation_since so operators can see how long the account has
 // been unreconciled, not just since its most recent negative item.
-func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, reason, triggerType, triggerID, detail string, actor AuditActor) error {
+//
+// preserveStreak (XM-INV-PENDING-RECON C4) is the one exception to that
+// reset, and it exists because the reset's own justification does not always
+// apply. Evidence whose magnitude is unknown -- balance evidence sealed
+// before the bridge started reporting deficits -- never produces a difference
+// at all, so it cannot be "a fresh negative difference" showing that the
+// streak failed to resolve anything. It says only that the account is
+// negative by an amount nobody can state. Resetting on it discards a real
+// streak on the strength of no arithmetic, and because every carry-forward
+// proof restates its prior verbatim, one such item during a replay becomes
+// one per published cycle: a production account collected 419 `entered` audit
+// rows exactly that way. With preserveStreak the counter survives, and when
+// the account was already in this state no second `entered` row is written --
+// restating that an already-pending account is still pending is not an event.
+// Evidence that does state a magnitude and disagrees with the ledger keeps
+// the original behaviour exactly: reset, and a fresh `entered`.
+func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, reason, triggerType, triggerID, detail string, preserveStreak bool, actor AuditActor) error {
 	if strings.TrimSpace(triggerID) == "" {
 		triggerID = accountID
+	}
+	// Whether this is a first entry or a re-entry decides whether an
+	// `entered` audit row is written, and the UPDATE below cannot report it:
+	// its RowsAffected only separates "frozen" from "not frozen", and a
+	// RETURNING (xmax=0) test does not survive a HOT update. So the status is
+	// read first, under the same row lock the evaluator's own caller already
+	// holds -- taking it here as well costs nothing and keeps this function
+	// correct when called from a path that does not.
+	var alreadyPending bool
+	if err := tx.QueryRow(ctx, `SELECT eligibility_status='not_invoiceable_pending_reconciliation'
+		FROM source_account_eligibility_state WHERE external_account_id=$1 FOR UPDATE`,
+		accountID).Scan(&alreadyPending); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
 	}
 	command, err := tx.Exec(ctx, `
 		UPDATE source_account_eligibility_state
@@ -2608,10 +2637,12 @@ func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, rea
 			pending_reconciliation_since=CASE
 				WHEN eligibility_status='not_invoiceable_pending_reconciliation'
 				THEN pending_reconciliation_since ELSE now() END,
-			pending_reconciliation_consecutive_matches=0,
+			pending_reconciliation_consecutive_matches=CASE
+				WHEN $6 AND eligibility_status='not_invoiceable_pending_reconciliation'
+				THEN pending_reconciliation_consecutive_matches ELSE 0 END,
 			projection_version=projection_version+1,updated_at=now()
 		WHERE external_account_id=$1 AND eligibility_status<>'frozen'`,
-		accountID, reason, triggerType, triggerID, detail)
+		accountID, reason, triggerType, triggerID, detail, preserveStreak)
 	if err != nil {
 		return err
 	}
@@ -2621,6 +2652,13 @@ func enterPendingReconciliationTx(ctx context.Context, tx pgx.Tx, accountID, rea
 	if command.RowsAffected() == 0 {
 		// Frozen priority: a real, distinct freeze already governs this
 		// account -- do not downgrade or overwrite its trigger detail.
+		return nil
+	}
+	if preserveStreak && alreadyPending {
+		// The trigger detail above was still refreshed to this item, so an
+		// operator sees the most recent evidence; what is suppressed is only
+		// the audit row claiming the account entered a state it was in
+		// already.
 		return nil
 	}
 	return writeAudit(ctx, tx, actor, "eligibility.pending_reconciliation.entered", "external_account", accountID,
@@ -4524,8 +4562,14 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				}
 			}
 			if status == "negative_frozen" {
+				// XM-INV-PENDING-RECON C4: an item whose magnitude the source
+				// never reported produced no difference above, so it is not
+				// evidence that a previous streak of matches failed -- it
+				// keeps the streak and, if the account is already pending,
+				// does not log a second entry. An item that did report a
+				// magnitude and disagrees keeps the original reset.
 				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-					objectTypeOf(item), item.key, detail, actor); err != nil {
+					objectTypeOf(item), item.key, detail, item.deficitText == nil, actor); err != nil {
 					return err
 				}
 			}
@@ -4540,8 +4584,10 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				detail := fmt.Sprintf("%s %s at %s reported balance %s, expected %s (difference %s)",
 					objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano),
 					balance.String(), signedExpectedUnits(projection).String(), difference.String())
+				// A stated magnitude that disagrees with the ledger: the
+				// streak really did fail to resolve the gap, so it resets.
 				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
-					objectTypeOf(item), item.key, detail, actor); err != nil {
+					objectTypeOf(item), item.key, detail, false, actor); err != nil {
 					return err
 				}
 			case 1:
