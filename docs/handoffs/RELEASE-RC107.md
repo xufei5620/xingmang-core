@@ -6,8 +6,9 @@
 - worktree: `K:/发票/wt-XM-INV-RC107`
 - 内容：
   - `ai/claude/XM-INV-DEAD-CONTAINMENT`（L1）：`61f5ca5` → `4d468d6` → `b39a123` → `80d5774` → `f8386f8`（合 RC106）→ `df97427` → `59d22ec` → `1112322` → `139ee4e`
-  - `ai/claude/XM-INV-UNIT-DISPLAY`：`a159309` → `9535864` → `f5498f4` → `8436e19` → `f61f92d` → `dba423b`，合并提交 `aeb3dc2`
-  - `0dea130`（发布身份 RC106→RC107，**先于打 tag**）→ 本文
+  - `ai/claude/XM-INV-UNIT-DISPLAY`：`a159309` → `9535864` → `f5498f4` → `8436e19` → `f61f92d` → `dba423b`（合并 `aeb3dc2`）
+    → `6807282`（发现范围锚在模块根，合并 `d3b93d5`）
+  - `0dea130`（发布身份 RC106→RC107，**先于打 tag**）→ `54aaf97`（本文）→ `dd00e65`（verify-postgres 挂载清单）→ `d3b93d5` → 本文补记
 - 切片交接单：`docs/handoffs/XM-INV-DEAD-CONTAINMENT.md`、`docs/handoffs/XM-INV-UNIT-DISPLAY.md`
 - **不含** L2（`ai/claude/XM-INV-OBSERVED-AT-PER-BINDING`，迁移 0033）：0033 打上之后不带它的构建起不来，发布当下没有可回滚的目标构建，留 RC108 先做回滚演练。
 
@@ -42,8 +43,17 @@
 | 单位显示分支全量（`dba423b`，库 `invoice_test_unitdisp`） | 06:43:37 | 06:49:59 | 382s | go test 0（376s）；vet 0；22 文件 374 用例；no-secrets 0 |
 | 两分支干跑合并 `git merge-tree` | 06:5x | — | — | clean（App.tsx / http-api.ts / types.ts 自动合并） |
 | `scripts/test-release-image-gate.ps1`（改名后） | 07:1x | — | 2s | exit 0 |
-| 合并后全量（`verify.ps1`，detached runner + WSL bash） | 待跑 | | | |
+| 合并后全量 `verify.ps1`（第 3 次，`d3b93d5`；detached runner + WSL bash） | 07:36:57 | 07:44:58 | 481s | **exit 0，`All local verification gates passed`**（`logs/detached-runs/rc107-gate-20260909T073657Z-f596`） |
 | 镜像门禁 / 产物校验 / 签名 | 待做 | | | |
+
+`verify.ps1` 前两次红，都是隔离 PostgreSQL 容器里「仓库根解析成容器根」这一类：
+
+1. 07:12–07:18：就绪原因对拍闸读 `web/src/App.tsx`、验证脚本同步闸读 `deploy/postgres/…`，容器没挂这两个目录
+   → `dd00e65` 把 `verify-postgres.ps1` 的挂载改成清单（backend、agents、web/src、deploy、docs 同名只读挂到容器根），
+   不再一个补一个。
+2. 07:19–07:26：单位显示的发现闸「从仓库根走整棵树」，在容器里等于走整个文件系统，把 `/usr/local/go/test/` 里
+   Go 自己的测试样例解析了 → `6807282` 把发现范围锚在本仓库的 Go 模块根（`<root>/go.mod`、`<root>/*/go.mod`），
+   覆盖探针同样收进模块树；假仓库根上三条变异红。合并 `d3b93d5`。
 
 ## 顺序
 
