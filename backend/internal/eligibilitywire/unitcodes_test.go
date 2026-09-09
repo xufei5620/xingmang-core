@@ -415,55 +415,9 @@ func TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := repoRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
 	visited := Set(scan.ScannedDirs)
 	mentions := regexp.MustCompile(`UnitCode|\b[A-Z][A-Z0-9_]*_1E[0-9]+\b`)
-	uncovered := []string{}
-	excluded := []string{}
-	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			// .git and node_modules are not source trees; node_modules is also
-			// a junction to the main checkout in this worktree.
-			if path != root && (entry.Name() == ".git" || entry.Name() == "node_modules") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !mentions.Match(body) {
-			return nil
-		}
-		rel, err := filepath.Rel(root, filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		dir := filepath.ToSlash(rel)
-		fileRel := dir + "/" + name
-		if strings.Contains("/"+dir+"/", "/testdata/") || strings.Contains("/"+dir+"/", "/vendor/") {
-			excluded = append(excluded, fileRel)
-			return nil
-		}
-		if !visited[dir] {
-			uncovered = append(uncovered, fileRel)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		t.Fatal(walkErr)
-	}
+	uncovered, excluded := sweepForCoverage(t, mentions, visited)
 	if len(uncovered) > 0 {
 		t.Fatalf("these non-test Go files mention a unit code but live in directories the scan never visited:\n  %s\n"+
 			"the scan visited %d directories; DiscoverGoPackageDirs is missing them",
@@ -477,6 +431,199 @@ func TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode(t *testing.T) {
 	// A sweep that proved nothing would also satisfy both checks above.
 	if len(visited) == 0 {
 		t.Fatal("the scan reported visiting no directories at all")
+	}
+}
+
+// sweepForCoverage is the coverage probes' own walk: every non-test .go file in
+// this repository's own Go modules whose text matches `mentions`, split into
+// the ones whose directory the scan visited and the ones under testdata/ or
+// vendor/. Shared by the unit-code and eligibility_status probes, which differ
+// only in what they match.
+//
+// What it shares with the scans is the ANCHOR -- DiscoverGoModuleRoots, i.e.
+// where this repository's go.mod files are -- and nothing else. That is a fact
+// about the tree, not a judgement about what to scan, and it has to be shared:
+// RC107's container gate showed what happens when a walk starts from wherever
+// repoRoot() lands and keeps going, and a probe that walked `/` would fail on
+// Go's own testdata exactly like the scan did. The JUDGEMENT stays
+// independent: its own walk, matching text rather than parsing, deciding for
+// itself which files count.
+func sweepForCoverage(t *testing.T, mentions *regexp.Regexp, visited map[string]bool) (uncovered, excluded []string) {
+	t.Helper()
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	moduleRoots, err := DiscoverGoModuleRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(moduleRoots) == 0 {
+		t.Fatal("no Go module root found; the probe would sweep nothing and pass vacuously")
+	}
+	seen := map[string]bool{}
+	for _, moduleRoot := range moduleRoots {
+		treeRoot := root
+		if moduleRoot != "." {
+			treeRoot = filepath.Join(root, filepath.FromSlash(moduleRoot))
+		}
+		walkErr := filepath.WalkDir(treeRoot, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				// .git and node_modules are not source trees; node_modules is
+				// also a junction to the main checkout in this worktree.
+				if path != treeRoot && (entry.Name() == ".git" || entry.Name() == "node_modules") {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if !mentions.Match(body) {
+				return nil
+			}
+			rel, err := filepath.Rel(root, filepath.Dir(path))
+			if err != nil {
+				return err
+			}
+			dir := filepath.ToSlash(rel)
+			fileRel := dir + "/" + name
+			if seen[fileRel] {
+				// The container mounts the same package twice (/src and
+				// /backend); report each file once.
+				return nil
+			}
+			seen[fileRel] = true
+			if strings.Contains("/"+dir+"/", "/testdata/") || strings.Contains("/"+dir+"/", "/vendor/") {
+				excluded = append(excluded, fileRel)
+				return nil
+			}
+			if !visited[dir] {
+				uncovered = append(uncovered, fileRel)
+			}
+			return nil
+		})
+		if walkErr != nil {
+			t.Fatal(walkErr)
+		}
+	}
+	return uncovered, excluded
+}
+
+// TestDiscoverGoModuleRootsFindsThisRepositorysModules pins the anchor the
+// package discovery hangs off. Both modules must be found, and everything
+// returned must actually be a module -- a discovery that answered with
+// directories that merely exist would put the scan back to walking whatever is
+// above it.
+func TestDiscoverGoModuleRootsFindsThisRepositorysModules(t *testing.T) {
+	roots, err := DiscoverGoModuleRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := Set(roots)
+	for _, needed := range []string{"backend", "agents"} {
+		if !found[needed] {
+			t.Fatalf("module root %s is missing; found %v", needed, roots)
+		}
+	}
+	repo, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range roots {
+		dir := repo
+		if root != "." {
+			dir = filepath.Join(repo, filepath.FromSlash(root))
+		}
+		if !hasGoMod(dir) {
+			t.Fatalf("%s was returned as a module root but has no go.mod", root)
+		}
+	}
+}
+
+// TestGoPackageDiscoveryStaysInsideTheModules is the RC107 regression, run
+// against a fake repository root rather than the real one so the "outside"
+// case can exist at all.
+//
+// The isolated container gate mounts backend/ at /src, so repoRoot() resolved
+// to the container's `/` and the discovery walked the entire filesystem,
+// parsing Go's own testdata:
+//
+//	eligibilitywire: parse usr/local/go/test/bombad.go: illegal byte order mark
+//
+// The fixture reproduces the shape: a module to find, a directory of Go source
+// with no go.mod above it (what /usr looked like), and a module nested too deep
+// to be one of this repository's own.
+func TestGoPackageDiscoveryStaysInsideTheModules(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A module of this repository's own, with a package one level down.
+	write("mod/go.mod", "module zzprobe/mod\n\ngo 1.27\n")
+	write("mod/pkg/a.go", "package pkg\n\nconst A = \"a\"\n")
+	// Go source with no go.mod anywhere above it inside this root. This is
+	// /usr/local/go/test in the container.
+	write("outside/b.go", "package outside\n\nconst B = \"b\"\n")
+	write("outside/deeper/c.go", "package deeper\n\nconst C = \"c\"\n")
+	// A module too deep to be one of this repository's own modules. Excluding
+	// it is what keeps a discovery started at `/` from finding
+	// /usr/local/go/go.mod.
+	write("vendorish/nested/go.mod", "module zzprobe/nested\n\ngo 1.27\n")
+	write("vendorish/nested/d.go", "package nested\n\nconst D = \"d\"\n")
+	// Skipped by name even though it is inside the module.
+	write("mod/testdata/e.go", "package testdata\n\nconst E = \"e\"\n")
+
+	roots, err := discoverGoModuleRootsIn(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0] != "mod" {
+		t.Fatalf("only the depth-1 module is this repository's own, got %v", roots)
+	}
+
+	dirs, err := discoverGoPackageDirsIn(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := Set(dirs)
+	if !found["mod/pkg"] {
+		t.Fatalf("a package inside the module must be discovered, got %v", dirs)
+	}
+	for _, outside := range []string{"outside", "outside/deeper", "vendorish/nested", "mod/testdata"} {
+		if found[outside] {
+			t.Fatalf("%s is outside this repository's modules (or skipped by name) and must not be scanned, got %v",
+				outside, dirs)
+		}
+	}
+}
+
+// TestGoPackageDiscoveryRefusesARootWithNoModules keeps the empty case loud.
+// Answering "no packages" for a root that contains no go.mod would make every
+// gate downstream compare against an empty set, which is the shape of a green
+// that means nothing.
+func TestGoPackageDiscoveryRefusesARootWithNoModules(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := discoverGoPackageDirsIn(root); err == nil {
+		t.Fatal("a root with no go.mod must be an error, not an empty answer")
 	}
 }
 
