@@ -1215,7 +1215,7 @@ var sourceEventAliasPattern = regexp.MustCompile(`^[a-z][a-z_]{0,15}$`)
 // The last four narrow the question further -- to one account, or to one
 // freeze -- which is what extraFreezePredicates is for. The narrowing is then
 // visibly one extra line instead of a retyped copy of the core, and
-// TestEveryDeadEventCountIsRenderedFromOneDefinition is the discovery guard
+// TestEveryDeadEventAggregateConsultsContainment is the discovery guard
 // that keeps it that way.
 //
 // One deliberate non-caller: ingestRequeueDeadOpenFreezesTx lists the open
