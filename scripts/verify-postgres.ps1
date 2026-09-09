@@ -27,7 +27,7 @@ function Invoke-PostgresContainerCommand {
         [Parameter(Mandatory = $true)][string[]]$Environment,
         [Parameter(Mandatory = $true)][string]$Command,
         [string]$ContractsPath,
-        [string]$BackendPath,
+        [string[]]$RepoRootMounts = @(),
         [Parameter(Mandatory = $true)][string]$FailureMessage
     )
 
@@ -35,11 +35,17 @@ function Invoke-PostgresContainerCommand {
     if (-not [string]::IsNullOrWhiteSpace($ContractsPath)) {
         $arguments += @('--mount', "type=bind,source=$ContractsPath,target=/contracts,readonly")
     }
-    if (-not [string]::IsNullOrWhiteSpace($BackendPath)) {
-        # eligibilitywire.repoRoot() 从自己的源文件路径往上三级算仓库根；运行器镜像把 backend/
-        # 放在 /src，于是根是 /，它接着要读 /backend/migrations 与 /backend/internal/...（发现
-        # 后端会写出的状态值）。把宿主机的 backend/ 只读挂到 /backend，和 /src 是同一份源码。
-        $arguments += @('--mount', "type=bind,source=$BackendPath,target=/backend,readonly")
+    # 后端测试有一批按「源文件往上三级 = 仓库根」去读仓库其它目录：eligibilitywire 读
+    # contracts/ 与 backend/{migrations,internal}，又按全仓发现扫 agents/；就绪原因对拍闸读
+    # web/src/App.tsx；验证脚本同步闸读 deploy/postgres/…。运行器镜像只带 /src，仓库根解析成
+    # 容器根，所以把这些目录按同名只读挂到 / 下（与 /src 是同一份源码）。RC106 第一次门禁死在
+    # contracts/，第二次死在 backend/，RC107 第一次死在 web/ 与 deploy/——手列一个补一个的
+    # 形状，这里一次把仓库根下会被读的目录全部挂上，调用方传清单。
+    foreach ($relative in $RepoRootMounts) {
+        $sourcePath = Join-Path $projectRoot $relative
+        if (-not (Test-Path -LiteralPath $sourcePath)) { throw "repo mount source missing: $relative" }
+        $target = '/' + ($relative -replace '\\', '/')
+        $arguments += @('--mount', "type=bind,source=$sourcePath,target=$target,readonly")
     }
     foreach ($environmentEntry in $Environment) {
         $arguments += @('--env', $environmentEntry)
@@ -163,7 +169,7 @@ try {
                 -Environment @("INVOICE_TEST_DATABASE_URL=$databaseUrl") `
                 -Command "go test $($databaseTest.Package) -count=1" `
                 -ContractsPath $contractsPath `
-                -BackendPath (Join-Path $projectRoot 'backend') `
+                -RepoRootMounts @('backend', 'agents', 'web\src', 'deploy', 'docs') `
                 -FailureMessage $databaseTest.Failure
         }
 
