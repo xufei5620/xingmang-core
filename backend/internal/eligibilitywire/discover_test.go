@@ -1,0 +1,263 @@
+package eligibilitywire
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// These tests pin the RECOGNITION rule of the code scan, separately from the
+// probes that consume it. The second cut of discover.go recognised only bare
+// string literals, and the review's own mutations showed what that costs: a
+// status written as a named constant was invisible (green), while extracting
+// an existing literal into a constant -- a pure refactor -- went red with a
+// message telling the reader to delete the value from the contract. Both
+// directions are nailed down here against a throwaway package, so a regression
+// in the rule shows up in this file rather than as a probe that happens to
+// stay green.
+
+func scanProbePackage(t *testing.T, source string) (StatusScan, error) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "probe.go"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan := StatusScan{Literals: []StatusLiteral{}, Funcs: map[string]bool{}}
+	err := scanPackageDir(&scan, dir, "probe")
+	return scan, err
+}
+
+func literalValues(scan StatusScan, kind string) []string {
+	out := []string{}
+	for _, literal := range scan.Literals {
+		if literal.Kind == kind {
+			out = append(out, literal.Value)
+		}
+	}
+	return out
+}
+
+func TestScanResolvesNamedConstantAssignments(t *testing.T) {
+	// Review mutation V2, reproduced: the third response-time status is spelled
+	// as a constant, once by assignment and once as a composite-literal key.
+	scan, err := scanProbePackage(t, `package probe
+
+const zzProbeStatus = "zz_probe_status"
+
+const zzOtherStatus = "zz_" + "other_status"
+
+type lot struct{ EligibilityStatus string }
+
+func override(lots []lot) {
+	for i := range lots {
+		lots[i].EligibilityStatus = zzProbeStatus
+	}
+}
+
+func build() lot {
+	return lot{EligibilityStatus: zzOtherStatus}
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := literalValues(scan, LiteralAssignment)
+	if len(got) != 2 || got[0] != "zz_probe_status" || got[1] != "zz_other_status" {
+		t.Fatalf("named constants must be resolved to their values, got %v", got)
+	}
+	if len(scan.InFunc("override")) != 1 || len(scan.InFunc("build")) != 1 {
+		t.Fatalf("each value must be attributed to the function that assigns it, got %v", scan.Literals)
+	}
+	if scan.Literals[0].File != "probe/probe.go" || scan.Literals[0].Line != 11 {
+		t.Fatalf("the location must point at the assignment, got %s", scan.Literals[0])
+	}
+}
+
+func TestScanStillSeesBareLiteralsAndPassthroughs(t *testing.T) {
+	// The historical RC58 shape must keep working, and copying one status
+	// field into another (what user_dto.go and ListUserEligibilitySummaries do)
+	// must be neither a literal nor an error.
+	scan, err := scanProbePackage(t, `package probe
+
+type lot struct{ EligibilityStatus string }
+
+type dto struct{ EligibilityStatus string }
+
+func override(l *lot, base lot) dto {
+	l.EligibilityStatus = "source_unavailable"
+	l.EligibilityStatus = (base.EligibilityStatus)
+	return dto{EligibilityStatus: l.EligibilityStatus}
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := literalValues(scan, LiteralAssignment)
+	if len(got) != 1 || got[0] != "source_unavailable" {
+		t.Fatalf("want exactly the bare literal, got %v", got)
+	}
+}
+
+func TestScanRefusesAnAssignmentItCannotEvaluate(t *testing.T) {
+	// Review mutation V7, reproduced: the status comes out of a helper. There
+	// is no constant to fold, so the scan must not answer at all -- an answer
+	// with a gap is what let V7 through green.
+	for name, source := range map[string]string{
+		"helper return": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func pick() string { return "zz" }
+
+func override(l *lot) {
+	l.EligibilityStatus = pick()
+}
+`,
+		"local variable": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot, s string) {
+	status := s
+	l.EligibilityStatus = status
+}
+`,
+		"composite literal from helper": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func pick() string { return "zz" }
+
+func build() lot {
+	return lot{EligibilityStatus: pick()}
+}
+`,
+		"tuple assignment": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func pick() (string, error) { return "zz", nil }
+
+func override(l *lot) (err error) {
+	l.EligibilityStatus, err = pick()
+	return err
+}
+`,
+		"constant from another package": `package probe
+
+import "invoice-system/backend/internal/somewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = somewhere.Status
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := scanProbePackage(t, source)
+			if err == nil {
+				t.Fatal("an EligibilityStatus the scan cannot evaluate must be refused, not skipped")
+			}
+			if !strings.Contains(err.Error(), "probe/probe.go:") {
+				t.Fatalf("the refusal must name file:line, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestScanResolvesCoalesceDefaultsBuiltFromConstants(t *testing.T) {
+	scan, err := scanProbePackage(t, `package probe
+
+const zzDefault = "zz_coalesce_default"
+
+const listQuery = "SELECT COALESCE(eas.eligibility_status,'" + zzDefault + "') FROM t"
+
+func list() string {
+	return listQuery + " WHERE 1=1"
+}
+
+func other() string {
+	return "SELECT COALESCE(eas.eligibility_status,'missing'), COALESCE(eas.unit_code,'') FROM t"
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := literalValues(scan, LiteralCoalesceDefault)
+	// The constant is recorded where it is declared (package scope) and where it
+	// is used (inside list); the bare literal once. Sets are what the probes
+	// consume, so duplicates are fine -- what matters is that the value built
+	// from a concatenation is visible at all, and attributed to list().
+	if !Set(got)["zz_coalesce_default"] || !Set(got)["missing"] {
+		t.Fatalf("COALESCE defaults built from constants must be resolved, got %v", got)
+	}
+	inList := literalValues(StatusScan{Literals: scan.InFunc("list")}, LiteralCoalesceDefault)
+	if len(inList) != 1 || inList[0] != "zz_coalesce_default" {
+		t.Fatalf("the default must be attributed to the function whose query carries it, got %v", inList)
+	}
+	if len(scan.InFunc("other")) != 1 {
+		t.Fatalf("a query with one eligibility_status COALESCE must yield exactly one literal, got %v", scan.InFunc("other"))
+	}
+}
+
+func TestScanRefusesACoalesceDefaultItCannotRead(t *testing.T) {
+	_, err := scanProbePackage(t, `package probe
+
+func list() string {
+	return "SELECT COALESCE(eas.eligibility_status,$2) FROM t"
+}
+`)
+	if err == nil {
+		t.Fatal("a COALESCE default that is not a literal must be refused, not read as no default")
+	}
+	if !strings.Contains(err.Error(), "probe/probe.go:4") {
+		t.Fatalf("the refusal must name file:line, got: %v", err)
+	}
+}
+
+func TestScanRefusesAnEmptyPackageDir(t *testing.T) {
+	scan := StatusScan{Literals: []StatusLiteral{}, Funcs: map[string]bool{}}
+	if err := scanPackageDir(&scan, t.TempDir(), "probe"); err == nil {
+		t.Fatal("a scanned directory with no Go files reads exactly like a package that introduces nothing; it must be an error")
+	}
+}
+
+// TestNewConstantStatusReachesTheGate is the end-to-end negative form the
+// review asked for: a status introduced as a named constant is not merely
+// "visible to the scan" but lands in the synthetic set the contract gate
+// compares against, so the gate would go red on it.
+func TestNewConstantStatusReachesTheGate(t *testing.T) {
+	contract, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := DiscoverPersistedStatuses()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := scanProbePackage(t, `package probe
+
+const zzProbeStatus = "zz_probe_status"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = zzProbeStatus
+}
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synthetic := map[string]bool{}
+	for _, literal := range scan.Literals {
+		if !Set(persisted.Values)[literal.Value] {
+			synthetic[literal.Value] = true
+		}
+	}
+	extra, _ := Diff(synthetic, Set(contract.LotSyntheticStatuses))
+	if len(extra) != 1 || extra[0] != "zz_probe_status" {
+		t.Fatalf("a constant-spelled status must reach the contract gate as undeclared, got extra=%v", extra)
+	}
+}

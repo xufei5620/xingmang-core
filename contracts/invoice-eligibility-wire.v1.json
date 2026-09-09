@@ -1,0 +1,135 @@
+{
+  "$id": "https://invoice.solov.internal/contracts/invoice-eligibility-wire.v1.json",
+  "title": "开票资格线缆契约 v1（eligibility_status / reason_code）",
+  "slice": "XM-INV-LOT-REASON-CONTRACT",
+  "description": [
+    "后端会在 /api/v1/user/orders 的 funding lot 与 /api/v1/user/eligibility-summary",
+    "上回给前端的 eligibility_status 与 reason_code 全集。这是唯一真相源：Go 侧的探针",
+    "测试把真实 emitter 的实际输出与本文件双向比对（多了红、少了也红），并由本文件",
+    "生成 web/src/lib/eligibility-wire.generated.ts 供前端使用。任何一侧都不得再手抄。",
+    "",
+    "历史：XM-INV-ELIG-AUTO-RECONCILE 上线时后端新增了第 4 个持久化状态",
+    "not_invoiceable_pending_reconciliation 与 reason_code LEDGER_PENDING_RECONCILIATION，",
+    "而前端 http-api.ts 里三份手抄闭集（mapLot / mapEligibilitySummary / mapEligibilityFreeze）",
+    "都停在旧清单上，导致用户端开票中心整页崩、已关联账号面板退回绑定向导。",
+    "",
+    "本文件只是「提交时」的闸。运行时（后端先上线、前端 bundle 还旧）由前端的降级路径兜底：",
+    "未知但形状合法的值可见、不可选、带中文兜底文案，绝不再整页 throw。两层缺一不可。"
+  ],
+  "lot_persisted_statuses_description": [
+    "source_account_eligibility_state.eligibility_status 的 CHECK 约束取值。",
+    "Go 探针从 backend/migrations 里最新一条改写该约束的迁移中抽取实际取值再与此比对，",
+    "所以这一组是被发现的、不是手列的。"
+  ],
+  "lot_persisted_statuses": [
+    "active",
+    "syncing",
+    "frozen",
+    "not_invoiceable_pending_reconciliation"
+  ],
+  "lot_synthetic_statuses_description": [
+    "不落库、只在响应期出现的状态。missing 来自 postgresstore/funding.go 的",
+    "COALESCE(eas.eligibility_status,'missing')（该 external_account 尚无资格状态行）；",
+    "source_unavailable 来自 application/service.go 的来源新鲜度覆盖（五条同步流未全 fresh）。",
+    "这一组同样是被发现的、不是手列的：Go 探针用 go/ast 扫 application / postgresstore /",
+    "httpapi 三个包里对 EligibilityStatus 字段的字面量赋值与 SQL 的 COALESCE 默认值，",
+    "减去持久化集后与本组双向比对。第一版把这两个值手写在这里、又让 lot 探针从",
+    "lot_eligibility_status 取输入空间，于是「再加第三个响应期状态」——也就是 RC58 当年",
+    "加 source_unavailable 的原样形状——会让六道探针全绿。",
+    "两者与 reason_code 的配对由 Go 侧 emitter 探针钉住，见 lot_status_reason_pairs。"
+  ],
+  "lot_synthetic_statuses": ["missing", "source_unavailable"],
+  "lot_eligibility_status": [
+    "active",
+    "syncing",
+    "frozen",
+    "not_invoiceable_pending_reconciliation",
+    "missing",
+    "source_unavailable"
+  ],
+  "lot_reason_code": [
+    "SOURCE_NOT_READY",
+    "SOURCE_REFUND",
+    "BEFORE_ELIGIBILITY_START",
+    "SUBSCRIPTION_USAGE_UNSUPPORTED",
+    "NO_POST_START_CONSUMPTION",
+    "LEDGER_SYNCING",
+    "LEDGER_PENDING_RECONCILIATION",
+    "LEDGER_FROZEN"
+  ],
+  "lot_status_reason_pairs_description": [
+    "对每个状态，emitter 实际可能配出的 reason_code 全集（空串表示 omitempty 省略该键）。",
+    "由 httpapi 的笛卡尔积探针发现并双向比对；它是「只补 reason_code 白名单救不了页面」",
+    "这件事的机器化证据——注意 not_invoiceable_pending_reconciliation 下可以配出 5 种不同的",
+    "reason，而状态本身恒为该值，所以前端必须放宽 status 校验而不只是放宽 reason 校验。"
+  ],
+  "lot_status_reason_pairs": {
+    "active": [
+      "",
+      "BEFORE_ELIGIBILITY_START",
+      "NO_POST_START_CONSUMPTION",
+      "SOURCE_REFUND",
+      "SUBSCRIPTION_USAGE_UNSUPPORTED"
+    ],
+    "syncing": [
+      "BEFORE_ELIGIBILITY_START",
+      "LEDGER_SYNCING",
+      "NO_POST_START_CONSUMPTION",
+      "SOURCE_REFUND",
+      "SUBSCRIPTION_USAGE_UNSUPPORTED"
+    ],
+    "frozen": [
+      "BEFORE_ELIGIBILITY_START",
+      "LEDGER_FROZEN",
+      "NO_POST_START_CONSUMPTION",
+      "SOURCE_REFUND",
+      "SUBSCRIPTION_USAGE_UNSUPPORTED"
+    ],
+    "not_invoiceable_pending_reconciliation": [
+      "BEFORE_ELIGIBILITY_START",
+      "LEDGER_PENDING_RECONCILIATION",
+      "NO_POST_START_CONSUMPTION",
+      "SOURCE_REFUND",
+      "SUBSCRIPTION_USAGE_UNSUPPORTED"
+    ],
+    "missing": [
+      "BEFORE_ELIGIBILITY_START",
+      "LEDGER_FROZEN",
+      "NO_POST_START_CONSUMPTION",
+      "SOURCE_REFUND",
+      "SUBSCRIPTION_USAGE_UNSUPPORTED"
+    ],
+    "source_unavailable": ["SOURCE_NOT_READY"]
+  },
+  "summary_status_description": [
+    "/api/v1/user/eligibility-summary 的 status 能取到的全集，比 lot 的**窄**。",
+    "它走 postgresstore/eligibility_operations.go 的 COALESCE(eas.eligibility_status,'syncing')",
+    "（不是 lot 那条 'missing'），且 application/service.go 的 ListUserEligibilitySummaries",
+    "直接透传、不做来源新鲜度覆盖——所以 missing 与 source_unavailable 在摘要侧都不可达。",
+    "同样由 Go 探针发现：COALESCE 默认值与该函数内的字面量赋值一起并入持久化集后双向比对，",
+    "并断言这两个被扫描的函数名仍然存在（否则「扫到空」会与「本来就没有」无法区分）。",
+    "第一版这里是 6 个值，靠一句「summary 与 lot 是同一列」的断言维持——那句话与代码不符，",
+    "既发现不了摘要词汇表的真实漂移，还会把想改正的人挡回去。"
+  ],
+  "summary_status": [
+    "active",
+    "syncing",
+    "frozen",
+    "not_invoiceable_pending_reconciliation"
+  ],
+  "summary_reason": [
+    "BINDING_NOT_VERIFIED",
+    "ACCOUNT_FROZEN",
+    "PENDING_RECONCILIATION",
+    "PROJECTION_PENDING",
+    "SOURCE_NOT_READY",
+    "NO_CONSUMED_CASH",
+    "READY"
+  ],
+  "summary_reason_max_count_description": [
+    "一条摘要最多能同时带几个 reason（由 application 侧笛卡尔积探针发现）。",
+    "前端 mapEligibilitySummary 的长度上限用它，而不是用「已知清单长度」——",
+    "后者会随清单增长而漂移，等于没有上限。"
+  ],
+  "summary_reason_max_count": 5
+}

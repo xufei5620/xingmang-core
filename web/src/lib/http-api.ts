@@ -11,7 +11,9 @@ import type {
   EligibilityFreeze,
   EligibilityFreezeFilters,
   EligibilityProjectionHealth,
+  EligibilityStatusWire,
   FundingOrder,
+  LotReasonCodeWire,
   InvoicePolicy,
   InvoiceProfile,
   InvoiceSystemSettings,
@@ -35,6 +37,15 @@ import {
   type InvoiceApiClient,
 } from "./api-contract";
 import { isUnobservedTimestamp } from "./format";
+import { sourceTypeLabel } from "./source-labels";
+import {
+  lotEligibilityStatuses,
+  lotReasonCodes,
+  summaryReasonMaxCount,
+  summaryReasons,
+  summaryStatuses,
+  type LotReasonCodeWire as LotReasonCodeWireExact,
+} from "./eligibility-wire.generated";
 
 type RequestRole = "user" | "admin";
 
@@ -107,7 +118,10 @@ export function platformLoginTwoFABody(input: PlatformLoginTwoFAInput) {
 
 export type BackendSourceAccount = {
   id: string;
-  source_type: "sub2api" | "newapi";
+  // Wire value: whatever platform code the backend currently emits. The two
+  // this bundle knows are "sub2api" and "newapi"; mapSourceAccount only checks
+  // the shape (see there).
+  source_type: string;
   source_instance_id: string;
   source_name: string;
   external_user_id_masked: string;
@@ -126,7 +140,7 @@ type BackendEligibilitySummary = {
   source_type: "sub2api" | "newapi";
   source_name: string;
   binding_status: "pending" | "verified" | "frozen" | "revoked";
-  status: "active" | "syncing" | "frozen" | "missing" | "source_unavailable";
+  status: EligibilityStatusWire;
   currency: string;
   available_minor: number;
   consumed_minor: number;
@@ -148,7 +162,7 @@ type BackendEligibilityFreeze = {
   scope: "account" | "funding_lot";
   freeze_reason: string;
   status: "open" | "resolved";
-  eligibility_status: "active" | "syncing" | "frozen" | "missing" | "source_unavailable";
+  eligibility_status: EligibilityStatusWire;
   opened_at: string;
   resolved_at?: string;
   version: number;
@@ -293,20 +307,11 @@ export type BackendFundingLot = {
   issued_minor: number;
   available_minor: number;
   eligibility_kind: "wallet" | "subscription" | "legacy" | "noncash";
-  eligibility_status:
-    | "active"
-    | "syncing"
-    | "frozen"
-    | "missing"
-    | "source_unavailable";
-  reason_code?:
-    | "SOURCE_REFUND"
-    | "LEDGER_SYNCING"
-    | "LEDGER_FROZEN"
-    | "SOURCE_NOT_READY"
-    | "BEFORE_ELIGIBILITY_START"
-    | "NO_POST_START_CONSUMPTION"
-    | "SUBSCRIPTION_USAGE_UNSUPPORTED";
+  // Widened with `(string & {})` on purpose -- see EligibilityStatusWire in
+  // ../types. A server that has shipped a value this bundle predates must be
+  // representable, because that is a routine deployment state, not a bug.
+  eligibility_status: EligibilityStatusWire;
+  reason_code?: LotReasonCodeWire;
   verification: "pending" | "verified" | "frozen";
   refund_frozen: boolean;
 };
@@ -514,14 +519,13 @@ function requireSafeMinor(value: number, field: string) {
   return value;
 }
 
-const eligibilitySummaryReasons = [
-  "BINDING_NOT_VERIFIED",
-  "ACCOUNT_FROZEN",
-  "PROJECTION_PENDING",
-  "SOURCE_NOT_READY",
-  "NO_CONSUMED_CASH",
-  "READY",
-] as const;
+// XM-INV-LOT-REASON-CONTRACT: these four lists used to be hand-copied here.
+// They are now generated from contracts/invoice-eligibility-wire.v1.json, which
+// Go probes pin against the real emitters. They are still only the *known* set:
+// see enumCodePattern below for what happens to a value that is not in them.
+const knownSummaryReasons: readonly string[] = summaryReasons;
+const knownSummaryStatuses: readonly string[] = summaryStatuses;
+const knownLotReasonCodes: readonly string[] = lotReasonCodes;
 
 // The known, labeled freeze reasons -- used to validate the `reason` filter
 // query param (an operator can only ask to filter by a reason this UI
@@ -556,13 +560,29 @@ const eligibilityFreezeReasons = [
 // over one unrecognized row.
 const freezeReasonPattern = /^[A-Z][A-Z0-9_]{0,62}$/;
 
-const eligibilityStatuses = [
-  "active",
-  "syncing",
-  "frozen",
-  "missing",
-  "source_unavailable",
-] as const;
+// The same tolerance, now applied to the two enums that took the user's invoice
+// page down. `freezeReasonPattern` was introduced after migration 0016 added
+// two freeze reasons this client had never heard of and one such row blanked
+// the whole "资格冻结" list. The verdict then was: a response-side enum check
+// should assert the SHAPE of a code, not membership of a list this bundle
+// happens to have been compiled with. eligibility_status and reason_code kept
+// their closed lists anyway, and XM-INV-ELIG-AUTO-RECONCILE then did exactly
+// the same thing to them -- a fourth persisted status, three stale copies, and
+// the entire 开票中心 refusing to render for the affected accounts.
+//
+// Loosening these is not "checking less". A status this client does not
+// recognise still cannot show money as invoiceable: availableMinor() derives
+// the expected amount from canInvoice, which requires the literal "active", so
+// any unknown status forces expectedAvailable to 0 and a server claiming
+// otherwise still fails INCONSISTENT_ELIGIBILITY_RESPONSE. What is given up is
+// only the ability to reject a *name* we have not seen -- which was never a
+// safety property, just a bet that the frontend would always deploy first.
+const enumCodePattern = /^[A-Z][A-Z0-9_]{0,62}$/;
+const statusCodePattern = /^[a-z][a-z0-9_]{0,62}$/;
+
+function wellFormedEnumCode(value: unknown, pattern: RegExp) {
+  return typeof value === "string" && pattern.test(value);
+}
 
 // CR-0009 (XM-INV-CR0009-LEDGER-VIEW), plus "settling"
 // (XM-INV-LEDGER-SETTLING-STATE) -- see docs/ELIGIBILITY-OPERATIONS.md's
@@ -581,9 +601,11 @@ const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const serviceUnitsPattern = /^(0|[1-9][0-9]{0,77})$/;
 
-function exactObjectKeys(
+// The half of the key check that must never be relaxed: it is an object, and
+// every key this client reads by name is present. A missing required key means
+// a field would silently read as `undefined` and be validated as such.
+function requiredObjectKeys(
   value: unknown,
-  allowed: readonly string[],
   required: readonly string[],
   field: string,
 ): asserts value is Record<string, unknown> {
@@ -592,11 +614,34 @@ function exactObjectKeys(
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
   }
-  const keys = Object.keys(value);
   if (
-    keys.some((key) => !allowed.includes(key)) ||
     required.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
   ) {
+    throw new InvoiceApiError(`服务返回的${field}字段超出安全白名单。`, {
+      code: "INVALID_ELIGIBILITY_RESPONSE",
+    });
+  }
+}
+
+function unknownObjectKeys(
+  value: Record<string, unknown>,
+  allowed: readonly string[],
+) {
+  return Object.keys(value).filter((key) => !allowed.includes(key));
+}
+
+// The strict form: an unknown key rejects the whole item. Still used everywhere
+// EXCEPT the user eligibility summary -- see the note above
+// mapEligibilitySummary for why that one response tolerates unknown keys and
+// what is deliberately NOT being changed here.
+function exactObjectKeys(
+  value: unknown,
+  allowed: readonly string[],
+  required: readonly string[],
+  field: string,
+): asserts value is Record<string, unknown> {
+  requiredObjectKeys(value, required, field);
+  if (unknownObjectKeys(value, allowed).length > 0) {
     throw new InvoiceApiError(`服务返回的${field}字段超出安全白名单。`, {
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
@@ -617,16 +662,28 @@ function fixedSourceLabel(source: "sub2api" | "newapi") {
   return source === "sub2api" ? "SoloV API" : "SoloV 模型平台";
 }
 
+// `unknownSink`, when supplied, collects the keys this bundle did not expect so
+// the caller can mark the row degraded instead of rejecting it. Passed only
+// from mapEligibilitySummary: these two objects are nested inside that response
+// and get the same tolerance for the same reason.
 function mapServiceUnitSummary(
   value: BackendServiceUnitSummary,
   source: "sub2api" | "newapi",
+  unknownSink?: string[],
 ): UserEligibilitySummary["noncash"] {
-  exactObjectKeys(
-    value,
-    ["service_units", "unit_code"],
-    ["service_units", "unit_code"],
-    "源服务单位",
-  );
+  if (unknownSink) {
+    requiredObjectKeys(value, ["service_units", "unit_code"], "源服务单位");
+    unknownSink.push(
+      ...unknownObjectKeys(value, ["service_units", "unit_code"]),
+    );
+  } else {
+    exactObjectKeys(
+      value,
+      ["service_units", "unit_code"],
+      ["service_units", "unit_code"],
+      "源服务单位",
+    );
+  }
   if (
     typeof value.service_units !== "string" ||
     !serviceUnitsPattern.test(value.service_units) ||
@@ -649,43 +706,44 @@ function mapServiceUnitSummary(
   return { serviceUnits: value.service_units, unitCode: expectedUnit };
 }
 
+// The key set of this ONE response is tolerant, because a strict key set is the
+// same bug as a strict enum list wearing different clothes: the backend adds a
+// field, ships one deploy ahead of this bundle, and
+// `keys.some(key => !allowed.includes(key))` rejects the whole summary request
+// -- the same red banner, from the same cause, on the same request that this
+// slice exists because of. An unknown key cannot make a displayed number wrong:
+// every field is read by name and the amount invariants below still run. So the
+// key is ignored and the row is marked degraded. The response ENVELOPE around
+// these items (`{items: [...]}` in getUserEligibilitySummary) gets the same
+// treatment for the same reason; it is the same request.
+//
+// Deliberately NOT extended to exactObjectKeys's other callers (admin account
+// ledger, payment candidates, the pagination cursor). Those are a different
+// trade: several are money DTOs where an unexpected key is better read as "this
+// is not the response I think it is", and none of them is on the user's invoice
+// page. They keep the strict key set, and the same failure mode with them --
+// backend adds a field, that list stops rendering -- is written down in the
+// handoff's risks rather than being quietly assumed away.
+const eligibilitySummaryKeys = [
+  "source_instance_id",
+  "source_type",
+  "source_name",
+  "binding_status",
+  "status",
+  "currency",
+  "available_minor",
+  "consumed_minor",
+  "unconsumed_minor",
+  "reserved_minor",
+  "issued_minor",
+  "legacy_noninvoiceable",
+  "noncash",
+  "reasons",
+] as const;
+
 function mapEligibilitySummary(value: BackendEligibilitySummary) {
-  exactObjectKeys(
-    value,
-    [
-      "source_instance_id",
-      "source_type",
-      "source_name",
-      "binding_status",
-      "status",
-      "currency",
-      "available_minor",
-      "consumed_minor",
-      "unconsumed_minor",
-      "reserved_minor",
-      "issued_minor",
-      "legacy_noninvoiceable",
-      "noncash",
-      "reasons",
-    ],
-    [
-      "source_instance_id",
-      "source_type",
-      "source_name",
-      "binding_status",
-      "status",
-      "currency",
-      "available_minor",
-      "consumed_minor",
-      "unconsumed_minor",
-      "reserved_minor",
-      "issued_minor",
-      "legacy_noninvoiceable",
-      "noncash",
-      "reasons",
-    ],
-    "开票资格摘要",
-  );
+  requiredObjectKeys(value, eligibilitySummaryKeys, "开票资格摘要");
+  const unknownKeys = unknownObjectKeys(value, eligibilitySummaryKeys);
   if (
     !uuidPattern.test(value.source_instance_id) ||
     !["sub2api", "newapi"].includes(value.source_type) ||
@@ -694,17 +752,17 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
     !["pending", "verified", "frozen", "revoked"].includes(
       value.binding_status,
     ) ||
-    !eligibilityStatuses.includes(value.status) ||
+    !wellFormedEnumCode(value.status, statusCodePattern) ||
     value.currency !== "CNY" ||
     !Array.isArray(value.reasons) ||
     value.reasons.length === 0 ||
-    value.reasons.length > eligibilitySummaryReasons.length ||
-    !value.reasons.every(
-      (reason) =>
-        typeof reason === "string" &&
-        eligibilitySummaryReasons.includes(
-          reason as (typeof eligibilitySummaryReasons)[number],
-        ),
+    // The cap comes from the contract (the most reasons the backend's own
+    // decision function can produce at once), not from the length of the known
+    // list. Using the list's length made the cap grow every time the list did,
+    // which is the same as having no cap.
+    value.reasons.length > summaryReasonMaxCount ||
+    !value.reasons.every((reason) =>
+      wellFormedEnumCode(reason, enumCodePattern),
     ) ||
     new Set(value.reasons).size !== value.reasons.length
   ) {
@@ -712,6 +770,24 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
       code: "INVALID_ELIGIBILITY_RESPONSE",
     });
   }
+  // status=source_unavailable MUST pair with SOURCE_NOT_READY. This used to be
+  // a hard throw here, and it was the last client-side hard refusal of a
+  // backend pairing left in this file after mapLot's equivalent was degraded
+  // (RC58: refusing a backend ordering bug on the client turns it into a blank
+  // page). It survived only because it is currently unreachable -- the summary
+  // rides COALESCE(...,'syncing') and gets no freshness override, so its status
+  // can only be one of the four persisted values. "It does not fire" is a fact
+  // about today's backend, not a property of this code, so it is now a
+  // degradation like every other pairing violation: if the summary ever does
+  // start carrying that status, the row renders with a fallback label instead
+  // of blanking the panel, and the contract probe is what goes red.
+  const degraded =
+    !knownSummaryStatuses.includes(value.status) ||
+    !value.reasons.every((reason: string) =>
+      knownSummaryReasons.includes(reason),
+    ) ||
+    (value.status === "source_unavailable" &&
+      !value.reasons.includes("SOURCE_NOT_READY"));
   const availableMinor = requireSafeMinor(value.available_minor, "可开票金额");
   const consumedMinor = requireSafeMinor(value.consumed_minor, "已消费现金金额");
   const unconsumedMinor = requireSafeMinor(
@@ -722,6 +798,11 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
   const issuedMinor = requireSafeMinor(value.issued_minor, "已开票金额");
   const reasons = value.reasons as UserEligibilitySummary["reasons"];
   const ready = reasons.includes("READY");
+  // These invariants are the reason the enum check above could be loosened
+  // without loosening anything that matters. READY is the only reason that may
+  // accompany a positive amount, and it may only appear alone, on a literally
+  // "active" and verified row -- so an unrecognised status can never disclose
+  // invoiceable money, no matter what the server says about it.
   if (
     reservedMinor + issuedMinor > consumedMinor ||
     availableMinor > consumedMinor ||
@@ -729,14 +810,22 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
       (reasons.length !== 1 ||
         value.status !== "active" ||
         value.binding_status !== "verified")) ||
-    (!ready && availableMinor !== 0) ||
-    (value.status === "source_unavailable" &&
-      !reasons.includes("SOURCE_NOT_READY"))
+    (!ready && availableMinor !== 0)
   ) {
     throw new InvoiceApiError("开票资格金额或安全状态不一致，已停止显示。", {
       code: "INCONSISTENT_ELIGIBILITY_RESPONSE",
     });
   }
+  const legacyNoninvoiceable = mapServiceUnitSummary(
+    value.legacy_noninvoiceable,
+    value.source_type,
+    unknownKeys,
+  );
+  const noncash = mapServiceUnitSummary(
+    value.noncash,
+    value.source_type,
+    unknownKeys,
+  );
   return {
     source: value.source_type,
     sourceInstanceId: value.source_instance_id,
@@ -749,12 +838,10 @@ function mapEligibilitySummary(value: BackendEligibilitySummary) {
     unconsumedMinor,
     reservedMinor,
     issuedMinor,
-    legacyNoninvoiceable: mapServiceUnitSummary(
-      value.legacy_noninvoiceable,
-      value.source_type,
-    ),
-    noncash: mapServiceUnitSummary(value.noncash, value.source_type),
+    legacyNoninvoiceable,
+    noncash,
     reasons,
+    eligibilityDegraded: degraded || unknownKeys.length > 0,
   } satisfies UserEligibilitySummary;
 }
 
@@ -804,7 +891,12 @@ function mapEligibilityFreeze(value: BackendEligibilityFreeze) {
     typeof value.freeze_reason !== "string" ||
     !freezeReasonPattern.test(value.freeze_reason) ||
     !["open", "resolved"].includes(value.status) ||
-    !eligibilityStatuses.includes(value.eligibility_status) ||
+    // Same tolerance the freeze_reason on this very row already gets. This one
+    // has not fired in production only because there happen to be zero open
+    // freezes on the two accounts holding the new status right now -- it is
+    // green because of an external fact, not because it is correct, and the
+    // first freeze opened on such an account would blank the admin list.
+    !wellFormedEnumCode(value.eligibility_status, statusCodePattern) ||
     !validTimestamp(value.opened_at) ||
     !Number.isSafeInteger(value.version) ||
     value.version <= 0 ||
@@ -1216,36 +1308,67 @@ function availableMinor(lot: BackendFundingLot) {
   return lot.available_minor;
 }
 
+// Chinese copy for every reason code the backend can put on a lot. Keyed on the
+// EXACT generated union, so `npm run typecheck` fails if the contract gains a
+// code and nobody writes the sentence a user will read. Before this slice only
+// three of the eight had any wording at all; the rest leaned on App.tsx's
+// status-derived fallback, which meant a lot with an unfamiliar status AND an
+// unfamiliar reason had nothing to show at either level.
+const lotReasonDescriptions: Record<LotReasonCodeWireExact, string> = {
+  SOURCE_NOT_READY: "来源同步流尚未全部就绪（暂不可开票）",
+  SOURCE_REFUND: "该笔充值存在退款，账本已冻结（不可开票）",
+  BEFORE_ELIGIBILITY_START: "开票生效日前充值（不可开票）",
+  SUBSCRIPTION_USAGE_UNSUPPORTED: "订阅消费暂缺可核验关联证据（不可开票）",
+  NO_POST_START_CONSUMPTION: "尚无开票生效日后的真实消费（暂不可开票）",
+  LEDGER_SYNCING: "账本正在追平历史事件（暂不可开票）",
+  // XM-INV-ELIG-AUTO-RECONCILE. The wording has to carry one specific fact:
+  // this clears itself. The accounts sitting in this state have been in it
+  // since early September, and if the copy reads like a freeze they will open
+  // a support ticket for something no human action can speed up.
+  LEDGER_PENDING_RECONCILIATION: "账本对账中，暂不可开票（完成后自动恢复）",
+  LEDGER_FROZEN: "账本已冻结或资格账本未建立（暂不可开票）",
+};
+
+// The fallback quotes the raw code on purpose. Someone reading a screenshot of
+// this needs to be able to say which value the backend actually sent.
+// Exported so the per-value copy probe can assert every contract code resolves
+// to real Chinese rather than to this fallback.
+export function lotReasonDescription(reasonCode: string) {
+  return (
+    (lotReasonDescriptions as Record<string, string>)[reasonCode] ??
+    `账本状态待确认（${reasonCode}）`
+  );
+}
+
 export function mapLot(lot: BackendFundingLot): FundingOrder {
   if (
-    ![
-      "active",
-      "syncing",
-      "frozen",
-      "missing",
-      "source_unavailable",
-    ].includes(
-      lot.eligibility_status,
-    ) ||
+    !wellFormedEnumCode(lot.eligibility_status, statusCodePattern) ||
     (lot.reason_code !== undefined &&
-      ![
-        "SOURCE_REFUND",
-        "LEDGER_SYNCING",
-        "LEDGER_FROZEN",
-        "SOURCE_NOT_READY",
-        "BEFORE_ELIGIBILITY_START",
-        "NO_POST_START_CONSUMPTION",
-        "SUBSCRIPTION_USAGE_UNSUPPORTED",
-      ].includes(lot.reason_code)) ||
-    (lot.eligibility_status === "source_unavailable" &&
-      lot.reason_code !== "SOURCE_NOT_READY")
+      !wellFormedEnumCode(lot.reason_code, enumCodePattern))
   ) {
     throw new InvoiceApiError("充值记录包含无效的资金账本状态。", {
       code: "INVALID_ELIGIBILITY_STATUS",
     });
   }
+  // eligibility_status=source_unavailable MUST pair with SOURCE_NOT_READY --
+  // the backend's reason chain puts freshness ahead of every other reason for
+  // exactly this reason, and user_dto_test.go pins it there. Keeping it as a
+  // hard client-side throw was how RC58 turned a backend ordering bug into a
+  // blank page, so it is now a degradation: the pairing is still wrong, the lot
+  // still cannot be selected, and the Go test is where that goes red.
+  const pairingViolated =
+    lot.eligibility_status === "source_unavailable" &&
+    lot.reason_code !== "SOURCE_NOT_READY";
+  const degraded =
+    pairingViolated ||
+    !lotEligibilityStatuses.includes(
+      lot.eligibility_status as (typeof lotEligibilityStatuses)[number],
+    ) ||
+    (lot.reason_code !== undefined &&
+      !knownLotReasonCodes.includes(lot.reason_code));
   const available = availableMinor(lot);
   return {
+    eligibilityDegraded: degraded,
     id: lot.id,
     source: lot.source,
     sourceInstanceId: lot.source_instance_id,
@@ -1265,12 +1388,8 @@ export function mapLot(lot: BackendFundingLot): FundingOrder {
     refundFrozen: lot.refund_frozen,
     paymentMethod: "支付凭证已核验",
     description:
-      lot.reason_code === "BEFORE_ELIGIBILITY_START"
-        ? "开票生效日前充值（不可开票）"
-        : lot.reason_code === "SUBSCRIPTION_USAGE_UNSUPPORTED"
-        ? "订阅消费暂缺可核验关联证据（不可开票）"
-        : lot.reason_code === "NO_POST_START_CONSUMPTION"
-        ? "尚无开票生效日后的真实消费（暂不可开票）"
+      lot.reason_code !== undefined
+        ? lotReasonDescription(lot.reason_code)
         : lot.eligibility_kind === "subscription"
         ? "订阅套餐支付"
         : "钱包充值（按已消费现金开票）",
@@ -1636,7 +1755,18 @@ function mapSession(value: BackendSession): AuthSession {
 }
 
 export function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
-  if (!(["sub2api", "newapi"] as string[]).includes(value.source_type)) {
+  // Shape check only, same as mapLot's eligibility_status: a platform code
+  // this bundle has not seen is NOT a reason to reject the whole accounts
+  // request. Today the only values are sub2api / newapi; the day a third
+  // platform ships, or the backend deploys one step ahead of this bundle, a
+  // closed list here would throw INVALID_SOURCE_ACCOUNT, getSourceAccounts()
+  // would reject as a whole, and the "已关联的平台账号" panel would show the
+  // binding wizard to users whose bindings are fine -- the exact shape of the
+  // incident this slice exists because of. So: well-formed but unknown keeps
+  // its raw value and the row renders with a 「未识别的平台」 badge (derived
+  // from `source` by sourceTypeLabel, no separate flag); malformed (empty,
+  // upper-case, not a code) is still refused.
+  if (!wellFormedEnumCode(value.source_type, statusCodePattern)) {
     throw new InvoiceApiError("源账号包含无法识别的平台类型。", {
       code: "INVALID_SOURCE_ACCOUNT",
     });
@@ -1645,9 +1775,7 @@ export function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
     id: value.id,
     source: value.source_type,
     sourceInstanceId: value.source_instance_id,
-    sourceLabel:
-      value.source_name ||
-      (value.source_type === "newapi" ? "SoloV 模型平台" : "SoloV API"),
+    sourceLabel: value.source_name || sourceTypeLabel(value.source_type),
     externalUserIdMasked: value.external_user_id_masked,
     status: value.binding_status,
     verifiedAt: value.verified_at,
@@ -2103,15 +2231,28 @@ export const httpInvoiceApi: InvoiceApiClient = {
     const response = await requestJSON<unknown>(
       "/api/v1/user/eligibility-summary",
     );
-    exactObjectKeys(response, ["items"], ["items"], "开票资格摘要响应");
+    // The envelope gets the same tolerance as the items inside it. It was the
+    // last strict key set on this request: a top-level `generated_at` (or any
+    // other field the backend adds a deploy ahead of this bundle) rejected the
+    // whole summary -- the same banner, the same cause, one wrapper further
+    // out. `items` stays required and capped; `response.items` is read by
+    // name, so an unknown sibling cannot change any number shown.
+    requiredObjectKeys(response, ["items"], "开票资格摘要响应");
+    const envelopeUnknown = unknownObjectKeys(response, ["items"]).length > 0;
     if (!Array.isArray(response.items) || response.items.length > 32) {
       throw new InvoiceApiError("开票资格摘要数量无效，已停止显示。", {
         code: "INVALID_ELIGIBILITY_RESPONSE",
       });
     }
-    return response.items.map((item) =>
-      mapEligibilitySummary(item as BackendEligibilitySummary),
-    );
+    return response.items.map((item) => {
+      const summary = mapEligibilitySummary(item as BackendEligibilitySummary);
+      // An unknown envelope key means this bundle is behind the backend for
+      // every row it carries, so every row says so -- the same visible,
+      // unselectable, non-crashing degradation as an unknown item key.
+      return envelopeUnknown
+        ? { ...summary, eligibilityDegraded: true }
+        : summary;
+    });
   },
 
   async getInvoicePolicy() {

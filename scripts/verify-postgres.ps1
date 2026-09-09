@@ -27,12 +27,19 @@ function Invoke-PostgresContainerCommand {
         [Parameter(Mandatory = $true)][string[]]$Environment,
         [Parameter(Mandatory = $true)][string]$Command,
         [string]$ContractsPath,
+        [string]$BackendPath,
         [Parameter(Mandatory = $true)][string]$FailureMessage
     )
 
     $arguments = @('run', '--rm', '--network', "container:$DatabaseContainer")
     if (-not [string]::IsNullOrWhiteSpace($ContractsPath)) {
         $arguments += @('--mount', "type=bind,source=$ContractsPath,target=/contracts,readonly")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BackendPath)) {
+        # eligibilitywire.repoRoot() 从自己的源文件路径往上三级算仓库根；运行器镜像把 backend/
+        # 放在 /src，于是根是 /，它接着要读 /backend/migrations 与 /backend/internal/...（发现
+        # 后端会写出的状态值）。把宿主机的 backend/ 只读挂到 /backend，和 /src 是同一份源码。
+        $arguments += @('--mount', "type=bind,source=$BackendPath,target=/backend,readonly")
     }
     foreach ($environmentEntry in $Environment) {
         $arguments += @('--env', $environmentEntry)
@@ -146,11 +153,17 @@ try {
             [pscustomobject]@{ Package = './internal/backupverify'; Failure = 'backup document restore verification PostgreSQL integration tests failed' }
         )
         foreach ($databaseTest in $backendDatabaseTests) {
+            # XM-INV-LOT-REASON-CONTRACT: application 里的资格摘要契约测试经 eligibilitywire.Load()
+            # 读仓库根下的 contracts/invoice-eligibility-wire.v1.json（repoRoot = 源文件往上三级）。
+            # 运行器镜像只带 backend/，根就是容器根，所以要把 contracts/ 只读挂到 /contracts，
+            # 否则那条测试在会话里绿、在这里红（RC106 门禁第一次跑就是这样死的）。
             Invoke-PostgresContainerCommand `
                 -DatabaseContainer $containerName `
                 -RunnerImage $backendRunnerImage `
                 -Environment @("INVOICE_TEST_DATABASE_URL=$databaseUrl") `
                 -Command "go test $($databaseTest.Package) -count=1" `
+                -ContractsPath $contractsPath `
+                -BackendPath (Join-Path $projectRoot 'backend') `
                 -FailureMessage $databaseTest.Failure
         }
 

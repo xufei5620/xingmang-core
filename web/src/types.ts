@@ -1,4 +1,45 @@
+import type {
+  LotEligibilityStatusWire,
+  LotReasonCodeWire as GeneratedLotReasonCode,
+  SummaryReasonWire,
+} from "./lib/eligibility-wire.generated";
+
+// XM-INV-LOT-REASON-CONTRACT. The values the backend can put on the wire are
+// the backend's fact; they are declared once in
+// contracts/invoice-eligibility-wire.v1.json, pinned there by Go probes that
+// run the real emitters, and generated into ./lib/eligibility-wire.generated.
+// Nothing in this repository may hand-copy them again -- four separate copies
+// in this file and http-api.ts are what took the user's invoice page down when
+// XM-INV-ELIG-AUTO-RECONCILE added a fourth persisted status.
+//
+// Each wire type is widened with `(string & {})`, the same way
+// EligibilityFreezeReason already was. That widening is not laziness about
+// types: it is the type-level admission that "the backend is one deploy ahead
+// of this bundle" is a normal, recurring state rather than an error. The
+// generated literals still drive autocomplete and still make every
+// `Record<..., string>` label table exhaustive, so forgetting a Chinese label
+// for a newly added value is a typecheck failure.
+export type EligibilityStatusWire = LotEligibilityStatusWire | (string & {});
+export type LotReasonCodeWire = GeneratedLotReasonCode | (string & {});
+export type EligibilitySummaryReasonWire = SummaryReasonWire | (string & {});
+
+// The exact, non-widened counterparts. Label tables key on THESE, which makes
+// the compiler reject `labels[someWireValue]` -- indexing a widened value into
+// a table of known keys is precisely how an unrecognised status turns into an
+// empty badge instead of a sentence. Callers are pushed to the `...Label()`
+// accessors below the tables, which supply the fallback wording.
+export type EligibilityStatusKnown = LotEligibilityStatusWire;
+export type LotReasonCodeKnown = GeneratedLotReasonCode;
+
 export type SourceType = "sub2api" | "newapi";
+// Widened for the one place a platform code arrives from the network without
+// the frontend having a say in it: a bound source account's `source_type`.
+// A third platform, or a backend that ships one deploy ahead of this bundle,
+// used to be a hard INVALID_SOURCE_ACCOUNT throw that rejected the WHOLE
+// accounts request -- and an empty accounts list is the binding wizard (see
+// user-data-load.ts). Same shape as EligibilityStatusWire: the known union
+// keeps its label table exhaustive, the wire value may be something newer.
+export type SourceTypeWire = SourceType | (string & {});
 export type UserRole = "user" | "admin";
 export type VerificationState = "verified" | "pending" | "attention";
 export type InvoiceProfileType = "personal" | "enterprise";
@@ -28,24 +69,20 @@ export interface FundingOrder {
   availableMinor: number;
   currency: "CNY";
   eligibilityKind: "wallet" | "subscription" | "legacy" | "noncash";
-  eligibilityStatus:
-    | "active"
-    | "syncing"
-    | "frozen"
-    | "missing"
-    | "source_unavailable";
-  reasonCode?:
-    | "SOURCE_REFUND"
-    | "LEDGER_SYNCING"
-    | "LEDGER_FROZEN"
-    | "SOURCE_NOT_READY"
-    | "BEFORE_ELIGIBILITY_START"
-    | "NO_POST_START_CONSUMPTION"
-    | "SUBSCRIPTION_USAGE_UNSUPPORTED";
+  eligibilityStatus: EligibilityStatusWire;
+  reasonCode?: LotReasonCodeWire;
   verification: VerificationState;
   refundFrozen: boolean;
   paymentMethod: string;
   description: string;
+  // True when this lot carried an eligibility_status or reason_code this
+  // bundle does not know. The lot still renders (with a fallback Chinese
+  // label that quotes the raw code) and is still unselectable, because a
+  // non-active status can never carry a positive availableMinor. It is a
+  // distinct flag rather than a special status value so the "we are behind
+  // the backend" case stays visible to operators instead of being laundered
+  // into a state the UI already had a meaning for.
+  eligibilityDegraded?: boolean;
 }
 
 export interface AuthUser {
@@ -110,22 +147,33 @@ export type AuthSession =
 
 export interface SourceAccount {
   id: string;
-  source: SourceType;
+  // Widened (see SourceTypeWire): a platform this bundle does not know still
+  // renders as a row -- labelled 「未识别的平台」 -- instead of rejecting the
+  // whole accounts request and dropping the user into the binding wizard.
+  source: SourceTypeWire;
   sourceInstanceId: string;
   sourceLabel: string;
   externalUserIdMasked: string;
   status: "pending" | "verified" | "frozen" | "revoked";
   verifiedAt?: string;
   lastObservedAt?: string;
+  // There is deliberately no `sourceDegraded` flag next to this. Unlike a
+  // summary (whose status can be known while an unknown envelope key still
+  // degrades it), "this row's platform is unknown" is exactly
+  // `!isKnownSourceType(source)` -- a second field would be a copy that can
+  // drift. Renderers derive the 「未识别的平台」 badge from `source` itself
+  // (see SourceBadge in App.tsx and sourceTypeLabel in lib/source-labels.ts).
 }
 
-export type EligibilitySummaryReason =
-  | "BINDING_NOT_VERIFIED"
-  | "ACCOUNT_FROZEN"
-  | "PROJECTION_PENDING"
-  | "SOURCE_NOT_READY"
-  | "NO_CONSUMED_CASH"
-  | "READY";
+// Another hand-copy of a backend enum this slice removed: this list was
+// missing PENDING_RECONCILIATION, which the summary endpoint has emitted since
+// XM-INV-ELIG-AUTO-RECONCILE. It now derives from the generated contract.
+//
+// Deliberately the EXACT generated union, not the widened one. Label tables key
+// on this type, and `Record<string, string>` would accept a table missing any
+// number of entries -- the widening belongs on the data that arrives from the
+// network, never on the set we promise to have Chinese labels for.
+export type EligibilitySummaryReason = SummaryReasonWire;
 
 export interface ServiceUnitSummary {
   serviceUnits: string;
@@ -146,7 +194,11 @@ export interface UserEligibilitySummary {
   issuedMinor: number;
   legacyNoninvoiceable: ServiceUnitSummary;
   noncash: ServiceUnitSummary;
-  reasons: EligibilitySummaryReason[];
+  // Widened: a summary that arrives carrying a reason this bundle predates
+  // renders with a fallback label rather than blanking the panel.
+  reasons: EligibilitySummaryReasonWire[];
+  // See FundingOrder.eligibilityDegraded.
+  eligibilityDegraded?: boolean;
 }
 
 export type EligibilityFreezeReason =

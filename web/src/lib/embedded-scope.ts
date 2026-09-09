@@ -1,5 +1,10 @@
-import type { AuthUser, SourceAccount, SourceType } from "../types";
-import { sourceName } from "./source-labels";
+import type {
+  AuthUser,
+  SourceAccount,
+  SourceType,
+  SourceTypeWire,
+} from "../types";
+import { isKnownSourceType, sourceName } from "./source-labels";
 
 // XM-INV-EMBED-SCOPE: a platform embeds the invoice center in an iframe via
 // `?ui_mode=embedded`; this optional second parameter narrows that embedded
@@ -54,12 +59,23 @@ export function resolveEmbeddedPlatform(
 // summaries, source account rows) down to one platform once the embedded
 // view is scoped; unscoped views (embeddedPlatform === null) are returned
 // unchanged.
-export function scopeBySource<T extends { source: SourceType }>(
+//
+// A row whose platform this bundle does not recognise (SourceTypeWire, see
+// mapSourceAccount) is KEPT in a scoped view. The point of scoping is to keep
+// the *other known* platform's data out of this iframe; an unknown code is not
+// that. Dropping it would be the dangerous direction: a user whose only bound
+// account arrived under a code this bundle predates would see an empty list,
+// and an empty accounts list is the binding wizard (sourceAccountPanelMode).
+// Worst case of keeping it is one extra row labelled 「未识别的平台」.
+export function scopeBySource<T extends { source: SourceTypeWire }>(
   items: T[],
   embeddedPlatform: SourceType | null,
 ): T[] {
   return embeddedPlatform
-    ? items.filter((item) => item.source === embeddedPlatform)
+    ? items.filter(
+        (item) =>
+          item.source === embeddedPlatform || !isKnownSourceType(item.source),
+      )
     : items;
 }
 

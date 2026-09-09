@@ -97,6 +97,70 @@ describe("source account HTTP contract", () => {
         .lastObservedAt,
     ).toBeUndefined();
   });
+
+  // XM-INV-LOT-REASON-CONTRACT R10. `source_type` used to be a closed list
+  // (sub2api | newapi) that threw INVALID_SOURCE_ACCOUNT for anything else --
+  // and getSourceAccounts() maps every row, so one row on a third platform
+  // (or a backend one deploy ahead of this bundle) rejected the WHOLE accounts
+  // request. An empty accounts list on a first load is the binding wizard.
+  // Same prescription as eligibility_status: shape check, keep the raw value,
+  // label it 「未识别的平台」; malformed is still refused.
+  describe("an unrecognised but well-formed source_type", () => {
+    const unknown = { ...backendAccount, source_type: "thirdapi" };
+
+    it("does not throw, and keeps the raw platform code on the row", () => {
+      expect(() => mapSourceAccount(unknown)).not.toThrow();
+      expect(mapSourceAccount(unknown).source).toBe("thirdapi");
+    });
+
+    it("labels the row 「未识别的平台」 when the backend sent no display name", () => {
+      expect(
+        mapSourceAccount({ ...unknown, source_name: "" }).sourceLabel,
+      ).toBe("未识别的平台");
+    });
+
+    it("prefers the backend's own display name over the fallback label", () => {
+      expect(
+        mapSourceAccount({ ...unknown, source_name: "第三平台" }).sourceLabel,
+      ).toBe("第三平台");
+    });
+
+    it("keeps the row's binding status and identity, so the panel can list it", () => {
+      const row = mapSourceAccount(unknown);
+      expect(row.status).toBe("verified");
+      expect(row.externalUserIdMasked).toBe("n***8");
+      expect(row.id).toBe(backendAccount.id);
+    });
+
+    it("still resolves the known platforms to their fixed labels", () => {
+      expect(
+        mapSourceAccount({ ...backendAccount, source_type: "sub2api", source_name: "" })
+          .sourceLabel,
+      ).toBe("SoloV API");
+      expect(
+        mapSourceAccount({ ...backendAccount, source_type: "newapi", source_name: "" })
+          .sourceLabel,
+      ).toBe("SoloV 模型平台");
+    });
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["an upper-case code", "SUB2API"],
+    ["a code with a space", "new api"],
+    ["a code with a hyphen", "sub2-api"],
+    ["a code starting with a digit", "3rdapi"],
+    ["a code over the length cap", `a${"b".repeat(63)}`],
+  ])("still refuses %s as a source_type", (_label, sourceType) => {
+    expect(() =>
+      mapSourceAccount({ ...backendAccount, source_type: sourceType }),
+    ).toThrow("源账号包含无法识别的平台类型。");
+    try {
+      mapSourceAccount({ ...backendAccount, source_type: sourceType });
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe("INVALID_SOURCE_ACCOUNT");
+    }
+  });
 });
 
 describe("request recovery and document routes", () => {
@@ -219,7 +283,20 @@ describe("immutable invoice eligibility policy contract", () => {
     ).toThrow("系统开票生效策略无效");
   });
 
-  it("accepts closed-set noninvoiceable reasons and rejects unknown ones", () => {
+  // Renamed and rewritten by XM-INV-LOT-REASON-CONTRACT. This test used to end
+  // with `expect(() => mapLot({...lot, reason_code: "UNKNOWN"})).toThrow(...)`,
+  // which pinned exactly the behaviour that took the user's invoice page down:
+  // any reason_code outside the bundle's hand-copied list threw, and one such
+  // lot rejected the whole orders response. That assertion is intentionally
+  // reversed below, not deleted -- the closed set was a real decision once, and
+  // this is the record of it being overturned for the second time (the first
+  // was freeze_reason, after migration 0016; see
+  // http-api.eligibility-freeze-reason-tolerance.test.ts).
+  //
+  // What replaces it is not "no validation". A well-formed but unknown code is
+  // accepted and flagged degraded; a malformed one is still rejected; and an
+  // unknown status still cannot carry invoiceable money.
+  it("renders unknown-but-well-formed noninvoiceable reasons instead of rejecting the response", () => {
     const lot: BackendFundingLot = {
       id: "50000000-0000-4000-8000-000000000001",
       source: "sub2api",
@@ -242,10 +319,23 @@ describe("immutable invoice eligibility policy contract", () => {
       availableMinor: 0,
       reasonCode: "SUBSCRIPTION_USAGE_UNSUPPORTED",
       description: "订阅消费暂缺可核验关联证据（不可开票）",
+      eligibilityDegraded: false,
     });
-    expect(() => mapLot({ ...lot, reason_code: "UNKNOWN" } as unknown as BackendFundingLot)).toThrow(
-      "充值记录包含无效的资金账本状态",
-    );
+
+    const unknown = mapLot({
+      ...lot,
+      reason_code: "UNKNOWN",
+    } as unknown as BackendFundingLot);
+    expect(unknown.reasonCode).toBe("UNKNOWN");
+    expect(unknown.eligibilityDegraded).toBe(true);
+    expect(unknown.availableMinor).toBe(0);
+    expect(unknown.description).toBe("账本状态待确认（UNKNOWN）");
+
+    // Malformed codes are still refused -- the check became a shape check, not
+    // an absent one.
+    expect(() =>
+      mapLot({ ...lot, reason_code: "not upper case" } as unknown as BackendFundingLot),
+    ).toThrow("充值记录包含无效的资金账本状态");
   });
 });
 

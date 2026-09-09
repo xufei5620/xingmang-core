@@ -7,6 +7,7 @@ import {
   resolveEmbeddedPlatform,
   scopeBySource,
 } from "./embedded-scope";
+import { sourceAccountPanelMode } from "./user-data-load";
 import type { AuthUser, SourceAccount } from "../types";
 
 describe("parseEmbeddedPlatform", () => {
@@ -99,6 +100,39 @@ describe("scopeBySource", () => {
 
   it("returns an empty list when nothing matches", () => {
     expect(scopeBySource([items[1]], "sub2api")).toEqual([]);
+  });
+
+  // XM-INV-LOT-REASON-CONTRACT R10. A source account row may arrive with a
+  // platform code this bundle predates (SourceTypeWire). Scoping exists to
+  // keep the OTHER known platform out of an embedded iframe; an unknown code
+  // is not that, and filtering it out would leave a user whose only binding
+  // wears the new code with an empty list -- which is the binding wizard.
+  describe("a row whose platform this bundle does not recognise", () => {
+    const unknownRow = { id: "u", source: "thirdapi" };
+    const mixed = [items[0], items[1], unknownRow];
+
+    it("is kept in a scoped view, while the other known platform is still dropped", () => {
+      expect(scopeBySource(mixed, "sub2api")).toEqual([items[0], unknownRow]);
+      expect(scopeBySource(mixed, "newapi")).toEqual([items[1], unknownRow]);
+    });
+
+    it("is kept in an unscoped view like everything else", () => {
+      expect(scopeBySource(mixed, null)).toEqual(mixed);
+    });
+
+    it("does not let the accounts panel fall through to the binding wizard", () => {
+      // The row is the user's only account. Both the scoped and the unscoped
+      // view must still count it, so the panel shows an account row (labelled
+      // 未识别的平台) rather than telling the user to go and bind again.
+      for (const scope of ["sub2api", "newapi", null] as const) {
+        expect(
+          sourceAccountPanelMode({
+            accountCount: scopeBySource([unknownRow], scope).length,
+            failed: [],
+          }),
+        ).toBe("accounts");
+      }
+    });
   });
 });
 

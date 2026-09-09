@@ -63,7 +63,23 @@ import {
 
 import { dateTime, dateTimeShanghai, maskTaxId, money } from "./lib/format";
 import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
-import { sourceName } from "./lib/source-labels";
+import {
+  isKnownSourceType,
+  sourceName,
+  sourceTypeLabel,
+} from "./lib/source-labels";
+import {
+  eligibilityReasonLabel,
+  eligibilityStatusLabel,
+} from "./lib/eligibility-labels";
+import {
+  applyUserDataPlan,
+  loadUserInvoiceData,
+  sourceAccountPanelMode,
+  userDataLoadFailurePlan,
+  type UserDataRequestKey,
+  type UserDataSetters,
+} from "./lib/user-data-load";
 import {
   accountIdentityLabel,
   appendEmbeddedParams,
@@ -122,6 +138,7 @@ import type {
   SourceHealthReport,
   SourceStreamHealth,
   SourceType,
+  SourceTypeWire,
   UserEligibilitySummary,
 } from "./types";
 
@@ -272,13 +289,19 @@ type AppData = {
   requests: InvoiceRequest[];
   summary: DashboardSummary | null;
   loadError: string | null;
+  // Which of the five user reads failed on the last refresh. A panel needs
+  // this to distinguish "this is empty" from "I could not read this" -- see
+  // sourceAccountPanelMode.
+  failedRequests: UserDataRequestKey[];
   refresh: () => Promise<void>;
   requestsNextCursor?: string;
   loadingMoreRequests: boolean;
   loadMoreRequests: () => Promise<void>;
 };
 
-const DataContext = createContext<AppData | null>(null);
+// Exported for the render test (App.source-account-panel.test.tsx), which
+// feeds SourceAccountStatus a value produced by the real loadUserInvoiceData.
+export const DataContext = createContext<AppData | null>(null);
 
 function useData() {
   const value = useContext(DataContext);
@@ -327,6 +350,9 @@ function DataProvider({ children }: { children: ReactNode }) {
   const [requests, setRequests] = useState<InvoiceRequest[]>([]);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [failedRequests, setFailedRequests] = useState<UserDataRequestKey[]>(
+    [],
+  );
   const [requestsNextCursor, setRequestsNextCursor] = useState<
     string | undefined
   >();
@@ -337,6 +363,24 @@ function DataProvider({ children }: { children: ReactNode }) {
   const refresh = async () => {
     const version = ++refreshVersion.current;
     setLoading(true);
+    // Defined once, up here, because the whole-load `catch` below needs the
+    // same setters as the happy path: it must register every request as
+    // failed through the same applyUserDataPlan, not through a hand-written
+    // subset that stops calling setFailed the next time someone edits it.
+    const setters: UserDataSetters = {
+      setOrders,
+      setProfiles,
+      setSourceAccounts,
+      setEligibilitySummaries,
+      setRequests: (page) => {
+        setRequests(page.items);
+        setRequestsNextCursor(page.nextCursor);
+      },
+      setSummary: (page, availableMinor) =>
+        setSummary(summarizeRequests(page.items, availableMinor)),
+      setLoadError,
+      setFailed: setFailedRequests,
+    };
     try {
       if (adminRoute) {
         if (user?.role !== "admin") {
@@ -348,6 +392,7 @@ function DataProvider({ children }: { children: ReactNode }) {
           setSummary(null);
           setRequestsNextCursor(undefined);
           setLoadError(null);
+          setFailedRequests([]);
           return;
         }
         if (location.pathname !== "/admin") {
@@ -359,6 +404,7 @@ function DataProvider({ children }: { children: ReactNode }) {
           setSummary(null);
           setRequestsNextCursor(undefined);
           setLoadError(null);
+          setFailedRequests([]);
           return;
         }
         // Platform-scoped embedded admin: wait for the platform's
@@ -378,48 +424,42 @@ function DataProvider({ children }: { children: ReactNode }) {
         setRequests(nextRequests);
         setRequestsNextCursor(requestPage.nextCursor);
         setSummary(summarizeRequests(nextRequests, 0));
+        setFailedRequests([]);
       } else {
-        const [
-          nextOrders,
-          nextProfiles,
-          nextSourceAccounts,
-          nextEligibilitySummaries,
-          requestPage,
-        ] =
-          await Promise.all([
-            invoiceApi.getOrders(),
-            invoiceApi.getProfiles(),
-            invoiceApi.getSourceAccounts(),
-            invoiceApi.getUserEligibilitySummary(),
-            invoiceApi.getUserRequestPage(),
-          ]);
-        const nextRequests = requestPage.items;
-        if (version !== refreshVersion.current) return;
-        setOrders(nextOrders);
-        setProfiles(nextProfiles);
-        setSourceAccounts(nextSourceAccounts);
-        setEligibilitySummaries(nextEligibilitySummaries);
-        setRequests(nextRequests);
-        setRequestsNextCursor(requestPage.nextCursor);
-        setSummary(
-          summarizeRequests(
-            nextRequests,
-            nextEligibilitySummaries.reduce(
-              (total, item) => total + item.availableMinor,
-              0,
-            ),
-          ),
+        // Five independent reads, settled independently. Promise.all here was
+        // the amplifier that turned one unrecognised enum value into a
+        // whole-page outage: getOrders() rejecting meant setSourceAccounts()
+        // below never ran, sourceAccounts stayed at its initial [], and the
+        // "已关联的平台账号" panel re-rendered as the "关联平台账号" onboarding
+        // wizard. Users with verified bindings were told to go and bind again
+        // -- worse than showing them nothing, because it invites them to
+        // "fix" an account that was never broken.
+        //
+        // Each request now keeps its own last-good value and reports its own
+        // failure. A failing request must never blank a panel it does not own.
+        //
+        // The five reads, the allSettled, which panels survive a partial
+        // failure, AND the whole-load catch all live (and are tested) in
+        // lib/user-data-load.ts, not here.
+        await loadUserInvoiceData(
+          invoiceApi,
+          setters,
+          () => version === refreshVersion.current,
         );
+        return;
       }
       setLoadError(null);
     } catch (error) {
       if (version !== refreshVersion.current) return;
-      setEligibilitySummaries([]);
-      setLoadError(
-        error instanceof Error
-          ? error.message
-          : "读取开票数据失败，请稍后重试。",
-      );
+      // A refresh that failed as a whole. Registered through the same plan
+      // machinery as a per-request failure so that every panel reads as
+      // "could not read this" rather than "empty": on a first load the old
+      // `setLoadError`-only catch left sourceAccounts at [] with nothing in
+      // failedRequests, which sourceAccountPanelMode renders as the binding
+      // wizard. The user path above catches its own errors and cannot reach
+      // here; this is the admin path's catch and the safety net for anything
+      // a future edit lets escape.
+      applyUserDataPlan(userDataLoadFailurePlan(error), setters);
     } finally {
       if (version === refreshVersion.current) setLoading(false);
     }
@@ -480,6 +520,7 @@ function DataProvider({ children }: { children: ReactNode }) {
         requests,
         summary,
         loadError,
+        failedRequests,
         refresh,
         requestsNextCursor,
         loadingMoreRequests,
@@ -841,18 +882,37 @@ function Badge({
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
-function SourceBadge({ source }: { source: SourceType }) {
-  return (
-    <Badge tone={source === "newapi" ? "violet" : "cyan"}>
-      {sourceName[source]}
-    </Badge>
-  );
+// Takes the wire type: a source account row may carry a platform code this
+// bundle predates (see SourceTypeWire), and the badge is where that becomes
+// visible -- 「未识别的平台」 in the neutral tone -- instead of an empty badge
+// from indexing sourceName with a key it does not have.
+function SourceBadge({ source }: { source: SourceTypeWire }) {
+  const tone = !isKnownSourceType(source)
+    ? "neutral"
+    : source === "newapi"
+      ? "violet"
+      : "cyan";
+  return <Badge tone={tone}>{sourceTypeLabel(source)}</Badge>;
 }
 
-function SourceAccountStatus() {
-  const { sourceAccounts: allSourceAccounts, loading, refresh } = useData();
+// Exported for the render test (App.source-account-panel.test.tsx): the
+// "unavailable, not the wizard" decision is unit-tested in
+// sourceAccountPanelMode, but whether this component actually hands it the
+// context's failedRequests -- and renders the notice instead of the three
+// steps -- is only checkable by rendering it.
+export function SourceAccountStatus() {
+  const {
+    sourceAccounts: allSourceAccounts,
+    loading,
+    refresh,
+    failedRequests,
+  } = useData();
   const embeddedPlatform = useEmbeddedPlatform();
   const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
+  const mode = sourceAccountPanelMode({
+    accountCount: sourceAccounts.length,
+    failed: failedRequests,
+  });
   if (loading) return null;
   if (
     embeddedUserMode &&
@@ -869,7 +929,9 @@ function SourceAccountStatus() {
     <section className="card source-account-card" aria-label="源平台账号连接">
       <div className="card-heading compact">
         <div>
-          <h2>{sourceAccounts.length ? "已关联的平台账号" : "关联平台账号"}</h2>
+          <h2>
+            {mode === "onboarding" ? "关联平台账号" : "已关联的平台账号"}
+          </h2>
           <p>仅展示由统一登录主体明确绑定的账号，不会按邮箱自动匹配。</p>
         </div>
         <Network size={20} />
@@ -906,7 +968,29 @@ function SourceAccountStatus() {
             </small>
           </div>
         ))}
-        {!sourceAccounts.length && (
+        {mode === "unavailable" && (
+          <div className="source-binding-empty" role="status">
+            <div className="binding-step">
+              <CircleAlert size={18} />
+              <div>
+                <strong>已关联账号暂时无法读取</strong>
+                <p>
+                  这只是本次读取失败，不代表你的绑定已失效或被撤销，也不需要重新绑定。请稍后点击下方「重试」。
+                </p>
+                <div className="binding-site-links">
+                  <button
+                    className="button button-secondary"
+                    onClick={() => void refresh()}
+                  >
+                    <RefreshCcw size={15} />
+                    重试
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        {mode === "onboarding" && (
           <div className="source-binding-empty">
             <div className="binding-step">
               <span>1</span>
@@ -967,28 +1051,9 @@ function SourceAccountStatus() {
   );
 }
 
-const eligibilityReasonLabels: Record<
-  UserEligibilitySummary["reasons"][number],
-  string
-> = {
-  BINDING_NOT_VERIFIED: "平台账号尚未完成可信绑定",
-  ACCOUNT_FROZEN: "资金资格已安全冻结",
-  PROJECTION_PENDING: "资金账本正在重新计算",
-  SOURCE_NOT_READY: "来源五条同步流尚未全部就绪",
-  NO_CONSUMED_CASH: "当前没有已消费的现金金额",
-  READY: "可提交开票申请",
-};
-
-const eligibilityStatusLabels: Record<
-  UserEligibilitySummary["status"],
-  string
-> = {
-  active: "资格正常",
-  syncing: "账本同步中",
-  frozen: "资格已冻结",
-  missing: "资格账本未建立",
-  source_unavailable: "来源同步不可用",
-};
+// The eligibility label tables and their fallback accessors now live in
+// lib/eligibility-labels.ts (XM-INV-LOT-REASON-CONTRACT) so the Chinese copy
+// can be asserted directly by tests rather than only through rendering.
 
 function formatServiceUnits(value: UserEligibilitySummary["noncash"]) {
   const grouped = value.serviceUnits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -1006,7 +1071,11 @@ function eligibilitySummaryReady(summary?: UserEligibilitySummary) {
   );
 }
 
-function EligibilitySummaryPanel({
+// Exported for the render test: the degraded badge below is the only place the
+// summary's eligibilityDegraded flag becomes visible, and a flag that is
+// computed and tested but never rendered is exactly what the second review
+// found here. Absence is asserted too (see App.eligibility-summary-panel.test).
+export function EligibilitySummaryPanel({
   items,
   loading,
 }: {
@@ -1036,9 +1105,17 @@ function EligibilitySummaryPanel({
                   <SourceBadge source={item.source} />
                   <strong>{item.sourceLabel}</strong>
                 </div>
-                <Badge tone={eligibilitySummaryReady(item) ? "green" : "amber"}>
-                  {eligibilityStatusLabels[item.status]}
-                </Badge>
+                <div>
+                  <Badge tone={eligibilitySummaryReady(item) ? "green" : "amber"}>
+                    {eligibilityStatusLabel(item.status)}
+                  </Badge>
+                  {item.eligibilityDegraded && (
+                    // Same badge as the lot list: this bundle is behind the
+                    // backend for this row (unknown status, reason or key).
+                    // Without it the flag was computed, tested and invisible.
+                    <Badge tone="amber">账本状态待确认</Badge>
+                  )}
+                </div>
               </div>
               <div className="eligibility-money-grid">
                 <div className="eligibility-money-primary">
@@ -1074,7 +1151,7 @@ function EligibilitySummaryPanel({
               </div>
               <div className="eligibility-reasons" aria-label="资格状态原因">
                 {item.reasons.map((reason) => (
-                  <span key={reason}>{eligibilityReasonLabels[reason]}</span>
+                  <span key={reason}>{eligibilityReasonLabel(reason)}</span>
                 ))}
               </div>
             </article>
@@ -1385,6 +1462,16 @@ function OrdersPage() {
                         {order.eligibilityStatus === "source_unavailable" && (
                           <Badge tone="red">来源同步不可用</Badge>
                         )}
+                        {order.eligibilityStatus ===
+                          "not_invoiceable_pending_reconciliation" && (
+                          // amber, not red: this is a wait, not an alarm. It
+                          // clears itself, and the admin ledger view already
+                          // tones the same state this way.
+                          <Badge tone="amber">对账中暂不可开票</Badge>
+                        )}
+                        {order.eligibilityDegraded && (
+                          <Badge tone="amber">账本状态待确认</Badge>
+                        )}
                       </div>
                       <div className="order-meta">
                         <span>{order.tradeNo}</span>
@@ -1411,6 +1498,9 @@ function OrdersPage() {
                               ? "历史基线与新事件正在追平"
                               : order.eligibilityStatus === "source_unavailable"
                                 ? "来源五条同步流尚未全部就绪"
+                              : order.eligibilityStatus ===
+                                  "not_invoiceable_pending_reconciliation"
+                                ? "来源账本正在自动对账，完成后会自动恢复"
                               : order.eligibilityStatus !== "active"
                                 ? "来源账本正在对账处理"
                                 : !orderSourceReady(order)
@@ -3298,7 +3388,7 @@ function EligibilityFreezesPage() {
                     <td>{item.scope === "account" ? "整个平台账号" : "单笔资金批次"}</td>
                     <td>
                       <Badge tone={item.eligibilityStatus === "active" ? "green" : "amber"}>
-                        {eligibilityStatusLabels[item.eligibilityStatus]}
+                        {eligibilityStatusLabel(item.eligibilityStatus)}
                       </Badge>
                     </td>
                     <td>
@@ -3494,7 +3584,7 @@ function EligibilityFreezeDrawer({
               </div>
               <div>
                 <dt>资格状态</dt>
-                <dd>{eligibilityStatusLabels[item.eligibilityStatus]}</dd>
+                <dd>{eligibilityStatusLabel(item.eligibilityStatus)}</dd>
               </div>
             </dl>
           </section>
