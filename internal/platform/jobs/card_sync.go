@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 
@@ -127,6 +128,23 @@ func (w *CardSyncWorker) WithObservations(store ObservationStore, environment st
 	w.environment = environment
 	w.expectedInterval = expectedInterval
 	return w
+}
+
+// newCardSyncWorkerFor 按配置组装卡片同步 worker，**观测一并装上**。
+//
+// 单独抽成一个函数只为一件事：让「观测必装」这条约束有测试可依
+// （TestCardSyncWorkerAssemblyWiresObservations）。它此前只写在 client.go
+// 的一句注释里，而注释不会发红——把那一行 .WithObservations(...) 删掉，
+// 或者把 CardSyncEnabled 那一段重构一遍顺手漏掉它，全仓门禁照样全绿。
+//
+// 为什么这条约束值得一个函数：本片做了一次**有意的信号让渡**——RunOnce 对
+// 部分成功返回 nil、整轮全砸且没有一条值得再试时落 cancelled，作业不再变红。
+// 于是「某个账号一直在失败」这件事只剩 cards.sync.status 这一个承载物，
+// 而 cards.sync.failed 规则又以它为唯一输入。少了这一行，告警在结构上就
+// 不可能响，且不会有任何报错——正是这次改动最怕的那种安静。
+func newCardSyncWorkerFor(cfg Config, pool *pgxpool.Pool) *CardSyncWorker {
+	return NewCardSyncWorker(cfg.Logger, cfg.CardSyncer).
+		WithObservations(ops.NewStore(pool), cfg.Environment, cfg.CardSyncInterval)
 }
 
 // WithClock 注入时钟（测试用）。

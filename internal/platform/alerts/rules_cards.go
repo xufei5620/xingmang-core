@@ -94,8 +94,12 @@ type cardSyncStep struct {
 //
 // 三条判据上的选择：
 //
-//  1. **当前这一轮没有失败就完全不回看历史**。回看要打一次 ListSamples，
-//     而绝大多数轮次里什么都没坏——照抄 R4 的成本纪律。
+//  1. **每次评估都回看一次历史**，即便这一轮全绿。这条曾经反过来写（照抄
+//     R4「当前没坏就不回看」的成本纪律），而那是个只在迟滞是死代码时才成立
+//     的省法：迟滞的全部意义就是「这一轮成功了但还不算恢复」，而那种状态
+//     只能从历史里看出来。当前这一轮全绿恰恰是**必须**回看的时刻。
+//     代价是每个评估周期多一次 ListSamples——一次，不是每个 (账号,步骤)
+//     一次，由 TestCardSyncFailedReadsSamplesOncePerRound 钉住。
 //  2. **被暂停的账号一条都不报**。运营刚把一个坏账号停掉，紧接着收到一条
 //     永远清不掉的告警，结果一定是把整条规则静默——那会连带丢掉其余账号的
 //     信号。代价是「忘了恢复的暂停」看不见，由 Query 侧的 paused 徽标
@@ -105,25 +109,7 @@ type cardSyncStep struct {
 func (e *Evaluator) cardSyncFindings(
 	ctx context.Context, o ops.Observation, environment string, now time.Time,
 ) ([]Finding, error) {
-	current := cardSyncSteps(o.Value)
 	paused := cardSyncPausedAccounts(o.Value)
-
-	var failing []cardSyncStepKey
-	for key, step := range current {
-		if step.ok || step.skipped || paused[key.account] {
-			continue
-		}
-		failing = append(failing, key)
-	}
-	if len(failing) == 0 {
-		return nil, nil
-	}
-	sort.Slice(failing, func(i, j int) bool {
-		if failing[i].account != failing[j].account {
-			return failing[i].account < failing[j].account
-		}
-		return failing[i].step < failing[j].step
-	})
 
 	samples, _, err := e.source.ListSamples(
 		ctx, environment, o.MetricKey, now.Add(-cardSyncLookback), cardSyncMaxSamples)
@@ -131,39 +117,85 @@ func (e *Evaluator) cardSyncFindings(
 		return nil, fmt.Errorf("读取 %s 历史样本: %w", o.MetricKey, err)
 	}
 	// 样本按 (synced_at, id) 升序返回（见 ops.Store.ListSamples）。
-	// 当前这条观测**本身就是最新的那条样本**（UpsertWithSample 在同一个事务里
-	// 写最新态与样本），所以不再把它追加进去——追加会把最近一轮数成两轮。
-	rounds := make([]map[cardSyncStepKey]cardSyncStep, 0, len(samples))
+	// 当前这条观测正常情况下**本身就是最新的那条样本**（UpsertWithSample 在
+	// 同一个事务里写最新态与样本），所以只在它确实更新时才补进去——
+	// 无条件追加会把最近一轮数成两轮。
+	rounds := make([]map[cardSyncStepKey]cardSyncStep, 0, len(samples)+1)
 	for _, s := range samples {
 		rounds = append(rounds, cardSyncSteps(s.Value))
 	}
+	if len(samples) == 0 || samples[len(samples)-1].SyncedAt.Before(o.SyncedAt) {
+		rounds = append(rounds, cardSyncSteps(o.Value))
+	}
 
 	var out []Finding
-	for _, key := range failing {
-		streak := cardSyncFailureStreak(rounds, key)
-		if streak < e.cfg.ConsecutiveFailureThreshold {
+	for _, key := range cardSyncKeysInWindow(rounds) {
+		if paused[key.account] {
 			continue
 		}
-		step := current[key]
-		detail := fmt.Sprintf(
-			"账号 %s 的「%s」已连续 %d 轮失败（阈值 %d 轮，需连续 %d 轮成功才算恢复）。最近一次上游答复：%s",
-			key.account, cardSyncStepLabel(key.step), streak,
-			e.cfg.ConsecutiveFailureThreshold, cardSyncRecoverySamples,
-			cardSyncDetailOrPlaceholder(step))
+		streak := cardSyncStreakOf(rounds, key)
+		if !streak.open(e.cfg.ConsecutiveFailureThreshold) {
+			continue
+		}
 		out = append(out, Finding{
-			RuleKey:  RuleCardSyncFailed,
-			DedupKey: dedupKey(RuleCardSyncFailed, environment, key.account+"/"+key.step),
-			Severity: SeverityCritical,
-			Title: fmt.Sprintf("卡片同步失败：账号 %s 的%s连续 %d 轮",
-				key.account, cardSyncStepLabel(key.step), streak),
-			Detail:          detail,
+			RuleKey:         RuleCardSyncFailed,
+			DedupKey:        dedupKey(RuleCardSyncFailed, environment, key.account+"/"+key.step),
+			Severity:        SeverityCritical,
+			Title:           cardSyncTitle(key, streak),
+			Detail:          cardSyncDetail(key, streak, e.cfg.ConsecutiveFailureThreshold),
 			SourceMetricKey: o.MetricKey,
 		})
 	}
 	return out, nil
 }
 
-// cardSyncFailureStreak 数一个 (账号, 步骤) 的连续失败轮数。
+// cardSyncKeysInWindow 收集窗口里出现过的所有 (账号, 步骤)，按字典序返回。
+//
+// 候选键取自**整个窗口**而不是「这一轮正在失败的那些」。后者是这条规则
+// 第一版的写法，而它让迟滞成了死代码：只有这一轮正在失败的键才会去数连续串，
+// 于是「失败 N 轮之后成功 1 轮」这种状态压根进不了循环，Reconciler 当轮就把
+// 告警恢复掉了——声明上写着「要连续 2 轮成功才算恢复」，实际是 1 轮。
+// 一个还在 80% 失败率上的账号撞上一轮走运就会让告警开-关-开地抖，
+// 抖几次之后运维会把整条规则静默掉，那才是真正把预警关掉。
+func cardSyncKeysInWindow(rounds []map[cardSyncStepKey]cardSyncStep) []cardSyncStepKey {
+	seen := make(map[cardSyncStepKey]bool)
+	var keys []cardSyncStepKey
+	for _, round := range rounds {
+		for key := range round {
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].account != keys[j].account {
+			return keys[i].account < keys[j].account
+		}
+		return keys[i].step < keys[j].step
+	})
+	return keys
+}
+
+// cardSyncStreak 是一个 (账号, 步骤) 在窗口末尾的状态。
+type cardSyncStreak struct {
+	// failures 是恢复窗口之前的连续失败轮数。
+	failures int
+	// okTail 是末尾已经攒到的连续成功轮数；攒够 cardSyncRecoverySamples 才算恢复。
+	okTail int
+	// last 是最近一次失败那一轮的结果，用来取上游原话。
+	last cardSyncStep
+	// seen 为假表示窗口里根本没有这个键的失败。
+	seen bool
+}
+
+// open 判断这条告警此刻是否该开着。
+func (s cardSyncStreak) open(threshold int) bool {
+	return s.seen && s.failures >= threshold && s.okTail < cardSyncRecoverySamples
+}
+
+// cardSyncStreakOf 数一个 (账号, 步骤) 的连续失败轮数与末尾的成功轮数。
 //
 // 迟滞在这里实现：末尾允许有最多 cardSyncRecoverySamples-1 轮成功而不算恢复，
 // 攒够 cardSyncRecoverySamples 轮成功才把连续串清掉。
@@ -171,32 +203,58 @@ func (e *Evaluator) cardSyncFindings(
 // **样本里没有这个 (账号, 步骤)** 一律当作串的终点，不当作成功也不当作失败：
 // 中间那几轮可能是账号被暂停了，把暂停期两侧的失败接成一条长串，等于把
 // 「停过又开」说成「一直在坏」。
-func cardSyncFailureStreak(rounds []map[cardSyncStepKey]cardSyncStep, key cardSyncStepKey) int {
+func cardSyncStreakOf(rounds []map[cardSyncStepKey]cardSyncStep, key cardSyncStepKey) cardSyncStreak {
 	i := len(rounds) - 1
 	okRun := 0
 	for ; i >= 0; i-- {
 		step, present := rounds[i][key]
 		if !present || step.skipped {
-			return 0
+			return cardSyncStreak{}
 		}
 		if !step.ok {
 			break
 		}
 		okRun++
 		if okRun >= cardSyncRecoverySamples {
-			return 0
+			return cardSyncStreak{}
 		}
 	}
+	if i < 0 {
+		// 窗口里全是成功（只是还没攒够恢复轮数）：没有失败串可言。
+		return cardSyncStreak{okTail: okRun}
+	}
 
-	streak := 0
+	out := cardSyncStreak{okTail: okRun, last: rounds[i][key], seen: true}
 	for ; i >= 0; i-- {
 		step, present := rounds[i][key]
 		if !present || step.skipped || step.ok {
 			break
 		}
-		streak++
+		out.failures++
 	}
-	return streak
+	return out
+}
+
+func cardSyncTitle(key cardSyncStepKey, streak cardSyncStreak) string {
+	if streak.okTail > 0 {
+		return fmt.Sprintf("卡片同步失败：账号 %s 的%s连续 %d 轮（刚成功 %d 轮，未达恢复条件）",
+			key.account, cardSyncStepLabel(key.step), streak.failures, streak.okTail)
+	}
+	return fmt.Sprintf("卡片同步失败：账号 %s 的%s连续 %d 轮",
+		key.account, cardSyncStepLabel(key.step), streak.failures)
+}
+
+func cardSyncDetail(key cardSyncStepKey, streak cardSyncStreak, threshold int) string {
+	if streak.okTail > 0 {
+		return fmt.Sprintf(
+			"账号 %s 的「%s」连续 %d 轮失败后刚成功 %d 轮，还差 %d 轮才算恢复。最近一次失败时上游答复：%s",
+			key.account, cardSyncStepLabel(key.step), streak.failures, streak.okTail,
+			cardSyncRecoverySamples-streak.okTail, cardSyncDetailOrPlaceholder(streak.last))
+	}
+	return fmt.Sprintf(
+		"账号 %s 的「%s」已连续 %d 轮失败（阈值 %d 轮，需连续 %d 轮成功才算恢复）。最近一次上游答复：%s",
+		key.account, cardSyncStepLabel(key.step), streak.failures,
+		threshold, cardSyncRecoverySamples, cardSyncDetailOrPlaceholder(streak.last))
 }
 
 // cardSyncSteps 把一条观测的 value_json 解成 (账号, 步骤) → 结果。

@@ -77,25 +77,32 @@ func cardSyncSource(current ops.Observation, samples ...ops.Observation) *fakeMe
 }
 
 // 连续 N 轮才开：N-1 轮不报，第 N 轮恰好一条。
+//
+// 夹具一律是**生产形状**：当前观测就是样本序列的最后一条。
+// UpsertWithSample 在同一个事务里写最新态与样本，所以生产上不存在
+// 「current 与最新样本不是同一轮」的状态——用那种夹具测出来的结论
+// 在生产上不成立（迟滞那条用例就是这么假绿了三天的）。
 func TestCardSyncFailedNeedsNConsecutiveRounds(t *testing.T) {
 	now := time.Now().UTC()
 	threshold := DefaultConsecutiveFailureThreshold
 
-	var samples []ops.Observation
-	for i := 0; i < threshold-1; i++ {
-		samples = append(samples, cardSyncSample(
-			now.Add(-time.Duration(threshold-i)*5*time.Minute), true,
-			failedStep("LINFENG", "batch_status")))
+	round := func(back int) ops.Observation {
+		return cardSyncSample(now.Add(-time.Duration(back)*5*time.Minute), true,
+			failedStep("LINFENG", "batch_status"))
 	}
-	current := cardSyncSample(now, true, failedStep("LINFENG", "batch_status"))
+
+	var samples []ops.Observation
+	for i := threshold - 1; i >= 1; i-- {
+		samples = append(samples, round(i))
+	}
+	current := samples[len(samples)-1]
 
 	if got := countFor(evaluate(t, cardSyncSource(current, samples...), now), RuleCardSyncFailed); got != 0 {
 		t.Fatalf("只有 %d 轮时不该报，实际 %d 条", threshold-1, got)
 	}
 
-	samples = append(samples, cardSyncSample(now.Add(-5*time.Minute), true,
-		failedStep("LINFENG", "batch_status")))
-	samples = append(samples, current)
+	samples = append(samples, round(0))
+	current = samples[len(samples)-1]
 
 	findings := evaluate(t, cardSyncSource(current, samples...), now)
 	if got := countFor(findings, RuleCardSyncFailed); got != 1 {
@@ -169,32 +176,53 @@ func TestCardSyncFailedRequiresSameStep(t *testing.T) {
 }
 
 // 迟滞：一轮走运的成功不清告警，连续两轮成功才清。
+//
+// **夹具必须是生产形状**（current == 最新样本）。这条用例的上一版把 current
+// 造成「正在失败」、却在样本末尾追一条成功——那正是 rules_cards.go 的注释
+// 断言不会发生的状态（两者在同一个事务里写）。于是它绿着，而生产上迟滞
+// 是死代码：只有「这一轮正在失败」的键才会去数连续串，成功一轮就没人再数它，
+// Reconciler 当轮把告警恢复掉。声明写着 2 轮，实际是 1 轮。
 func TestCardSyncFailedHasRecoveryHysteresis(t *testing.T) {
 	now := time.Now().UTC()
 	threshold := DefaultConsecutiveFailureThreshold
 
-	base := func(n int) []ops.Observation {
-		var out []ops.Observation
-		for i := 0; i < n; i++ {
-			out = append(out, cardSyncSample(
-				now.Add(-time.Duration(n+2-i)*5*time.Minute), true,
-				failedStep("LINFENG", "batch_status")))
-		}
-		return out
+	// 失败 N 轮（最新的那轮在 now-2 个周期）。
+	var failed []ops.Observation
+	for i := threshold + 1; i >= 2; i-- {
+		failed = append(failed, cardSyncSample(
+			now.Add(-time.Duration(i)*5*time.Minute), true,
+			failedStep("LINFENG", "batch_status")))
 	}
 
 	// 失败 N 轮 + 成功 1 轮：**仍然报**。一个还在 80% 失败率上的账号
-	// 很容易撞上一轮走运，1 轮就清会让告警在开与关之间抖动。
-	current := cardSyncSample(now, true, failedStep("LINFENG", "batch_status"))
-	oneOK := append(base(threshold), cardSyncSample(now.Add(-5*time.Minute), false,
+	// 很容易撞上一轮走运，1 轮就清会让告警在开与关之间抖动，
+	// 抖几次之后运维会把整条规则静默掉——那才是真正把预警关掉的方式。
+	oneOK := make([]ops.Observation, 0, len(failed)+2)
+	oneOK = append(oneOK, failed...)
+	oneOK = append(oneOK, cardSyncSample(now.Add(-5*time.Minute), false,
 		okStep("LINFENG", "batch_status")))
-	if got := countFor(evaluate(t, cardSyncSource(current, oneOK...), now), RuleCardSyncFailed); got != 1 {
+
+	findings := evaluate(t, cardSyncSource(oneOK[len(oneOK)-1], oneOK...), now)
+	if got := countFor(findings, RuleCardSyncFailed); got != 1 {
 		t.Fatalf("只成功 1 轮不算恢复，应仍报 1 条，实际 %d 条", got)
+	}
+	// 正文要说清「还差几轮」，否则运维看着一条正在恢复的告警不知道该等还是该动手。
+	f, _ := findingFor(findings, RuleCardSyncFailed)
+	for _, want := range []string{"刚成功 1 轮", "还差 1 轮"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Fatalf("恢复中的告警正文应含 %q，实际 %q", want, f.Detail)
+		}
+	}
+	// 上游原话取自**最近一次失败**那一轮：这一轮成功了，它自己没有 detail。
+	if !strings.Contains(f.Detail, "40004") {
+		t.Fatalf("恢复中的告警仍要带上最近一次失败时的上游答复，实际 %q", f.Detail)
 	}
 
 	// 失败 N 轮 + 成功 2 轮：清掉。
-	twoOK := append(oneOK, cardSyncSample(now, false, okStep("LINFENG", "batch_status")))
-	if got := countFor(evaluate(t, cardSyncSource(current, twoOK...), now), RuleCardSyncFailed); got != 0 {
+	twoOK := make([]ops.Observation, 0, len(oneOK)+1)
+	twoOK = append(twoOK, oneOK...)
+	twoOK = append(twoOK, cardSyncSample(now, false, okStep("LINFENG", "batch_status")))
+	if got := countFor(evaluate(t, cardSyncSource(twoOK[len(twoOK)-1], twoOK...), now), RuleCardSyncFailed); got != 0 {
 		t.Fatalf("连续成功 %d 轮应算恢复，实际 %d 条", cardSyncRecoverySamples, got)
 	}
 }
@@ -228,17 +256,55 @@ func TestCardSyncFailedSuppressesPausedAccounts(t *testing.T) {
 	}
 }
 
-// 当前这一轮没有失败时**完全不回看历史样本**：成本纪律，照抄 R4。
-func TestCardSyncFailedDoesNotReadSamplesWhenHealthy(t *testing.T) {
+// 一轮评估**只回看一次**历史样本，不管有几个 (账号, 步骤) 在失败。
+//
+// 这条替掉了原来那条「健康时一次都不回看」。原来那条照抄 R4 的成本纪律，
+// 但那个省法只在迟滞是死代码时才成立：迟滞要判的正是「这一轮成功了但还没
+// 算恢复」，而这一轮全绿恰恰是**必须**回看的时刻。留着它就等于用一条
+// 恒绿的成本断言把迟滞永远钉死在关闭状态。
+//
+// 真正值得钉的成本性质是「不随失败数放大」：按键去查会让一个坏掉的账号
+// 在评估时打出十几次查询。
+func TestCardSyncFailedReadsSamplesOncePerRound(t *testing.T) {
 	now := time.Now().UTC()
-	current := cardSyncSample(now, false, okStep("LINFENG", "batch_status"))
-	src := cardSyncSource(current)
+	threshold := DefaultConsecutiveFailureThreshold
+
+	// 观测状态记 ok：三步失败但整轮不算失败，正是本片写观测的生产形状
+	// （writeObservation 只在整轮全砸时记 failed）。顺带让 R4 不去回看，
+	// 于是 sampleCalls 数的就只有这条规则自己。
+	round := func(back int) ops.Observation {
+		return cardSyncSample(now.Add(-time.Duration(back)*5*time.Minute), false,
+			failedStep("LINFENG", "batch_status"),
+			failedStep("LINFENG", "fetch_secrets"),
+			failedStep("MAIN", "batch_status"))
+	}
+	var samples []ops.Observation
+	for i := threshold - 1; i >= 0; i-- {
+		samples = append(samples, round(i))
+	}
+	src := cardSyncSource(samples[len(samples)-1], samples...)
+
+	if got := countFor(evaluate(t, src, now), RuleCardSyncFailed); got != 3 {
+		t.Fatalf("三个 (账号, 步骤) 各一条，实际 %d 条", got)
+	}
+	if src.sampleCalls != 1 {
+		t.Fatalf("一轮评估只该回看一次历史, sampleCalls=%d", src.sampleCalls)
+	}
+}
+
+// 窗口里从没坏过时不报，且不因为「回看了历史」就凭空造出命中。
+func TestCardSyncFailedStaysQuietWhenHealthy(t *testing.T) {
+	now := time.Now().UTC()
+	var samples []ops.Observation
+	for i := 5; i >= 0; i-- {
+		samples = append(samples, cardSyncSample(
+			now.Add(-time.Duration(i)*5*time.Minute), false,
+			okStep("LINFENG", "batch_status")))
+	}
+	src := cardSyncSource(samples[len(samples)-1], samples...)
 
 	if got := countFor(evaluate(t, src, now), RuleCardSyncFailed); got != 0 {
-		t.Fatalf("这一轮成功了不该报，实际 %d 条", got)
-	}
-	if src.sampleCalls != 0 {
-		t.Fatalf("健康时不该回看历史样本, sampleCalls=%d", src.sampleCalls)
+		t.Fatalf("一直健康不该报，实际 %d 条", got)
 	}
 }
 

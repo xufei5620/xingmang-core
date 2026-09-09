@@ -1,9 +1,12 @@
 # XM-CARD-VISIBILITY：让卡片同步说出上游到底为什么拒绝
 
-- **status:** implemented，未上线。后端 + 迁移 + 契约；`web/` 一个字没改（见「合并点」）。
+- **status:** implemented + 复审补丁已合，未上线。后端 + 迁移 + 契约；
+  `web/` 一个字没改（见「合并点」）。
 - **branch:** `ai/claude/XM-CARD-VISIBILITY`，起点 `e4f7dcf`。
 - **来源：** `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` 的 card_sync 段与第三节第 4 条。
-- **时间：** 开始 2026-09-08T16:18Z，结束 2026-09-08T17:20Z（约 1 小时）。
+- **时间：** 第一轮 2026-09-08T16:18Z–17:20Z（约 1 小时）；
+  复审补丁 2026-09-08T17:36Z–2026-09-09T00:05Z（约 6.5 小时）；
+  门禁与 35 条变异复跑 2026-09-09T02:35Z–02:56Z（约 21 分钟）。
 
 ## 为什么
 
@@ -101,6 +104,142 @@ rejected: infini POST /v2/cards/status/batch
   （两者 Kind 与 op 逐字相同）。
 - `TestBatchStatusMaxMatchesOpenAPI` **读契约文件**
   （`card.yaml` 的 `maxItems`），不复述那个数字。
+
+## 复审补丁（第二轮，2026-09-09）
+
+复审在真实形状上打出 7 个洞（2 个 fatal、5 个 major）。**每一个都先用探针在
+worktree 里复现，再修，再补一条会红的用例。** 探针本身不留在树里，
+它们的内容都变成了正式用例。
+
+### 1（fatal）脱敏器对复合字段名整词匹配 → 复合键名的凭据原样进对外文本
+
+`{"access_token":…}` / `{"client_secret":…}` / `{"x_api_key":…}` 全都漏过：
+`\btoken\b` 在 `access_token` 里因为下划线是词字符而根本匹配不到。荒唐的是
+`x-api-key`（连字符）挡得住而 `x_api_key`（下划线）挡不住——防线成不成立取决于
+上游用了哪个分隔符。
+
+这条不是「内部日志多了点东西」：这段文本进 ops 观测的 `value_json`，由
+`rules_cards.go` 原样送进 `Finding.Detail`，再由 `notify.go` 投到 Telegram /
+企业微信 / 通用 webhook，也就是**发出平台之外**。
+
+**修法**：键名判定改成小写**子串**匹配，语义与
+`internal/platform/audit.RedactDefault` 对齐（那边的注释早就写明「子串匹配，
+覆盖 Access_Token 这类变体」）。为了让两份清单不会各自漂开，给 audit 加了
+`SensitiveKeyFragments()`（返回副本），`connectors/infini/redact_shared_test.go`
+**遍历**它逐项验证覆盖——那边加一项而这边漏了会当场红。这是「闸的范围要发现
+不要手列」：手写一份「我覆盖了哪些」的对照表只会一起漂。
+
+生产依赖方向没变：只有**测试**引用 audit，连接器的生产代码不 import 它。
+
+### 2（fatal）脱敏跑在压平换行之前 → 跨行的键值对整对逃掉
+
+分隔符字符类不含 `\n`，而压平又发生在脱敏之后，于是
+`{\n "api_key":\n "sk-live-…"\n}` 先逃过脱敏、再被排成一行漂亮的可读文本。
+美化过的 JSON 与网关错误页正是响应体最常见的两种形状。
+
+**修法**：压平提到 `redactUpstreamText` 的**第一行**（而不是只放在 `bodyPrefix`
+里）——三个 message 入口根本不经过 `bodyPrefix`，只改那里等于只覆盖一半的路。
+
+### 3（major）`message` 那条路没有长度上限
+
+响应体有 300 字节上限，`message` 一个字都不截：实测上游回 20 万字节的
+message，`err.Error()` 就是 20 万字节。它会每 5 分钟落一次 ops 观测的
+`value_json`、进 `alerts.detail`（无上限的 text 列），最后进 Telegram
+sendMessage 的 body（单条上限 4096 字符）——一个话痨或被打崩的上游既能把库
+撑大，又能让 `cards.sync.failed` 投不出去，而那条告警正是本片用来替换
+「作业变红」这个响亮信号的东西。
+
+**修法**：新增 `safeUpstreamText`（压平 → 脱敏 → 截断）作为**唯一**入口，
+三个入口一起改。并加一条扫源码的门禁 `TestOnlySafeUpstreamTextReachesOutwardText`：
+非测试文件里除 `redact.go` 外不许出现 `redactUpstreamText(` 的调用点。
+写成源码扫描而不是再写三条针对具体入口的用例，是因为行为测不出
+「下一个人会不会绕过去」——而这次正是三个入口各自忘了截断，且每条都全绿。
+
+### 4（major）「观测必装」只写在注释里
+
+`client.go` 那行 `.WithObservations(...)` 靠一句注释声明必装，没有任何测试
+会因为它被删掉而红。而本片做了一次**有意的信号让渡**：部分成功返回 nil、
+全砸且不值得再试落 `cancelled`，作业不再变红，于是「某个账号一直在失败」
+只剩 `cards.sync.status` 这一个承载物。删掉那一行，全仓门禁照样全绿、
+告警从此结构上不可能响、而且不会有任何报错。
+
+**修法**：抽出 `newCardSyncWorkerFor(cfg, pool)`，加
+`TestCardSyncWorkerAssemblyWiresObservations` 断言 observations 非 nil、
+environment 与 interval 都传对了。
+
+### 5（major）相邻词分支无条件吞掉下一个词 → 把答案吃掉，同时漏掉真凭据
+
+实测：`signature mismatch for request 88213` → `signature [REDACTED] for …`；
+`token expired at …` → `token [REDACTED] at …`；
+`authorization denied for account LINFENG` → `authorization [REDACTED] for …`。
+token / secret / signature / authorization 恰恰是拒绝类 message 里最高频的词，
+而它们后面那个词**正是答案**。运维会拿到一句比三天前只多一个词的话。
+
+反过来，凭据不紧贴标签时反而漏：本连接器自己的签名头
+`Signature keyId="ak_live_…",…,signature="…"` 里，被吃掉的是字面量
+`Signature` 这个词，而 `keyId` 原样留在一个 `[REDACTED]` 旁边——读日志的人
+会以为这一段已经处理过了。
+
+**为什么没被测出来**：`redact_test.go` 的夹具字面就是
+`signature mismatch for api_key sk-live-…`，它自己带着这个 bug 却看不见，
+因为**全套用例里没有一条正向断言「message 的人类可读部分要活下来」**。
+缺席断言做了双向变异，正向断言这一侧一条都没有。
+
+**修法**：拆成三件事——(a) 带分隔符的 `k=v` 无条件去值（这部分原本就是对的）；
+(b) 没有分隔符的散文只在下一个词 `looksLikeSecret` 时才去（长度 ≥16 且数字
+字母混排、或 ≥20 且大小写混排、或 `sk-`/`ak_` 这类前缀）；(c) 安全码另判，
+`cvv`/`cvc`（子串，因此 `cvv2` 也命中）后面的 3~4 位数字一律去掉。
+scheme（`Bearer`/`Basic`/`Negotiate`）后面那个 token 连 scheme 一起吃掉。
+新增 `TestRedactKeepsDiagnosticProse` 逐字钉住三句诊断原话——**这是整组用例里
+唯一能防住「脱敏器把答案吃掉」的东西**。
+
+顺带修掉两个同源的坑：正则匹配是**不重叠**的，
+`invalid cvv2 123` 会先被 (invalid, cvv2) 那一对吃掉、真正要判的 (cvv2, 123)
+根本轮不到；`upstream said: token = sk-live-x` 会先被 (said, token) 吃掉。
+两条规则都改成「只匹配键，值手工向后取」。
+
+### 6（major）迟滞是死代码：声明 2 轮，实际 1 轮
+
+`cardSyncFindings` 只给「**这一轮正在失败**」的键去数连续串，而
+`cardSyncFailureStreak` 的迟滞循环只有在「最新样本是成功」时才进得去——
+而当前观测**就是**最新样本（同事务写两份，代码注释自己也这么写）。两句话互斥，
+迟滞循环永远进不去。于是失败 N 轮之后**成功 1 轮**，Reconciler 当轮就把告警
+恢复掉了。
+
+代价是对运维说了假话两处：`Rule.Recovery` 与告警正文都逐字写着
+「需连续 2 轮成功才算恢复」。LINFENG 这种 80% 失败率的账号撞上一轮走运，
+告警就会 resolve、下一轮再 fire——抖几次之后运维会把整条规则静默掉，
+那才是真正把预警关掉。
+
+原来那条用例之所以绿，是因为夹具把 `current` 造成失败、却在样本末尾追一条
+成功——正是代码注释断言不会发生的那个状态。
+
+**修法**：选了「真做迟滞」而不是「删掉迟滞」（派工第 4 条明写「有迟滞」）。
+候选键改成取自**整个窗口**而不是「这一轮正在失败的」；`cardSyncStreakOf` 同时
+返回失败串长度与末尾成功轮数，`open()` 判「失败 ≥ 阈值 且 末尾成功 < 2」。
+恢复中的告警正文改成「连续 N 轮失败后刚成功 1 轮，还差 1 轮才算恢复」，
+上游原话取自**最近一次失败**那一轮。**所有夹具改成生产形状**（current == 最新样本）。
+
+**一处成本纪律被推翻，请负责人知悉**：原来「当前这一轮没有失败就完全不回看
+历史样本」（照抄 R4）现在**不成立**——迟滞要判的正是「这一轮成功了但还没算
+恢复」，而这一轮全绿恰恰是必须回看的时刻。留着那条省法等于用一条恒绿的成本
+断言把迟滞永远钉死在关闭状态。代价是每个评估周期对 `cards.sync.status` 多一次
+`ListSamples`（limit 20）。换上的成本断言是**更值得钉的那条**：
+`TestCardSyncFailedReadsSamplesOncePerRound` 要求一轮只查一次，
+不随失败的 (账号, 步骤) 数放大。
+
+### 7（major）六个暂停检查点里有两个一条测试都没穿过
+
+把 `advanceWithdrawals` 与 `reconcileOperations` 的暂停跳过整段删掉，
+`cards` + `jobs` 全量**照样全绿**。原因是夹具里 `SyncOptions.Withdrawals` 是
+nil（第一行就 return）、store 里也没有未收敛的操作（循环一次都不进）。
+其中 `advanceWithdrawals` 是**动钱**那一步：一个被人为停掉的账号会继续被打
+上游推进提现，而门禁不会有任何反应。
+
+**修法**：夹具补上两个账号各一笔未收敛提现与一笔未收敛开卡；`spyClient` 加
+`withdrawCalls`，并把带 alias 的列卡单独计成 `aliasListCalls`（对账与发现走的是
+同一个上游方法，不分开就分不清删的是哪一处）。**七个计数器各配一条正向对照**
+——夹具里没有那件活要干时，0 次调用不说明任何事。新增变异 M30 / M31 各自发红。
 
 ## 新增 API 字段清单（供 XM-WORKBENCH-TRUTH 消费）
 
@@ -229,7 +368,12 @@ rejected: infini POST /v2/cards/status/batch
 ## 变异验证
 
 每一条都：改坏 → 跑定向测试确认发红 → 还原 → 复跑确认发绿。
-最后用 `diff` 逐文件核对 7 个被改过的文件与备份**逐字节相同**。
+最后用 `cmp` 逐文件核对 10 个被改过的文件与备份**逐字节相同**。
+
+**M1–M23 是第一轮的，M24–M35 是复审补丁的。第二轮把 35 条全部重跑了一遍**
+（不是只跑新增的那 12 条）：复审补丁动了脱敏器、告警判定与 `RunOnce` 周边，
+旧变异是否**还**发红是一件要重新证明的事，不能从上一轮的结论继承——
+第一轮的 M19 恰恰就是「发红了但发红的理由是错的」（夹具不是生产形状）。
 
 | # | 变异 | 变红的测试 |
 |---|---|---|
@@ -255,7 +399,30 @@ rejected: infini POST /v2/cards/status/batch
 | M20 | 告警去重键去掉步骤 | `TestCardSyncFailedNeedsNConsecutiveRounds` + `TestCardSyncFailedSplitsByAccountAndStep` |
 | M21 | 告警只按步骤 `skipped` 抑制，不按账号 `paused` | `TestCardSyncFailedSuppressesPausedAccounts` |
 | M22 | 连续轮数阈值降到 1 | `TestCardSyncFailedNeedsNConsecutiveRounds` + `TestCardSyncFailedRequiresSameStep` |
-| M23 | `AllFailed()` 退回「有失败就算整轮失败」 | `TestSyncIsolatesFailingAccountAndReportsPartialSuccess` + `TestSyncPANFetchFailureDoesNotAbortTheRound` |
+| M23 | `AllFailed()` 退回「有失败就算整轮失败」 | `TestSyncIsolatesFailingAccountAndReportsPartialSuccess` + `TestSyncPANFetchFailureDoesNotAbortTheRound` + `TestSyncKeepsUnknownIntactWhenUpstreamUnavailable` |
+
+复审补丁新增的 12 条（每一条都对应上面「复审补丁」里的一个洞，
+**先复现原缺陷、再修、再让这条变异把修法钉死**）：
+
+| # | 变异 | 变红的测试 |
+|---|---|---|
+| M24 | `isSensitiveKey` 的子串匹配改回整键相等（复现 fatal 1） | `TestRedactCatchesCompoundCredentialKeys`、`TestRedactCoversAuditSensitiveKeys`、`TestRedactHandlesSignatureHeaderShape` |
+| M25 | `valueSpan` 不吃 scheme（只盖住 `Bearer` 这个词） | `TestRedactEatsCredentialAfterAuthScheme` 4 个子用例中的 3 个 + `TestRedactFlattensBeforeMatching` 的 html 子用例 |
+| M26 | 去掉 `redactUpstreamText` 第一行的压平（复现 fatal 2） | `TestRedactFlattensBeforeMatching` 3 个子用例全红 |
+| M27 | `safeUpstreamText` 不截断（复现 major 3） | `TestUpstreamMessageIsLengthCapped`（实测 20 万字节进对外文本）、`TestUpstreamRefusalMessageIsLengthCapped` 两个子用例 |
+| M28 | `newCardSyncWorkerFor` 不挂 `.WithObservations`（复现 major 4） | `TestCardSyncWorkerAssemblyWiresObservations` |
+| M29 | `looksLikeSecret` 恒为真（复现 major 5：把答案一起吃掉） | `TestRedactKeepsDiagnosticProse` **7 个子用例里红 6 个**——`signature mismatch` / `token expired` / `authorization denied` 三句逐字复现了复审报告里的输出 |
+| M30 | 只删 `advanceWithdrawals` 里的暂停跳过（**动钱**那一步） | `TestSyncSkipsPausedAccountAndSaysSo` 的 `withdrawCalls == 0`。**修补丁之前这条变异全绿**——夹具的 `SyncOptions.Withdrawals` 是 nil |
+| M31 | 只删 `reconcileOperations` 里的暂停跳过 | 同一条的 `aliasListCalls == 0`。**修补丁之前也全绿**——store 里没有未收敛的操作 |
+| M32 | 候选键退回「只看这一轮正在失败的」（复现 major 6 的迟滞死代码） | `TestCardSyncFailedHasRecoveryHysteresis`（失败 N 轮 + 成功 1 轮，实际报 0 条） |
+| M33 | 给 `audit.defaultSensitiveKeys` 加一项 `session_id`，infini 侧不动 | `TestRedactCoversAuditSensitiveKeys/session_id`——证明这道跨包门禁是**遍历**出来的，不是手抄的对照表 |
+| M34 | `endpoints.go` 绕过 `safeUpstreamText` 直接调 `redactUpstreamText` | `TestOnlySafeUpstreamTextReachesOutwardText`（源码扫描）+ `TestUpstreamRefusalMessageIsLengthCapped` 两条同时红 |
+| M35 | 把 `ListSamples` 挪进 (账号,步骤) 循环里 | `TestCardSyncFailedReadsSamplesOncePerRound`（`sampleCalls=4`） |
+
+M30/M31 是这一轮**最值得单说**的两条：它们在复审补丁之前**变异后仍然全绿**
+（`cards` + `jobs` 两个包一起跑），也就是说那两处暂停检查点的正确性当时完全
+不设防，而其中一处是打上游推进提现的那一步。修的不是实现——实现本来就对——
+修的是夹具：让被暂停的账号真的**有活要干**，缺席断言才不是恒真的。
 
 两处因为变异验证而**被加强的测试**（原来的写法漏得过）：
 
@@ -278,12 +445,25 @@ go vet ./connectors/infini/ ./internal/platform/{connector,cards,jobs,alerts,ops
 go test -p 1 -count=1 ./connectors/infini/ ./internal/platform/connector/ \
   ./internal/platform/cards/ ./internal/platform/jobs/ ./internal/platform/alerts/ \
   ./internal/platform/ops/... ./internal/platform/httpapi/
+go test -p 1 -count=1 ./internal/platform/audit/
 go test -p 1 -count=1 -run TestPgStore ./internal/platform/cards/   # 带 XM_TEST_DATABASE_URL
 bash scripts/check-governance.sh                                     # exit 0
 ```
 
+第二轮（复审补丁）实测耗时：`go vet`（8 个包）+ 上面那批 `go test`
+2026-09-09T02:48:31Z → 02:48:44Z，**13 秒**；`check-governance.sh`
+02:48:49Z → 02:48:53Z，**4 秒**。
+
 **没跑**：`go test ./...` 全量（派工明令不跑）；前端（本 worktree 无
 `node_modules`，且 `web/` 不在本片范围）；任何真实上游调用。
+
+**第二轮没能重跑带库的那一条**（`-run TestPgStore`）：本次会话的机器上
+`psql` 不在 PATH、Docker daemon 也没起，`scripts/dev/worktree-testdb.sh --print-url`
+直接报「找不到可执行文件: psql」，于是 `XM_TEST_DATABASE_URL` 取不到、
+那些用例按既有约定 skip。第一轮跑过（迁移 000055 真上过测试库、
+`TestPgStoreAccountSyncPauseRoundTrip` 真跑过 Postgres 往返），而复审补丁
+**一行 SQL、一行 store_pg.go 都没动**——但这仍然是一条「上一轮的绿」，
+合入前请在有库的机器上补跑一次。
 
 新增表已加进 `store_pg_integration_test.go` 的 TRUNCATE 清单
 （漏了的症状很隐蔽：单跑绿、连跑红）。迁移 000055 已在本 worktree 的测试库
@@ -326,9 +506,12 @@ bash scripts/check-governance.sh                                     # exit 0
 - **批量拒绝的根因仍然未知。** 本片让原因可见，**没有**修好那个拒绝；
   契约里新加的第 11 条只是一条待验证的假设，请不要当结论用。
 - **部分成功不再让作业变红**：若 `cards.sync.status` 观测因为装配漏项而没写
-  （`WithObservations` 没接上），就会既不红也没告警。`jobs/client.go` 里已经
-  必装，且 `TestCardSyncWorkerWritesObservationWithPerAccountDetail` 钉住形状；
-  但上线后请顺手确认 `/metrics/history?metric_key=cards.sync.status` 有数据。
+  （`WithObservations` 没接上），就会既不红也没告警。这条此前**只由一句注释
+  守着**（复审 major 4），现在装配抽成了 `newCardSyncWorkerFor` 并由
+  `TestCardSyncWorkerAssemblyWiresObservations` 钉住（变异 M28 发红）；
+  形状仍由 `TestCardSyncWorkerWritesObservationWithPerAccountDetail` 钉。
+  但那条测试守的是**这一个装配函数**，不是「River 客户端里确实用了它」——
+  上线后仍请顺手确认 `/metrics/history?metric_key=cards.sync.status` 有数据。
 - `connector.Error.Error()` 是**七个连接器共用**的类型。`NewError` 一字节未改，
   由 `TestNewErrorTextUnchangedForOtherConnectors` 与既有的
   `connector/transport_test.go` 一起守住。

@@ -20,16 +20,29 @@ import (
 // 两个都不够：变异验证一次只删掉一处跳过时，必须能分辨漏的是哪一处。
 type spyClient struct {
 	infini.CardClient
-	listCalls   int
-	batchCalls  int
-	statusCalls int
-	revealCalls int
-	txCalls     int
+	listCalls int
+	// aliasListCalls 只数带 alias 的列卡，也就是**对账**那一步打的。
+	// 与 listCalls 分开是为了让变异验证分得清删掉的是哪一处跳过：
+	// 发现卡片与不确定态对账走的是同一个上游方法。
+	aliasListCalls int
+	batchCalls     int
+	statusCalls    int
+	revealCalls    int
+	txCalls        int
+	withdrawCalls  int
 }
 
 func (c *spyClient) ListCards(ctx context.Context, q infini.ListCardsQuery) (infini.CardPage, error) {
 	c.listCalls++
+	if q.Alias != "" {
+		c.aliasListCalls++
+	}
 	return c.CardClient.ListCards(ctx, q)
+}
+
+func (c *spyClient) WithdrawStatus(ctx context.Context, requestID string) (infini.WithdrawState, error) {
+	c.withdrawCalls++
+	return c.CardClient.WithdrawStatus(ctx, requestID)
 }
 
 func (c *spyClient) BatchCardStatus(ctx context.Context, ids []string) (map[string]string, error) {
@@ -53,14 +66,23 @@ func (c *spyClient) CardTransactions(ctx context.Context, id string, page, size 
 }
 
 func (c *spyClient) total() int {
-	return c.listCalls + c.batchCalls + c.statusCalls + c.revealCalls + c.txCalls
+	return c.listCalls + c.batchCalls + c.statusCalls +
+		c.revealCalls + c.txCalls + c.withdrawCalls
 }
 
 const pauseReason = "上游拒绝待查 XM-CARD-VISIBILITY"
 
 // 暂停的账号一次上游都不打，而且结果里说清为什么跳过。
+//
+// 夹具必须让**六处**暂停检查点都真的有活要干。上一版漏了两处：
+// SyncOptions.Withdrawals 是 nil（advanceWithdrawals 第一行就 return），
+// store 里也没有未收敛的操作（reconcileOperations 的循环一次都不进），
+// 于是那两处的 `if paused` 整段删掉，cards 与 jobs 全量测试照样全绿。
+// 其中 advanceWithdrawals 是**动钱**的那一步——一个被人为停掉的账号会继续
+// 被打上游推进提现，而门禁不会有任何反应。
 func TestSyncSkipsPausedAccountAndSaysSo(t *testing.T) {
 	store := newMemStore()
+	ctx := context.Background()
 
 	goodFake := infini.NewFake()
 	goodFake.ActivateOnApply()
@@ -69,14 +91,42 @@ func TestSyncSkipsPausedAccountAndSaysSo(t *testing.T) {
 	badFake.SeedCard(infini.Card{ID: "backup-1", Alias: "B", Status: "active"})
 
 	// 让两个账号名下都有已知的卡，否则「没打上游」可能只是因为没活要干。
-	if err := store.UpsertCard(context.Background(), "main",
+	if err := store.UpsertCard(ctx, "main",
 		infini.Card{ID: "main-1", Status: "active"}, CardAttribution{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.UpsertCard(context.Background(), "backup",
+	if err := store.UpsertCard(ctx, "backup",
 		infini.Card{ID: "backup-1", Status: "active"}, CardAttribution{}); err != nil {
 		t.Fatal(err)
 	}
+
+	// 两个账号各有一笔**未收敛的开卡**：不确定态对账那一步才会真的进循环。
+	for _, account := range []string{"main", "backup"} {
+		store.ops[account+"-op"] = Operation{
+			IdempotencyKey: account + "-op", Account: account,
+			Kind: OpIssue, State: StateUnknown,
+			Alias: account + "-alias", StartedAt: issueNow.Add(-time.Minute),
+		}
+	}
+
+	// 两个账号各有一笔**未收敛的提现**：推进提现那一步才会真的进循环。
+	// 这一步会打上游推进真金白银，暂停在这里最该被守住。
+	for _, account := range []string{"main", "backup"} {
+		fake := goodFake
+		if account == "backup" {
+			fake = badFake
+		}
+		if _, err := fake.Withdraw(ctx, infini.WithdrawRequest{
+			RequestID: account + "-w", Chain: "TRON", TokenType: "USDT", Amount: "10",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		store.withdrawals[account+"-w"] = WithdrawRecord{
+			RequestID: account + "-w", Account: account, Status: "pending",
+			Chain: "TRON", TokenType: "USDT", Amount: "10", UpdatedAt: issueNow,
+		}
+	}
+
 	store.pauses["backup"] = AccountSyncPause{
 		Account: "backup", Paused: true, Reason: pauseReason,
 		PausedBy: "human:ops", PausedAt: issueNow,
@@ -84,39 +134,59 @@ func TestSyncSkipsPausedAccountAndSaysSo(t *testing.T) {
 
 	good := &spyClient{CardClient: goodFake}
 	bad := &spyClient{CardClient: badFake}
-	syncer := NewSyncer([]Account{
+	accounts := []Account{
 		{ID: "backup", Client: bad},
 		{ID: "main", Client: good},
-	}, store, SyncOptions{
+	}
+	syncer := NewSyncer(accounts, store, SyncOptions{
 		UnknownGrace:     30 * time.Minute,
 		SyncTransactions: true,
+		Withdrawals:      NewWithdrawService(accounts, store, func() time.Time { return issueNow }),
 		Now:              func() time.Time { return issueNow },
 	})
 
-	round, err := syncer.RunOnce(context.Background())
+	round, err := syncer.RunOnce(ctx)
 	if err != nil {
 		t.Fatalf("暂停不是失败，不该让作业变红: %v", err)
 	}
 
-	// 五个计数器分别断言：一次只删一处跳过时才分得清漏了哪一处。
-	if bad.listCalls != 0 {
-		t.Fatalf("暂停账号不该列卡, got %d", bad.listCalls)
+	// 逐个计数器分别断言：一次只删一处跳过时才分得清漏了哪一处。
+	// 六处检查点 ↔ 六个计数器，一一对应。
+	for _, tc := range []struct {
+		what string
+		got  int
+	}{
+		{"列卡（发现卡片）", bad.listCalls},
+		{"按 alias 查卡（不确定态对账）", bad.aliasListCalls},
+		{"批量查状态", bad.batchCalls},
+		{"逐张查状态", bad.statusCalls},
+		{"拉明文", bad.revealCalls},
+		{"查流水", bad.txCalls},
+		{"查提现状态（动钱的那一步）", bad.withdrawCalls},
+	} {
+		if tc.got != 0 {
+			t.Errorf("暂停账号不该%s, got %d", tc.what, tc.got)
+		}
 	}
-	if bad.batchCalls != 0 {
-		t.Fatalf("暂停账号不该批量查状态, got %d", bad.batchCalls)
+
+	// 正向对照：上面每一条都必须有一个「没暂停就会打」的对照，
+	// 否则它们全是恒真的——夹具里根本没有那件活要干时，0 次调用不说明任何事。
+	for _, tc := range []struct {
+		what string
+		got  int
+	}{
+		{"列卡（发现卡片）", good.listCalls},
+		{"按 alias 查卡（不确定态对账）", good.aliasListCalls},
+		{"查提现状态（动钱的那一步）", good.withdrawCalls},
+		{"拉明文", good.revealCalls},
+		{"查流水", good.txCalls},
+	} {
+		if tc.got == 0 {
+			t.Errorf("未暂停的账号应照常%s，否则对应的缺席断言是恒真的", tc.what)
+		}
 	}
-	if bad.statusCalls != 0 {
-		t.Fatalf("暂停账号不该逐张查状态, got %d", bad.statusCalls)
-	}
-	if bad.revealCalls != 0 {
-		t.Fatalf("暂停账号不该拉明文, got %d", bad.revealCalls)
-	}
-	if bad.txCalls != 0 {
-		t.Fatalf("暂停账号不该查流水, got %d", bad.txCalls)
-	}
-	// 正向对照：不是整轮什么都没干（否则上面五条是恒真的）。
-	if good.total() == 0 {
-		t.Fatal("未暂停的账号应照常同步")
+	if good.batchCalls+good.statusCalls == 0 {
+		t.Error("未暂停的账号应照常查卡状态，否则对应的缺席断言是恒真的")
 	}
 
 	var sawSkip bool

@@ -146,11 +146,37 @@ keyId 与 secret 分成两个引用是为了让它们能各自轮换。keyId 是
 - **上游的 HTTP 状态码、业务码与脱敏后的 `message`** 进 `connector.Error.Detail`，
   因而进对外错误文本、作业结果与结构化日志。
 - **原始响应体**只进 `Unwrap` 链与服务端日志，不进对外文本。
-- 脱敏规则见 `connectors/infini/redact.go`：像凭据的字段（token/secret/key/
-  password/authorization/signature/digest/cvv…）**整个值去掉**；12~19 位数字串
-  （允许组间空格或连字符）**打成 `****` + 末 4 位**。分隔符类含全角冒号与
-  全角引号——本仓库的上游文案按约定用全角标点，只认 ASCII 冒号的掩码
-  在这个仓库里已经漏过一次。
+- 进对外文本的上游文本一律经 `safeUpstreamText`：**压平换行 → 脱敏 → 截断到
+  300 字节**，三步的顺序都是有理由的（见下）。这是唯一入口，由
+  `TestOnlySafeUpstreamTextReachesOutwardText` 扫源码钉住。
+- 脱敏规则见 `connectors/infini/redact.go`：
+  - **键名按小写子串判定，不是整词**。语义与 `internal/platform/audit` 的
+    `RedactDefault` 一致，覆盖关系由 `redact_shared_test.go` 遍历
+    `audit.SensitiveKeyFragments()` 验证（那边加一项而这边漏了会当场红）。
+    整词匹配挡不住 `access_token` / `client_secret` / `x_api_key` 这类
+    带前缀的复合字段名——`\btoken\b` 在 `access_token` 里因为下划线是词字符
+    而根本匹配不到。
+  - 命中键名的值**整个去掉**；`Bearer` / `Basic` / `Negotiate` 这类 scheme
+    后面的凭据**连 scheme 一起吃掉**（只盖住 scheme 会留下把 token 摆在
+    掩码标记旁边的假安全形状）。
+  - 没有分隔符的散文（`for api_key sk-live-…`）只在下一个词**看起来像密钥**
+    时才去掉；`signature mismatch` / `token expired` / `authorization denied`
+    这类诊断原话必须逐字活下来——本片存在的全部理由就是让上游原话到人眼前。
+    安全码另判：`cvv`/`cvc`（含 `cvv2` 这类变体）后面的 3~4 位数字一律去掉。
+  - 12~19 位数字串（允许组间空格或连字符）**打成 `****` + 末 4 位**：
+    卡号与凭据不同，末 4 位是运维认卡的依据，所以刻意不并进上面那份键名清单。
+  - 分隔符与键名的字符类含全角冒号、全角引号与中文——本仓库的上游文案按约定
+    用全角标点，只认 ASCII 冒号的掩码在这个仓库里已经漏过一次。
+- **压平换行必须在脱敏之前**：分隔符字符类不含 `\n`，键与值跨行的键值对会
+  整个逃过脱敏，而随后的压平又把它排成一行漂亮的可读文本。美化过的 JSON 与
+  网关错误页正是响应体最常见的两种形状。
+- **截断必须在脱敏之后**：反过来的话，一个正好跨在 300 字节边界上的卡号会被
+  切成两截，两截都短于 12 位于是都逃过掩码。
+- **长度上限对 `message` 与响应体一视同仁**。`message` 那条路此前不截断，
+  而这段文本会每 5 分钟落一次 ops 观测的 `value_json`、进 `alerts.detail`
+  （无上限的 text 列），最后进 Telegram sendMessage 的 body（单条上限 4096
+  字符）——一个话痨或被打崩的上游既能把库撑大，又能让 `cards.sync.failed`
+  这条告警投不出去，而那条告警正是本片用来替换「作业变红」的东西。
 
 这是对此前写法的一次**有意放宽**，理由必须记下来：ADR-004 的铁律原文是
 「第三方错误不得原样透传给**用户**」，而实现此前执行成了「不透传给**调用方**」

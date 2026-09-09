@@ -1205,12 +1205,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	if cfg.CardSyncEnabled {
-		// 观测是 alerts 的 cards.sync.failed 规则的**唯一输入**，所以这里必装：
-		// 漏了的话规则永远不会命中，而且不会有任何报错——RunOnce 现在对部分
-		// 成功返回 nil，作业本身也不再变红，于是「某个账号一直在失败」这件事
-		// 就彻底没有承载物了（XM-CARD-VISIBILITY）。
-		river.AddWorker(workers, NewCardSyncWorker(cfg.Logger, cfg.CardSyncer).
-			WithObservations(ops.NewStore(pool), cfg.Environment, cfg.CardSyncInterval))
+		river.AddWorker(workers, newCardSyncWorkerFor(cfg, pool))
 		cardPeriodic, err := newManifestPeriodicJob(
 			CardSyncJobKind, cfg.CardSyncInterval, cfg.CardSyncRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {

@@ -306,3 +306,32 @@ func TestCardSyncWorkerPartialSuccessIsNotAJobFailure(t *testing.T) {
 		t.Fatal("部分成功也要留一条日志，不能静默")
 	}
 }
+
+// 装配必须把观测装上——这条约束此前只活在一句注释里。
+//
+// 本片做了一次有意的信号让渡：部分成功返回 nil、全砸且不值得再试落
+// cancelled，作业不再变红。于是「某个账号一直在失败」只剩 cards.sync.status
+// 这一个承载物，而 cards.sync.failed 规则以它为唯一输入。把那一行
+// .WithObservations(...) 删掉，全仓门禁照样全绿、告警从此结构上不可能响、
+// 而且不会有任何报错——这正是「被信任的过期闸最危险」那一条：
+// 约束只写在注释里，等于没写。
+func TestCardSyncWorkerAssemblyWiresObservations(t *testing.T) {
+	cfg := Config{
+		Environment:      "production",
+		CardSyncInterval: DefaultCardSyncInterval,
+	}
+	// pool 传 nil：这条用例问的是「装没装上」，不是「写得进库吗」。
+	w := newCardSyncWorkerFor(cfg, nil)
+
+	if w.observations == nil {
+		t.Fatal("装配漏了观测：cards.sync.failed 从此不可能命中，且不会有任何报错")
+	}
+	if w.environment != cfg.Environment {
+		t.Fatalf("环境没传进去 = %q, want %q（观测会落到错误的环境上）",
+			w.environment, cfg.Environment)
+	}
+	if w.expectedInterval != cfg.CardSyncInterval {
+		t.Fatalf("周期没传进去 = %v, want %v（新鲜度阈值会算错）",
+			w.expectedInterval, cfg.CardSyncInterval)
+	}
+}

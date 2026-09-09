@@ -247,7 +247,7 @@ func (c *Client) switchOp(ctx context.Context, path, cardID string) error {
 		// 上游原文脱敏后进 Detail（对外文本与日志都看得到），原文进 cause。
 		// 冻结/解冻是运营当场点的按钮，失败时有人正等着看「为什么」。
 		return connector.NewErrorWithDetail(connector.KindRejected, "infini "+path,
-			"upstream refused: "+redactUpstreamText(data.Message),
+			"upstream refused: "+safeUpstreamText(data.Message),
 			fmt.Errorf("upstream refused: %s", data.Message))
 	}
 	return nil
@@ -549,7 +549,7 @@ func (c *Client) DeleteCard(ctx context.Context, cardID string) error {
 		// 上游原文脱敏后进 Detail，原文进 cause（ADR-004）。当成成功会让
 		// 页面显示「已关停」而卡还活着——那是最坏的一种错。
 		return connector.NewErrorWithDetail(connector.KindRejected, "infini "+path,
-			"upstream refused: "+redactUpstreamText(data.Message),
+			"upstream refused: "+safeUpstreamText(data.Message),
 			fmt.Errorf("upstream refused: %s", data.Message))
 	}
 	return nil

@@ -98,7 +98,7 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 		// 常规形状（见 kindForBusinessCode），而卡 API 没有错误码表——
 		// message 的文字是此刻唯一存在的证据。把它丢掉就等于把诊断丢掉。
 		return connector.NewErrorWithDetail(kindForBusinessCode(env.Code), op,
-			fmt.Sprintf("upstream code %d: %s", env.Code, redactUpstreamText(env.Message)),
+			fmt.Sprintf("upstream code %d: %s", env.Code, safeUpstreamText(env.Message)),
 			fmt.Errorf("upstream code %d: %s", env.Code, env.Message))
 	}
 
@@ -124,11 +124,11 @@ const bodyPrefixLimit = 300
 
 // bodyPrefix 脱敏、截断响应体并压平换行，供**对外可见**的 Detail 使用。
 //
-// 脱敏在截断之前：反过来的话，一个正好跨在 300 字节边界上的卡号会被切成
-// 两截，两截都短于 12 位于是都逃过 digitRun——那是一条只在长响应体上才
-// 发作的泄漏。要原样的那一份用 rawBodyPrefix。
+// 压平与脱敏的先后顺序在 redactUpstreamText 里（它自己压平），这里不能
+// 先压平再交给它：那样看起来一样，但三个 message 入口不经过本函数，
+// 顺序保证就只覆盖了一半的路。要原样的那一份用 rawBodyPrefix。
 func bodyPrefix(raw []byte) string {
-	return truncateFlat(redactUpstreamText(strings.TrimSpace(string(raw))))
+	return safeUpstreamText(string(raw))
 }
 
 // rawBodyPrefix 只截断不脱敏，**仅供 Unwrap 链**。
