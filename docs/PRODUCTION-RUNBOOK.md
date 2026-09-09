@@ -2447,10 +2447,18 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
 账号，不是 issuer），但那个错误的 issuer 会永久留在库里
 （`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong`）。
 
-工具还会把这个 issuer 与**库里该平台已有身份的 issuer** 对一遍：对不上直接拒绝，
-对得上则在 `issuer:` 行标 `(matches every existing identity for this platform)`。
-只有该平台**第一个**身份没有东西可比，那一行会标
-`<- FIRST identity for this platform`，必须人工核对。
+工具还会把这个 issuer 与**该来源上已有的「平台登录铸出来的」身份的 issuer** 对一遍：
+对不上直接拒绝，对得上则在 `issuer:` 行标
+`(matches every platform-login identity on this source)`。
+
+比对范围只取「在这个 source 上持有 `platform_password_login` 或 `operator_attested`
+绑定」的身份——**不是该平台的全部身份**。生产里还有由中心 OIDC 铸出、随后认领了
+平台身份的用户（issuer 是 `auth.solov.cc/realms/solov`，绑定是
+`source_signed_oidc_projection`），他们的 issuer 本来就该不一样，不构成矛盾。按
+「该平台全部身份」去比会看到两个 issuer，从而拒绝掉**每一次** sub2api 代绑定。
+
+只有该来源上**第一个**平台登录身份没有东西可比，那一行会标
+`<- FIRST platform-login identity on this source`，必须人工核对。
 
 `--email` 可选，存的是密文且 `email_verified` 保持 FALSE——运营在终端里敲进去的
 地址不构成验证，真正的收件地址仍然要客户自己验。**注意 `--email` 的值会明文留在
@@ -2508,8 +2516,9 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
 **逐行核对，不要只看 `timing gate`。** 摘要里能拦住不可逆误操作的就这几行：
 
 - **`issuer:`** —— 必须等于 api 容器实际在用的值。行尾要么是
-  `(matches every existing identity for this platform)`（库已经替你对过了），
-  要么是 `<- FIRST identity for this platform`（**库里没有可比对象，只有你能
+  `(matches every platform-login identity on this source)`（库已经替你对过了；比对
+  范围只含平台登录/代绑定铸的身份，中心 OIDC 用户不算矛盾），要么是
+  `<- FIRST platform-login identity on this source`（**库里没有可比对象，只有你能
   把关**）。后一种情况先跑一次这个再继续：
 
   ```bash

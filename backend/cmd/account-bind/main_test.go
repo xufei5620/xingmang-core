@@ -199,7 +199,7 @@ func TestRunDryRunAgainstAnEmptyDatabaseReportsAPlan(t *testing.T) {
 		// checklist, plus the warning that makes the dangerous case visible
 		// without an operator having to compare numbers by eye.
 		"ingest waiting:      0",
-		"FIRST identity for this platform",
+		"FIRST platform-login identity on this source",
 		"WARNING: no parked facts for this external id",
 		"Re-run with --apply",
 	} {
@@ -291,7 +291,7 @@ func TestRunRefusesAnIssuerThatDisagreesWithTheDatabase(t *testing.T) {
 		bindOptions{platform: "sub2api", externalUserID: "7788", apply: true, operatorID: cliOperatorID}, &first); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(first.String(), "FIRST identity for this platform") {
+	if !strings.Contains(first.String(), "FIRST platform-login identity on this source") {
 		t.Fatalf("the first bind did not flag that nothing corroborates its issuer:\n%s", first.String())
 	}
 
@@ -304,7 +304,7 @@ func TestRunRefusesAnIssuerThatDisagreesWithTheDatabase(t *testing.T) {
 	if err == nil {
 		t.Fatal("accepted an issuer that disagrees with every existing identity for the platform")
 	}
-	if !strings.Contains(err.Error(), "does not match the issuer every existing") {
+	if !strings.Contains(err.Error(), "does not match the issuer every platform-login") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	var users int64
@@ -322,7 +322,7 @@ func TestRunRefusesAnIssuerThatDisagreesWithTheDatabase(t *testing.T) {
 		bindOptions{platform: "sub2api", externalUserID: "9911"}, &third); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(third.String(), "matches every existing identity for this platform") {
+	if !strings.Contains(third.String(), "matches every platform-login identity on this source") {
 		t.Fatalf("a corroborated issuer was not reported as such:\n%s", third.String())
 	}
 }

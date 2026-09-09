@@ -263,7 +263,7 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 		return OperatorBindResult{}, err
 	}
 
-	if result.PlatformIssuerInUse, err = checkPlatformIssuerConsistency(ctx, tx, platform, issuer); err != nil {
+	if result.PlatformIssuerInUse, err = checkPlatformIssuerConsistency(ctx, tx, platform, result.SourceInstanceID, issuer); err != nil {
 		return OperatorBindResult{}, err
 	}
 	if result.FactsEverSeen, err = countFactsEverSeen(ctx, tx, in.DependencyKeyHMAC); err != nil {
@@ -392,25 +392,51 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 }
 
 // checkPlatformIssuerConsistency refuses an issuer that disagrees with the one
-// every existing invoice_users row for this platform already carries, and
-// returns that in-use issuer (or "" when this platform has no rows yet).
+// the running api demonstrably mints for platform logins on this source, and
+// returns that in-use issuer (or "" when this source has no such identity yet).
 //
 // The issuer reaching this function came from the operator's environment, and
 // a wrong one is written permanently: the customer's later real login claims
 // the shadow row through the external account, never through (issuer,
 // subject), so it does not repair the column -- proved by cmd/api's
 // TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong. Every
-// session identity hash and the email AAD derive from it.
+// session identity hash and the email AAD derive from it. So rather than
+// trusting the environment, the value is checked against production evidence.
 //
-// So rather than trusting the environment, the value is checked against what
-// the running api demonstrably minted for earlier logins on the same platform.
-// Note honestly what this cannot do: on a platform whose first-ever row this
-// bind is creating, there is nothing to compare against and the check passes
-// vacuously. That first bind's issuer line has to be read by a human -- which
-// is exactly why the runbook's dry-run checklist names it.
-func checkPlatformIssuerConsistency(ctx context.Context, tx pgx.Tx, platform, issuer string) (string, error) {
+// Choosing that evidence correctly is the whole difficulty, and the first
+// version of this got it wrong. It compared against every invoice_users row
+// with platform=<platform>, which on a fixture containing only platform-login
+// identities looked right and on the real database was not: production also
+// holds an identity minted by the CENTRAL OIDC provider (issuer
+// auth.solov.cc/realms/solov) that later claimed a sub2api platform identity,
+// so the query returned two issuers and the "more than one, refuse until
+// explained" branch would have rejected every single sub2api bind on the very
+// first production dry run.
+//
+// The population that actually answers the question is: identities owning a
+// binding on THIS source that was created by a platform password login or by
+// this tool. Those are exactly the identities whose oidc_issuer the api
+// derived from the platform login origin. A source_signed_oidc_projection
+// binding belongs to a centrally-minted identity whose issuer is legitimately
+// something else, so it is excluded rather than treated as a contradiction.
+//
+// Scoping by external_accounts.source_instance_id rather than by
+// invoice_users.platform is also deliberate: that column records only the
+// FIRST platform a login claimed (see runtime.go's claim branch and the RC57
+// canary), so a multi-platform identity carries just one of its platforms
+// there and would be scoped wrongly.
+//
+// What this still cannot do: on a source whose first platform-login identity
+// this bind is creating, there is nothing to compare against and the check
+// passes vacuously. That first bind's issuer line has to be read by a human,
+// which is why the summary flags it.
+func checkPlatformIssuerConsistency(ctx context.Context, tx pgx.Tx, platform, sourceInstanceID, issuer string) (string, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT DISTINCT oidc_issuer FROM invoice_users WHERE platform=$1 ORDER BY oidc_issuer LIMIT 5`, platform)
+		SELECT DISTINCT u.oidc_issuer
+		FROM invoice_users u
+		JOIN external_accounts a ON a.invoice_user_id=u.id
+		WHERE a.source_instance_id=$1 AND a.binding_method IN ('platform_password_login',$2)
+		ORDER BY u.oidc_issuer LIMIT 5`, sourceInstanceID, BindingMethodOperatorAttested)
 	if err != nil {
 		return "", err
 	}
@@ -431,12 +457,12 @@ func checkPlatformIssuerConsistency(ctx context.Context, tx pgx.Tx, platform, is
 	}
 	if len(inUse) > 1 {
 		return "", fmt.Errorf(
-			"invoice_users already holds %d different oidc_issuer values for platform %q (%s); refusing to add another until that is explained",
-			len(inUse), platform, strings.Join(inUse, ", "))
+			"%d different oidc_issuer values are in use by platform-login identities on source %s (%s); refusing to add another until that is explained",
+			len(inUse), sourceInstanceID, strings.Join(inUse, ", "))
 	}
 	if inUse[0] != issuer {
 		return "", fmt.Errorf(
-			"issuer %q does not match the issuer every existing %s identity carries (%q); the login origin this tool read from the environment is not the one the running api uses",
+			"issuer %q does not match the issuer every platform-login %s identity carries (%q); the login origin this tool read from the environment is not the one the running api uses",
 			issuer, platform, inUse[0])
 	}
 	return inUse[0], nil

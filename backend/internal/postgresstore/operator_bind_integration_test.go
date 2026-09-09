@@ -879,3 +879,95 @@ func TestOperatorBindFiresTheInvoiceOIDCUserWake(t *testing.T) {
 		t.Fatalf("another identity's fact became %q; the wake is not scoped", status)
 	}
 }
+
+// TestOperatorBindIssuerCheckIgnoresCentrallyMintedIdentities is the shape the
+// first version of checkPlatformIssuerConsistency got wrong, reproduced from
+// the real production distribution rather than from a convenient fixture.
+//
+// Production holds, on the sub2api source: nine identities minted by platform
+// password login (issuer https://api.solov.cc), and one minted by the CENTRAL
+// OIDC provider (issuer https://auth.solov.cc/realms/solov) that later claimed
+// a sub2api platform identity and owns a source_signed_oidc_projection
+// binding. The original check selected every invoice_users row with
+// platform='sub2api', saw two distinct issuers, and would have refused every
+// sub2api bind on the first production dry run -- a predicate that held on a
+// fixture and failed on the real database.
+//
+// So this fixture deliberately contains both kinds at once. The centrally
+// minted identity must be ignored (its issuer is legitimately different), and
+// the platform-login issuer must be the one reported.
+//
+// Mutation that must turn this red: drop the binding_method filter from the
+// query, which is what makes the centrally minted identity invisible to it.
+func TestOperatorBindIssuerCheckIgnoresCentrallyMintedIdentities(t *testing.T) {
+	store, ctx, _ := seedShadowBindFixture(t)
+	const centralIssuer = "https://auth.solov.cc/realms/solov"
+
+	// Two identities minted the ordinary way: platform password login, issuer
+	// = the platform login origin, bound with platform_password_login.
+	for _, upstreamID := range []string{"1001", "1002"} {
+		user, err := store.EnsureUser(ctx, UserRecord{
+			OIDCIssuer: shadowIssuer, OIDCSubject: upstreamID, Status: "active",
+		}, shadowActor())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err = store.ClaimPlatformIdentity(ctx, user.ID, "sub2api", upstreamID, shadowActor()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.BindExternalAccount(ctx, ExternalAccountRecord{
+			PrincipalID: user.ID, SourceInstanceID: shadowSourceID, ExternalUserID: upstreamID,
+			ExternalSubjectHMAC: shadowSubjectHMAC(upstreamID),
+			BindingMethod:       "platform_password_login", BindingStatus: "verified",
+		}, shadowActor()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// One identity minted by the central OIDC provider: its oidc_subject is a
+	// Keycloak UUID, its issuer is the SSO realm, it later claimed a sub2api
+	// platform identity, and its binding came from the signed projection.
+	central, err := store.EnsureUser(ctx, UserRecord{
+		OIDCIssuer: centralIssuer, OIDCSubject: "3f7c1c1e-0d2b-4a55-9f1a-2c9d5e7b8a10", Status: "active",
+	}, shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = store.ClaimPlatformIdentity(ctx, central.ID, "sub2api", "2048", shadowActor()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.BindExternalAccount(ctx, ExternalAccountRecord{
+		PrincipalID: central.ID, SourceInstanceID: shadowSourceID, ExternalUserID: "2048",
+		ExternalSubjectHMAC: shadowSubjectHMAC("2048"),
+		BindingMethod:       "source_signed_oidc_projection", BindingStatus: "verified",
+	}, shadowActor()); err != nil {
+		t.Fatal(err)
+	}
+	// Guard the guard: if this row were not actually visible to a naive
+	// platform-scoped query, the test would prove nothing about excluding it.
+	var naiveIssuers int64
+	if err = store.pool.QueryRow(ctx, `
+		SELECT count(DISTINCT oidc_issuer) FROM invoice_users WHERE platform='sub2api'`).Scan(&naiveIssuers); err != nil {
+		t.Fatal(err)
+	}
+	if naiveIssuers != 2 {
+		t.Fatalf("fixture does not reproduce the production shape: a platform-scoped query sees %d issuers, want 2", naiveIssuers)
+	}
+
+	bound, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatalf("a centrally minted identity blocked an ordinary bind: %v", err)
+	}
+	if bound.PlatformIssuerInUse != shadowIssuer {
+		t.Fatalf("corroborating issuer is %q, want the platform-login one %q", bound.PlatformIssuerInUse, shadowIssuer)
+	}
+
+	// A genuinely contradictory platform-login issuer must still be refused.
+	moved := shadowBindInput("8899", true)
+	moved.Issuer = "https://api.moved.example"
+	if _, err = store.OperatorBindExternalAccount(ctx, moved, shadowActor()); err == nil {
+		t.Fatal("accepted an issuer that contradicts the platform-login identities")
+	} else if !strings.Contains(err.Error(), "does not match the issuer every platform-login") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

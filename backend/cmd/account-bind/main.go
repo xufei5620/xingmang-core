@@ -316,14 +316,18 @@ func modeLabel(apply bool) string {
 }
 
 // issuerProvenance annotates the issuer line with whether anything in the
-// database corroborates it. On a platform's first-ever identity there is
-// nothing to compare against, and the operator is the only check -- the line
+// database corroborates it. The comparison population is identities that own a
+// platform-login or operator-attested binding on this source -- NOT every
+// identity carrying this platform, which also includes centrally minted OIDC
+// users whose issuer is legitimately different (see
+// checkPlatformIssuerConsistency). On a source's first such identity there is
+// nothing to compare against and the operator is the only check, so the line
 // says so rather than looking as verified as a corroborated one.
 func issuerProvenance(result postgresstore.OperatorBindResult) string {
 	if result.PlatformIssuerInUse == "" {
-		return "   <- FIRST identity for this platform: nothing in the database corroborates this. Verify it by hand."
+		return "   <- FIRST platform-login identity on this source: nothing corroborates this. Verify it by hand."
 	}
-	return "   (matches every existing identity for this platform)"
+	return "   (matches every platform-login identity on this source)"
 }
 
 func printSummary(out io.Writer, platform, issuer, externalUserID string, result postgresstore.OperatorBindResult) {

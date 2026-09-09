@@ -136,6 +136,7 @@ dry-run 不写库、apply 端到端。
 | 14 | 删掉 `invoice_oidc_user` 唤醒（复审 C） | 红：`released=0 want 1` |
 | 15 | 关掉 `--external-user-id` 数字校验（复审 E） | 红：四个反例全部落到后面的环境变量检查上，说明校验没在参数阶段拦住 |
 | 17 | 把唤醒 WHERE 里的 `dependency_key_hmac=$2` 换成恒真条件（复审 G 的诱饵） | 红：`released=3 want 2` 与 `released=2 want 1`；加诱饵前这一改是看不出来的 |
+| 18 | issuer 检查删掉 binding_method 过滤（退回上一轮的比对集） | 红：`2 different oidc_issuer values ... refusing to add another until that is explained`，与复审员预测的生产失败一字不差 |
 
 变异 7 顺带查出一件对运行手册有用的事：影子用户是按「真登录会铸的同一对
 (issuer, subject)」建的，所以**即使认领分支不存在**，`ResolveOrCreate` 也会找到
@@ -353,6 +354,53 @@ source_ingest_events；投影写入方不碰 invoice_users，无环。
   `/app/migrations` 与 `/app/qpdf-policy-gate`，没有 `/app/bin`，tools 二进制也不在
   api 镜像里。也就是说那两段在「docker exec 进 api 容器」语境下同样不成立。与
   「RC104 跑成功过」的记忆冲突，需要有人去查当时到底跑的是什么。
+
+## 4d. 复审拿生产数据打回：issuer 检查的比对集选错了
+
+我上一轮加的 `checkPlatformIssuerConsistency` 用的是「`invoice_users` 里
+`platform=<平台>` 的全部行」。这在我的 fixture 上成立，在真库上不成立——复审员
+拿生产只读数据一对就红了。生产 sub2api 侧的分布是：
+
+| platform | oidc_issuer | 行数 | 来源 |
+|---|---|---|---|
+| sub2api | `https://api.solov.cc` | 9 | 平台密码登录铸的 |
+| sub2api | `https://auth.solov.cc/realms/solov` | 1 | 中心 OIDC 铸的，随后认领了 sub2api 平台身份，绑定是 `source_signed_oidc_projection` |
+| newapi | `https://xm.solov.cc` | 1 | 平台密码登录铸的 |
+| （空） | `https://console.solov.cc` | 1 | 不影响 |
+
+于是 `SELECT DISTINCT oidc_issuer ... WHERE platform='sub2api'` 返回 2 个值，
+撞上我那条 `len(inUse) > 1` 的「先解释清楚再说」分支，**每一次 sub2api 代绑定都会
+被拒**，第一次生产 dry-run 就会撞上。
+
+这正是我自己在 4b 节里写「让判据为自己负责」时想防的那类错误的另一面：判据换了，
+但**取证范围**是我手列的，而手列的范围只反映了 fixture 里有什么。
+
+改法选了派工给的 (b)，并且再收紧一点：比对集是「在**这个 source instance** 上持有
+`platform_password_login` 或 `operator_attested` 绑定的身份」。
+
+- 用 binding_method 过滤，是因为它就是「这个身份由平台登录铸出来」的直接证据；
+  `source_signed_oidc_projection` 属于中心 OIDC 铸的身份，issuer 本来就该不同，
+  是要排除的对象而不是矛盾。
+- 用 `external_accounts.source_instance_id` 而不是 `invoice_users.platform` 限定范围，
+  是因为后者只记录**首次认领**的那个平台（runtime.go 认领分支 + RC57 canary），
+  多平台身份在那一列里只会留下一个平台，范围会取错。
+
+没选 (a)（`oidc_subject = platform_user_id`）的理由：它靠的是「中心 OIDC 的 subject
+是 Keycloak UUID、不会等于十进制上游 id」这个**格式巧合**。今天成立，但它不是被任何
+约束保证的，属于「靠外部事实成立的判断」。(b) 用的是语义证据。
+
+测试 `TestOperatorBindIssuerCheckIgnoresCentrallyMintedIdentities`：fixture 里同时
+造两个平台登录身份和一个「中心 OIDC issuer + 已认领 sub2api 平台身份 +
+`source_signed_oidc_projection` 绑定」的身份，先断言**朴素查询确实看得到 2 个
+issuer**（不然这个测试什么也没证明），再断言检查通过、`PlatformIssuerInUse` 是平台
+登录那个；最后仍然断言一个真正矛盾的平台登录 issuer 会被拒。
+
+变异 18（把 binding_method 过滤删掉，退回按 source 取全部绑定）→ 红，报的正是
+`2 different oidc_issuer values ... refusing to add another until that is explained`
+——与复审员预测的生产失败一字不差。
+
+摘要那一行与手册的措辞同步改成「与该来源上平台登录铸的身份一致」，并写明中心 OIDC
+用户为什么不算矛盾。
 
 ## 5. 偏离与未证实
 
