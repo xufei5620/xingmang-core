@@ -207,15 +207,15 @@ if ($statusLines.Count -ne 0) { throw 'RC100 source worktree is dirty' }
 # 下面三步的合取——签名 tag 打出来、`git verify-tag` 回 Good、该 tag 剥离后的提交
 # 逐字等于 HEAD——三步齐了才算「这份源码被发布者签过」。理由见本代码块后一段。
 # 2026-09-09 负责人定案：改文档，不改成签提交。
-git tag -s -a v0.1.0-rc109-signed -m 'RC100 image-security release candidate'
+git tag -s -a v0.1.0-rc110-signed -m 'RC100 image-security release candidate'
 $tagCreateExit = $LASTEXITCODE
 if ($tagCreateExit -ne 0) { throw "RC100 signed tag creation failed with exit $tagCreateExit" }
 # 信任锚 (1/2)：tag 上的 Ed25519 签名必须 Good。
-git verify-tag refs/tags/v0.1.0-rc109-signed
+git verify-tag refs/tags/v0.1.0-rc110-signed
 $tagVerifyExit = $LASTEXITCODE
 if ($tagVerifyExit -ne 0) { throw "RC100 tag signature verification failed with exit $tagVerifyExit" }
 # 信任锚 (2/2)：tag 剥离后的提交必须逐字等于候选 HEAD，否则签的不是这份源码。
-$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc109-signed^{}')
+$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc110-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 $headLines = @(git rev-parse --verify HEAD)
 $headExit = $LASTEXITCODE
@@ -251,19 +251,19 @@ $worktreeLines = @(git rev-parse --show-toplevel)
 $worktreeExit = $LASTEXITCODE
 $headLines = @(git rev-parse --verify HEAD)
 $headExit = $LASTEXITCODE
-$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc109-signed^{}')
+$tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc110-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 if ($worktreeExit -ne 0 -or $headExit -ne 0 -or $tagHeadExit -ne 0 -or
     -not [string]::Equals(($worktreeLines -join '').Trim(), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, [StringComparison]::OrdinalIgnoreCase) -or
     ($headLines -join '').Trim() -cne ($tagHeadLines -join '').Trim()) { throw 'RC100 worktree/tag/HEAD binding failed' }
 $rc100ReleaseDirectory = 1..99 |
-  ForEach-Object { "release\0.1.0-rc109-exact$_" } |
+  ForEach-Object { "release\0.1.0-rc110-exact$_" } |
   Where-Object { -not (Test-Path -LiteralPath $_) } |
   Select-Object -First 1
 if ([string]::IsNullOrWhiteSpace($rc100ReleaseDirectory)) { throw 'no unused RC100 exact directory remains' }
 pwsh -NoProfile -File .\scripts\release-image-gate.ps1 `
-  -ReleaseName 0.1.0-rc109 `
-  -ImageTag 0.1.0-rc109 `
+  -ReleaseName 0.1.0-rc110 `
+  -ImageTag 0.1.0-rc110 `
   -SourceAgentVersion 0.3.0 `
   -ReleaseDirectory $rc100ReleaseDirectory `
   -IdPMode keycloak
@@ -272,7 +272,7 @@ if ($imageGateExit -ne 42) { throw "RC100 image gate expected exit 42, got $imag
 pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc100ReleaseDirectory
 $ordinaryVerifyExit = $LASTEXITCODE
 if ($ordinaryVerifyExit -ne 0) { throw "ordinary RC100 artifact verification failed with exit $ordinaryVerifyExit" }
-pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc100ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc109-signed
+pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc100ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed
 $strictVerifyExit = $LASTEXITCODE
 if ($strictVerifyExit -ne 0) { throw "strict RC100 transfer-ready verification failed with exit $strictVerifyExit" }
 ```
@@ -470,7 +470,7 @@ both verifiers must exit `0`.
 
 Strict mode verifies the annotated tag signature and peels it to a commit. It
 then requires `source.gitDirty=false`, a 40-hex `source.gitHead` equal to that
-commit, `releaseName=0.1.0-rc109`, all nine exact `:0.1.0-rc109` image
+commit, `releaseName=0.1.0-rc110`, all nine exact `:0.1.0-rc110` image
 references, `applicationImageGate=passed`, and exactly one production block reason:
 `idp_self_hosted_pending_canary`. Missing or additional reasons fail closed.
 `productionLaunch` must remain `blocked`; transfer is preparation for the real
@@ -492,8 +492,8 @@ independent allowed-signers file:
 
 ```powershell
 $strictReadyCandidates = [Collections.Generic.List[string]]::new()
-foreach ($candidate in Get-ChildItem -LiteralPath release -Directory -Filter '0.1.0-rc109-exact*') {
-  pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $candidate.FullName -RequireTransferReady -SignedReleaseTag v0.1.0-rc109-signed
+foreach ($candidate in Get-ChildItem -LiteralPath release -Directory -Filter '0.1.0-rc110-exact*') {
+  pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $candidate.FullName -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed
   $candidateVerifyExit = $LASTEXITCODE
   if ($candidateVerifyExit -eq 0) { $strictReadyCandidates.Add($candidate.FullName) }
 }
@@ -926,7 +926,7 @@ Generate the application field keyring without printing key material:
 ```bash
 export INVOICE_IMAGE_TAG='<exact tag from the verified RC100 release manifest>'
 : "${RC100_RELEASE_DIRECTORY:?set the exact strict-verified and signed RC100 exactN directory name from the release ticket}"
-case "$RC100_RELEASE_DIRECTORY" in 0.1.0-rc109-exact[1-9]|0.1.0-rc109-exact[1-9][0-9]) ;; *) echo 'invalid RC100 release directory' >&2; exit 1 ;; esac
+case "$RC100_RELEASE_DIRECTORY" in 0.1.0-rc110-exact[1-9]|0.1.0-rc110-exact[1-9][0-9]) ;; *) echo 'invalid RC100 release directory' >&2; exit 1 ;; esac
 RELEASE_MANIFEST="/root/invoice-system/release/$RC100_RELEASE_DIRECTORY/release-manifest.json"
 # The transferred manifest-bound images must already exist; production never builds or pulls them.
 test "$(jq '[.images[] | .name] | length' "$RELEASE_MANIFEST")" -eq 9
