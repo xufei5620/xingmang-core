@@ -272,6 +272,13 @@ function alertColumns(
           <span className="block text-xs text-fg-muted">
             最近 {formatUtcTimestamp(alert.last_seen_at)}
           </span>
+          {/* 确认时刻在场才显示：它回答「我确认之后它还在不在响」——「最近」晚于
+              「确认」就是还在。null 表示没人确认过，不拿零值时间冒充 */}
+          {alert.acknowledged_at ? (
+            <span className="block text-xs text-fg-muted">
+              确认 {formatUtcTimestamp(alert.acknowledged_at)}
+            </span>
+          ) : null}
           {alert.resolved_at ? (
             <span className="block text-xs text-fg-muted">
               恢复 {formatUtcTimestamp(alert.resolved_at)}

@@ -5,6 +5,8 @@ import type { ApprovalItem } from "../api/approvals";
 import type { JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import {
+  acknowledgedGroupHeading,
+  acknowledgedWorkItems,
   approvalsDueSoonCount,
   focusRows,
   platformMatrixRows,
@@ -112,13 +114,23 @@ describe("顶部四格的计数口径", () => {
     expect(urgentCount(alerts)).toBe(1);
   });
 
-  it("已确认与已静默的严重告警仍然算紧急", () => {
+  it("已静默的严重告警仍然算紧急", () => {
     // 静默不是解决：静默期间「紧急」掉到 0，正是最容易出事的时候
+    const alerts = [alert({ id: "2", severity: "critical", status: "SILENCED" })];
+    expect(urgentCount(alerts)).toBe(1);
+  });
+
+  // 这条以前写的是「已确认与已静默的严重告警仍然算紧急」。负责人按了确认之后
+  // 看到「紧急」纹丝不动，得出的结论是「确认没生效」——一个永远降不下来的数
+  // 回答不了「要不要放下手里的事」。已确认的有人在管；静默的没人管，仍算。
+  it("已确认的严重告警不算紧急：有人认领了，不再催人放下手里的事", () => {
     const alerts = [
-      alert({ id: "1", severity: "critical", status: "ACKNOWLEDGED" }),
-      alert({ id: "2", severity: "critical", status: "SILENCED" }),
+      alert({ id: "1", severity: "critical", status: "ACKNOWLEDGED", acknowledged_at: "2026-08-28T11:10:00Z" }),
+      alert({ id: "2", severity: "critical", status: "OPEN" }),
     ];
-    expect(urgentCount(alerts)).toBe(2);
+    // 对照组在场：只有一条 ACKNOWLEDGED 时断言 0 太容易恒真（空数组也是 0）
+    expect(urgentCount(alerts)).toBe(1);
+    expect(urgentCount([alerts[0] as AlertItem])).toBe(0);
   });
 
   it("「最近恢复」只数窗口内已解决的", () => {
@@ -223,6 +235,76 @@ describe("我的待处理", () => {
       NOW,
     );
     expect(items.map((i) => i.id)).toEqual(["crit", "warn"]);
+  });
+
+  // 生产事实（2026-09-09）：upstream.version.changed 那条 ACKNOWLEDGED 于 15:45Z，
+  // 此后 fire_count 每分钟 +1、last_seen_at 每轮更新，而工作台把它与未处理的
+  // 混排、标「警告」、只写「已持续 13 小时」。负责人原话：「这个没有带时间，
+  // 我感觉好像我确认之后还在告警」。下面这一组把三件事分开钉住：不混排、不催、
+  // 给绝对时刻。
+  describe("已确认的告警：不混排、不催、给绝对时刻", () => {
+    const acked = alert({
+      id: "acked",
+      severity: "warning",
+      status: "ACKNOWLEDGED",
+      title: "上游版本变化",
+      opened_at: "2026-08-27T13:31:00Z",
+      acknowledged_at: "2026-08-27T15:45:00Z",
+      last_seen_at: "2026-08-28T11:59:00Z",
+      fire_count: 821,
+    });
+
+    it("已确认的不进未处理列表，而进已确认组——两边都用整个 id 数组相等，缺席不恒真", () => {
+      const input = [alert({ id: "open" }), acked, alert({ id: "gone", status: "RESOLVED" })];
+      // 「acked 不在这里」靠的是整个数组相等：把过滤删掉它就会多出来
+      expect(workItemsFromAlerts(input, NOW).map((i) => i.id)).toEqual(["open"]);
+      expect(acknowledgedWorkItems(input, NOW).map((i) => i.id)).toEqual(["acked"]);
+    });
+
+    it("已解决的不进已确认组，哪怕它带着当年的确认时刻", () => {
+      const resolved = alert({
+        id: "resolved",
+        status: "RESOLVED",
+        acknowledged_at: "2026-08-27T15:45:00Z",
+        resolved_at: "2026-08-28T00:00:00Z",
+      });
+      expect(acknowledgedWorkItems([resolved, acked], NOW).map((i) => i.id)).toEqual(["acked"]);
+    });
+
+    it("已确认组的行不再挂「警告 / 严重」，徽章是状态口径的「已确认」", () => {
+      const [item] = acknowledgedWorkItems([acked], NOW);
+      expect(item?.categoryLabel).toBe("已确认");
+      expect(item?.tone).toBe("info");
+      // 严重度没有被丢掉，只是退到 meta 里不再催
+      expect(item?.meta).toContain("警告");
+    });
+
+    it("已确认组的行写「已确认 <时刻>」与「仍在成立：最近评估 <时刻>」，一律带 UTC 后缀", () => {
+      const [item] = acknowledgedWorkItems([acked], NOW);
+      expect(item?.timeline).toBe(
+        "打开 2026-08-27 13:31:00 UTC · 已确认 2026-08-27 15:45:00 UTC · 仍在成立：最近评估 2026-08-28 11:59:00 UTC",
+      );
+    });
+
+    it("确认时刻缺失时明说缺失，不拿「—」或别的时刻冒充", () => {
+      const [item] = acknowledgedWorkItems([alert({ ...acked, acknowledged_at: null })], NOW);
+      expect(item?.timeline).toContain("已确认（后端没有记录确认时刻）");
+      expect(item?.timeline).not.toContain("已确认 —");
+    });
+
+    it("未处理的行也给打开与最近评估两个绝对时刻——「已持续 13 小时」核对不了任何事", () => {
+      const [item] = workItemsFromAlerts(
+        [alert({ opened_at: "2026-08-28T11:00:00Z", last_seen_at: "2026-08-28T11:30:00Z" })],
+        NOW,
+      );
+      expect(item?.timeline).toBe("打开 2026-08-28 11:00:00 UTC · 最近评估 2026-08-28 11:30:00 UTC");
+      // 未处理的行没有「已确认」这一段——没人确认过就不能写出来
+      expect(item?.timeline).not.toContain("已确认");
+    });
+
+    it("组头写条数", () => {
+      expect(acknowledgedGroupHeading(3)).toBe("已确认，等待自愈（3 条）");
+    });
   });
 
   it("每条待办都给出持续时长与评估轮数", () => {

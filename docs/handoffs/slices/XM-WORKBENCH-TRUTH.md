@@ -14,6 +14,9 @@
   - 第三轮（复审的七条 minor，逐条修）：开始 2026-09-08T17:44Z，结束
     2026-09-08T17:58Z（约 14 分钟。见文末「评审回合三」；含 5 项变异验证，
     一次性同时施加、按测试文件归因，还原后全量复跑）。
+  - 第四轮（负责人截图：已确认的告警看起来仍在告警）：开始 2026-09-09T02:32Z，
+    结束 2026-09-09T02:46Z（约 14 分钟。见文末「评审回合四」；含 12 项变异验证，
+    分四批施加、按测试名归因，每批还原后复跑）。
 
 ## 一句话结论
 
@@ -146,6 +149,36 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 「评估 N 轮」那句话本身）。本仓没有自由文案门禁。能真正进这道门禁的只有
 `ops.State`（取值 + 顺序）、评估周期那个数、以及上面那条 grep。
 
+### 7. 已确认的告警：不混排、不催、给绝对时刻（第四轮，`workbench.ts` + `OverviewPage.tsx` + 两张告警表）
+
+生产事实（2026-09-09）：`alerts.alert` 里那条 `upstream.version.changed` 状态是
+ACKNOWLEDGED（`acknowledged_at` 15:45Z），`fire_count` 每分钟 +1、`last_seen_at`
+每轮更新；工作台「我的待处理」把它和未处理的一样列出、标「警告」、只写「已持续
+13 小时 · 触发 821 次」，没有任何绝对时间，也看不出已确认。负责人原话：「这个
+没有带时间，我感觉好像我确认之后还在告警」。三件事分开修：
+
+- **绝对时刻。** `WorkItem` 新增可选字段 `timeline`，告警行渲染成独占一行的小字
+  （`basis-full`，不与 `meta` 抢 truncate）。未处理行写「打开 <T> · 最近评估 <T>」；
+  已确认行写「打开 <T> · 已确认 <T> · 仍在成立：最近评估 <T>」。时间一律走
+  `@xingmang/ui-admin` 的 `formatUtcTimestamp`（与告警中心「首次 / 最近」列、
+  工作台「最近活动」同款，带 `UTC` 后缀，不用 `toLocaleString`）。措辞叫「最近
+  评估」不叫「最近触发」——`last_seen_at` 是 TouchAlert 每轮更新的评估时刻，
+  与第 5 项「评估轮数」同一口径。告警中心与平台告警面板的「首次 / 最近」列在
+  `acknowledged_at` 在场时多一行「确认 <T>」（null 不显示，不拿零值时间冒充）。
+- **不混排、不催。** `workItemsFromAlerts` 不再收 ACKNOWLEDGED；新增
+  `acknowledgedWorkItems`（判据只看 `status`，不看 `acknowledged_at` 有没有值——
+  已解决的也可能带着当年的确认时刻）与 `acknowledgedGroupHeading(count)`
+  （「已确认，等待自愈（N 条）」）。界面上是列表底部一个折叠组
+  （`AcknowledgedGroup`：`<button aria-expanded>` + 条件渲染，与 `MergedWorkRow`
+  同一写法，理由同——`<details>` 折叠时内容仍在 DOM，「收起时看不到」会恒真），
+  只在「全部」与「故障」筛选下出现。组内行的徽章是状态口径的「已确认」
+  （`describeStatus`，info 色调），严重度退到 `meta` 里仍可见。
+- **「紧急」不数已确认的。** `urgentCount` 现状**算**已确认的（且有一条测试
+  「已确认与已静默的严重告警仍然算紧急」在钉着），改成不算；已静默的仍算——
+  它没人认领、只是被捂住了嘴。副行文案随之改成「未处理的严重（critical）告警，
+  已确认的不算」。`FilterChip` 上本来就没有计数，「故障筛选计数」这一条落在
+  「故障」筛选下主列表不再含已确认的（同一条判据，同一批测试）。
+
 ## 变异验证表
 
 每一条都是：改实现 → 跑测试 → 记录变红的用例 → 还原 → 复跑确认全绿。
@@ -192,6 +225,23 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 | M25 | `overview.ts` 守卫改回 `a.fire_count > 1` | overview「trigger_count 在场时哪怕只评估了一轮也要带出来」 | ✅ |
 | M26 | 给 `OpsFreshnessState` 与 `FreshnessState` 各加一个 `"melted"`（真源码） | labels.reconcile 2 条：「两份手写的 TS 联合类型不多不少」+ 合成源码那条的对照组 | ✅ |
 
+**第四轮新增（已确认的告警；12 项分四批施加，每批还原后复跑，按测试名归因）：**
+
+| # | 变异 | 变红的用例 | 已还原 |
+|---|---|---|---|
+| M27 | `workItemsFromAlerts` 去掉 `!== "ACKNOWLEDGED"` | workbench「已确认的不进未处理列表，而进已确认组」（整个 id 数组相等，不是 `not.toContain`）+ OverviewPage DOM「不与未处理混排」（listitem 变 2、「警告」徽章冒出来）——**缺席型断言的非恒真证明** | ✅ |
+| M28 | `acknowledgedWorkItems` 判据改成 `acknowledged_at !== null` | workbench「已解决的不进已确认组，哪怕它带着当年的确认时刻」 | ✅ |
+| M29 | 已确认组的行改回严重度徽章 | workbench「徽章是状态口径的『已确认』」+ DOM「不与未处理混排」里 `queryByText("警告")` | ✅ |
+| M30 | 确认时刻缺失时退回 `formatUtcTimestamp(null)`（即「—」） | workbench「确认时刻缺失时明说缺失」 | ✅ |
+| M31 | `urgentCount` 去掉 `!== "ACKNOWLEDGED"` | workbench「已确认的严重告警不算紧急」（带 OPEN 对照组）+ DOM「『紧急』格不数已确认的」+ DOM 对照组「有未处理的严重告警时照常数」 | ✅ |
+| M32 | `AcknowledgedGroup` 去掉条件渲染（始终展开） | DOM「不与未处理混排」（`listitem` 长度 1 → 2）。**单独施加**：它与 M34 落在同一条用例上 | ✅ |
+| M33 | 折叠组不看 `activeId`，任何筛选下都算 | DOM「『失败任务』筛选下没有这一组」 | ✅ |
+| M34 | `WorkRow` 不渲染 `timeline` | DOM「未处理的行也带打开与最近评估」+ DOM「不与未处理混排」（三个时刻断言） | ✅ |
+| M35 | `AlertsPage` 去掉「确认 <T>」那一行 | AlertsPage DOM「已确认的行多一行『确认 <时刻>』」 | ✅ |
+| M36 | `PlatformAlertsPanel` 去掉「确认 <T>」那一行 | PlatformAlertsPanel DOM 同名用例 | ✅ |
+| M37 | `acknowledgedGroupHeading` 不带条数 | workbench「组头写条数」+ DOM「不与未处理混排」/「『故障』筛选下折叠组也在」（按钮名含「（1 条）」） | ✅ |
+| M38 | 未处理行 `timeline` 去掉「打开」段；已确认行去掉「仍在成立：」前缀；已确认行 `meta` 去掉严重度 | workbench 三条各红一条（两条整句相等 + `meta` 含「警告」） | ✅ |
+
 测试内部另有三条**合成源码**变异（不改实现、只换输入，写在
 `labels.reconcile.test.ts` 里长期运行）：对调 Go 函数体的两个分支、给 Go 常量块加
 第六个状态、把 `f.State =` 改名让抽取器抓空。第二轮又加了两组同类的**合成文件**
@@ -214,16 +264,18 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 | `freshnessBody.not_applicable` / `uninitialized_reason` | 无人认领 | ✗ | **不说「不适用」。** 改用今天就能做到的近似：有没有指标行。这**不等于**「结构上不适用」——一条刚上线还没采到值的新指标长得一模一样，措辞必须止步于事实 |
 | 卡片同步的部分成功 / 暂停状态 | XM-CARD-VISIBILITY | ✗ | 本片**不预留字段名**。合并行只陈述作业事实（`card_sync 已放弃 ×N`），**不断言卡片数据是否已刷新**——报告说批量失败后会退回逐张单查且成功，但那是缓解事实，不是这一行能负责的东西。等对方定了字段名再补一句 |
 | `JobRunItem.kind/queue/finalized_at/…`、`MetricItem.watermark`、`freshness.is_partial`、`ServiceItem.service_type === "invoice"`、`invoice.*` 指标键 | 已有 | ✓ | 无需回退 |
+| `AlertItem.opened_at` / `last_seen_at`（第四轮） | 已有（`httpapi/alerts.go` alertItem 第 44–45 行，`string`） | ✓ | 无需回退；解析不出来时 `formatUtcTimestamp` 原样显示 |
+| `AlertItem.acknowledged_at`（第四轮） | 已有（`httpapi/alerts.go` 第 46 行，`*string`，未确认为 null） | ✓ | 告警表两列：null 不显示「确认」行。工作台已确认组：`status` 是 ACKNOWLEDGED 但时刻为 null / 空串时写「已确认（后端没有记录确认时刻）」，**不显示「—」也不拿别的时刻冒充**——这种组合今天的后端写不出来（AcknowledgeAlert 一起写），但前端不能靠这条外部事实成立 |
 
 ## 门禁
 
 | 命令 | 结果 |
 |---|---|
-| `pnpm --filter admin-web run typecheck` | ✅（第三轮复跑：17:53:40Z–17:53:46Z，6 秒） |
-| `pnpm --filter admin-web run test` | ✅ 143 文件 / **2191** 用例（第三轮复跑：17:53:47Z–17:54:09Z，22 秒） |
-| `pnpm --filter ui-admin run test` | ✅ 17 文件 / 262 用例（第三轮复跑：17:54:09Z–17:54:12Z，3 秒；三轮都没动该包源码） |
-| `bash scripts/check-governance.sh` | ✅（第三轮：17:54:29Z–17:54:34Z，5 秒） |
-| `gitleaks detect --source . --no-git --redact` | 11 条 generic-api-key，**全部在本片未触碰的文件里**（`connectors/…`、`internal/platform/…` 的测试、`web/…/metrics.test.ts`、`platform.test.ts`、storybook 静态产物），是既有的指标键字面量误报；本片改动的 11 个文件里 0 条 |
+| `pnpm --filter admin-web run typecheck` | ✅（第四轮复跑：02:44:16Z–02:44:23Z，7 秒） |
+| `pnpm --filter admin-web run test` | ✅ 143 文件 / **2207** 用例（第四轮复跑：02:44:23Z–02:44:45Z，22 秒；第三轮 2191 + 本轮净增 16） |
+| `pnpm --filter ui-admin run test` | ✅ 17 文件 / 262 用例（第四轮复跑：02:44:45Z–02:44:48Z，3 秒；四轮都没动该包源码） |
+| `bash scripts/check-governance.sh` | ✅（第四轮：02:44:48Z–02:44:52Z，4 秒） |
+| `gitleaks detect --source . --no-git --redact` | 11 条 generic-api-key（第四轮：02:44:52Z–02:44:55Z，3 秒；退出码 1 是基线），**全部在本片未触碰的文件里**（`connectors/infini/signing_test.go`、`connectors/sms62/client.go`、`internal/platform/…` 五处测试、`web/…/metrics.test.ts` ×2、`platform.test.ts`、storybook 静态产物），是既有的指标键字面量误报；本片改动的文件里 0 条，与第三轮基线一致，未新增 |
 | `pnpm --filter ui-storybook run build` | ✅（第一轮；第二、三轮没有组件变更） |
 
 （全部带 `--config.verify-deps-before-run=false`：本 worktree 的 `node_modules` 是
@@ -238,6 +290,11 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
   纯数字（数字列），口径由表头与悬停整句承担；「跟表里别的 6 撞上」的顾虑改由
   `pages/AlertsPage.test.tsx` 按表头定位列再看格子来解决，不再用 getByText 去撞
 - `router.test.tsx` 「取满 20 条但没有下一页」：等的从逐条那句改成合并行标题
+- **第四轮**：`lib/workbench.test.ts` 「已确认与已静默的严重告警仍然算紧急」拆成
+  两条——「已静默的仍然算紧急」（照旧）与「已确认的不算紧急」（**反转**，见第 7
+  项）；`router.test.tsx:1260` 与 `OverviewPage.test.tsx` 「全部」空态整句里的
+  「未解决」改成「未处理」（已确认的仍未解决、但不是未处理，旧句在有已确认告警
+  时是假话）
 
 ## risks
 
@@ -276,6 +333,19 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 11. **`tsUnionValues` 也是文本启发式。** 它认的是 `type X = … ;` 这一句，要求声明
     以分号结束、成员是双引号字面量；写法变了会抓空。配了数量下界（`>= 5`）与
     改名抓空的变异用例，与 risks 2 是同一类债。
+12. **（第四轮）「紧急」与「运营焦点·可靠性」现在口径不同。** `urgentCount` 不数
+    已确认的，`focusRows` 的可靠性行（「N 条严重告警未解决」）与 `lib/alerts` 的
+    `countBySeverity`（总览告警卡）仍数。这不是漏改：那两处说的是「未解决」，
+    已确认的确实未解决；「紧急」说的是「要不要放下手里的事」。但同一屏上
+    「紧急 0」与「1 条严重告警未解决」并排，读的人可能要想一下。派工只点名了
+    「紧急」与故障筛选，另外两处**没动**，见 follow_up 8。
+13. **（第四轮）已静默的仍在主列表里、仍算紧急。** 派工只说已确认；静默的没人
+    认领，逻辑上也不该收进「等待自愈」组。但它和已确认的一样每轮 +1，负责人
+    看到「已静默」却仍标「严重」也可能有同一个疑问。
+14. **（第四轮）折叠组的判据是 `status`，不是「确认之后仍在成立」。** 一条刚被
+    确认、下一轮就恢复的告警会先在这一组里出现一分钟，然后随 RESOLVED 消失——
+    这是对的（它确实等了一轮）。真正说不出口的是「确认之后**又**恶化了」：
+    后端没有「确认后严重度变化」的字段，`REOPENED` 又是另一个状态。
 
 ## follow_ups
 
@@ -303,6 +373,40 @@ observedAt: null, … })` 六个字面量，不查任何数据。现在走 `invo
 7. **「取值」扫描补上 JSX 正文这一种写法**（`{alert.fire_count}` /
    `{a.fire_count}`），并配同样的合成文件反向验证。今天没有人这么写，但门禁的
    承诺是「只经 describeFireCount 一处出场」，它眼下只兑现了模板串那一半。
+8. **（第四轮）「未解决」三处口径要不要统一。** `focusRows` 可靠性行、
+   `countBySeverity`（总览告警卡）、`lib/alertNotify.ts` 的「还没解决又没送达」
+   都用 `status !== "RESOLVED"`。若产品负责人认为「已确认」在所有计数里都该单列，
+   要一起改并配同款测试；本轮刻意没动（risks 12）。
+9. **（第四轮）告警中心没有「已确认」的快捷视图。** 工作台折叠组的每一行都指向
+   `/alerts`，进去之后要自己按状态列筛。若这一组常有内容，值得给 `/alerts` 一个
+   `?status=ACKNOWLEDGED` 的入口，让「去看」落到正确的那几行。
+
+## 评审回合四：负责人截图——已确认的告警看起来仍在告警
+
+| # | 问题 | 处置 |
+|---|---|---|
+| 1 | 上一轮复审的 minor：`overview.ts:54` 三元 `?` 后缺空格 | 已在 `55e49fb` 单独提交（`style(admin-web): 复审第四轮——三元 \`?\` 后补空格`），语义不变 |
+| 2 | 告警行没有任何绝对时间 | `WorkItem.timeline`；告警中心与平台面板补「确认 <T>」行。三个字段后端都已有（见「依赖的后端字段与回退」末三行） |
+| 3 | 已确认的与未处理的混排、仍挂「警告」 | `workItemsFromAlerts` 排除 ACKNOWLEDGED；`acknowledgedWorkItems` + `AcknowledgedGroup` 折叠组，徽章「已确认」 |
+| 4 | 「紧急」把已确认的算进去 | `urgentCount` 现状**算**，改成不算；既有反向断言拆开重写 |
+| 5 | handoff 同步 | 本节 + 第 7 项 + 变异表 M27–M38 + 后端字段表三行 + 门禁表 + risks 12–14 + follow_ups 8–9 |
+
+第四轮 files_changed（全部在 `web/apps/admin-web/src/` 下，外加本文）：
+
+- `lib/workbench.ts` —— `WorkItem.timeline`、`workItemsFromAlerts` 排除已确认、
+  `acknowledgedWorkItems` / `acknowledgedGroupHeading` / `ACKNOWLEDGED_GROUP_TITLE`、
+  `urgentCount` 口径
+- `pages/OverviewPage.tsx` —— `AcknowledgedGroup`、`WorkRow` 渲染 `timeline`、
+  「紧急」副行、`DEFAULT_EMPTY_DESCRIPTION` 「未解决」→「未处理」
+- `pages/AlertsPage.tsx`、`components/PlatformAlertsPanel.tsx` —— 「确认 <T>」行
+- `lib/workbench.test.ts`（+8 条，1 条拆 2）、`pages/OverviewPage.test.tsx`（+6 条 DOM，
+  1 处整句更新）、`pages/AlertsPage.test.tsx`（+1）、
+  `components/PlatformAlertsPanel.test.tsx`（+1）、`router.test.tsx`（1 处整句更新）
+- `docs/handoffs/slices/XM-WORKBENCH-TRUTH.md`
+
+第四轮**没有**动 Go 文件、`ui-admin` 源码、CPA 相关页面 / 指标 / 渠道，没有新增任何
+颜色 / 圆角 / 阴影（折叠组复用 `MergedWorkRow` 已有的 `rounded-md border border-edge`
+一组工具类）。
 
 ## 评审回合三：七条 minor 逐条
 

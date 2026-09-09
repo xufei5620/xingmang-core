@@ -122,6 +122,10 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
       <div className="min-w-44 text-xs tabular-nums text-fg-muted">
         <span className="block">首次 {formatUtcTimestamp(alert.opened_at)}</span>
         <span className="block">最近 {formatUtcTimestamp(alert.last_seen_at)}</span>
+        {/* 确认时刻在场才显示（与告警中心同一列同一写法）：null 是没人确认过 */}
+        {alert.acknowledged_at ? (
+          <span className="block">确认 {formatUtcTimestamp(alert.acknowledged_at)}</span>
+        ) : null}
         {alert.resolved_at ? (
           <span className="block">恢复 {formatUtcTimestamp(alert.resolved_at)}</span>
         ) : null}

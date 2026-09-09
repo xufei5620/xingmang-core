@@ -147,6 +147,25 @@ describe("持续时长与时间范围（XM-ALERTS-TAB-DURATION）", () => {
     expect(await screen.findByText("2 小时 7 分")).toBeTruthy();
   });
 
+  it("已确认的行多一行「确认 <时刻>」，与告警中心同一列同一写法", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    withNow("2026-08-29T09:07:00Z", [
+      alert({
+        id: "alert-acked",
+        title: "已确认的那条",
+        status: "ACKNOWLEDGED",
+        acknowledged_at: "2026-08-29T07:30:00Z",
+      }),
+      alert(),
+    ]);
+    renderPanel();
+
+    const acked = (await screen.findByText("已确认的那条")).closest("tr") as HTMLElement;
+    const open = screen.getByText("NewAPI 渠道健康数据延迟").closest("tr") as HTMLElement;
+    expect(within(acked).getByText("确认 2026-08-29 07:30:00 UTC")).toBeTruthy();
+    expect(within(open).queryByText(/^确认 /)).toBeNull();
+  });
+
   it("已恢复的告警算到恢复时刻，不再继续增长", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     withNow("2026-08-30T00:00:00Z", [

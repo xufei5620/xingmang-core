@@ -164,6 +164,22 @@ describe("「评估轮次」列", () => {
   });
 });
 
+describe("「首次 / 最近」列的确认时刻", () => {
+  it("已确认的行多一行「确认 <时刻>」，没人确认过的行没有这一行", async () => {
+    stubAlerts([
+      { ...alert("id-a", "ACKNOWLEDGED", "戊告警"), acknowledged_at: "2026-09-01T10:03:00Z" },
+      alert("id-b", "OPEN", "己告警"),
+    ]);
+    renderAlerts();
+    const acked = (await screen.findByText("戊告警")).closest("tr") as HTMLElement;
+    const open = screen.getByText("己告警").closest("tr") as HTMLElement;
+    expect(within(acked).getByText("确认 2026-09-01 10:03:00 UTC")).not.toBeNull();
+    // 「最近」晚于「确认」才读得出「确认之后还在响」，两行都要在
+    expect(within(acked).getByText("最近 2026-09-01 10:05:00 UTC")).not.toBeNull();
+    expect(within(open).queryByText(/^确认 /)).toBeNull();
+  });
+});
+
 // --- 缺口 1：批量确认 -------------------------------------------------------
 
 describe("批量确认（XM-ALERTS-GAPS）", () => {

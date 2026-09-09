@@ -1257,7 +1257,7 @@ describe("运营工作台（ADMIN-IA v3 §一 分组 1，原型 #/g/overview）"
     expect(await screen.findByText("没有待处理事项")).not.toBeNull();
     // 零不等于「都处理完了」：还有四类根本没接
     expect(screen.getByText(/并不代表全部待办/)).not.toBeNull();
-    expect(screen.getByText("当前没有未解决的严重告警")).not.toBeNull();
+    expect(screen.getByText("当前没有未处理的严重告警（已确认的不算）")).not.toBeNull();
   });
 });
 

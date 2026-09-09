@@ -1,5 +1,10 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
-import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
+import {
+  describeServiceStatus,
+  formatUtcTimestamp,
+  platformNavSpec,
+  type FreshnessContract,
+} from "@xingmang/ui-admin";
 import {
   alertAgeAnchor,
   describeFireCount,
@@ -9,7 +14,7 @@ import {
 import type { ApprovalItem } from "../api/approvals";
 import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
-import { describeSeverity, sortForDisplay } from "./alerts";
+import { describeSeverity, describeStatus, sortForDisplay } from "./alerts";
 import { groupByRisk, isEffectivelyExpired, voteProgress } from "./approvals";
 import { metricLabel } from "./metrics";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
@@ -119,6 +124,13 @@ export interface WorkItem {
   to: string;
   /** 悬停说明：这一行的数字有什么读起来不直观的地方。缺省不挂。 */
   hint?: string;
+  /** 绝对时刻那一行（告警行才有）：打开 / 确认 / 最近评估，一律
+   *  `formatUtcTimestamp` 带 UTC 后缀。
+   *
+   *  `meta` 里的「已持续 13 小时」是相对时长，它回答不了「我确认之后它还在
+   *  不在响」——负责人看着一条已确认的告警说「这个没有带时间，我感觉好像我确认
+   *  之后还在告警」，而界面上确实没有任何一个时刻能让他核对。 */
+  timeline?: string;
   /** 被合并进这一行的明细（同 kind 的已放弃作业）。**只有合并行才有**，
    *  单条不带（也不显示「×1」），否则界面上会多出一堆没有内容的展开箭头。 */
   children?: WorkItem[];
@@ -149,12 +161,27 @@ function untilText(toIso: string, now: Date): string | null {
   return durationText((at - now.getTime()) / 1000);
 }
 
-/** 活跃告警 → 待处理事项。
+/** 「最近评估」那个时刻怎么念。
  *
- *  只取活跃的（已解决的不是待办），按严重度与最近发现排序——与告警页同一条
- *  排序规则，两处不能各排各的。 */
+ *  `last_seen_at` 是告警引擎最近一轮判定「条件仍成立」的时刻（TouchAlert 每轮
+ *  更新），不是「最近一次发生」；措辞跟着 `FIRE_COUNT_MEANING` 的口径叫「评估」，
+ *  不叫「最近触发」。 */
+function lastEvaluatedText(alert: Pick<AlertItem, "last_seen_at">): string {
+  return `最近评估 ${formatUtcTimestamp(alert.last_seen_at)}`;
+}
+
+/** 未处理的活跃告警 → 待处理事项。
+ *
+ *  **不收已确认的。** 已确认（ACKNOWLEDGED）的告警仍然活着、每轮仍在 +1，但它
+ *  已经有人认领——把它和没人管的混排在一起、还挂着「警告 / 严重」的徽章，
+ *  人会以为自己刚才那一下确认没生效。那一组走 `acknowledgedWorkItems`，在列表
+ *  底部折叠着。已解决的更不是待办。
+ *
+ *  按严重度与最近发现排序——与告警页同一条排序规则，两处不能各排各的。 */
 export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): WorkItem[] {
-  return sortForDisplay(alerts.filter((alert) => alert.status !== "RESOLVED")).map((alert) => {
+  return sortForDisplay(
+    alerts.filter((alert) => alert.status !== "RESOLVED" && alert.status !== "ACKNOWLEDGED"),
+  ).map((alert) => {
     const severity = describeSeverity(alert.severity);
     const age = alertAgeAnchor(alert);
     return {
@@ -168,6 +195,10 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
       // api/alerts 的 alertAgeAnchor）——一个系统性偏小的数字不加说明地摆
       // 出来，与摆一个错数字没有区别。
       meta: `${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(age.since, now)}`,
+      // 相对时长之外再给两个绝对时刻：「已持续 13 小时」核对不了任何事，
+      // 「打开 09-08 13:31 UTC · 最近评估 09-09 02:31 UTC」才能拿去和自己的
+      // 记忆、和 IM 记录对时间。
+      timeline: `打开 ${formatUtcTimestamp(alert.opened_at)} · ${lastEvaluatedText(alert)}`,
       // **不是「触发 N 次」。** fire_count 是每 60 秒重评一轮、条件仍成立就
       // +1 的轮数（见 api/alerts 的 fire_count 契约注释）；措辞与告警中心、
       // 平台告警面板共用 describeFireCount 一份，三处不各说各的。
@@ -176,6 +207,52 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
       hint: [FIRE_COUNT_MEANING, age.hint].filter(Boolean).join(" "),
     };
   });
+}
+
+/** 已确认那一组的标题。组头带条数：折叠着的时候人只看得见这一行。 */
+export const ACKNOWLEDGED_GROUP_TITLE = "已确认，等待自愈";
+
+export function acknowledgedGroupHeading(count: number): string {
+  return `${ACKNOWLEDGED_GROUP_TITLE}（${count} 条）`;
+}
+
+/** 已确认、但条件仍然成立的告警 → 折叠组里的明细行。
+ *
+ *  判据只看 `status === "ACKNOWLEDGED"`，不看 `acknowledged_at` 有没有值：
+ *  确认时刻是伴随字段，后端 AcknowledgeAlert 一起写，但已解决的告警也可能带着
+ *  当年的确认时刻——它不是「等待自愈」，它已经愈了。
+ *
+ *  徽章不再是严重度（「警告 / 严重」是催人动手的语气，而这一组恰恰是「已经有人
+ *  在管」），改用状态口径的「已确认」（与告警中心状态列同一份 describeStatus）。
+ *  严重度退到 meta 里仍然可见——不是不重要，是不再催。
+ *
+ *  明细行要回答的是「我确认之后它还在不在响」：写出**确认时刻**与**最近评估
+ *  时刻**，后者晚于前者就是「仍在成立」的证据。确认时刻缺失时明说缺失，不拿
+ *  「—」或别的时刻冒充。 */
+export function acknowledgedWorkItems(alerts: readonly AlertItem[], now: Date): WorkItem[] {
+  return sortForDisplay(alerts.filter((alert) => alert.status === "ACKNOWLEDGED")).map(
+    (alert) => {
+      const status = describeStatus("ACKNOWLEDGED");
+      const severity = describeSeverity(alert.severity);
+      const age = alertAgeAnchor(alert);
+      const acknowledged =
+        alert.acknowledged_at === null || alert.acknowledged_at === ""
+          ? "已确认（后端没有记录确认时刻）"
+          : `已确认 ${formatUtcTimestamp(alert.acknowledged_at)}`;
+      return {
+        id: alert.id,
+        categoryId: "incidents",
+        categoryLabel: status.label,
+        tone: status.tone,
+        title: alert.title,
+        meta: `${severity.label} · ${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(age.since, now)}`,
+        timeline: `打开 ${formatUtcTimestamp(alert.opened_at)} · ${acknowledged} · 仍在成立：${lastEvaluatedText(alert)}`,
+        due: describeFireCount(alert).combined,
+        to: "/alerts",
+        hint: [status.hint, FIRE_COUNT_MEANING, age.hint].filter(Boolean).join(" "),
+      };
+    },
+  );
 }
 
 /** 已放弃的后台任务 → 待处理事项。
@@ -372,12 +449,20 @@ export function truncationNote(input: {
   return `这一屏可能不是全部：${parts.join("，")}。完整清单在各自的页面里。`;
 }
 
-/** 顶部四格里「紧急」的口径：未解决的严重告警。
+/** 顶部四格里「紧急」的口径：**未处理**的严重告警。
  *
  *  刻意只数 critical：把 warning 也算进「紧急」，这个数就永远不会小,
- *  于是它不再能回答「现在要不要放下手里的事」。 */
+ *  于是它不再能回答「现在要不要放下手里的事」。
+ *
+ *  **已确认的不算，已静默的算。** 两者都活着、都没解决，但问的是「要不要放下
+ *  手里的事」：已确认意味着有人认领了，再数进去这个数就永远降不下来，负责人按
+ *  了确认之后看到「紧急 1」只会得出「确认没生效」的结论；静默则相反——它没人
+ *  认领、只是被捂住了嘴，静默期间「紧急」掉到 0 正是最容易出事的时候。
+ *  已确认的那一条在「我的待处理」底部的折叠组里仍然看得见。 */
 export function urgentCount(alerts: readonly AlertItem[]): number {
-  return alerts.filter((a) => a.status !== "RESOLVED" && a.severity === "critical").length;
+  return alerts.filter(
+    (a) => a.status !== "RESOLVED" && a.status !== "ACKNOWLEDGED" && a.severity === "critical",
+  ).length;
 }
 
 /** 顶部四格里「审批到期」的口径：`APPROVAL_DUE_WINDOW_HOURS` 内到期的待审批单。

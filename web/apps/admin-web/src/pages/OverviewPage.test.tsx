@@ -459,7 +459,7 @@ describe("我的待处理·待审批（XM-WORKBENCH-APPROVALS）", () => {
     renderWorkbench("/");
     expect(await screen.findByText("没有待处理事项")).not.toBeNull();
     expect(screen.getByText(/并不代表全部待办/).textContent).toBe(
-      "当前没有未解决的告警、没有等着投票的审批单，也没有失败的后台任务。" +
+      "当前没有未处理的告警、没有等着投票的审批单，也没有失败的后台任务。" +
         "注意：财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。",
     );
   });
@@ -507,5 +507,116 @@ describe("我的待处理·待审批（XM-WORKBENCH-APPROVALS）", () => {
     const card = workCard();
     expect(within(card).queryByText("加载失败")).toBeNull();
     expect(within(card).queryByText("未接入")).toBeNull();
+  });
+});
+
+// 生产事实（2026-09-09）：alerts.alert 里那条 upstream.version.changed 是
+// ACKNOWLEDGED（acknowledged_at 15:45Z），fire_count 每分钟 +1，last_seen_at
+// 每轮更新；工作台把它与未处理的一样列出、标「警告」、只写「已持续 13 小时 ·
+// 触发 821 次」，没有任何绝对时间，也看不出已确认。负责人原话：「这个没有带
+// 时间，我感觉好像我确认之后还在告警」。
+describe("我的待处理·已确认的告警（XM-WORKBENCH-TRUTH 第四轮）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(APPROVALS_NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function ackedAlert() {
+    return {
+      ...activeAlert(),
+      id: "al-acked",
+      rule_key: "upstream.version.changed",
+      severity: "warning",
+      status: "ACKNOWLEDGED",
+      title: "上游版本变化",
+      opened_at: "2026-09-06T21:00:00Z",
+      acknowledged_at: "2026-09-06T23:45:00Z",
+      last_seen_at: "2026-09-07T09:59:00Z",
+      fire_count: 821,
+    };
+  }
+
+  function stubAlerts(items: unknown[]) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) =>
+        Promise.resolve(
+          input.startsWith("/api/v1/alerts") ? fakeResponse({ items }) : baseHandler(input),
+        ),
+      ),
+    );
+  }
+
+  it("已确认的不与未处理混排：收进底部折叠组，组头写条数，展开才见明细", async () => {
+    stubAlerts([activeAlert(), ackedAlert()]);
+    renderWorkbench("/");
+    const card = workCard();
+    await within(card).findByText("指标同步失败");
+
+    // 折叠时：主列表里只有那条未处理的，已确认那条的标题与「警告」徽章都不在 DOM 里
+    expect(within(card).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(card).queryByText("上游版本变化")).toBeNull();
+    expect(within(card).queryByText("警告")).toBeNull();
+    const toggle = within(card).getByRole("button", { name: /已确认，等待自愈（1 条）/ });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const row = (await within(card).findByText("上游版本变化")).closest("li") as HTMLElement;
+    // 徽章是「已确认」，不是「警告」——这一组不催
+    expect(within(row).getByText("已确认")).not.toBeNull();
+    expect(within(row).queryByText("警告")).toBeNull();
+    // 三个绝对时刻都在，带 UTC 后缀；「最近评估」晚于「已确认」就是仍在成立的证据
+    expect(row.textContent).toContain("已确认 2026-09-06 23:45:00 UTC");
+    expect(row.textContent).toContain("仍在成立：最近评估 2026-09-07 09:59:00 UTC");
+    expect(row.textContent).toContain("打开 2026-09-06 21:00:00 UTC");
+  });
+
+  it("未处理的行也带打开与最近评估的绝对时刻", async () => {
+    stubAlerts([activeAlert()]);
+    renderWorkbench("/");
+    const row = (await within(workCard()).findByText("指标同步失败")).closest("li") as HTMLElement;
+    expect(row.textContent).toContain("打开 2026-09-07 09:00:00 UTC · 最近评估 2026-09-07 09:30:00 UTC");
+  });
+
+  it("「故障」筛选下折叠组也在；别的筛选下不冒出来", async () => {
+    stubAlerts([ackedAlert()]);
+    renderWorkbench("/?work=incidents");
+    expect(
+      await within(workCard()).findByRole("button", { name: /已确认，等待自愈（1 条）/ }),
+    ).not.toBeNull();
+  });
+
+  it("「失败任务」筛选下没有这一组", async () => {
+    stubAlerts([ackedAlert()]);
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    await within(card).findByText("没有待处理事项");
+    expect(within(card).queryByRole("button", { name: /已确认，等待自愈/ })).toBeNull();
+  });
+
+  it("「紧急」格不数已确认的严重告警，并把口径写在副行", async () => {
+    stubAlerts([{ ...ackedAlert(), severity: "critical" }]);
+    renderWorkbench("/");
+    const urgent = (await screen.findByRole("heading", { name: "紧急", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(urgent).getByText("0")).not.toBeNull();
+    expect(within(urgent).getByText("当前没有未处理的严重告警（已确认的不算）")).not.toBeNull();
+  });
+
+  it("有未处理的严重告警时「紧急」照常数，对照组不能少", async () => {
+    stubAlerts([activeAlert(), { ...ackedAlert(), severity: "critical" }]);
+    renderWorkbench("/");
+    const urgent = (await screen.findByRole("heading", { name: "紧急", level: 3 })).closest(
+      "article",
+    ) as HTMLElement;
+    expect(within(urgent).getByText("1")).not.toBeNull();
   });
 });
