@@ -124,7 +124,13 @@ func main() {
 //	1  the operation failed: database unreachable, migration set mismatch,
 //	   a refused bind (ErrForbidden), a serialization conflict, an issuer that
 //	   disagrees with the identities already in the database
-//	2  the command line itself is wrong (bad flags, relative paths)
+//	2  the command line could not be parsed at all: a positional argument was
+//	   supplied, or one of the three path flags is not absolute. This is
+//	   NARROWER than "the command line is wrong": an invalid flag VALUE
+//	   (--platform=sub3api, --external-user-id=alice, --operator-id=bob) is
+//	   rejected inside run(), before the database is opened, and exits 1. The
+//	   runbook's exit-code table says the same. Do not branch on 2 as "my
+//	   command was malformed".
 //	3  --apply was refused by the ingest timing gate: nothing was wrong with
 //	   the request, the deployment is simply not in a state to accept it
 const (
@@ -365,8 +371,17 @@ func printSummary(out io.Writer, platform, issuer, externalUserID string, result
 	if result.BindingCreated {
 		bindingLabel = "created"
 	}
-	fmt.Fprintf(out, "invoice_user_id:     %s (%s)\n", result.InvoiceUserID, userLabel)
-	fmt.Fprintf(out, "external_account_id: %s (%s)\n", result.ExternalAccountID, bindingLabel)
+	// A dry run really did INSERT these rows before rolling back, so the ids
+	// are real ids that no longer exist. The runbook tells operators to save
+	// external_account_id and invoice_user_id as observation-window variables,
+	// and ids copied from a dry run make every one of those queries return
+	// nothing -- which reads exactly like a failed bind. Say so on the line.
+	rolledBack := ""
+	if !result.Applied {
+		rolledBack = " (rolled back; --apply will mint different ids)"
+	}
+	fmt.Fprintf(out, "invoice_user_id:     %s (%s)%s\n", result.InvoiceUserID, userLabel, rolledBack)
+	fmt.Fprintf(out, "external_account_id: %s (%s)%s\n", result.ExternalAccountID, bindingLabel, rolledBack)
 	fmt.Fprintf(out, "binding:             %s / %s\n\n", result.BindingMethod, result.BindingStatus)
 
 	fmt.Fprintf(out, "PRE_POLICY_SKIPPED:  %d (irreversible)\n", result.PrePolicySkipped)

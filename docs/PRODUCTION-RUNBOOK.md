@@ -2461,7 +2461,10 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
 `<- FIRST platform-login identity on this source`，必须人工核对。
 
 `--email` 可选，存的是密文且 `email_verified` 保持 FALSE——运营在终端里敲进去的
-地址不构成验证，真正的收件地址仍然要客户自己验。**注意 `--email` 的值会明文留在
+地址不构成验证，真正的收件地址仍然要客户自己验。**它只在这次调用真的新建
+`invoice_users` 行时才写得进去**：底层 UPSERT 只有在新值被标记为已验证时才替换已有
+密文，而本工具永远传 FALSE，所以对一个已存在的身份重跑并加上 `--email`是**静默空
+操作**，不会补写。要补邮箱只能走客户自己的邮箱验证流程。**注意 `--email` 的值会明文留在
 root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要么别传，要么命令前加
 一个空格并确认 `HISTCONTROL` 含 `ignorespace`。
 
@@ -2506,10 +2509,15 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
 | --- | --- | --- |
 | 0 | 成功（apply 已提交；或 dry-run 正常出计划，**包括门关着标 NO-GO 的 dry-run**） | 按下面「怎么读」核对 |
 | 1 | 操作失败：连不上库、迁移集不匹配、绑定被拒（已绑他人 / platform 不符 / issuer 与库里矛盾 / **该 id 已有非 operator_attested 绑定** / **有未处理的 identity_binding 事件**）、序列化冲突 | 读错误信息，不要重试到它自己好 |
-| 2 | 命令行本身写错（参数非法、路径不是绝对路径） | 改命令 |
+| 2 | **位置参数**多余，或三个路径参数不是绝对路径 | 改命令 |
 | 3 | `--apply` 被时机门拒绝 | **请求本身没问题**，等下一个安静窗口再来 |
 
 3 单独分出来，就是为了让脚本和人不要把「现在不是时候」读成「出错了」。
+
+**注意 2 的范围比想当然的窄。** 只有「多给了位置参数」和「路径不是绝对路径」这两类
+在解析旗标时就退 2；**旗标的值**非法（`--platform=sub3api`、`--external-user-id=alice`、
+`--operator-id=bob`）一律退 **1**，因为那些校验在打开数据库之前、但在 `run()` 里做。
+写脚本时不要用「退 2 就是我命令写错了」来分流。
 
 ### dry-run 输出怎么读
 
@@ -2572,10 +2580,17 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
 ### 观察窗口（每个客户一次）
 
 先把 `--apply` 摘要里的三个值存成变量——后面每条命令都用它们，其中
-`dependency_key_hmac` 是盲索引，**人手算不出来，只能从摘要里抄**：
+`dependency_key_hmac` 是盲索引，**人手算不出来，只能从摘要里抄**。
+
+> **必须抄 `--apply` 那一次的输出，不能抄 dry-run 的。** dry-run 也会打出
+> `invoice_user_id` 与 `external_account_id`，但那两个 id 随事务回滚一起作废，
+> `--apply` 会铸出**不同**的 id。拿 dry-run 的 id 去跑下面的查询，结果会全空，
+> 看起来就像绑定失败了。dry-run 输出里这两行带 `(rolled back; --apply will mint
+> different ids)` 后缀，就是提醒这件事。（`dependency_key_hmac` 只由来源与上游 id
+> 决定，两次一样，但为了不出错，三个值一律抄 apply 那次。）
 
 ```bash
-BIND_DEP_KEY='<摘要里的 dependency_key_hmac，形如 h1:...>'
+BIND_DEP_KEY='<摘要里的 dependency_key_hmac，形如 h1:...>'  # 见下方警告：三个值都要抄 --apply 那次的
 BIND_ACCOUNT_ID='<摘要里的 external_account_id>'
 BIND_USER_ID='<摘要里的 invoice_user_id>'
 ```

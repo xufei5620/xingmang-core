@@ -138,6 +138,9 @@ dry-run 不写库、apply 端到端。
 | 19 | 删掉按账号的 advisory lock | 红：`the bind committed while another transaction held this account's advisory lock` |
 | 20 | `lock_timeout` 由 5s 改 90s | 红两处：`SHOW` 断言直接红；竞争测试也红，但失败方式是 `context deadline exceeded (elapsed 1m30s)` 而非 55P03——两种回归可区分 |
 | 21 | `exitTimingGateRefused` 常量由 3 改 4 | 红：`timing gate refusal exits 4, want 3`（原来的自证写法在这里是绿的） |
+| 22 | 去掉 dry-run 的 `(rolled back; ...)` 后缀 | 红：dry-run 输出缺该后缀（apply 侧另有一条断言它**不**出现） |
+
+（编号 16 未使用，见 4f 末。）
 
 变异 7 顺带查出一件对运行手册有用的事：影子用户是按「真登录会铸的同一对
 (issuer, subject)」建的，所以**即使认领分支不存在**，`ResolveOrCreate` 也会找到
@@ -445,6 +448,66 @@ held this account's advisory lock`；变异 20（`lock_timeout` 改 90s）在这
 
 这也补上了行级 `FOR UPDATE` 覆盖不到的那块：影子绑定时 `external_accounts` 那一行还
 不存在，`FOR UPDATE` 锁不住任何东西。
+
+## 4f. 终审余段的 minor（4、5、7、8、9）
+
+第 6 条（F/10 零测试）在 baf5319 里已经做完，消息交叉了；其余五条如下。除第 7 条外
+都是注释与文档改准，**没有行为改动**。
+
+**4. 退出码 2 的范围被写宽了。** 手册与代码注释都写「命令行本身写错」，实际只有
+「多给了位置参数」和「三个路径参数不是绝对路径」退 2；旗标**值**非法
+（`--platform=sub3api` / `--external-user-id=alice` / `--operator-id=bob`）都在
+`run()` 里退 1。
+
+两个选项里选了**改文档不改行为**：把校验挪到 `main()` 会改变退出码契约，而派工这一轮
+明确只接受注释/顺序级别的行为改动。手册那张表与代码注释都改成「2 = 位置参数/相对
+路径；旗标值非法退 1」，并加一句「写脚本时不要用『退 2 就是命令写错了』来分流」。
+
+**5. advisory lock 的注释不成立。** 我写的「取在任何判定依据被读取之前」是错的：
+`sourceIngestHealthTx` 在锁之前就读了。
+
+但**把健康读挪到锁之后并不能解决那个问题**，所以我没有挪，而是把注释写准并写明真实
+边界：时机门的依据是**全库**的（所有 ingest 事件），而这把锁是按 (source, 上游账号)
+的；两个运营对**不同**账号 apply 时拿的是不同的锁，互不阻塞，都能读到 Pending=0 都
+过门。挪顺序改不了这一点——不同键本来就不互斥。真正兜底的是 Serializable
+（复审员实测到 `Canceled on identification as a pivot`），以及运行手册那条「一次一个、
+一个人操作」的**流程**规矩，那条规矩不是代码强制的。注释现在把这三件事都说了。
+
+（顺带：挪顺序还会改变错误优先级——平台没有 enabled source instance 时会先报那个而不是
+先报时机门。为一个解决不了的问题去改错误优先级不划算。）
+
+**7. dry-run 打出的 id 会被抄去做观察窗口变量。** dry-run 确实 INSERT 过那两行再回滚，
+所以打出来的是**真实但已不存在**的 id；而手册要求把 `external_account_id` /
+`invoice_user_id` 存成变量去跑观察 SQL，抄 dry-run 的会让每条查询都返回空，看起来就像
+绑定失败了。
+
+dry-run 时两行加后缀 `(rolled back; --apply will mint different ids)`；手册观察窗口段
+加了醒目警告，要求三个值一律抄 `--apply` 那次的。这是本批**唯一**的行为改动（只是多打
+一段字）。测试两侧都断言：dry-run 必须有这个后缀、apply 必须没有（否则会教运维去怀疑
+那些真正能用的 id）。变异 22（去掉后缀）→ 红。
+
+**8. `--email` 对已存在的身份是静默空操作。** `ensureUserTx` 的 UPSERT 只在
+`EXCLUDED.email_verified` 为真时替换密文，而本工具永远传 FALSE（这本身是对的——运营
+敲进去的地址不构成验证）。所以对已存在的身份重跑并加 `--email` 什么也不会发生。手册
+`--email` 那段补了一句说明，并指出要补邮箱只能走客户自己的验证流程。
+
+**9. `FactsEverSeen` 的口径比注释窄，而且窄两处。** 复审员点出 PRE_POLICY_SKIPPED 那处
+并提示「后面可能还有一处更窄」——对照 `requeueSourceDependencyTx` 核完，确实有两处：
+
+- PRE_POLICY_SKIPPED 分支把 `dependency_key_hmac` 置空且**从不**写 `catchup_key_hmac`；
+- 释放分支的 `catchup_key_hmac=CASE WHEN processing_status='parked_identity' THEN $2
+  ELSE catchup_key_hmac END`，从 `waiting_dependency` 释放的行保持原值（通常是 NULL）。
+
+两类行最后两个键都空，这个计数看不见它们。所以真实口径是「**现在还挂着本账号两个键
+之一**的行」，它只会**少报**、不会多报。
+
+没有把口径改宽（那些行已经没有任何可关联的键，改不了），而是把字段注释、函数注释与
+摘要说明都写准。同时说明为什么这对唯一的用途是安全的：告警只在 `BindingCreated` 为真
+时打，而一个事实已经被唤醒过的账号必然已经有绑定，`BindingCreated` 就是 false，所以
+少报不会造成误报警。
+
+**变异编号 16 的缺口**：15 之后直接跳到 17，中间没有 16 号——那是我编号时跳过的，不是
+漏掉一条变异。为避免再被当成缺失，这里记一笔。
 
 ## 5. 偏离与未证实
 

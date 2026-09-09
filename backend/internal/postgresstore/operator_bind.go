@@ -106,12 +106,23 @@ type OperatorBindResult struct {
 	PrePolicySkipped  int64
 	Released          int64
 
-	// FactsEverSeen counts the source_ingest_events rows this external id has
-	// ever been associated with -- parked on this binding right now
-	// (dependency_key_hmac), or released by an earlier wake
-	// (catchup_key_hmac). Zero on a freshly created binding means this
-	// database has never heard of this id at all, which is what a mistyped
-	// upstream id usually looks like.
+	// FactsEverSeen counts source_ingest_events rows that still carry one of
+	// this account's two keys: parked on this binding right now
+	// (dependency_key_hmac), or released from parked_identity by an earlier
+	// wake (catchup_key_hmac).
+	//
+	// That is NARROWER than "every fact this id ever had", and the difference
+	// is not obvious from requeueSourceDependencyTx: its PRE_POLICY_SKIPPED
+	// branch clears dependency_key_hmac and never sets catchup_key_hmac, and
+	// its release branch sets catchup_key_hmac only for rows that were
+	// parked_identity -- a row released from waiting_dependency keeps whatever
+	// it had, normally NULL. Both kinds end up with neither key and are
+	// invisible here. So this count can only under-report, never over-report.
+	//
+	// Zero on a freshly created binding therefore still means "this database
+	// has never heard of this id", which is what the warning keys on: an
+	// account whose facts were already woken necessarily has a binding
+	// already, so BindingCreated is false and the warning does not fire.
 	//
 	// It is NOT a proof of correctness, and the summary must not present it
 	// as one. An id mistyped into a DIFFERENT real but never-bound customer
@@ -238,8 +249,21 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	// (BindExternalAccountFromSource and RevokeExternalAccountFromSource, both
 	// in identity.go) on the same key and the same seed: seed 4 is the "one
 	// upstream account on one source" lock namespace, and the key is exactly
-	// what those two use. Taken here, immediately after the source instance is
-	// known, and before anything is read that the decision depends on.
+	// what those two use. It is taken as soon as the key can be computed,
+	// which is immediately after the source instance is resolved.
+	//
+	// What it does NOT cover, stated plainly because an earlier version of
+	// this comment claimed otherwise: the timing gate above was already
+	// evaluated, and its evidence is deployment-wide (every ingest event),
+	// while this lock is per (source, upstream account). Two operators
+	// applying to DIFFERENT accounts take different locks, so they do not
+	// block each other, and both can read Pending=0 and pass the gate before
+	// either commits. Moving the health read below this line would not fix
+	// that -- different keys still do not serialize -- so the honest backstop
+	// is Serializable isolation, which cancels one of the two transactions
+	// ("could not serialize access ... identified as a pivot"). The runbook
+	// rule that makes this safe is procedural, not enforced here: one account
+	// at a time, one operator.
 	//
 	// Serializable isolation alone would probably do it today -- the UPSERT
 	// would raise 40001 -- but the safety of this operation must not rest on
@@ -487,10 +511,10 @@ func checkPlatformIssuerConsistency(ctx context.Context, tx pgx.Tx, platform, so
 	return inUse[0], nil
 }
 
-// countFactsEverSeen counts the ingest events this external id is or was
-// associated with: still parked on the binding (dependency_key_hmac), or
-// already released by an earlier wake (catchup_key_hmac). See
-// OperatorBindResult.FactsEverSeen for what this can and cannot prove.
+// countFactsEverSeen counts ingest events still carrying one of this
+// account's two keys. See OperatorBindResult.FactsEverSeen for the exact
+// scope -- in particular which already-processed rows it cannot see, and why
+// that is safe for the one thing it is used for.
 func countFactsEverSeen(ctx context.Context, tx pgx.Tx, dependencyKeyHMAC string) (int64, error) {
 	var count int64
 	err := tx.QueryRow(ctx, `

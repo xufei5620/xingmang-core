@@ -195,6 +195,11 @@ func TestRunDryRunAgainstAnEmptyDatabaseReportsAPlan(t *testing.T) {
 		"binding:             operator_attested / verified",
 		"PRE_POLICY_SKIPPED:  0 (irreversible)",
 		"facts ever seen:     0",
+		// A dry run's ids are real ids that no longer exist. The runbook has
+		// operators paste external_account_id and invoice_user_id into the
+		// observation-window queries, and dry-run ids make every one of those
+		// return nothing -- indistinguishable from a failed bind.
+		"(rolled back; --apply will mint different ids)",
 		// The two lines the first review found missing from the runbook's
 		// checklist, plus the warning that makes the dangerous case visible
 		// without an operator having to compare numbers by eye.
@@ -232,6 +237,12 @@ func TestRunApplyWritesTheShadowBinding(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "account-bind XM-INV-SHADOW-BINDING: APPLIED") {
 		t.Fatalf("apply did not report applying:\n%s", out.String())
+	}
+	// The rolled-back marker is dry-run only. On the run whose ids the operator
+	// is actually told to save it must be absent, or it would teach them to
+	// distrust the ids that do work.
+	if strings.Contains(out.String(), "rolled back") {
+		t.Fatalf("apply output carries the dry-run rollback marker:\n%s", out.String())
 	}
 	var issuer, subject, platform, platformUserID, status string
 	var emailVerified bool
