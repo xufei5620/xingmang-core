@@ -2223,7 +2223,7 @@ that do not exist in any image, in text that had never been run.
 export INVOICE_IMAGE_TAG='<exact tag from the verified release manifest>'
 export SECRETS_DIR=/root/invoice-system/secrets
 invoice_eligibility_repair() {
-  docker run --rm --pull=never --user 10001:10001 \
+  docker run --rm --pull never --user 10001:10001 \
     --network invoice-system-prod_invoice_db \
     --read-only --security-opt no-new-privileges:true --cap-drop ALL \
     -v "$SECRETS_DIR/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro" \
