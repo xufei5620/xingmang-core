@@ -2711,7 +2711,11 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
       FROM source_account_eligibility_state WHERE external_account_id='$BIND_ACCOUNT_ID'"
 ```
 
-出行之后还有 15 分钟的 finalization 延迟才会首次评估。
+**首次评估紧跟排空发生，不需要再等 15 分钟。** 那 15 分钟的终局延迟只挡**最新的那
+一段窗口**：评估覆盖 `(finalized_through, requested_through]`，而 `requested_through`
+最多推到「现在减 15 分钟」。代绑定放出来的是**历史**事实（2823 那批是 09-03 起的），
+远早于这条线，所以一排空就立刻被评估。本节早期版本写的「出行之后还要等 15 分钟终局
+延迟才首次评估」是**错的**，按实测改正。
 
 **2026-09-09 账号 2823 的实测时间线**（观察脚本每 30 秒采样一次，所以「≤」是采样
 上界，不是精确值）：
@@ -2722,6 +2726,15 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
 | 14:54:29Z | `source_account_eligibility_state` 出行（`syncing`，T+3s） |
 | 14:56:49Z–14:58:22Z | 未处理 257 → 191 → 125 → 58，约 66 条/30 秒；全程 dead 0 |
 | ≤14:58:53Z | 排空、`/readyz` 回 200、状态离开 `syncing` 变 `active`（连击 0）——三件事落在同一个采样点，**均在 T+4 分 27 秒以内** |
+| 14:59:05.605Z | **首次评估**（T+4 分 39 秒，紧跟排空）；同一事务里 `pending_reconciliation` entered→exited、`projection.rebuilt` ×14、写下 1 条结转证明 |
+| 15:17:21Z | 复查：`active`、连击 0、`finalized_through` 已推进到 14:56:27Z、无 overage |
+
+**整件事从 `--apply` 到首次评估不到 5 分钟**，而不是原先以为的「补数几十分钟 + 再等
+15 分钟」。首次评估的评估行样本也值得知道长什么样：08-31 16:00 那张策略起点检查点
+（balance 50,000,000）判 `positive_classified_non_cash`（expected 0、difference
+50,000,000，即起点合成的 0.50 元当量 `UNKNOWN_POSITIVE`），09-03 的四张判 `matched`
+（expected = balance、difference 0）。起点那张不是 `matched` 属于正常，见 9. 节
+`UNKNOWN_POSITIVE` 相关段落。
 
 设计稿写的「几十分钟到一小时」对**这个规模**是高估了一个数量级；但按上面那条
 「÷2 秒」的速率外推，它对设计稿里那个 6842 条的账号（约 53 分钟）是对的。**窗口
