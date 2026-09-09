@@ -2578,6 +2578,16 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
   `--apply` 就回不来了。
 - **`released to queued:`** —— 会被放出来交给 worker 的条数，也就是接下来补数
   的规模，以及同来源其他客户读到 `source_unavailable` 的时长量级。
+  **按下 `--apply` 之前先用它估一下窗口长度**：2026-09-09 账号 2823 实测排空速率是
+  **约 2.1 条/秒**（552 条，四个采样点 2.06–2.16/秒，高度线性）。所以
+
+  > 窗口秒数 ≈ `released to queued` ÷ 2　　窗口分钟数 ≈ `released to queued` ÷ 120
+
+  552 条 → 约 4 分半（实测 ≤4 分 27 秒）。设计稿提到过的那个 6842 条的账号 →
+  **约 53 分钟**。这一段时间里 `/readyz` 一直 503、api 显示 `unhealthy`、同来源其他
+  客户读到 `source_unavailable`，所以**窗口长度就是选低峰时段和通知告警值班人的依据**。
+  注意这是**一个账号的一次实测**，事件类型构成（用量／余额检查点／订单）和当时的库
+  负载都会影响速率，拿它当量级用、不要当承诺。
 - `invoice_user_id` / `external_account_id` 后面标 `created` 还是 `reused` /
   `updated in place`：第一次做应该都是 `created`。
 - `timing gate` 要是 `GO`。
@@ -2701,9 +2711,30 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
       FROM source_account_eligibility_state WHERE external_account_id='$BIND_ACCOUNT_ID'"
 ```
 
-出行之后还有 15 分钟的 finalization 延迟才会首次评估。「几十分钟到一小时」是
-设计稿的估算，**未实测**；本次做的时候把 `--apply` 时刻、这张表出行时刻、首次
-评估时刻都记进发布记录，把这条从估算变成事实。
+出行之后还有 15 分钟的 finalization 延迟才会首次评估。
+
+**2026-09-09 账号 2823 的实测时间线**（观察脚本每 30 秒采样一次，所以「≤」是采样
+上界，不是精确值）：
+
+| 时刻 | 事件 |
+|---|---|
+| 14:54:26Z | `--apply` 落地，released 552 |
+| 14:54:29Z | `source_account_eligibility_state` 出行（`syncing`，T+3s） |
+| 14:56:49Z–14:58:22Z | 未处理 257 → 191 → 125 → 58，约 66 条/30 秒；全程 dead 0 |
+| ≤14:58:53Z | 排空、`/readyz` 回 200、状态离开 `syncing` 变 `active`（连击 0）——三件事落在同一个采样点，**均在 T+4 分 27 秒以内** |
+
+设计稿写的「几十分钟到一小时」对**这个规模**是高估了一个数量级；但按上面那条
+「÷2 秒」的速率外推，它对设计稿里那个 6842 条的账号（约 53 分钟）是对的。**窗口
+长度由 `released to queued` 决定，不是一个固定值**，选时段时按那条规则自己算。
+
+补数结果（同一账号）：2 个额度批各 ¥10.00（对应起点后的 2 单）、151 张余额检查点、
+400 条用量入账。审计序列可以拿来核对一次健康的补数长什么样：
+
+```
+user.created → external_account.operator_bound → identity_catchup.completed
+→ policy_anchor.bootstrapped → pending_reconciliation entered → exited
+→ projection.rebuilt ×14
+```
 
 **判断「能不能开票」**只能用管理端账本
 `GET /api/v1/admin/accounts/$BIND_ACCOUNT_ID/ledger` 的
