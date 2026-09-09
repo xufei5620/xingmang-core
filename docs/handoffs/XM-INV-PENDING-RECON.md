@@ -111,6 +111,16 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M20 | `Blocked()` 看不见 blocker | 五条拒绝用例 | 全红 |
 | M21 | 报告重算不再走共用 helper | dry-run 用例 | 红（期望 0 而非 −50） |
 | M22 | 被拒绝的 apply 退回 dry-run 横幅 | 横幅格式用例 | 红 |
+| M23 | 排队窗口退回 `finalized_through`（生产不可达那版） | 生产形状用例 | 红（预测/实写一致性守卫先报出来） |
+| M24 | 报告忽略既有作业行更宽的窗口 | 既有作业行用例 | 红（报告说 finalized_through，实际是更宽的） |
+| M25 | 目标周期不再受窗口约束 | 生产形状用例 | 红（选到窗口外的周期） |
+| M26 | 预测/实写一致性守卫短路 **+** 同时把写入退回窄窗口 | 生产形状用例 | 红（作业行 requested_through 断言） |
+| M27 | 加一个没有手册行的 blocker | 手册同源用例 | 红（11 行 vs 12 个 blocker） |
+
+M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
+漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
+`requested_through` 的断言（配对变异 M26 即红）。记在这里是因为「单独短路是绿的」这件事本身
+容易被下一个人误读成「守卫没用」。
 
 M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**，因为检查层先拒绝、语句
 根本没执行到。这属于「闸恰好没被触发」而不是「闸有效」，所以把语句抽成函数并单测它；记在这里
@@ -143,9 +153,73 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
   （`git diff --name-only b3ded69 -- web/` 为空）。
 - `scripts/verify.ps1` / `scripts/verify-postgres.ps1`：容器化的发布门禁，属于发布环节，
   由主控者在打 RC 时跑。
-- **影子评估**：C5 属于评估器改动，按 XM-INV-ELIG-POLICY-START-ANCHOR 的纪律，
-  `deploy/rehearsal/shadow-eval.sh --reproject-all --reevaluate-evidence` **发布前必做**，
-  本切片没有跑（需要生产备份与 age 身份，不在实现范围内）。这不是可选项，见 §6 第 9 条。
+- **影子评估**：C5 属于评估器改动，发布前必做；本切片没有跑（需要生产备份与 age 身份，
+  不在实现范围内）。**怎么跑、怎么判见 §4.1，照那节执行。**
+
+### 4.1 RC108 影子评估：命令、预期 diff、判据
+
+第一轮复审指出的三件事都成立，先摆出来，因为它们决定了这一节为什么是这个样子：
+
+1. `--reproject-all` 单独对 C5 是空转。评估器只挑 `NOT EXISTS(evaluation)` 的证据，生产快照
+   里每条检查点都已经有评估行，所以只重放投影不会让新分类器判任何东西。
+2. `--reevaluate-evidence` 才会清掉评估行让新分类器重判，但手册对它的既有判据是「重做出来的
+   状态必须与生产一致」，而 C5 的全部目的就是改变其中一部分状态。照那条判据判，本次必然
+   「不一致」。所以**本次的判据不是「一致」，是「变化恰好等于下面的清单」**。
+3. C1/C2 的闲置派生需要窗口。冻结副本上没有任何东西发布水位，`--reproject-all` 只按各账号
+   自己的 `finalized_through` 排作业（窗口宽度为零），派生不了。要 `--finalization-window`
+   才会按「一次 finalize 会请求的窗口」排队。
+
+命令（服务器上，镜像 load 之后、`roll-forward.sh` 之前）：
+
+```bash
+BACKUP_DIR=/root/invoice-system/backups \
+BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
+AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
+  bash deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rc108 \
+    --reproject-all \
+    --reevaluate-evidence \
+    --finalization-window --finalization-window-lag 1h --finalization-window-provable
+```
+
+每个参数为什么在这里：
+
+| 参数 | 理由 |
+| --- | --- |
+| `--reproject-all` | 另外两个开关都要求它；也是「这次真的跑过账号」的前提（`AccountsProjected==0` 直接判 not_ready） |
+| `--reevaluate-evidence` | 唯一能让 C5 的新分类器重判既有检查点的开关；不给它，C5 在影子上根本没被执行 |
+| `--finalization-window` | 给 C1/C2 一个非零窗口；不给它，闲置派生一次都不会发生 |
+| `--finalization-window-lag 1h` | 冻结副本上贴着前沿的事实其水位晚于窗口末端，结转证明在那里永远 pend（生产靠下一次更宽的窗口收敛）；1h 是脚本注释自己给的经验值 |
+| `--finalization-window-provable` | 把每个窗口砍到「窗口内每条事实都已被看见」的那个已发布 balances 天花板，正是 `ensureBalanceCarryForwardProofTx` 需要的 |
+
+**判据一（自动）**：`verdict=ready`、退出码 0。但要知道它只检查三件事
+（`eligibility-shadow/report.go` 的 `EvaluateReadiness`）：跑过账号、没有**新出现的冻结原因
+类别**、没有投影错误。它**不**比较 `eligibility_status`，所以 pending→active 不会让它变红；
+它也**不**会发现「SOURCE_GAP 落到了一个原本没有 SOURCE_GAP 的账号上」，只要这个类别在基线里
+已经存在。自动判据是必要条件，不是充分条件。
+
+**判据二（人工，逐账号 diff）**：生产共 12 个账号，基线 active 9、frozen 1（2222）、
+`not_invoiceable_pending_reconciliation` 2（用户 12、34）。看 `after.accounts[]`，
+**必须恰好只有下面这些变化**：
+
+| 账号 | 预期 | 依据 |
+| --- | --- | --- |
+| 用户 12 `acdcdce9-c7f4-4cb4-9a02-ce527849a440` | 出现一条 `idle_reevaluation:true` 的结转证明，其评估 `matched`，连击 1→2，状态 → `active` | C1+C2；它 09-06 11:29:30Z 之后无检查点，连击停在 1 |
+| 用户 34 `40bd883d-26fa-4938-b8c8-0f51c8b88686` | 正向检查点在有符号口径下改判：合成一条 `UNKNOWN_POSITIVE`（量级 ≈ 09-06 17:18 那笔加款 + 当时 deficit），随后 `matched`；状态 → `active`，或至少连击 ≥1 | C5 |
+| 其余 9 个 active | 状态仍 `active`，不新增 open 冻结 | C5 对 `UnallocatedUnits=0` 的账号逐字节不变；有欠账的账号只会被判得更宽松，不会更严 |
+| 2222（frozen） | 仍 `frozen`，冻结原因不变 | 本切片不碰冻结路径 |
+
+**判据三**：清单之外的任何变化都是 not ready——某个 active 账号进了 pending 或 frozen、某个
+账号多出 `SOURCE_GAP`、`eligibility.balance_blip.rebaselined` 出现在用户 34 以外的账号上、
+合成额度出现在预期之外的账号上——停下来查，不要发布。
+
+两个已知的影子专有伪象，看到不要当回归：
+
+- `--reevaluate-evidence` 是否同时删除副本上已合成的 `UNKNOWN_POSITIVE` 额度，我没有证实
+  （设计 §8 第 8 条）。若不删，用户 34 在影子上会出现「旧合成 + 新合成」两条，生产不会。
+  跑之前先在副本上数一次 `source_credit_events WHERE credit_kind='UNKNOWN_POSITIVE'`，跑完
+  再数，差值对不上就是这个伪象。
+- 快照不带 `pending_reconciliation_consecutive_matches`（`eligibility_shadow_report.go`），
+  连击要另外用 psql 在副本上读。
 
 顺带一条实现现场的坑：`gofmt -w internal/postgresstore/` 会把整包文件的 CRLF 改成 LF，
 `git status` 于是显示 78 个文件被改。仓库 `core.autocrlf=true`，所以 `git diff` 对这些文件是
@@ -182,6 +256,39 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
    per-kind 带 filters 的表，给 `ingest-acknowledge-unreplayable` 和 `pending-reevaluate` 各自
    补上它们必填的窄化参数 —— 否则这两种会因为「缺 `--event`/`--account`」而先报错，用例看着绿
    但根本没测到 operator-id 那道闸。
+8. **C3 的排队窗口重做**（第一轮复审 major 1+2，最要紧的一条）。原实现把
+   `requested_through` 写成 `finalized_through`，报告也按 `finalized_through` 算窗口。两个后果：
+   - 生产上 `finalized_through = min(四条流水位) − finalization_delay_seconds`（秒级、每次
+     finalize 都在动），**不可能**正好落在某个周期天花板上，所以派生窗口宽度为零，apply 的
+     派生路径在生产**不可达**：横幅 APPLIED、accounts affected: 1、审计照落、报告印着预期
+     matched，而证明数、状态、连击一个都没动。唯一证明它「能派生」的用例是手工把
+     `finalized_through` 写到天花板上的——**用例造出了生产不存在的形状**。
+   - `ON CONFLICT DO UPDATE` 不写 `requested_through`，已有作业行保留它更宽的窗口。于是报告
+     说「applying now changes nothing」，apply 之后 worker 用旧的宽窗口派生、评估 matched、
+     账号退出「对账中」变 active——被告知「不会有变化」的操作把一个账号变成可开票。
+   现在：排队按 **finalize 自己的口径**写窗口（`GREATEST(finalized_through, cutover_at,
+   min(四条水位) − 延迟)`，四条水位齐了才算），既有行取 `GREATEST` 只升不降；报告用**同一个
+   SQL 片段**（`pendingReevaluateWindowSQL`）预测同一个值；目标周期改成「窗口内、按
+   `ensureBalanceCarryForwardProofTx` 自己的规则（从新往旧、跳过已带真实检查点的）」选。
+   apply 还会把实写值与预测值比一次，不等就拒绝提交——报告描述的操作和实际执行的操作必须是
+   同一个。用例换成生产形状：两个已发布周期、`finalized_through` 在两者之下、窗口落在两者
+   之间，谁都不在边界上。
+9. **报告新增 `requeue window` / `newest published` / `skipped` 三行**，并删掉会误导的
+   `in requeue window`。窗口行排在周期行之前是刻意的：周期只有「在这个窗口里」才有意义。
+10. **STOP 表与代码同源**（复审 minor 7）。原表 8 行、代码 10 个 blocker，漏了「没有资格状态
+    行」和「窗口之后没有已发布周期」——后者恰是生产常态。现在每个 blocker 有一个 ASCII
+    `Code`，`PendingReevaluateBlockerCodes` 是唯一清单，`TestPendingReevaluateBlockersMatchThe
+    RunbookTable` 读手册数表格行、与清单长度比对（找不到表头就 fail，不会 0==0 恒真）。
+11. **手册补两段只读 SQL**（复审 major 6）：按上游 id 查 `external_accounts.id`、查资格状态四列
+    确认账号有没有离开「对账中」，并点名**别**去查
+    `balance_reconciliation_checkpoints.reconciliation_status`（生产上全是
+    `pending_finalization`），评估结果在两张 evaluations 表里。同时指向管理端
+    `GET /api/v1/admin/accounts`。
+12. **ELIGIBILITY-OPERATIONS.md 里我新增的可粘贴命令改成手册的 `docker run` 形状**（复审
+    major 3）。原来抄了同文件既有片段的 `/app/bin/invoice-eligibility-repair`、
+    `/run/secrets/invoice-db-url`、`field-keyring.json`——三个路径都不存在。**同文件里兄弟
+    kind 的既有片段仍是错的**（我只改了自己新增的那两段，另加一段提示指向手册）：那是既有
+    问题，是否一并修由主控者决定。
 7. **被拒绝的 apply 单独一个横幅**（设计没写，是实现时发现的输出正确性问题）。兄弟 kind 的
    横幅只有 `DRY RUN (nothing was changed)` 与 `APPLIED` 两种，而本 kind 会拒绝 apply；沿用
    两种横幅的话，操作者打了 `--apply` 却看到 `DRY RUN`，最合理的推断是「参数没生效、再打一遍」，
@@ -203,21 +310,35 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 - `sourceEventContainedByOpenFreezeSQL` 与 C2 的候选查询同源渲染，C3 报告里的死信判断复用同一
   个片段，两处不会漂开。
 
-**仍需主控者在生产核实（属于生产数据类，我不猜）：**
+**主控者已在生产只读核实（2026-09-09 11:10Z），结论抄录如下：**
 
-1. 生产 balances 周期发布节奏与「每 20 分钟空推进」的驱动（决定用户 12 多久能自动退出）。
-2. 用户 34 当前是否仍有 `status='dead'` 的作业行；若是，先跑 `--kind=projection-requeue-dead`。
-3. 用户 34 在 09-06 17:15–17:38 的负余额评估为何不 matched（残差 D 的大小），以及 C5 的合成量
-   到底会是多少。
-4. 用户 34 的 09-02 四条 UNKNOWN_POSITIVE 各自走的路径（影响后续 admin-credits 切片的去重）。
-5. 用户 12 在 09-06 之后是否有停放/死信的余额 ingest 事件 —— 若有，C2 的死信 hold 会让它的作业
-   进入 `BALANCE_PROOF_PENDING` 重排而不是派生，这是对的，但要先处理那条死信。
-6. 0026 由哪个 RC 上线、`install-economic` 的执行时间（12 的 09-06 11:29 检查点归因）。
-9. 生产中还有多少 `UnallocatedUnits>0` 且上游余额为正的账号 —— C5 会改判它们，**发布前的影子
-   评估必须逐账号 diff**（评估器改动纪律，本切片没有跑影子评估，那是发布环节的事）。
-15. 用户 34 加余额的上游操作到底走的哪个入口。
+1. balances 周期每个源约 **1 分钟**发布一次（10:36–10:39 四分钟内 8 个 published 周期），
+   空推进由 finalize 驱动。→ 设计稿「每 20 分钟」的估计偏慢，用户 12 在 C1 下应该在分钟级
+   而不是 40 分钟内拿到闲置证据。**这条数字直接推翻了 C3 的原实现**，见 §5 第 8 条。
+2. 用户 34 的投影作业是 `queued`（attempt 2），不是 dead；2222 是 `queued`（attempt 1）；
+   全库**没有** dead 作业。→ **不必**先跑 `--kind=projection-requeue-dead`。
+3. 用户 34（`40bd883d-26fa-4938-b8c8-0f51c8b88686`）时间线：09-06 17:14:30 余额 35,951,468
+   → 17:15:32 余额 0 负、deficit 25,900,972 → 17:16:40 deficit 51,228,592 → 17:18:48 余额
+   99,948,771,408（管理员加约 1000 元当量）→ 之后每分钟一张检查点持续消费，09-09 10:39Z
+   余额 84,084,681,007。pending 自 09-06 17:38:06Z，reason `UNKNOWN_NEGATIVE_BALANCE`，
+   连击 0。→ **C5 的合成量 ≈ 加款额 + 当时 deficit**，不是设计稿推测的 999.49+D。
+4. 用户 34 的 09-02 四条 UNKNOWN_POSITIVE 各自路径：仍未核（留给 admin-credits 切片的去重）。
+5. 用户 12（`acdcdce9-c7f4-4cb4-9a02-ce527849a440`）：最后一张真实检查点 09-06 11:29:30Z
+   （余额 0 负、deficit 3,610,140），此后无检查点；pending 自 09-04 10:03:06Z，连击 1。
+   全库 `source_ingest_events` **无 failed/dead**。→ 没有死信 hold 要先处理，C2 的闲置派生
+   对它是畅通的。
+6. 0026 于 09-06 11:28:57Z 打上，比 12 的最后一张检查点早 33 秒——所以那张带 deficit；
+   0032 于 09-09 08:26:54Z。
+9. 近似：每账号最新检查点余额为正的 8 个、非正 4 个；全库资格状态 active 9、frozen 1（2222）、
+   pending 2（12、34）。真值仍要靠影子评估逐账号 diff，判据见 §4.1。
+15. 用户 34 的加款走 Sub2API 管理员加余额（`redeem_codes` type=`admin_balance`），已核。
 
-第 8、10、11、12、13 条与本切片的实现无关，未处置。
+另外一条与手册相关：`balance_reconciliation_checkpoints.reconciliation_status` 生产上**全是**
+`pending_finalization`，评估结果不在这张表。手册的确认 SQL 已改为查
+`balance_checkpoint_evaluations` / `balance_carry_forward_evaluations`。
+
+**仍未核实：** 第 4 条（34 的四条旧合成额度各走哪条路径）；第 8、10、11、12、13 条与本切片的
+实现无关，未处置。
 
 ## 7. 部署后预期观测
 

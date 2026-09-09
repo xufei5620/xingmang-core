@@ -96,27 +96,51 @@ func (f *idlePendingFixture) publishEmptyBalancesCycle(t *testing.T, seed int, a
 // has to infer.
 func (f *idlePendingFixture) runFinalize(t *testing.T, through time.Time) {
 	t.Helper()
-	watermark := through.Add(f.finalizationDelay(t))
+	f.setWatermarks(t, through.Add(f.finalizationDelay(t)))
 	tx, err := f.store.pool.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err = tx.Exec(f.ctx, `INSERT INTO source_economic_stream_watermarks(
-		source_instance_id,stream_kind,watermark_at,source_sequence,source_cursor,configuration_hash)
-		VALUES($1,'payments',$2,1,'c',$3),($1,'usage',$2,1,'c',$3),
-			($1,'credits',$2,1,'c',$3),($1,'balances',$2,1,'c',$3)
-		ON CONFLICT(source_instance_id,stream_kind) DO UPDATE SET
-			watermark_at=GREATEST(source_economic_stream_watermarks.watermark_at,EXCLUDED.watermark_at)`,
-		f.sourceID, watermark, f.configHash); err != nil {
-		t.Fatal(err)
-	}
 	if err = finalizeSourceAccountsTx(f.ctx, tx, f.sourceID, AuditActor{Type: "system", ID: "pending-recon-test"}); err != nil {
 		t.Fatalf("finalization pass: %v", err)
 	}
 	if err = tx.Commit(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// setWatermarks raises all four of the source's stream watermarks to `at`
+// without running a finalization pass. The separation matters for the repair
+// tool's own tests: the tool derives the window it will ask for from these
+// watermarks itself, the same way a pass would, so exercising it through an
+// actual pass would prove nothing about the tool.
+//
+// Raising only (GREATEST), because lowering a stream watermark is a
+// STREAM_WATERMARK_REGRESSION as far as the receiver is concerned.
+func (f *idlePendingFixture) setWatermarks(t *testing.T, at time.Time) {
+	t.Helper()
+	if _, err := f.store.pool.Exec(f.ctx, `INSERT INTO source_economic_stream_watermarks(
+		source_instance_id,stream_kind,watermark_at,source_sequence,source_cursor,configuration_hash)
+		VALUES($1,'payments',$2,1,'c',$3),($1,'usage',$2,1,'c',$3),
+			($1,'credits',$2,1,'c',$3),($1,'balances',$2,1,'c',$3)
+		ON CONFLICT(source_instance_id,stream_kind) DO UPDATE SET
+			watermark_at=GREATEST(source_economic_stream_watermarks.watermark_at,EXCLUDED.watermark_at)`,
+		f.sourceID, at, f.configHash); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requestedThrough reads the window the account's own job row currently asks
+// for: what the repair tool's report predicts, and what its apply writes.
+func (f *idlePendingFixture) requestedThrough(t *testing.T) time.Time {
+	t.Helper()
+	var requested time.Time
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT requested_through FROM eligibility_projection_jobs
+		WHERE external_account_id=$1`, f.accountID).Scan(&requested); err != nil {
+		t.Fatalf("job row requested_through: %v", err)
+	}
+	return requested.UTC()
 }
 
 func (f *idlePendingFixture) finalizationDelay(t *testing.T) time.Duration {

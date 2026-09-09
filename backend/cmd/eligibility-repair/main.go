@@ -582,9 +582,17 @@ func printPendingReevaluateSummary(out io.Writer, result postgresstore.PendingRe
 	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", "ACCOUNT", "STATUS", "MATCHES", "JOB")
 	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", result.AccountID, orNone(result.Status),
 		fmt.Sprintf("%d/%d", result.ConsecutiveMatches, result.ExitMatches), orNone(result.JobStatus))
-	fmt.Fprintf(out, "\nfinalized_through: %s\n", orNone(formatRepairTime(result.FinalizedThrough)))
-	fmt.Fprintf(out, "target cycle:      %s (ceiling %s, in requeue window: %t)\n",
-		orNone(result.TargetCycleID), orNone(formatRepairTime(result.TargetCycleAt)), result.TargetInRequeueWindow)
+	// The window line comes before the cycle line on purpose: a cycle is only
+	// meaningful as "the one inside this window", and reading them the other
+	// way round is how an operator ends up believing a cycle the apply cannot
+	// reach is the one it will use.
+	fmt.Fprintf(out, "\nrequeue window:    (%s, %s]  (watermark streams %d/4)\n",
+		orNone(formatRepairTime(result.FinalizedThrough)),
+		orNone(formatRepairTime(result.EffectiveRequestedThrough)), result.WatermarkStreams)
+	fmt.Fprintf(out, "target cycle:      %s (ceiling %s, skipped %d already carrying a real checkpoint)\n",
+		orNone(result.TargetCycleID), orNone(formatRepairTime(result.TargetCycleAt)),
+		result.SkippedRealCheckpointCycles)
+	fmt.Fprintf(out, "newest published:  %s\n", orNone(formatRepairTime(result.NewestPublishedCycleAt)))
 	fmt.Fprintf(out, "prior checkpoint:  %s (as_of %s)\n",
 		orNone(result.PriorCheckpointID), orNone(formatRepairTime(result.PriorAsOf)))
 	fmt.Fprintf(out, "recomputed:        expected=%s difference=%s -> %s\n",

@@ -54,10 +54,33 @@ type PendingReevaluateRepairInput struct {
 // precondition, whether it holds, and the operator-facing explanation. Detail
 // is Chinese because it is read by whoever is on call, not parsed.
 type PendingReevaluateCheck struct {
+	// Code is the stable, ASCII identity of the condition, used to keep the
+	// runbook's STOP table and this code from drifting apart. Name and Detail
+	// are prose and may be reworded freely; Code may not.
+	Code    string
 	Name    string
 	Passed  bool
 	Detail  string
 	Blocker bool
+}
+
+// PendingReevaluateBlockerCodes is every condition that can refuse an apply.
+// The runbook's STOP table documents exactly these, one row each, and
+// TestPendingReevaluateBlockersMatchTheRunbookTable holds the two to the same
+// length -- a blocker added here without a row there fails the build, which is
+// the only way a table of "what to do instead" stays true as the tool grows.
+var PendingReevaluateBlockerCodes = []string{
+	"account_missing",
+	"not_pending",
+	"open_freeze",
+	"job_processing",
+	"job_dead",
+	"window_empty",
+	"no_derivable_cycle",
+	"cycle_has_proof",
+	"cycle_has_stranded",
+	"prior_unknown_magnitude",
+	"self_dealing",
 }
 
 // PendingReevaluateRepairResult is the tool's whole answer, printable as-is
@@ -93,20 +116,43 @@ type PendingReevaluateRepairResult struct {
 	// UnevaluatedEvidence counts checkpoints and proofs already waiting for
 	// the evaluator -- the same NOT EXISTS predicate the evaluator selects on.
 	UnevaluatedEvidence int
-	// TargetCycleID/TargetCycleAt describe the newest published balances scan
-	// cycle at or after FinalizedThrough: the one an idle derivation would
-	// take. Empty when there is none.
-	TargetCycleID           string
-	TargetCycleAt           time.Time
-	TargetInRequeueWindow   bool
-	TargetHasRealCheckpoint bool
-	TargetHasProof          bool
-	TargetHasStranded       bool
-	PriorCheckpointID       string
-	PriorAsOf               time.Time
-	PriorBalance            string
-	PriorNegative           bool
-	PriorDeficit            string
+	// EffectiveRequestedThrough is the requested_through the account's job row
+	// will actually carry after an apply, and therefore the whole window the
+	// worker will then derive over. It is deliberately not finalized_through:
+	// the requeue asks for the window a finalization pass would ask for, and
+	// an existing job row's own wider window is kept rather than lowered.
+	// Every window judgement below is made against this one value, so the dry
+	// run and the apply cannot disagree about what will happen.
+	EffectiveRequestedThrough time.Time
+	// WatermarkStreams is how many of the source's four economic stream
+	// watermarks exist. Below four, finalization itself does not run at all
+	// and there is no window to derive over.
+	WatermarkStreams int
+	// TargetCycleID/TargetCycleAt describe the published balances scan cycle
+	// an idle derivation would actually take: the newest one inside
+	// [FinalizedThrough, EffectiveRequestedThrough] that does not already
+	// carry a real checkpoint for this account -- ensureBalanceCarryForwardProofTx's
+	// own selection rule, not an approximation of it. Empty when there is none.
+	TargetCycleID string
+	TargetCycleAt time.Time
+	// SkippedRealCheckpointCycles counts cycles inside the window passed over
+	// because they already carry a real checkpoint for this account, so a
+	// target older than the newest cycle in the window is explained rather
+	// than surprising.
+	SkippedRealCheckpointCycles int
+	// NewestPublishedCycleAt is the newest published balances cycle for the
+	// source, window or no window. When it sits above the window the account
+	// is simply waiting for the finalization delay to pass, which is the
+	// ordinary state and worth saying out loud rather than reporting as a
+	// missing cycle.
+	NewestPublishedCycleAt time.Time
+	TargetHasProof         bool
+	TargetHasStranded      bool
+	PriorCheckpointID      string
+	PriorAsOf              time.Time
+	PriorBalance           string
+	PriorNegative          bool
+	PriorDeficit           string
 	// RecomputedStatus/RecomputedDifference are this run's own arithmetic for
 	// the evidence a derivation would produce -- computed here, never read
 	// from a stored evaluation row.
@@ -160,7 +206,7 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 	if err != nil {
 		if errors.Is(err, domain.ErrSourceUnavailable) {
 			result.Applied = false
-			result.Checks = append(result.Checks, PendingReevaluateCheck{Name: "account",
+			result.Checks = append(result.Checks, PendingReevaluateCheck{Code: "account_missing", Name: "账号",
 				Detail: "该外部账号没有开票侧的资格状态行，无法重评", Blocker: true})
 			return result, nil
 		}
@@ -180,11 +226,21 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 		return result, nil
 	}
 
-	queued, err := requeuePendingReevaluateJobTx(ctx, tx, accountID)
+	queued, written, err := requeuePendingReevaluateJobTx(ctx, tx, accountID)
 	if err != nil {
 		return PendingReevaluateRepairResult{}, err
 	}
 	result.Queued = queued
+	if queued && !written.Equal(result.EffectiveRequestedThrough) {
+		// The report told the operator which window the apply would ask for,
+		// and every judgement above -- which cycle, what the evaluator would
+		// decide -- was made against it. If the write disagreed, the report
+		// they approved described a different operation, so refuse rather
+		// than commit one they were not shown.
+		return PendingReevaluateRepairResult{}, fmt.Errorf(
+			"predicted requeue window %s but wrote %s; refusing to commit a run the report did not describe",
+			result.EffectiveRequestedThrough.Format(time.RFC3339Nano), written.Format(time.RFC3339Nano))
+	}
 	after := map[string]any{
 		"repair_tool":           "XM-INV-PENDING-RECON",
 		"consecutive_matches":   result.ConsecutiveMatches,
@@ -192,7 +248,7 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 		"prior_checkpoint_id":   result.PriorCheckpointID,
 		"recomputed_difference": result.RecomputedDifference,
 		"recomputed_status":     result.RecomputedStatus,
-		"target_in_window":      result.TargetInRequeueWindow,
+		"requested_through":     written.Format(time.RFC3339Nano),
 		"queued":                result.Queued,
 	}
 	if err = writeAudit(ctx, tx, actor, "eligibility.pending_reconciliation.reevaluation_requested",
@@ -205,10 +261,41 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 	return result, nil
 }
 
+// pendingReevaluateWindowSQL is the requested_through a requeue asks for,
+// against a source_account_eligibility_state aliased "eas". It is
+// finalizeSourceAccountsTx's own expression -- GREATEST(cutover_at, the
+// source's minimum stream watermark minus the account's finalization delay),
+// floored at finalized_through -- and EnqueueEligibilityShadowFinalizationWindow
+// computes the same thing for the shadow harness.
+//
+// Asking for exactly what a finalization pass would ask for is the point.
+// requested_through is what the job publishes as the new finalized_through,
+// so a window wider than that would finalize an interval the ordinary path
+// has deliberately not finalized yet, and any fact still arriving inside it
+// would become a late fact. A window narrower than that -- in particular
+// finalized_through itself, which is what this statement used to write --
+// gives the derivation a zero-width window: the candidate range
+// [finalized_through, requested_through] then holds only a cycle whose
+// ceiling is exactly finalized_through, and since finalized_through is
+// min(watermarks) minus a delay measured in seconds it essentially never
+// lands on a cycle ceiling. The apply reported success and derived nothing.
+//
+// The four-watermark requirement is finalizeSourceAccountsTx's own guard
+// (it returns without doing anything when a stream is missing). GREATEST
+// ignores NULLs, so a source short of a watermark row yields finalized_through
+// and the report says so rather than silently asking for a useless window.
+const pendingReevaluateWindowSQL = `GREATEST(eas.finalized_through,eas.cutover_at,
+	(SELECT min(w.watermark_at) FROM source_economic_stream_watermarks w
+	  WHERE w.source_instance_id=eas.source_instance_id
+	  HAVING count(*)=4)-make_interval(secs=>eas.finalization_delay_seconds))`
+
 // requeuePendingReevaluateJobTx is the only statement this repair writes to
 // eligibility_projection_jobs, and the only thing about the account it
-// changes at all: due now, lease cleared, window set to whatever the account
-// has already finalized.
+// changes at all: queued, due now, lease cleared, and the window above --
+// raised onto an existing row, never lowered, exactly as both
+// finalizeSourceAccountsTx and the shadow harness do it. It returns the
+// requested_through the row ended up with, which is the ground truth the
+// report's own prediction is checked against.
 //
 // The DO UPDATE deliberately refuses a status='dead' row.
 // XM-INV-PROJECTION-FAILURE-GRADING's terminal grade exists so a persistently
@@ -218,19 +305,52 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 // apply before this is ever reached, so in the ordinary flow this clause
 // never decides anything -- it is here so that the refusal is a property of
 // the write and not only of the check that precedes it, and it has its own
-// test for exactly that reason. Returns whether a row was actually queued.
-func requeuePendingReevaluateJobTx(ctx context.Context, tx pgx.Tx, accountID string) (bool, error) {
-	command, err := tx.Exec(ctx, `
+// test for exactly that reason.
+func requeuePendingReevaluateJobTx(ctx context.Context, tx pgx.Tx, accountID string) (bool, time.Time, error) {
+	var requested time.Time
+	err := tx.QueryRow(ctx, `
 		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
-		SELECT external_account_id,finalized_through,'queued',now() FROM source_account_eligibility_state
-		WHERE external_account_id=$1
-		ON CONFLICT(external_account_id) DO UPDATE SET status='queued',lease_token=NULL,
-			lease_expires_at=NULL,next_attempt_at=now(),updated_at=now()
-		WHERE eligibility_projection_jobs.status<>'dead'`, accountID)
-	if err != nil {
-		return false, err
+		SELECT eas.external_account_id,`+pendingReevaluateWindowSQL+`,'queued',now()
+		FROM source_account_eligibility_state eas
+		WHERE eas.external_account_id=$1
+		ON CONFLICT(external_account_id) DO UPDATE SET
+			requested_through=GREATEST(eligibility_projection_jobs.requested_through,EXCLUDED.requested_through),
+			status='queued',lease_token=NULL,lease_expires_at=NULL,
+			next_attempt_at=now(),updated_at=now()
+		WHERE eligibility_projection_jobs.status<>'dead'
+		RETURNING requested_through`, accountID).Scan(&requested)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The DO UPDATE's own WHERE refused the row (dead), or the account
+		// has no state row: nothing was written.
+		return false, time.Time{}, nil
 	}
-	return command.RowsAffected() == 1, nil
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return true, requested.UTC(), nil
+}
+
+// loadPendingReevaluateWindowTx predicts, without writing anything, exactly
+// what requeuePendingReevaluateJobTx would leave in requested_through: the
+// same window expression, raised by the same GREATEST against whatever the
+// existing job row already asks for. Sharing the fragment is what keeps the
+// dry run and the apply from drifting into two different answers -- the
+// failure the first review caught, where the report said "applying now
+// changes nothing" and the apply then took an existing row's wider window and
+// returned an account to invoiceable.
+func loadPendingReevaluateWindowTx(ctx context.Context, tx pgx.Tx, accountID string) (window time.Time, streams int, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT GREATEST(`+pendingReevaluateWindowSQL+`,
+			(SELECT j.requested_through FROM eligibility_projection_jobs j
+			  WHERE j.external_account_id=eas.external_account_id)),
+			(SELECT count(*) FROM source_economic_stream_watermarks w
+			  WHERE w.source_instance_id=eas.source_instance_id)
+		FROM source_account_eligibility_state eas
+		WHERE eas.external_account_id=$1`, accountID).Scan(&window, &streams)
+	if err != nil {
+		return time.Time{}, 0, err
+	}
+	return window.UTC(), streams, nil
 }
 
 // collectPendingReevaluateChecks fills in every reported field and the six
@@ -238,8 +358,8 @@ func requeuePendingReevaluateJobTx(ctx context.Context, tx pgx.Tx, accountID str
 func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 	account eligibilityAccount, in PendingReevaluateRepairInput, result *PendingReevaluateRepairResult) error {
 	accountID := account.ExternalAccountID
-	add := func(name string, passed, blocker bool, format string, args ...any) {
-		result.Checks = append(result.Checks, PendingReevaluateCheck{Name: name, Passed: passed,
+	add := func(code, name string, passed, blocker bool, format string, args ...any) {
+		result.Checks = append(result.Checks, PendingReevaluateCheck{Code: code, Name: name, Passed: passed,
 			Detail: fmt.Sprintf(format, args...), Blocker: blocker && !passed})
 	}
 
@@ -267,7 +387,7 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		result.Since = since.UTC()
 	}
 	pending := account.Status == "not_invoiceable_pending_reconciliation"
-	add("状态", pending, true,
+	add("not_pending", "状态", pending, true,
 		"当前 eligibility_status=%s；原因=%s 触发=%s/%s 起始=%s 连续匹配=%d/%d",
 		account.Status, result.Reason, result.TriggerType, result.TriggerID,
 		formatOptionalTime(result.Since), result.ConsecutiveMatches, pendingReconciliationExitMatches)
@@ -278,7 +398,7 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&result.OpenFreezes); err != nil {
 		return err
 	}
-	add("冻结", result.OpenFreezes == 0, true,
+	add("open_freeze", "冻结", result.OpenFreezes == 0, true,
 		"open 冻结 %d 条；大于 0 时退出会被冻结守卫挡住，且闲置派生本身就不会发生",
 		result.OpenFreezes)
 
@@ -292,14 +412,14 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 	}
 	switch result.JobStatus {
 	case "":
-		add("作业", true, true, "该账号当前没有投影作业行，可以排队")
+		add("job_ok", "作业", true, true, "该账号当前没有投影作业行，可以排队")
 	case "processing":
-		add("作业", false, true, "投影作业正在 processing，worker 正在处理该账号；等它结束后再看")
+		add("job_processing", "作业", false, true, "投影作业正在 processing，worker 正在处理该账号；等它结束后再看")
 	case "dead":
-		add("作业", false, true,
+		add("job_dead", "作业", false, true,
 			"投影作业已是 dead，本工具绝不复活它；先跑 --kind=projection-requeue-dead --account %s", accountID)
 	default:
-		add("作业", true, true, "投影作业当前状态=%s，重新排队即可", result.JobStatus)
+		add("job_ok", "作业", true, true, "投影作业当前状态=%s，重新排队即可", result.JobStatus)
 	}
 
 	// Check 4: evidence already waiting. The worker will get to it on its own
@@ -316,55 +436,71 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 				WHERE evaluation.proof_id=proof.id))`, accountID).Scan(&result.UnevaluatedEvidence); err != nil {
 		return err
 	}
-	add("待评估证据", true, false,
+	add("unevaluated_evidence", "待评估证据", true, false,
 		"尚未评估的检查点/证明 %d 条；大于 0 说明 worker 自己就会处理，通常不需要本工具",
 		result.UnevaluatedEvidence)
 
-	// Check 5: the cycle an idle derivation would take, and whether this
-	// tool's own requeue window can actually reach it. The requeue asks for
-	// requested_through = finalized_through, and the derivation's candidate
-	// window is [finalized_through, requested_through] -- so a cycle above
-	// finalized_through is reachable by the next finalization pass (C1), not
-	// by this tool.
+	// Check 5a: the window an apply will actually ask for. Predicted from the
+	// same SQL the requeue writes, so what the dry run says here is what the
+	// apply does -- including the case that caught the first review, where an
+	// existing job row's own wider window survives the upsert.
+	window, streams, err := loadPendingReevaluateWindowTx(ctx, tx, accountID)
+	if err != nil {
+		return err
+	}
+	result.EffectiveRequestedThrough, result.WatermarkStreams = window, streams
+	add("window_empty", "重评窗口", streams == 4 && window.After(result.FinalizedThrough), true,
+		"apply 后作业行会带 requested_through=%s（finalized_through=%s，四条流水位齐了 %d/4）；派生只在这个窗口内发生",
+		formatOptionalTime(result.EffectiveRequestedThrough),
+		formatOptionalTime(result.FinalizedThrough), streams)
+
+	// Check 5b: the cycle an idle derivation would take inside that window --
+	// selected by ensureBalanceCarryForwardProofTx's own rule, newest first,
+	// skipping any that already carries this account's real checkpoint.
 	found, err := s.loadPendingReevaluateTarget(ctx, tx, account, result)
 	if err != nil {
 		return err
 	}
+	if err = s.loadPendingReevaluateCycleContext(ctx, tx, account, result); err != nil {
+		return err
+	}
 	if !found {
-		add("目标周期", false, true,
-			"finalized_through=%s 之后没有可用的已发布 balances 周期（或该账号还没有可复述的真实检查点），重评拿不到任何证据",
-			formatOptionalTime(result.FinalizedThrough))
+		detail := fmt.Sprintf(
+			"窗口 (%s, %s] 内没有可派生的已发布 balances 周期（或该账号还没有可复述的真实检查点）",
+			formatOptionalTime(result.FinalizedThrough), formatOptionalTime(result.EffectiveRequestedThrough))
+		if !result.NewestPublishedCycleAt.IsZero() && result.NewestPublishedCycleAt.After(result.EffectiveRequestedThrough) {
+			detail += fmt.Sprintf("；该源最新已发布周期在 %s，还压在 finalization_delay 里，等下一次 finalize 把窗口推上去即可",
+				formatOptionalTime(result.NewestPublishedCycleAt))
+		}
+		if result.SkippedRealCheckpointCycles > 0 {
+			detail += fmt.Sprintf("；窗口内另有 %d 个周期已带该账号的真实检查点，按派生规则跳过",
+				result.SkippedRealCheckpointCycles)
+		}
+		add("no_derivable_cycle", "目标周期", false, true, "%s", detail)
 		return s.addSelfDealingCheck(ctx, tx, account, in, result)
 	}
 	switch {
-	case result.TargetHasRealCheckpoint:
-		add("目标周期", false, true,
-			"最新周期 %s（天花板 %s）已带该账号的真实检查点，不会派生证明",
-			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
 	case result.TargetHasProof:
-		add("目标周期", false, true,
-			"最新周期 %s（天花板 %s）已有该账号的结转证明，重评不会产生新证据",
+		add("cycle_has_proof", "目标周期", false, true,
+			"窗口内可派生的最新周期 %s（天花板 %s）已有该账号的结转证明，重评不会产生新证据",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
 	case result.TargetHasStranded:
-		add("目标周期", false, true,
-			"最新周期 %s（天花板 %s）带着该账号被兜住的失败检查点，派生会被 XM-INV-DEAD-CONTAINMENT 的等待挡住；先处理那条死信",
+		add("cycle_has_stranded", "目标周期", false, true,
+			"窗口内可派生的最新周期 %s（天花板 %s）带着该账号被兜住的失败检查点，派生会被 XM-INV-DEAD-CONTAINMENT 的等待挡住；先处理那条死信",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
-	case !result.TargetInRequeueWindow:
-		add("目标周期", true, false,
-			"最新周期 %s 的天花板 %s 高于 finalized_through %s：本工具排的作业窗口到不了它，要等下一次 finalize（C1）把窗口推上去",
-			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt), formatOptionalTime(result.FinalizedThrough))
 	default:
-		add("目标周期", true, true,
-			"最新周期 %s（天花板 %s）可派生，复述的检查点 %s（as_of %s）",
+		add("cycle_ok", "目标周期", true, true,
+			"窗口内可派生的最新周期 %s（天花板 %s，跳过 %d 个已带真实检查点的周期）可派生，复述的检查点 %s（as_of %s）",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt),
+			result.SkippedRealCheckpointCycles,
 			result.PriorCheckpointID, formatOptionalTime(result.PriorAsOf))
 	}
 	if result.PriorNegative && result.PriorDeficit == "" {
-		add("复述量级", false, true,
+		add("prior_unknown_magnitude", "复述量级", false, true,
 			"要复述的检查点 %s 报负余额但没有量级（deficit 为空），重评只能得到 negative_frozen(unknown)",
 			result.PriorCheckpointID)
 	} else {
-		add("复述量级", true, true, "要复述的检查点 %s 余额=%s 负标志=%t deficit=%s",
+		add("prior_magnitude_ok", "复述量级", true, true, "要复述的检查点 %s 余额=%s 负标志=%t deficit=%s",
 			result.PriorCheckpointID, result.PriorBalance, result.PriorNegative, orDash(result.PriorDeficit))
 	}
 
@@ -375,7 +511,7 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 	if err = s.recomputePendingReevaluateOutcome(ctx, tx, account, result); err != nil {
 		return err
 	}
-	add("预期评估", result.RecomputedStatus == "matched", false,
+	add("recomputed", "预期评估", result.RecomputedStatus == "matched", false,
 		"按当前账本重算：期望=%s 差值=%s 预期结果=%s",
 		orDash(result.RecomputedExpected), orDash(result.RecomputedDifference), result.RecomputedStatus)
 
@@ -390,23 +526,31 @@ func (s *Store) addSelfDealingCheck(_ context.Context, _ pgx.Tx, account eligibi
 	in PendingReevaluateRepairInput, result *PendingReevaluateRepairResult) error {
 	operator := strings.TrimSpace(in.OperatorID)
 	if operator == "" {
-		result.Checks = append(result.Checks, PendingReevaluateCheck{Name: "自利守卫", Passed: true,
+		result.Checks = append(result.Checks, PendingReevaluateCheck{Code: "self_dealing", Name: "自利守卫", Passed: true,
 			Detail: "未提供 --operator-id，apply 时才校验"})
 		return nil
 	}
 	self := strings.EqualFold(operator, account.PrincipalID)
-	result.Checks = append(result.Checks, PendingReevaluateCheck{Name: "自利守卫", Passed: !self,
+	result.Checks = append(result.Checks, PendingReevaluateCheck{Code: "self_dealing", Name: "自利守卫", Passed: !self,
 		Blocker: self,
 		Detail:  "操作者不得是该账号所属的开票用户"})
 	return nil
 }
 
-// loadPendingReevaluateTarget finds the newest published balances scan cycle
-// at or after the account's finalized_through, with the same prior-checkpoint
-// LATERAL, has_real_checkpoint flag and stranded-checkpoint predicate
-// ensureBalanceCarryForwardProofTx's own candidate query uses -- rendered
-// from the same sourceEventContainedByOpenFreezeSQL, so the report cannot
-// drift from what the derivation will actually do.
+// loadPendingReevaluateTarget finds the cycle an idle derivation would
+// actually take: inside the window an apply will ask for, and -- like
+// ensureBalanceCarryForwardProofTx's own backwards walk -- the newest one
+// that does not already carry a real checkpoint for this account. The
+// prior-checkpoint LATERAL and the stranded-checkpoint predicate are the same
+// text the derivation uses (the latter rendered from the same
+// sourceEventContainedByOpenFreezeSQL), so the report cannot drift from what
+// the derivation will do.
+//
+// The window bound is EffectiveRequestedThrough, not finalized_through. Under
+// the old bound the report described a cycle the apply could never reach, and
+// on production shapes -- where finalized_through is min(watermarks) minus a
+// delay in seconds and cycles publish about once a minute -- that was every
+// cycle.
 func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 	account eligibilityAccount, result *PendingReevaluateRepairResult) (bool, error) {
 	var deficit *string
@@ -414,15 +558,6 @@ func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 		SELECT cycle.scan_cycle_id::text,cycle.scan_ceiling_at,
 			prior.id::text,prior.as_of,prior.balance_service_units::text,
 			prior.balance_negative,prior.deficit_service_units::text,
-			EXISTS (
-				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
-				JOIN source_economic_scan_cycle_events mapped
-				  ON mapped.source_instance_id=checkpoint.source_instance_id
-				 AND mapped.stream_id='balances'
-				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-				 AND mapped.payload_hash=checkpoint.source_revision_hash
-				WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id
-			),
 			EXISTS (
 				SELECT 1 FROM balance_carry_forward_proofs proof
 				WHERE proof.external_account_id=$1 AND proof.scan_cycle_id=cycle.scan_cycle_id
@@ -454,12 +589,23 @@ func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 			ORDER BY checkpoint.as_of DESC,checkpoint.source_sequence DESC,checkpoint.id DESC LIMIT 1
 		) prior ON true
 		WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
-		  AND cycle.cycle_status='published' AND cycle.scan_ceiling_at>=$3
+		  AND cycle.cycle_status='published'
+		  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
+		  AND NOT EXISTS (
+			SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+			JOIN source_economic_scan_cycle_events mapped
+			  ON mapped.source_instance_id=checkpoint.source_instance_id
+			 AND mapped.stream_id='balances'
+			 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+			 AND mapped.payload_hash=checkpoint.source_revision_hash
+			WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id
+		  )
 		ORDER BY cycle.scan_ceiling_at DESC,cycle.first_sequence DESC
-		LIMIT 1`, account.ExternalAccountID, account.SourceInstanceID, account.FinalizedThrough).Scan(
+		LIMIT 1`, account.ExternalAccountID, account.SourceInstanceID,
+		account.FinalizedThrough, result.EffectiveRequestedThrough).Scan(
 		&result.TargetCycleID, &result.TargetCycleAt, &result.PriorCheckpointID, &result.PriorAsOf,
 		&result.PriorBalance, &result.PriorNegative, &deficit,
-		&result.TargetHasRealCheckpoint, &result.TargetHasProof, &result.TargetHasStranded)
+		&result.TargetHasProof, &result.TargetHasStranded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -471,12 +617,43 @@ func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 	if deficit != nil {
 		result.PriorDeficit = *deficit
 	}
-	// The requeue asks for requested_through = finalized_through, and the
-	// derivation's candidate window is [finalized_through, requested_through]
-	// inclusive at both ends (design section 7 D8(a)), so only a cycle whose
-	// ceiling is exactly finalized_through is reachable from this tool alone.
-	result.TargetInRequeueWindow = !result.TargetCycleAt.After(account.FinalizedThrough.UTC())
 	return true, nil
+}
+
+// loadPendingReevaluateCycleContext fills in the two numbers that explain a
+// target the operator might otherwise find surprising: how many cycles inside
+// the window were passed over for already carrying this account's own real
+// checkpoint, and where the newest published cycle for the source sits. The
+// second is what distinguishes "this source has stopped publishing" from the
+// ordinary "the newest cycles are still inside the finalization delay".
+func (s *Store) loadPendingReevaluateCycleContext(ctx context.Context, tx pgx.Tx,
+	account eligibilityAccount, result *PendingReevaluateRepairResult) error {
+	var newest *time.Time
+	if err := tx.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM source_economic_scan_cycles cycle
+			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
+			  AND cycle.cycle_status='published'
+			  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
+			  AND EXISTS (
+				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+				JOIN source_economic_scan_cycle_events mapped
+				  ON mapped.source_instance_id=checkpoint.source_instance_id
+				 AND mapped.stream_id='balances'
+				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+				 AND mapped.payload_hash=checkpoint.source_revision_hash
+				WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id)),
+			(SELECT max(cycle.scan_ceiling_at) FROM source_economic_scan_cycles cycle
+			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
+			  AND cycle.cycle_status='published')`,
+		account.ExternalAccountID, account.SourceInstanceID,
+		account.FinalizedThrough, result.EffectiveRequestedThrough).Scan(
+		&result.SkippedRealCheckpointCycles, &newest); err != nil {
+		return err
+	}
+	if newest != nil {
+		result.NewestPublishedCycleAt = newest.UTC()
+	}
+	return nil
 }
 
 // recomputePendingReevaluateOutcome runs this run's own arithmetic for the

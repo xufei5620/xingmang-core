@@ -343,36 +343,46 @@ open freezes, its job row, evidence already waiting for the evaluator, which
 published cycle an idle derivation would take, and this run's own recomputed
 verdict for the evidence it would produce -- computed from the ledger, never
 read back from a stored evaluation row. Checks printed as `STOP` refuse the
-apply: the account is not pending, an open freeze would block the exit
-anyway, the job is `processing` or `dead` (`dead` is
-`--kind=projection-requeue-dead`'s decision, and this tool never revives
-one), the target cycle already carries a real checkpoint or a proof, the
-target cycle carries a stranded checkpoint, the checkpoint to be restated has
-no magnitude, or the operator is the account's own invoice user.
+apply: there is no eligibility state row for the account at all, the account
+is not pending, an open freeze would block the exit anyway, the job is
+`processing` or `dead` (`dead` is `--kind=projection-requeue-dead`'s decision,
+and this tool never revives one), the requeue window is empty, no cycle inside
+the window can be derived from, the one that can already carries a proof or a
+stranded checkpoint, the checkpoint to be restated has no magnitude, or the
+operator is the account's own invoice user. `docs/PRODUCTION-RUNBOOK.md` has
+the full table with what to do about each.
 
-```
+The command is a `docker run` against the tools image -- there is no compose
+service for this binary. `docs/PRODUCTION-RUNBOOK.md` defines the
+`invoice_eligibility_repair` shell function used below (image tag, the
+`invoice-system-prod_invoice_db` network, and the two read-only secret
+mounts); copy that block first.
+
+```bash
 # dry run (default) -- the diagnosis, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=pending-reevaluate --account=<external-account-uuid>
+invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid>
 
 # apply -- requires an approving operator id, and refuses if any check says STOP
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=pending-reevaluate --account=<external-account-uuid> \
+invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
-See `docs/PRODUCTION-RUNBOOK.md` for the full `docker run` form these
-snippets abbreviate.
+Read the report's `requeue window` line before applying even when nothing says
+`STOP`. The apply asks for the window a finalization pass would ask for --
+min(the source's four stream watermarks) minus the account's
+`finalization_delay_seconds`, and never lowers a window an existing job row
+already asks for -- and the derivation only happens inside it. When `newest
+published` is above that window the account is just waiting for the
+finalization delay to pass, and the automatic path will reach it anyway.
 
-Read the report's `in requeue window` line before applying even when nothing
-says `STOP`. The requeue asks for `requested_through = finalized_through`, so
-it can only reach a scan cycle whose ceiling is at or below
-`finalized_through`; when the newest cycle is above it the automatic path is
-what will pick it up, and applying now changes nothing.
+> The older snippets in this file (queue-narrow, policy-start-reanchor,
+> projection-requeue-dead, ingest-requeue-dead,
+> ingest-acknowledge-unreplayable) still show `/app/bin/...` with
+> `/run/secrets/invoice-db-url` and `field-keyring.json`. Those paths do not
+> exist: the binary is at `/usr/local/bin/invoice-eligibility-repair`, and the
+> compose secrets are `invoice_owner_database_url` and
+> `invoice_field_keyring`. Use the runbook's form for every kind until those
+> snippets are corrected.
 
 ## Manual queue narrowing (XM-INV-ELIG-QUEUE-NARROW, 2026-09-03)
 

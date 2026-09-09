@@ -2295,6 +2295,52 @@ an idle account gets that second evaluation on its own from the next
 published balances cycle. `--kind=pending-reevaluate` is for when it has not:
 it asks the projection worker to look at that one account again, now.
 
+First get the account id, which is what `--account` wants. It is
+`external_accounts.id`, an invoice-side UUID -- not the upstream user id:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT ea.id,ea.external_user_id,eas.eligibility_status,
+             eas.pending_reconciliation_reason,
+             eas.pending_reconciliation_consecutive_matches,
+             eas.pending_reconciliation_since
+      FROM external_accounts ea
+      JOIN source_account_eligibility_state eas ON eas.external_account_id=ea.id
+      WHERE eas.eligibility_status='not_invoiceable_pending_reconciliation'
+      ORDER BY eas.pending_reconciliation_since"
+```
+
+Replace the `WHERE` with `WHERE ea.external_user_id='<upstream id>'` to look
+up one known account instead. The same query is how you confirm afterwards
+that the account left the state: `eligibility_status` becomes `active` and the
+`pending_reconciliation_*` columns become empty.
+
+Do **not** look for the outcome in
+`balance_reconciliation_checkpoints.reconciliation_status` -- in production
+every row there reads `pending_finalization`, because that column is not where
+the evaluation result lives. The per-item verdicts are in
+`balance_checkpoint_evaluations` / `balance_carry_forward_evaluations`:
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT 'checkpoint',c.as_of,e.evaluation_status,e.difference_service_units
+      FROM balance_checkpoint_evaluations e
+      JOIN balance_reconciliation_checkpoints c ON c.id=e.checkpoint_id
+      WHERE c.external_account_id='<external-account-uuid>'
+      UNION ALL
+      SELECT 'proof',p.as_of,e.evaluation_status,e.difference_service_units
+      FROM balance_carry_forward_evaluations e
+      JOIN balance_carry_forward_proofs p ON p.id=e.proof_id
+      WHERE p.external_account_id='<external-account-uuid>'
+      ORDER BY 2 DESC LIMIT 20"
+```
+
+The administrator API shows the state without SQL:
+`GET /api/v1/admin/accounts` carries each account's eligibility status, and
+the user-facing web renders this one as 「对账中暂不可开票」.
+
 ```bash
 invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid>
 ```
@@ -2302,33 +2348,43 @@ invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account
 `--account` is required and names exactly one account; the tool is never run
 unnarrowed. The dry run is the diagnosis and is usually the whole answer --
 it prints the account's state and streak, open freezes, its projection job
-row, evidence already waiting for the evaluator, which published cycle the
-evidence would be derived from, and what this run's own arithmetic says the
-evaluator would decide about it. Checks marked `STOP` refuse `--apply`:
+row, evidence already waiting for the evaluator, the window an apply would ask
+for, which published cycle inside that window the evidence would come from,
+and what this run's own arithmetic says the evaluator would decide about it.
+Checks marked `STOP` refuse `--apply`:
 
 | `STOP` | What to do instead |
 | --- | --- |
+| there is no eligibility state row for this account id | check the id -- it is `external_accounts.id`, not the upstream user id |
 | the account is not `not_invoiceable_pending_reconciliation` | nothing -- this tool has no work on it |
 | open eligibility freezes > 0 | resolve the freeze first; the exit is blocked by the freeze guard regardless of evidence |
 | the projection job is `processing` | wait; a worker is holding the account right now |
 | the projection job is `dead` | run `--kind=projection-requeue-dead --account=<id>` first; this tool never revives a dead job |
-| the target cycle already has a real checkpoint or a proof | nothing to derive there; wait for the next published cycle |
-| the target cycle carries a stranded (dead or failed) balance checkpoint | deal with that dead event first (`--kind=ingest-requeue-dead`); a proof written over it would lose the fact permanently |
+| the requeue window is empty (fewer than four stream watermarks, or it would not rise above `finalized_through`) | the source is not finalizing at all; that is the problem to fix, not this account |
+| no published balances cycle inside the window can be derived from | usually the newest cycles are still inside the finalization delay -- the report prints where they are; wait for the next pass |
+| the cycle that would be used already carries a carry-forward proof | it was already derived; wait for the next published cycle |
+| that cycle carries a stranded (dead or failed) balance checkpoint | deal with that dead event first (`--kind=ingest-requeue-dead`); a proof written over it would lose the fact permanently |
 | the checkpoint to be restated reports a negative balance with no magnitude | the re-evaluation could only produce `negative_frozen(unknown)`; nothing to gain |
 | `--operator-id` is the account's own invoice user | someone else runs it |
 
-Read the "target cycle" line before applying even when nothing says `STOP`.
-The requeue asks for `requested_through = finalized_through`, so it can only
-reach a cycle whose ceiling is **at or below** `finalized_through`; the report
-prints `in requeue window: false` when the newest cycle is above it, which
-means the automatic path (the next finalization pass) is what will pick it
-up and applying now changes nothing. `--apply` writes exactly one row -- the
-account's `eligibility_projection_jobs` entry, set to `queued` and due now --
-plus one `eligibility.pending_reconciliation.reevaluation_requested` audit
-event. It writes no evidence, no evaluation and no `eligibility_status`, so
-it cannot make an account exit: the worker re-derives and re-evaluates
-through the ordinary path, and the two-consecutive-matches rule decides as
-always.
+Read the `requeue window` line before applying even when nothing says `STOP`.
+`--apply` asks for the window a finalization pass would ask for -- min(the
+source's four stream watermarks) minus the account's
+`finalization_delay_seconds` -- and never lowers a window an existing job row
+already asks for; the derivation happens only inside that window. When
+`newest published` sits above it, the newest cycles are still inside the
+finalization delay and the automatic path will reach them on its own.
+
+`--apply` writes exactly one row -- the account's
+`eligibility_projection_jobs` entry, set to `queued`, due now, carrying that
+window -- plus one
+`eligibility.pending_reconciliation.reevaluation_requested` audit event. It
+writes no evidence, no evaluation and no `eligibility_status`, so it cannot
+make an account exit by itself: the worker re-derives and re-evaluates through
+the ordinary path, and the two-consecutive-matches rule decides as always. It
+can, though, be the reason an account *does* exit seconds later and becomes
+invoiceable -- so read the recomputed verdict in the report before applying,
+not after.
 
 ```bash
 docker compose --env-file deploy/.env.production \

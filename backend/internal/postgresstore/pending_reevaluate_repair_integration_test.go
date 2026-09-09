@@ -48,6 +48,11 @@ func TestPendingReevaluateDryRunReportsAndChangesNothing(t *testing.T) {
 	f := newIdlePendingFixture(t)
 	carryAt := f.lastEvidenceAt.Add(idleCycleSpacing)
 	f.publishEmptyBalancesCycle(t, 891, carryAt)
+	// Production shape: the window a finalization pass asks for is
+	// min(watermarks) minus the account's delay, and it lands wherever it
+	// lands -- here ten minutes past the cycle ceiling, on no boundary at all.
+	requested := carryAt.Add(10 * time.Minute)
+	f.setWatermarks(t, requested.Add(f.finalizationDelay(t)))
 	proofsBefore := f.proofCount(t)
 	finalizedBefore := f.finalizedThrough(t)
 
@@ -67,14 +72,27 @@ func TestPendingReevaluateDryRunReportsAndChangesNothing(t *testing.T) {
 		t.Fatalf("report state: freezes=%d job=%q unevaluated=%d, want 0/none/0",
 			result.OpenFreezes, result.JobStatus, result.UnevaluatedEvidence)
 	}
-	// The target cycle is the empty one just published, and the report says
-	// plainly that this tool's own requeue window cannot reach it.
+	// The window the apply will ask for, stated outright: not
+	// finalized_through, but what a finalization pass would request from the
+	// current watermarks.
+	if !result.EffectiveRequestedThrough.Equal(requested.UTC()) {
+		t.Fatalf("report requeue window=%s, want %s (min watermark minus the account's finalization delay)",
+			result.EffectiveRequestedThrough, requested.UTC())
+	}
+	if result.WatermarkStreams != 4 {
+		t.Fatalf("report watermark streams=%d, want 4", result.WatermarkStreams)
+	}
+	// The target cycle is the empty one just published, and it is inside that
+	// window -- which is the only reason an apply could do anything.
 	if result.TargetCycleID == "" || !result.TargetCycleAt.Equal(carryAt.UTC()) {
 		t.Fatalf("report target cycle=%q at %s, want the cycle published at %s",
 			result.TargetCycleID, result.TargetCycleAt, carryAt.UTC())
 	}
-	if result.TargetInRequeueWindow {
-		t.Fatalf("a cycle above finalized_through is not reachable by this tool's own window: %+v", result)
+	if !result.NewestPublishedCycleAt.Equal(carryAt.UTC()) {
+		t.Fatalf("report newest published cycle=%s, want %s", result.NewestPublishedCycleAt, carryAt.UTC())
+	}
+	if result.SkippedRealCheckpointCycles != 0 {
+		t.Fatalf("report skipped %d cycles for a real checkpoint, want 0", result.SkippedRealCheckpointCycles)
 	}
 	if result.PriorCheckpointID == "" || !result.PriorNegative || result.PriorDeficit != "50" {
 		t.Fatalf("report must name the checkpoint a proof would restate: %+v", result)
@@ -107,26 +125,50 @@ func TestPendingReevaluateDryRunReportsAndChangesNothing(t *testing.T) {
 	}
 }
 
-// TestPendingReevaluateApplyOnTheCeilingBoundaryDerivesEvidence is design
-// matrix row (m) proper, built so the inclusive lower bound is the only thing
-// that can make it pass: finalized_through is set to the target cycle's own
-// ceiling, so the requeued window is [ceiling, ceiling].
-func TestPendingReevaluateApplyOnTheCeilingBoundaryDerivesEvidence(t *testing.T) {
+// TestPendingReevaluateApplyDerivesOnAProductionShapedWindow is design matrix
+// row (m), rebuilt on the shape production actually has after the first
+// review found the old one unreachable there.
+//
+// finalized_through is min(the source's four stream watermarks) minus the
+// account's finalization delay -- a value in seconds, moving every pass. It
+// therefore essentially never coincides with a scan cycle ceiling. The
+// original requeue wrote requested_through = finalized_through, giving the
+// derivation the window [finalized_through, finalized_through], which can
+// only ever contain a cycle whose ceiling is exactly that instant. The apply
+// printed APPLIED and one account affected, wrote its audit event, and
+// derived nothing; the only test that showed it working had put
+// finalized_through onto a ceiling by hand.
+//
+// So: two published cycles, finalized_through below both, and a window that
+// lands strictly between them. Nothing here sits on a boundary. The apply
+// must still derive, from the cycle inside the window and not the one above
+// it.
+func TestPendingReevaluateApplyDerivesOnAProductionShapedWindow(t *testing.T) {
 	f := newIdlePendingFixture(t)
-	carryAt := f.lastEvidenceAt.Add(idleCycleSpacing)
-	f.publishEmptyBalancesCycle(t, 893, carryAt)
-	// Put finalized_through exactly on the cycle ceiling, the state an empty
-	// advance leaves behind when the pass lands on a cycle boundary.
-	if _, err := f.store.pool.Exec(f.ctx, `UPDATE source_account_eligibility_state
-		SET finalized_through=$2,projection_version=projection_version+1,updated_at=now()
-		WHERE external_account_id=$1`, f.accountID, carryAt); err != nil {
-		t.Fatal(err)
-	}
+	firstAt := f.lastEvidenceAt.Add(idleCycleSpacing)
+	secondAt := firstAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 893, firstAt)
+	f.publishEmptyBalancesCycle(t, 894, secondAt)
+	// Ten minutes past the first ceiling, ten minutes short of the second.
+	requested := firstAt.Add(10 * time.Minute)
+	f.setWatermarks(t, requested.Add(f.finalizationDelay(t)))
+	finalizedBefore := f.finalizedThrough(t)
 	proofsBefore := f.proofCount(t)
+	if !finalizedBefore.Before(firstAt.UTC()) || !requested.UTC().Before(secondAt.UTC()) {
+		t.Fatalf("fixture: the window must straddle exactly one cycle -- finalized=%s first=%s requested=%s second=%s",
+			finalizedBefore, firstAt.UTC(), requested.UTC(), secondAt.UTC())
+	}
 
 	report := f.runReevaluate(t, false, pendingReevaluateOperator)
-	if !report.TargetInRequeueWindow {
-		t.Fatalf("a cycle whose ceiling equals finalized_through must be in the requeue window: %+v", report)
+	if !report.EffectiveRequestedThrough.Equal(requested.UTC()) {
+		t.Fatalf("report requeue window=%s, want %s", report.EffectiveRequestedThrough, requested.UTC())
+	}
+	if !report.TargetCycleAt.Equal(firstAt.UTC()) {
+		t.Fatalf("report target cycle at %s, want the one inside the window (%s), not the one above it (%s)",
+			report.TargetCycleAt, firstAt.UTC(), secondAt.UTC())
+	}
+	if !report.NewestPublishedCycleAt.Equal(secondAt.UTC()) {
+		t.Fatalf("report newest published=%s, want %s", report.NewestPublishedCycleAt, secondAt.UTC())
 	}
 	if report.Blocked() {
 		t.Fatalf("nothing should block this account: %+v", report.Checks)
@@ -136,16 +178,29 @@ func TestPendingReevaluateApplyOnTheCeilingBoundaryDerivesEvidence(t *testing.T)
 	if !result.Applied || !result.Queued {
 		t.Fatalf("apply did not queue: %+v", result)
 	}
+	// The row carries the window the dry run predicted, not finalized_through.
+	if got := f.requestedThrough(t); !got.Equal(requested.UTC()) {
+		t.Fatalf("job row requested_through=%s, want %s (the dry run's own prediction)", got, requested.UTC())
+	}
+
 	f.processJobs(t)
 	if got := f.proofCount(t); got != proofsBefore+1 {
-		t.Fatalf("proofs=%d, want %d: the inclusive lower bound is what lets the requeued window reach this cycle",
+		t.Fatalf("proofs=%d, want %d: the apply must actually derive on a production-shaped window",
 			got, proofsBefore+1)
+	}
+	var proofAt time.Time
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT as_of FROM balance_carry_forward_proofs
+		WHERE external_account_id=$1 AND as_of>$2`, f.accountID, finalizedBefore).Scan(&proofAt); err != nil {
+		t.Fatalf("the derived proof: %v", err)
+	}
+	if !proofAt.UTC().Equal(firstAt.UTC()) {
+		t.Fatalf("proof as_of=%s, want the in-window cycle ceiling %s", proofAt.UTC(), firstAt.UTC())
 	}
 	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.status != "active" {
 		t.Fatalf("the derived evidence should have taken the account to its second match: %+v", row)
 	}
 
-	// A second apply over the same cycle finds the proof already there and
+	// A second apply over the same window finds the proof already there and
 	// refuses: idempotent by refusal, not by writing a second one.
 	second := f.runReevaluate(t, true, pendingReevaluateOperator)
 	if second.Applied || second.Queued {
@@ -153,6 +208,64 @@ func TestPendingReevaluateApplyOnTheCeilingBoundaryDerivesEvidence(t *testing.T)
 	}
 	if got := f.reevaluateAuditCount(t); got != 1 {
 		t.Fatalf("reevaluation_requested audits=%d, want 1 (the refused run writes none)", got)
+	}
+}
+
+// TestPendingReevaluateReportsTheWindowAnExistingJobRowAlreadyAsksFor is the
+// other half of what the first review found: the requeue's ON CONFLICT never
+// lowers requested_through, so an account whose job row already asks for a
+// wider window keeps it. The old report computed the window from
+// finalized_through alone and therefore told the operator the apply would
+// change nothing -- and the apply then derived evidence, evaluated it matched
+// and returned the account to invoiceable. Being told "nothing will happen"
+// and getting an account made billable is the worst shape a repair tool can
+// have.
+//
+// Here the watermarks alone would give a window of exactly finalized_through
+// (no room at all), and only the existing row's window reaches the cycle. The
+// report must say so, and the apply must do exactly that.
+func TestPendingReevaluateReportsTheWindowAnExistingJobRowAlreadyAsksFor(t *testing.T) {
+	f := newIdlePendingFixture(t)
+	carryAt := f.lastEvidenceAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 895, carryAt)
+	finalizedBefore := f.finalizedThrough(t)
+	// Watermarks that leave the natural window at finalized_through exactly.
+	f.setWatermarks(t, finalizedBefore.Add(f.finalizationDelay(t)))
+	// An existing queued job row already asking for more, the shape a
+	// finalization pass leaves behind whenever the worker has not caught up.
+	wider := carryAt.Add(time.Minute)
+	if _, err := f.store.pool.Exec(f.ctx, `
+		INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at)
+		VALUES($1,$2,'queued',now())`, f.accountID, wider); err != nil {
+		t.Fatal(err)
+	}
+	proofsBefore := f.proofCount(t)
+
+	report := f.runReevaluate(t, false, pendingReevaluateOperator)
+	if !report.EffectiveRequestedThrough.Equal(wider.UTC()) {
+		t.Fatalf("report requeue window=%s, want the existing row's own wider window %s -- "+
+			"the upsert never lowers it", report.EffectiveRequestedThrough, wider.UTC())
+	}
+	if !report.TargetCycleAt.Equal(carryAt.UTC()) {
+		t.Fatalf("report target cycle=%s, want %s: the wider window reaches it", report.TargetCycleAt, carryAt.UTC())
+	}
+	if report.Blocked() {
+		t.Fatalf("the wider window makes this account actionable, so nothing should block: %+v", report.Checks)
+	}
+
+	result := f.runReevaluate(t, true, pendingReevaluateOperator)
+	if !result.Applied || !result.Queued {
+		t.Fatalf("apply did not queue: %+v", result)
+	}
+	if got := f.requestedThrough(t); !got.Equal(wider.UTC()) {
+		t.Fatalf("job row requested_through=%s, want %s (never lowered)", got, wider.UTC())
+	}
+	f.processJobs(t)
+	if got := f.proofCount(t); got != proofsBefore+1 {
+		t.Fatalf("proofs=%d, want %d -- and the report said this would happen", got, proofsBefore+1)
+	}
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.status != "active" {
+		t.Fatalf("the account exited, exactly as the report predicted: %+v", row)
 	}
 }
 
@@ -278,7 +391,7 @@ func TestPendingReevaluateRequeueStatementRefusesADeadRowOnItsOwn(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	queued, err := requeuePendingReevaluateJobTx(f.ctx, tx, f.accountID)
+	queued, _, err := requeuePendingReevaluateJobTx(f.ctx, tx, f.accountID)
 	if err != nil {
 		_ = tx.Rollback(f.ctx)
 		t.Fatal(err)
@@ -304,7 +417,7 @@ func TestPendingReevaluateRequeueStatementRefusesADeadRowOnItsOwn(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	queued, err = requeuePendingReevaluateJobTx(f.ctx, tx, f.accountID)
+	queued, _, err = requeuePendingReevaluateJobTx(f.ctx, tx, f.accountID)
 	if err != nil {
 		_ = tx.Rollback(f.ctx)
 		t.Fatal(err)
@@ -364,6 +477,7 @@ func TestPendingReevaluateRefusesAnUnknownMagnitudePrior(t *testing.T) {
 	f.project(t, unknownAt.Add(time.Minute))
 	carryAt := unknownAt.Add(idleCycleSpacing)
 	f.publishEmptyBalancesCycle(t, 896, carryAt)
+	f.setWatermarks(t, carryAt.Add(10*time.Minute).Add(f.finalizationDelay(t)))
 
 	result := f.runReevaluate(t, true, pendingReevaluateOperator)
 	if result.Applied || result.Queued {
