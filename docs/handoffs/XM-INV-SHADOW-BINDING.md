@@ -131,6 +131,11 @@ dry-run 不写库、apply 端到端。
 | 9 | 恢复 `platformLoginOrigin` 的静默默认值（复审第 1 条） | 红：`silently used a default origin "https://api.solov.cc" instead of refusing` |
 | 10 | 关掉 issuer 与库矛盾的拒绝 | 红：store 层与 CLI 层各红一条 |
 | 11 | `FactsEverSeen` 只数 `dependency_key_hmac`、不数 `catchup_key_hmac` | 红：`a released fact stopped being counted after the wake: 0` |
+| 12 | 关掉「已有非 operator_attested 绑定就拒绝」（复审 A） | 红：dry-run 与 apply 都返回 nil；且 `binding_method became "operator_attested"`，正是复审员探针看到的那一幕 |
+| 13 | 关掉未处理 identity_binding 事件的拒绝（复审 B） | 红：`apply returned <nil>, want ErrOperatorBindIdentityProjectionOpen` |
+| 14 | 删掉 `invoice_oidc_user` 唤醒（复审 C） | 红：`released=0 want 1` |
+| 15 | 关掉 `--external-user-id` 数字校验（复审 E） | 红：四个反例全部落到后面的环境变量检查上，说明校验没在参数阶段拦住 |
+| 17 | 把唤醒 WHERE 里的 `dependency_key_hmac=$2` 换成恒真条件（复审 G 的诱饵） | 红：`released=3 want 2` 与 `released=2 want 1`；加诱饵前这一改是看不出来的 |
 
 变异 7 顺带查出一件对运行手册有用的事：影子用户是按「真登录会铸的同一对
 (issuer, subject)」建的，所以**即使认领分支不存在**，`ResolveOrCreate` 也会找到
@@ -205,6 +210,150 @@ issuer 永久写进 `invoice_users.oidc_issuer`，而我自己那条
 `invoice_field_keyring`；api 镜像里也没有 tools 二进制。所以直接改正，改成与 9c
 相同的 docker run 形状并加注说明。
 
+## 4c. 第一轮第二、三批复审（数据完整性 + 运维实测）修了什么
+
+两批一起修。数据完整性 2 major + 5 minor，运维补充 1 major + 1 minor + 1 条更正。
+
+### major A：会静默改写客户自证过的绑定（最严重的一条）
+
+复审员在副本里跑了探针，`before=platform_password_login → after=operator_attested`，
+`applied=true`、无报错。我复现并确认成立。
+
+成因：`bindExternalAccountTx` 的 UPSERT 只拦「属于**别人**」的行
+（`WHERE external_accounts.invoice_user_id=EXCLUDED.invoice_user_id`）。客户自己
+用平台密码登录过之后，那一行的属主**正是**代绑定会解析到的同一个 invoice_user
+——两条路径用的是同一对 (平台 origin, 上游 id)——于是 UPSERT 走 DO UPDATE 分支，
+把 `binding_method` 改写成 `operator_attested`、`verified_at` 重置为 now()，再补一
+条 `operator_bound` 审计声称这条绑定是运营建的。`binding_method` 是唯一能区分
+「客户自证」与「运营代建」的痕迹，所以这个覆盖不可恢复。
+
+修法：`FOR UPDATE` 那条 SELECT 一并取出 `binding_method`；已存在且不是
+`operator_attested` 就拒绝（`ErrOperatorBindWouldOverwriteBinding`）。已存在且是
+`operator_attested` 才放行，那是本工具自己的幂等重跑。
+
+**两种模式都拒，包括 dry-run**——dry-run 在这里打一份漂亮的计划，等于打印一份
+销毁证据的计划。CLI 另外为这个 sentinel 打了一段解释（`printRefusalDetail`），
+说明「通常是客户已经自己登录过了，这时候本来就无事可做」。
+
+测试 `TestOperatorBindRefusesToOverwriteACustomerProvedBinding`（两种模式各断言一
+次，并回查 `binding_method`/`verified_at` 未变、没有 operator_bound 审计、停放事实
+没被消耗）+ `TestOperatorBindAllowsItsOwnIdempotentRerun`（守卫不能误伤幂等重跑）。
+
+顺带修了一处**测试互相遮蔽**：原来
+`TestOperatorBindRefusesAnExternalAccountOwnedBySomebodyElse` 用
+`platform_password_login` 当既有绑定，加了新守卫之后它会先撞上新守卫，于是
+「属于别人要拒绝」那条就再也测不到了（删掉 UPSERT 的 WHERE 会保持绿）。改成用
+`operator_attested` 当既有绑定，两道守卫各自独立可证。
+
+### major B：身份投影事件与代绑定不是同一对身份
+
+`identity_binding` 事件用 `FindUserByOIDC(payload.Issuer, payload.ProviderSubject)`
+解析属主，那是**中心 OIDC**；代绑定绑的是（平台登录 origin，上游 id）。影子身份
+满足不了这类事件 → ErrForbidden → `PROJECTION_FAILED`（既不算依赖等待也不算瞬态）
+→ 八次尝试后死信 → `/readyz` 503 且解不掉。
+
+复审员指出这个形状与「客户首次平台密码登录」同型，**不是本次引入**；生产实测
+（2026-09-09 10:35Z 只读）也显示没有现实触发面：全库 `identity_binding` 只有 2 条、
+都已 processed、最后一条 2026-08-26。按派工「便宜的护栏 + 明写风险」处理：
+
+- 摘要新增 `identity_binding open (whole deployment)` 一行；非 0 时 `--apply` 拒绝
+  （`ErrOperatorBindIdentityProjectionOpen`），CLI 打解释。
+- 手册 9c 新增「代绑定给客户留下的两个代价」第二条，写清后果与为什么不改投影链路。
+
+**这一行是全库计数，不是按上游 id 的**，摘要与手册都明说了。做不到按 id：停放的
+`identity_binding` 事件按中心 OIDC 的盲索引挂依赖，工具手上只有平台 origin 与上游
+id，事件载荷又是加密的，从这里无法判断某条属于哪个客户。派工要的是「该上游 id
+是否有」，我实现的是能算得出来的那个，并把差别写明——不想让一个全局数字看起来
+像是针对这个客户的结论。
+
+### minor C：漏了 EnsureUser 的那条唤醒
+
+`Service.EnsureUser` 铸完身份会发 `invoice_oidc_user` 唤醒（键：空 source instance
++ `issuer+"\n"+subject`）。代绑定复用 `ensureUserTx` 铸了身份却只发了
+`source_external_account` 那条。补上，两条唤醒的结果合并计入
+`Released`/`PrePolicySkipped`（对运维来说就是一批积压被放开）。
+测试 `TestOperatorBindFiresTheInvoiceOIDCUserWake`，带另一身份的诱饵行。
+
+### minor D：认领路径拿不到已验证邮箱 —— 记入文档，不改登录路径
+
+现状：没被代绑的客户首次登录走建号路径，`EnsureUser` 会把平台带回的邮箱记成已验证
+收件地址；被代绑过的走认领路径，那条路径**从不调用 `EnsureUser`**，邮箱进不了
+`verified_emails`，客户必须自己走一次邮箱挑战才能提交。
+
+派工倾向做到同等。**我判断不做，把代价写进手册**，理由三条：
+
+1. 认领分支不能简单地调 `EnsureUser`。对投影创建的用户，principal 的
+   (issuer, subject) 是中心 OIDC 的那一对，与库里那行不同，`EnsureUser` 会**再铸一个
+   invoice_user**——正是认领路径存在的意义所要防止的孤儿。要做同等就得新写一条
+   「按 principalID 直接登记已验证邮箱」的路径。
+2. 那条路径会改变**所有**被投影绑定账号的首次登录行为，不只是影子账号，而
+  「已验证收件地址」正是发票真正寄出去的地方；还要同时决定既有 SSO 已验证地址被
+   取代时怎么办。这需要它自己的一片和自己的评审。
+3. 对一个由运营代建的身份来说，要求客户自己证明收件地址，本来也更稳妥。
+
+手册 9c「两个代价」第一条写明了这件事，并说明它不是本片引入的。
+
+### minor E：`--external-user-id` 没有形状校验
+
+两个平台的 id 都是 `strconv.FormatInt` 出来的十进制整数。粘错字段（尤其是邮箱）会
+铸出一个 (issuer, subject) 永远不会被任何登录复现的影子用户——**没人认领得到**，
+而不可逆的 `PRE_POLICY_SKIPPED` 已经写掉了。加 `^[0-9]{1,20}$`，四个反例进
+`TestRunRefusesBadInputBeforeTouchingTheDatabase`。
+
+### minor F：按账号的 advisory lock
+
+另外两个 `external_accounts` 写入方（`BindExternalAccountFromSource`、
+`RevokeExternalAccountFromSource`）都先取
+`pg_advisory_xact_lock(hashtextextended($1,4))`，`$1 = sourceInstanceID+"\n"+externalUserID`。
+代绑定原来只开 Serializable 事务。补上同一把锁（同键同种子），取在 source instance
+解析出来之后、任何判定依据被读取之前。
+
+注释写明了为什么：行不存在时 `FOR UPDATE` 锁不住任何东西，而「行不存在」正是代绑定
+的常态；目前的保护实际上只来自 Serializable 在 UPSERT 上抛 40001，**安全性不能只
+挂在隔离级别上**——哪天有人为了少踩 40001 把它降成 Read Committed，这道保护就无声
+消失了。锁顺序：external_accounts（这把 advisory 键）→ invoice_users →
+source_ingest_events；投影写入方不碰 invoice_users，无环。
+
+### minor G：唤醒测试没有诱饵行
+
+原来只停放了目标账号的事实，「只放出本 key 的行」在套件里恒真。两个唤醒测试各加了
+一条属于**别人**的停放事实并断言它仍是 `parked_identity`。作用域本身是从基线继承来
+的（`requeueSourceDependencyTx` 的 WHERE 逐字未变），加诱饵是为了让它以后被改宽时会
+红——变异 17 证明了这一点。
+
+### 运维 major 9：镜像版本下限
+
+9c 的命令在 rc107 tools 镜像上根本跑不起来（`/usr/local/bin` 里没有
+`invoice-account-bind`，要 RC108 才有），而 9c 唯一的前置检查「镜像 ID 与发布清单
+一致」rc107 也能过——清单一致不代表二进制存在。9c 开头加了醒目的版本下限，命令里
+也加了行内注释。
+
+### 运维 minor 10：语句与锁超时
+
+工具连的是 `invoice_owner`，那个角色**没有任何超时**（`invoice_app` 才有
+15s/5s/15s，见 `deploy/postgres/010-invoice-roles.sh`）。事务里要 `FOR UPDATE` 两张
+表再批量 UPDATE 几千行 `source_ingest_events`，等锁时会攥着自己的锁最长五分钟。
+在事务开头加：
+
+- `lock_timeout='5s'` —— 与 `deploy/postgres` 里三处批量脚本的取值逐字一致
+  （`balance-history-cleanup.sql`、两个 `apply-*.sh`）。
+- `statement_timeout='5min'` —— 取 CLI 自己的 context 上限，让服务端与客户端在同一
+  刻放弃，而不是客户端走了服务端还在磨。
+- `idle_in_transaction_session_timeout='15s'` —— 与 `invoice_app` 角色同值。
+
+### 运维更正：9c 的角色与挂载保持不动；2186/2250 两处改回原样
+
+- 9c 用 `invoice_owner_database_url` 是对的（app 角色 15s 语句上限兜不住全表聚合 +
+  批量 UPDATE），保持不动。
+- 2186/2250 那两处既有 eligibility-repair 命令，我上一轮改过，**这一轮按派工改回
+  原样**，只记 follow_up。核实结果供接手的人参考，不必重查：`docker-compose.prod.yml`
+  里**没有任何 `target:` 键**，所以 compose secret 一律挂成
+  `/run/secrets/<secret 名>`，即 `invoice_app_database_url` / `invoice_field_keyring`，
+  库里不存在 `invoice-db-url` 或 `field-keyring.json` 这两个名字；api 镜像只有
+  `/app/migrations` 与 `/app/qpdf-policy-gate`，没有 `/app/bin`，tools 二进制也不在
+  api 镜像里。也就是说那两段在「docker exec 进 api 容器」语境下同样不成立。与
+  「RC104 跑成功过」的记忆冲突，需要有人去查当时到底跑的是什么。
+
 ## 5. 偏离与未证实
 
 **偏离**
@@ -257,3 +406,11 @@ issuer 永久写进 `invoice_users.oidc_issuer`，而我自己那条
   一个真实身份之后，这道检查才真正开始生效。
 - **管理端仍然看不到 `binding_method`。** 影子清单只能人工另存，设计稿 §B 风险 7
   说过，本片没有改变。真要治，得让账本 wire 带上 `binding_method`，那是另一片。
+- **认领路径拿不到已验证邮箱**（第 4c 节 minor D）。要做到与建号路径同等，需要新写
+  一条「按 principalID 直接登记已验证邮箱」的路径，并决定既有 SSO 已验证地址被取代
+  时怎么办。影响所有被投影绑定的账号，不只影子账号，值得单独一片。
+- **手册 2186/2250 两处 eligibility-repair 命令的路径与 secret 名对不上任何现有
+  部署**（第 4c 节末）。本片按派工改回原样、未动。核实证据已记在那里，接手的人不必
+  重查，但要去查清 RC104 当时实际跑的到底是什么。
+- **`identity_binding` 护栏是全库粒度**，做不到按上游 id（原因见 4c major B）。真要
+  按 id，得让工具能从中心 OIDC 那一侧反查，或者让事件带上可关联的非加密标识。

@@ -2183,20 +2183,9 @@ on its own. Requeue it with the same repair binary the projection path uses,
 under a different `--kind`:
 
 ```bash
-# Same container shape as section 9c: the tools image, both secrets mounted
-# read-only, on the internal database network. /app/bin and the secret names
-# `invoice-db-url`/`field-keyring.json` used to appear here; neither exists --
-# backend/Dockerfile installs to /usr/local/bin, and the compose secrets are
-# `invoice_owner_database_url` and `invoice_field_keyring` (XM-INV-SHADOW-BINDING
-# review round 1).
-docker run --rm --pull=never --network invoice-system-prod_invoice_db \
-  --user 10001:10001 \
-  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
-  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
-  --entrypoint /usr/local/bin/invoice-eligibility-repair \
-  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
-  --database-url-file=/run/secrets/invoice_owner_database_url \
-  --field-keyring-file=/run/secrets/invoice_field_keyring \
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
   --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
 
@@ -2258,15 +2247,9 @@ dead job never revives on its own (a new fact for that account advances its
 pending work but leaves it dead); recover it with:
 
 ```bash
-# Same container shape as the ingest-requeue-dead block above.
-docker run --rm --pull=never --network invoice-system-prod_invoice_db \
-  --user 10001:10001 \
-  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
-  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
-  --entrypoint /usr/local/bin/invoice-eligibility-repair \
-  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
-  --database-url-file=/run/secrets/invoice_owner_database_url \
-  --field-keyring-file=/run/secrets/invoice_field_keyring \
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
   --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
 
@@ -2393,6 +2376,12 @@ New API 的 `top_ups` 状态只有 `pending` / `success` / `failed` / `expired`�
 2026-09-09 拍板；对应本文 3.1 节里那条冻结的解除范围，见该节 2026-09-09
 的追加决定。交接见 `docs/handoffs/XM-INV-SHADOW-BINDING.md`。
 
+> **镜像下限：tools 镜像必须 ≥ `0.1.0-rc108`。** `invoice-account-bind` 从 RC108
+> 起才进 tools 镜像；rc107 及更早的 `/usr/local/bin` 里没有这个二进制，命令会以
+> "executable file not found" 失败。注意 3. 节那条「确认镜像 ID 与发布清单一致」
+> **拦不住这件事**——rc107 的镜像 ID 与 rc107 的清单当然是一致的。所以下面命令
+> 里的 `$INVOICE_IMAGE_TAG` 必须是 rc108 或更新的标签。
+
 ### 先读这三条，再往下看命令
 
 1. **绑不回来。** 系统没有解绑接口；唤醒会把该账号策略起点之前的用量/余额事实
@@ -2436,6 +2425,7 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
   -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
   --entrypoint /usr/local/bin/invoice-account-bind \
   "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  `# ↑ 这个 tag 必须 ≥ 0.1.0-rc108：更早的 tools 镜像里没有这个二进制` \
   --database-url-file=/run/secrets/invoice_owner_database_url \
   --field-keyring-file=/run/secrets/invoice_field_keyring \
   --platform=sub2api --external-user-id='<上游后台逐字复制的用户 id>'
@@ -2467,12 +2457,47 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
 root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要么别传，要么命令前加
 一个空格并确认 `HISTCONTROL` 含 `ignorespace`。
 
+### 代绑定给客户留下的两个代价（要提前知道）
+
+**一、客户日后登录不会自动获得已验证收件邮箱，必须自己走邮箱挑战。**
+
+没被代绑过的客户首次平台登录走的是「建号」路径，`EnsureUser` 会把平台带回来的
+邮箱直接记成已验证收件地址；被代绑过的客户走的是「认领」路径，那条路径**从不
+调用 `EnsureUser`**，所以邮箱进不了 `verified_emails`。结果是：他要提交开票申请，
+得先在页面上自己验证一次邮箱。
+
+这**不是本片引入的**——任何被投影管道提前绑定过的账号，首次登录都是这个样子。
+本片没有去改认领路径，理由是那属于登录热路径上的行为变更，会同时影响所有被投影
+绑定的账号，而「已验证收件地址」正是发票真正寄出去的地方，改它需要单独一片带自己
+的评审。何况对一个**由运营代建**的身份来说，要求客户自己证明收件地址，本来也更
+稳妥而不是更差。
+
+`--email` 填了也不改变这一点：那个值存的是密文且 `email_verified=FALSE`。
+
+**二、身份投影事件与代绑定用的不是同一对身份。**
+
+`identity_binding` 类事件按**中心 OIDC** 的 issuer/subject 解析属主，而代绑定用的
+是（平台登录 origin，上游 id）——不同的一对，因此影子身份**满足不了**这类事件：
+投影返回 ErrForbidden，被判为 `PROJECTION_FAILED`（既不算依赖等待也不算瞬态），
+八次尝试用完变死信，`/readyz` 对所有人 503 且解不掉。
+
+这个形状同样**不是本片引入的**（客户首次平台密码登录会造成同样的局面），而且
+2026-09-09 只读普查显示生产没有现实触发面：全库 `identity_binding` 事件只有 2 条，
+都在 identities 流、都已 processed（最后一条 2026-08-26），没有任何停放/排队/失败。
+但代绑定让运营可以**主动**对着最容易踩的那批账号触发它，所以工具加了护栏：
+摘要打印 `identity_binding open (whole deployment)`，非 0 时 `--apply` 直接拒绝。
+
+那一行是**全库计数，不是这个客户的**——停放的 `identity_binding` 事件按中心 OIDC
+的盲索引挂依赖，工具手上只有平台 origin 与上游 id，事件载荷又是加密的，从这里
+根本无法判断某条属于哪个上游客户。所以它只能回答「全局有没有卡住的身份投影」，
+不要把它读成「这个客户有没有」。
+
 ### 退出码
 
 | 码 | 含义 | 该做什么 |
 | --- | --- | --- |
 | 0 | 成功（apply 已提交；或 dry-run 正常出计划，**包括门关着标 NO-GO 的 dry-run**） | 按下面「怎么读」核对 |
-| 1 | 操作失败：连不上库、迁移集不匹配、绑定被拒（已绑他人 / platform 不符 / issuer 与库里矛盾）、序列化冲突 | 读错误信息，不要重试到它自己好 |
+| 1 | 操作失败：连不上库、迁移集不匹配、绑定被拒（已绑他人 / platform 不符 / issuer 与库里矛盾 / **该 id 已有非 operator_attested 绑定** / **有未处理的 identity_binding 事件**）、序列化冲突 | 读错误信息，不要重试到它自己好 |
 | 2 | 命令行本身写错（参数非法、路径不是绝对路径） | 改命令 |
 | 3 | `--apply` 被时机门拒绝 | **请求本身没问题**，等下一个安静窗口再来 |
 
@@ -2494,7 +2519,10 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
 
   两边逐字一致才往下走。
 - **`external_user_id:`** —— 与上游后台里那一行逐字比对。**没有任何自动检查能
-  替你做这件事**，原因见下一条。
+  替你做这件事**，原因见下一条。工具只能保证它是纯数字（两个平台的用户 id 都是
+  十进制整数），把邮箱或用户名粘进来会被当场拒绝。
+- **`identity_binding open (whole deployment):`** —— 必须是 0，否则 `--apply`
+  会被拒。这是**全库**计数，不是这个客户的；含义见上面「两个代价」第二条。
 - **`facts ever seen:` 与 `WARNING`** —— 这个上游 id 在本库出现过的事实条数
   （现在停放的 + 以前唤醒过的）。为 0 时工具会打
   `WARNING: no parked facts for this external id`，那**通常就是 id 敲错了**。
@@ -2520,7 +2548,17 @@ root 的 shell 历史与 `ps` 输出里**（工具本身不打印邮箱）。要
 
 **什么情况必须停手**：`issuer:` 与 api 不一致；`external_user_id` 与上游后台对不
 上；出现 `WARNING` 而你无法解释为什么这个客户在本库一条事实都没有；
-`timing gate` 是 `NO-GO`。
+`timing gate` 是 `NO-GO`；`identity_binding open` 非 0。
+
+**工具会自己拒绝、不用你判断的两种情况**（看到就照错误信息处理，别想办法绕过）：
+
+- **该上游 id 已经有一个不是 `operator_attested` 的绑定。** 最常见的原因是客户
+  自己已经用平台密码登录过了——那次登录**本身就是所有权证明**，记录在
+  `binding_method=platform_password_login` 里。再代绑一次会把这条记录覆盖成
+  `operator_attested`、`verified_at` 重置成现在，事后再也分不出当初是客户自证还是
+  运营代建，而且没有任何办法恢复。这种情况下本来也无事可做：账号已经绑好了，
+  停放事实在那次登录时就放出来了，直接去管理端账本看即可。
+- **有未处理的 `identity_binding` 事件**（见上面「两个代价」第二条）。
 
 ### 观察窗口（每个客户一次）
 
@@ -2569,12 +2607,19 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
       FROM source_ingest_events"
 ```
 
-同时看 `/readyz`。它只有 200 和 503 两种结果，503 的 body 里 `check` 字段说明是
-哪一道闸（读法见 9. 节「Reading a 503 from `/readyz`」）：
+同时看 `/readyz`。**它只有 200 和 503 两种结果**，没有中间态；503 的 body 里
+`check` 字段说明是哪一道闸（读法见 9. 节「Reading a 503 from `/readyz`」）。
+在开票主机上直接打本地端口，不必绕公网：
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://invoice.solov.cc/readyz
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:58088/readyz
+# 想看 503 的 check 字段就去掉 -o /dev/null：
+curl -s http://localhost:58088/readyz
 ```
+
+`http://localhost:58088/readyz`（主机上的映射端口）与 9. 节里用的
+`https://invoice.solov.cc/readyz`（公网入口）打到的是同一个 api 容器、同一段
+判定逻辑，结果等价；差别只是后者还要经过 Nginx 和证书，盯守时用前者少一层噪声。
 
 补数期间同来源**其他**客户读到 `source_unavailable` 是预期的，不是故障。
 

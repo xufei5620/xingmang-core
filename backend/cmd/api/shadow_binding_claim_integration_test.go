@@ -135,6 +135,8 @@ func shadowBind(t *testing.T, store *postgresstore.Store, ctx context.Context, e
 		ExternalSubjectHMAC: claimBlindIndex(t, "external-platform/"+claimSourceID, externalUserID),
 		DependencyKeyHMAC: claimBlindIndex(t, "source-dependency/source_external_account",
 			claimSourceID+"\n"+externalUserID),
+		OIDCUserDependencyKeyHMAC: claimBlindIndex(t, "source-dependency/invoice_oidc_user",
+			"\n"+claimIssuer+"\n"+externalUserID),
 		Apply: true, OperatorID: claimOperatorID,
 	}, postgresstore.AuditActor{Type: "operator", ID: claimOperatorID, RequestID: "claim-test", Reason: "shadow bind"})
 	if err != nil {
@@ -248,6 +250,8 @@ func TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong(t *testi
 		ExternalSubjectHMAC: claimBlindIndex(t, "external-platform/"+claimSourceID, claimExternalID),
 		DependencyKeyHMAC: claimBlindIndex(t, "source-dependency/source_external_account",
 			claimSourceID+"\n"+claimExternalID),
+		OIDCUserDependencyKeyHMAC: claimBlindIndex(t, "source-dependency/invoice_oidc_user",
+			"\n"+wrongIssuer+"\n"+claimExternalID),
 		Apply: true, OperatorID: claimOperatorID,
 	}, postgresstore.AuditActor{Type: "operator", ID: claimOperatorID, RequestID: "wrong-issuer-test", Reason: "shadow bind"})
 	if err != nil {

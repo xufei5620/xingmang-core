@@ -75,11 +75,20 @@ func TestRunRefusesBadInputBeforeTouchingTheDatabase(t *testing.T) {
 		options bindOptions
 		want    string
 	}{
-		"unknown platform":     {bindOptions{platform: "sub3api", externalUserID: "1"}, "--platform"},
-		"empty platform":       {bindOptions{externalUserID: "1"}, "--platform"},
-		"missing external id":  {bindOptions{platform: "sub2api"}, "--external-user-id"},
-		"apply without id":     {bindOptions{platform: "sub2api", externalUserID: "1", apply: true}, "operator UUID"},
-		"apply with non-uuid":  {bindOptions{platform: "sub2api", externalUserID: "1", apply: true, operatorID: "alice"}, "operator UUID"},
+		"unknown platform":    {bindOptions{platform: "sub3api", externalUserID: "1"}, "--platform"},
+		"empty platform":      {bindOptions{externalUserID: "1"}, "--platform"},
+		"missing external id": {bindOptions{platform: "sub2api"}, "--external-user-id"},
+		// Both platforms format their user ids with strconv.FormatInt, so a
+		// non-numeric value is a paste of the wrong field. An email is the
+		// worst of them: it mints a shadow identity at an (issuer, subject)
+		// pair no login will ever produce, so nothing ever claims it -- after
+		// the irreversible PRE_POLICY_SKIPPED write-off has already happened.
+		"email pasted as id":    {bindOptions{platform: "sub2api", externalUserID: "a@b.test"}, "numeric user id"},
+		"username pasted as id": {bindOptions{platform: "sub2api", externalUserID: "alice"}, "numeric user id"},
+		"id with stray sign":    {bindOptions{platform: "sub2api", externalUserID: "-42"}, "numeric user id"},
+		"id far too long":       {bindOptions{platform: "sub2api", externalUserID: strings.Repeat("9", 21)}, "numeric user id"},
+		"apply without id":      {bindOptions{platform: "sub2api", externalUserID: "1", apply: true}, "operator UUID"},
+		"apply with non-uuid":   {bindOptions{platform: "sub2api", externalUserID: "1", apply: true, operatorID: "alice"}, "operator UUID"},
 		"apply with short uuid": {bindOptions{platform: "sub2api", externalUserID: "1", apply: true,
 			operatorID: "70000000-0000-4000-8000-00000000"}, "operator UUID"},
 	} {

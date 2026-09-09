@@ -66,6 +66,11 @@ import (
 // record of who decided to bind on a customer's behalf.
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
+// externalUserIDPattern is the shape both upstream platforms actually
+// produce: a decimal integer (auth/sub2api_login.go and auth/newapi_login.go
+// both format theirs with strconv.FormatInt). Twenty digits covers int64.
+var externalUserIDPattern = regexp.MustCompile(`^[0-9]{1,20}$`)
+
 // bindOptions is the CLI's parsed input, grouped so run's signature does not
 // grow a row of same-typed positional arguments a caller could transpose.
 type bindOptions struct {
@@ -144,6 +149,16 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	if externalUserID == "" {
 		return errors.New("--external-user-id is required")
 	}
+	// Both platforms' user ids are decimal integers -- Sub2API and New API
+	// each render theirs with strconv.FormatInt (auth/sub2api_login.go,
+	// auth/newapi_login.go). Anything else is a paste of the wrong field, and
+	// an email address pasted here is the worst case: it mints a shadow
+	// identity whose (issuer, subject) no login will ever produce, so nothing
+	// ever claims it, while the irreversible PRE_POLICY_SKIPPED write-off has
+	// already happened.
+	if !externalUserIDPattern.MatchString(externalUserID) {
+		return fmt.Errorf("--external-user-id must be the upstream platform's numeric user id (1-20 digits), got %q", options.externalUserID)
+	}
 	if options.apply && !uuidPattern.MatchString(operatorID) {
 		return errors.New("a valid operator UUID is required to apply")
 	}
@@ -191,11 +206,20 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	if err != nil {
 		return fmt.Errorf("derive source dependency blind index: %w", err)
 	}
+	// The empty source instance and the issuer+"\n"+subject value are not a
+	// slip: they mirror Service.EnsureUser's own invoice_oidc_user wake byte
+	// for byte. A key derived any other way matches no rows and reports a
+	// cheerful zero.
+	oidcUserKey, err := application.SourceDependencyKeyHMAC(keyring, "invoice_oidc_user", "", issuer+"\n"+externalUserID)
+	if err != nil {
+		return fmt.Errorf("derive invoice_oidc_user dependency blind index: %w", err)
+	}
 
 	in := postgresstore.OperatorBindInput{
 		Platform: platform, Issuer: issuer, ExternalUserID: externalUserID,
 		ExternalSubjectHMAC: subjectHMAC, DependencyKeyHMAC: dependencyKey,
-		Apply: options.apply, OperatorID: operatorID,
+		OIDCUserDependencyKeyHMAC: oidcUserKey,
+		Apply:                     options.apply, OperatorID: operatorID,
 	}
 	if email := strings.TrimSpace(options.email); email != "" {
 		// Stored encrypted under the same AAD a real login would use, but
@@ -214,10 +238,35 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 		Reason: "XM-INV-SHADOW-BINDING operator-attested binding " + modeLabel(options.apply),
 	})
 	if err != nil {
+		printRefusalDetail(out, platform, externalUserID, err)
 		return fmt.Errorf("operator-attested bind: %w", err)
 	}
 	printSummary(out, platform, issuer, externalUserID, result)
 	return nil
+}
+
+// printRefusalDetail explains the two refusals whose whole value is in the
+// explanation. Both are returned in dry-run too -- a dry run that printed a
+// tidy plan for either would be printing a plan to do damage -- so without
+// this the operator would see only a one-line error and no context.
+func printRefusalDetail(out io.Writer, platform, externalUserID string, err error) {
+	switch {
+	case errors.Is(err, postgresstore.ErrOperatorBindWouldOverwriteBinding):
+		fmt.Fprintf(out, "REFUSED: %s user %s already has a binding this tool did not create.\n\n", platform, externalUserID)
+		fmt.Fprintf(out, "  The usual reason is that the customer has already logged in with their own\n"+
+			"  platform password. That login IS the ownership proof, and it is recorded as\n"+
+			"  binding_method=platform_password_login. Rebinding would overwrite that record\n"+
+			"  with operator_attested and reset verified_at, leaving no way to tell afterwards\n"+
+			"  that the customer proved it themselves.\n\n"+
+			"  There is nothing to do here: the account is already bound, and its parked facts\n"+
+			"  were released by that login. Check the admin ledger instead.\n\n")
+	case errors.Is(err, postgresstore.ErrOperatorBindIdentityProjectionOpen):
+		fmt.Fprintf(out, "REFUSED: unprocessed identity_binding ingest events exist.\n\n")
+		fmt.Fprintf(out, "  These are resolved against the CENTRAL OIDC issuer and subject, not the\n"+
+			"  platform login origin this binding uses, so a shadow identity cannot satisfy\n"+
+			"  them. Binding now risks driving them to dead, which fails /readyz for everyone.\n"+
+			"  Clear them first (runbook section 9, dead-event handling), then retry.\n\n")
+	}
 }
 
 // platformLoginOrigin reads the platform's login origin from the same
@@ -299,7 +348,10 @@ func printSummary(out io.Writer, platform, issuer, externalUserID string, result
 	fmt.Fprintf(out, "timing gate:         %s (%s)\n", gate, result.GateReason)
 	fmt.Fprintf(out, "ingest pending:      %d\n", result.Health.Pending)
 	fmt.Fprintf(out, "ingest dead:         %d (contained %d)\n", result.Health.Dead, result.Health.DeadContained)
-	fmt.Fprintf(out, "ingest waiting:      %d\n\n", result.Health.Waiting)
+	fmt.Fprintf(out, "ingest waiting:      %d\n", result.Health.Waiting)
+	// Deployment-wide, not per-id: see countOpenIdentityBindingEvents for why
+	// it cannot be scoped. Labelled so nobody reads it as "this customer's".
+	fmt.Fprintf(out, "identity_binding open (whole deployment): %d\n\n", result.IdentityBindingEventsOpen)
 
 	userLabel := "reused"
 	if result.UserCreated {

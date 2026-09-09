@@ -39,6 +39,18 @@ const operatorBoundAction = "external_account.operator_bound"
 // exit status must be able to tell them apart.
 var ErrOperatorBindTimingGate = errors.New("source ingestion timing gate is not satisfied")
 
+// ErrOperatorBindWouldOverwriteBinding is returned when the external account
+// already carries a binding this tool did not create -- above all a
+// platform_password_login one, which means the customer already proved
+// ownership themselves. Overwriting it is silent and irreversible, so it is
+// refused in BOTH modes rather than merely reported: a dry run that printed a
+// plan here would be printing a plan to destroy evidence.
+var ErrOperatorBindWouldOverwriteBinding = errors.New("external account already has a binding this tool did not create")
+
+// ErrOperatorBindIdentityProjectionOpen is returned when unprocessed
+// identity_binding ingest events exist. See countOpenIdentityBindingEvents.
+var ErrOperatorBindIdentityProjectionOpen = errors.New("unprocessed identity-binding ingest events exist")
+
 // blindIndexPattern matches securefields.Keyring.BlindIndex output. This
 // package deliberately has no securefields dependency (see
 // eligibility_repair.go), so the caller derives both HMACs and this only
@@ -58,10 +70,21 @@ type OperatorBindInput struct {
 	ExternalUserID      string
 	ExternalSubjectHMAC string
 	DependencyKeyHMAC   string
-	EmailCiphertext     []byte
-	EmailVerified       bool
-	Apply               bool
-	OperatorID          string
+
+	// OIDCUserDependencyKeyHMAC is the invoice_oidc_user wake key for this
+	// shadow identity. Service.EnsureUser fires that wake on every identity it
+	// mints (service.go, right after EnsureUserAndSyncOIDCEmail); a bind that
+	// mints an identity without it leaves any fact parked on
+	// invoice_oidc_user for this pair frozen for the same reason a missing
+	// source_external_account wake would. Derived by the caller with
+	// application.SourceDependencyKeyHMAC("invoice_oidc_user", "",
+	// issuer+"\n"+subject) -- note the empty source instance, matching
+	// Service.EnsureUser exactly.
+	OIDCUserDependencyKeyHMAC string
+	EmailCiphertext           []byte
+	EmailVerified             bool
+	Apply                     bool
+	OperatorID                string
 }
 
 // OperatorBindResult is the full outcome, printable as the CLI's summary. It
@@ -102,6 +125,17 @@ type OperatorBindResult struct {
 	// bind is creating the first row for the platform. See
 	// checkPlatformIssuerConsistency for why it is checked at all.
 	PlatformIssuerInUse string
+
+	// ExistingBindingMethod is the binding_method already on the external
+	// account, or "" when there is no row yet. Reported so an operator sees
+	// what they were about to overwrite, not only that they were refused.
+	ExistingBindingMethod string
+
+	// IdentityBindingEventsOpen counts identity_binding ingest events that are
+	// not yet processed, across the whole deployment. See
+	// countOpenIdentityBindingEvents for why it cannot be scoped to one
+	// upstream id.
+	IdentityBindingEventsOpen int64
 
 	// DependencyKeyHMAC is echoed back so the runbook's observation-window
 	// queries have something to paste: the parked rows are keyed by this
@@ -158,6 +192,9 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	if !blindIndexPattern.MatchString(in.DependencyKeyHMAC) {
 		return OperatorBindResult{}, errors.New("source dependency blind index is required (see application.SourceDependencyKeyHMAC)")
 	}
+	if !blindIndexPattern.MatchString(in.OIDCUserDependencyKeyHMAC) {
+		return OperatorBindResult{}, errors.New("invoice_oidc_user dependency blind index is required (see OperatorBindInput.OIDCUserDependencyKeyHMAC)")
+	}
 	if in.Apply && operatorID == "" {
 		return OperatorBindResult{}, errors.New("an approving operator id is required to apply")
 	}
@@ -167,6 +204,27 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 		return OperatorBindResult{}, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// This tool connects as invoice_owner, which -- unlike invoice_app
+	// (deploy/postgres/010-invoice-roles.sh sets 15s statement / 5s lock / 15s
+	// idle on that role) -- carries no timeouts at all. The transaction below
+	// takes FOR UPDATE on invoice_users and external_accounts and then
+	// batch-UPDATEs thousands of source_ingest_events rows, so without these
+	// it could sit waiting on a lock for the CLI's whole five-minute context
+	// while holding its own locks against the live api. lock_timeout matches
+	// every batch precedent in deploy/postgres (balance-history-cleanup.sql
+	// and the two apply-*.sh scripts all use 5s); statement_timeout is set to
+	// the CLI's own context deadline so the server gives up at the same moment
+	// the client does instead of grinding on behind an abandoned connection.
+	for _, statement := range []string{
+		`SET LOCAL lock_timeout='5s'`,
+		`SET LOCAL statement_timeout='5min'`,
+		`SET LOCAL idle_in_transaction_session_timeout='15s'`,
+	} {
+		if _, err = tx.Exec(ctx, statement); err != nil {
+			return OperatorBindResult{}, err
+		}
+	}
 
 	result := OperatorBindResult{}
 	if result.Health, err = sourceIngestHealthTx(ctx, tx); err != nil {
@@ -182,11 +240,42 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	}
 	result.DependencyKeyHMAC = in.DependencyKeyHMAC
 
+	// Serialize against the other two external_accounts writers
+	// (BindExternalAccountFromSource and RevokeExternalAccountFromSource, both
+	// in identity.go) on the same key and the same seed: seed 4 is the "one
+	// upstream account on one source" lock namespace, and the key is exactly
+	// what those two use. Taken here, immediately after the source instance is
+	// known, and before anything is read that the decision depends on.
+	//
+	// Serializable isolation alone would probably do it today -- the UPSERT
+	// would raise 40001 -- but the safety of this operation must not rest on
+	// the isolation level: the day somebody lowers it to Read Committed to
+	// stop seeing 40001, that protection disappears and nothing reports it.
+	// The row-level FOR UPDATE further down cannot substitute either, because
+	// it locks nothing when the row does not yet exist, which is the normal
+	// case for a shadow bind.
+	//
+	// Lock order here is external_accounts (this advisory key) ->
+	// invoice_users -> source_ingest_events; the projection writers never
+	// touch invoice_users, so no cycle is possible.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,4))`,
+		result.SourceInstanceID+"\n"+externalUserID); err != nil {
+		return OperatorBindResult{}, err
+	}
+
 	if result.PlatformIssuerInUse, err = checkPlatformIssuerConsistency(ctx, tx, platform, issuer); err != nil {
 		return OperatorBindResult{}, err
 	}
 	if result.FactsEverSeen, err = countFactsEverSeen(ctx, tx, in.DependencyKeyHMAC); err != nil {
 		return OperatorBindResult{}, err
+	}
+	if result.IdentityBindingEventsOpen, err = countOpenIdentityBindingEvents(ctx, tx); err != nil {
+		return OperatorBindResult{}, err
+	}
+	if in.Apply && result.IdentityBindingEventsOpen > 0 {
+		return OperatorBindResult{}, fmt.Errorf(
+			"%d identity-binding ingest event(s) are still unprocessed: %w",
+			result.IdentityBindingEventsOpen, ErrOperatorBindIdentityProjectionOpen)
 	}
 
 	user, created, err := ensureUserTx(ctx, tx, UserRecord{
@@ -213,13 +302,36 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 
 	var existingOwner string
 	ownerErr := tx.QueryRow(ctx, `
-		SELECT invoice_user_id FROM external_accounts
+		SELECT invoice_user_id,binding_method FROM external_accounts
 		WHERE source_instance_id=$1 AND external_user_id=$2 FOR UPDATE`,
-		result.SourceInstanceID, externalUserID).Scan(&existingOwner)
+		result.SourceInstanceID, externalUserID).Scan(&existingOwner, &result.ExistingBindingMethod)
 	if ownerErr != nil && !errors.Is(ownerErr, pgx.ErrNoRows) {
 		return OperatorBindResult{}, ownerErr
 	}
 	result.BindingCreated = errors.Is(ownerErr, pgx.ErrNoRows)
+
+	// Refuse to overwrite a binding the customer proved themselves.
+	//
+	// bindExternalAccountTx's UPSERT only refuses a row owned by SOMEBODY
+	// ELSE. When the customer has already logged in with their platform
+	// password, the row is owned by the very invoice_user this bind resolves
+	// to -- (platform origin, upstream id) is the same pair both paths use --
+	// so the UPSERT happily takes the DO UPDATE branch and rewrites
+	// binding_method from platform_password_login to operator_attested,
+	// resets verified_at to now(), and files an operator_bound audit row
+	// claiming the operator established a binding the customer had in fact
+	// established themselves. Nothing errors, and there is no way back:
+	// binding_method is the only surviving record of which happened.
+	//
+	// An existing operator_attested row is allowed through, because that is
+	// the idempotent re-run of this same tool.
+	if !result.BindingCreated && result.ExistingBindingMethod != BindingMethodOperatorAttested {
+		return OperatorBindResult{}, fmt.Errorf(
+			"external account %s/%s already carries a %q binding (owner invoice_user %s); "+
+				"refusing to overwrite a binding this tool did not create: %w",
+			result.SourceInstanceID, externalUserID, result.ExistingBindingMethod, existingOwner,
+			ErrOperatorBindWouldOverwriteBinding)
+	}
 
 	bound, err := bindExternalAccountTx(ctx, tx, ExternalAccountRecord{
 		PrincipalID: user.ID, SourceInstanceID: result.SourceInstanceID,
@@ -245,14 +357,29 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 		return OperatorBindResult{}, err
 	}
 
-	// Step four. Service.BindExternalAccount fires this wake only for
-	// platform_password_login, so an operator_attested bind that skipped it
-	// would leave every parked fact for this customer frozen forever: parked
-	// events are excluded from the periodic sweep by design.
+	// Step four, first half. Service.BindExternalAccount fires this wake only
+	// for platform_password_login, so an operator_attested bind that skipped
+	// it would leave every parked fact for this customer frozen forever:
+	// parked events are excluded from the periodic sweep by design.
 	if result.PrePolicySkipped, result.Released, err = requeueSourceDependencyTx(ctx, tx,
 		"source_external_account", in.DependencyKeyHMAC); err != nil {
 		return OperatorBindResult{}, err
 	}
+
+	// Step four, second half. Minting an identity has its own wake, which
+	// Service.EnsureUser fires and this originally missed: facts can park on
+	// invoice_oidc_user for a (issuer, subject) pair that does not exist yet,
+	// and this bind is what makes it exist. Same failure mode as the wake
+	// above -- silent, permanent, invisible to every health surface. Counted
+	// into the same Released/PrePolicySkipped totals because from the
+	// operator's side it is one backlog being let go.
+	oidcSkipped, oidcReleased, err := requeueSourceDependencyTx(ctx, tx,
+		"invoice_oidc_user", in.OIDCUserDependencyKeyHMAC)
+	if err != nil {
+		return OperatorBindResult{}, err
+	}
+	result.PrePolicySkipped += oidcSkipped
+	result.Released += oidcReleased
 
 	if !in.Apply {
 		return result, nil
@@ -324,6 +451,31 @@ func countFactsEverSeen(ctx context.Context, tx pgx.Tx, dependencyKeyHMAC string
 	err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM source_ingest_events
 		WHERE dependency_key_hmac=$1 OR catchup_key_hmac=$1`, dependencyKeyHMAC).Scan(&count)
+	return count, err
+}
+
+// countOpenIdentityBindingEvents counts identity_binding ingest events that
+// have not reached 'processed'.
+//
+// Why it is deployment-wide rather than scoped to this upstream id, even
+// though that is what an operator actually wants to know: a parked
+// identity_binding event waits on dependency kind invoice_oidc_user, whose
+// blind index is derived from the CENTRAL OIDC issuer and provider subject
+// (source_processor.go's processIdentityBinding resolves the owner with
+// FindUserByOIDC on those). This tool knows the platform login origin and the
+// upstream user id -- a different pair entirely -- and the event payload is
+// encrypted, so there is no way from here to tell which upstream customer a
+// parked identity_binding event belongs to. Reporting a deployment-wide count
+// and saying so is honest; reporting it as if it were per-id would not be.
+//
+// It is cheap to be strict about: production carried exactly two of these
+// events on 2026-09-09, both processed since 2026-08-26, so a non-zero count
+// is already an anomaly worth stopping for.
+func countOpenIdentityBindingEvents(ctx context.Context, tx pgx.Tx) (int64, error) {
+	var count int64
+	err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM source_ingest_events
+		WHERE entity_type='identity_binding' AND processing_status<>'processed'`).Scan(&count)
 	return count, err
 }
 

@@ -45,12 +45,19 @@ func shadowDependencyKey(externalUserID string) string {
 	return testBlindIndex("source-dependency/source_external_account", shadowSourceID+"\n"+externalUserID)
 }
 
+// shadowOIDCUserKey mirrors Service.EnsureUser's own invoice_oidc_user wake
+// key byte for byte: empty source instance, value issuer+"\n"+subject.
+func shadowOIDCUserKey(externalUserID string) string {
+	return testBlindIndex("source-dependency/invoice_oidc_user", "\n"+shadowIssuer+"\n"+externalUserID)
+}
+
 func shadowBindInput(externalUserID string, apply bool) OperatorBindInput {
 	return OperatorBindInput{
 		Platform: "sub2api", Issuer: shadowIssuer, ExternalUserID: externalUserID,
-		ExternalSubjectHMAC: shadowSubjectHMAC(externalUserID),
-		DependencyKeyHMAC:   shadowDependencyKey(externalUserID),
-		Apply:               apply, OperatorID: shadowOperatorID,
+		ExternalSubjectHMAC:       shadowSubjectHMAC(externalUserID),
+		DependencyKeyHMAC:         shadowDependencyKey(externalUserID),
+		OIDCUserDependencyKeyHMAC: shadowOIDCUserKey(externalUserID),
+		Apply:                     apply, OperatorID: shadowOperatorID,
 	}
 }
 
@@ -99,14 +106,21 @@ func seedShadowBindFixture(t *testing.T) (*Store, context.Context, time.Time) {
 // the row is released to 'queued'.
 func parkEvent(t *testing.T, store *Store, ctx context.Context, eventID, entityType, externalUserID string, observedAt time.Time) {
 	t.Helper()
+	parkEventOn(t, store, ctx, eventID, entityType, "source_external_account", shadowDependencyKey(externalUserID), observedAt)
+}
+
+// parkEventOn is parkEvent with the dependency spelled out, for the
+// invoice_oidc_user wake and for decoy rows belonging to other accounts.
+func parkEventOn(t *testing.T, store *Store, ctx context.Context, eventID, entityType, dependencyKind, dependencyKey string, observedAt time.Time) {
+	t.Helper()
 	if _, err := store.pool.Exec(ctx, `
 		INSERT INTO source_ingest_events(source_instance_id,stream_id,event_id,first_batch_id,entity_type,operation,
 			payload_hash,payload_ciphertext,observed_at,processing_status,dependency_kind,dependency_key_hmac,
 			attempt_count,created_at,updated_at)
 		VALUES($1,'usage',$2,$3,$4,'upsert',$5,decode(repeat('11',16),'hex'),$6,'parked_identity',
-			'source_external_account',$7,0,now(),now())`,
+			$7,$8,0,now(),now())`,
 		shadowSourceID, eventID, shadowBatchID, entityType,
-		strings.Repeat("c", 64), observedAt, shadowDependencyKey(externalUserID)); err != nil {
+		strings.Repeat("c", 64), observedAt, dependencyKind, dependencyKey); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -164,15 +178,22 @@ func countShadowBindings(t *testing.T, store *Store, ctx context.Context) int64 
 func TestOperatorBindWakesParkedFactsInTheSameTransaction(t *testing.T) {
 	store, ctx, policyStart := seedShadowBindFixture(t)
 	const (
-		inWindowEvent  = "82000000-0000-4000-8000-0000000000d1"
-		prePolicyEvent = "82000000-0000-4000-8000-0000000000d2"
-		paymentEvent   = "82000000-0000-4000-8000-0000000000d3"
+		inWindowEvent     = "82000000-0000-4000-8000-0000000000d1"
+		prePolicyEvent    = "82000000-0000-4000-8000-0000000000d2"
+		paymentEvent      = "82000000-0000-4000-8000-0000000000d3"
+		otherAccountEvent = "82000000-0000-4000-8000-0000000000da"
 	)
 	parkEvent(t, store, ctx, inWindowEvent, "usage_event", shadowExternalID, policyStart.Add(time.Hour))
 	parkEvent(t, store, ctx, prePolicyEvent, "usage_event", shadowExternalID, policyStart.Add(-time.Hour))
 	// A payment is never written off by the pre-policy branch, whatever its
 	// observed_at: it is released like any other fact.
 	parkEvent(t, store, ctx, paymentEvent, "payment", shadowExternalID, policyStart.Add(-2*time.Hour))
+	// A decoy belonging to a DIFFERENT account. Without it "only this key's
+	// rows were released" is trivially true in a fixture that contains no
+	// other rows, and the scoping -- which comes from
+	// requeueSourceDependencyTx's WHERE, inherited unchanged from the
+	// baseline -- would keep passing after somebody widened it.
+	parkEvent(t, store, ctx, otherAccountEvent, "usage_event", "50505", policyStart.Add(time.Hour))
 
 	result, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
 	if err != nil {
@@ -194,6 +215,9 @@ func TestOperatorBindWakesParkedFactsInTheSameTransaction(t *testing.T) {
 	}
 	if status, reason := eventStatus(t, store, ctx, prePolicyEvent); status != "processed" || reason != "PRE_POLICY_SKIPPED" {
 		t.Fatalf("pre-policy event is %q/%q, want processed/PRE_POLICY_SKIPPED", status, reason)
+	}
+	if status, _ := eventStatus(t, store, ctx, otherAccountEvent); status != "parked_identity" {
+		t.Fatalf("another account's parked fact became %q; the wake is not scoped to its own key", status)
 	}
 }
 
@@ -297,6 +321,15 @@ func TestOperatorBindRequiresBlindIndexBecauseNullsCollide(t *testing.T) {
 // TestOperatorBindRefusesAnExternalAccountOwnedBySomebodyElse is the guardrail
 // that stops an operator from moving a real customer's funding history onto a
 // freshly minted row by mistyping an upstream id.
+//
+// The pre-existing binding here is operator_attested on purpose. A
+// platform_password_login one would now be stopped one step earlier by
+// ErrOperatorBindWouldOverwriteBinding, and this test would then prove that
+// guard twice over and the ownership guard not at all -- deleting the UPSERT's
+// `WHERE invoice_user_id=EXCLUDED.invoice_user_id` would stay green. Using a
+// method this tool does accept keeps the two guards independently proven, and
+// is the realistic case anyway: a second shadow bind aimed at an id some
+// earlier shadow bind already claimed for a different user.
 func TestOperatorBindRefusesAnExternalAccountOwnedBySomebodyElse(t *testing.T) {
 	store, ctx, _ := seedShadowBindFixture(t)
 	owner, err := store.EnsureUser(ctx, UserRecord{
@@ -308,7 +341,7 @@ func TestOperatorBindRefusesAnExternalAccountOwnedBySomebodyElse(t *testing.T) {
 	if _, err = store.BindExternalAccount(ctx, ExternalAccountRecord{
 		PrincipalID: owner.ID, SourceInstanceID: shadowSourceID, ExternalUserID: shadowExternalID,
 		ExternalSubjectHMAC: shadowSubjectHMAC(shadowExternalID),
-		BindingMethod:       "platform_password_login", BindingStatus: "verified",
+		BindingMethod:       BindingMethodOperatorAttested, BindingStatus: "verified",
 	}, shadowActor()); err != nil {
 		t.Fatal(err)
 	}
@@ -322,13 +355,13 @@ func TestOperatorBindRefusesAnExternalAccountOwnedBySomebodyElse(t *testing.T) {
 	if count := countUsers(t, store, ctx); count != 1 {
 		t.Fatalf("%d invoice_users rows after a refused bind, want 1 (the pre-existing owner)", count)
 	}
-	var method string
-	if err = store.pool.QueryRow(ctx, `SELECT binding_method FROM external_accounts
-		WHERE source_instance_id=$1 AND external_user_id=$2`, shadowSourceID, shadowExternalID).Scan(&method); err != nil {
+	var ownerAfter string
+	if err = store.pool.QueryRow(ctx, `SELECT invoice_user_id FROM external_accounts
+		WHERE source_instance_id=$1 AND external_user_id=$2`, shadowSourceID, shadowExternalID).Scan(&ownerAfter); err != nil {
 		t.Fatal(err)
 	}
-	if method != "platform_password_login" {
-		t.Fatalf("the existing binding's method became %q; the refusal did not roll back", method)
+	if ownerAfter != owner.ID {
+		t.Fatalf("the binding moved to invoice_user %s; the refusal did not roll back", ownerAfter)
 	}
 }
 
@@ -649,5 +682,200 @@ func TestOperatorBindCountsFactsEverSeen(t *testing.T) {
 	}
 	if repeat.FactsEverSeen != 1 {
 		t.Fatalf("a released fact stopped being counted after the wake: %d", repeat.FactsEverSeen)
+	}
+}
+
+// TestOperatorBindRefusesToOverwriteACustomerProvedBinding is the first
+// review's data-integrity finding, and it is the one that silently destroyed
+// evidence.
+//
+// Scenario: the customer logged in with their own platform password
+// yesterday, so external_accounts carries binding_method
+// platform_password_login owned by the invoice_user at (platform origin,
+// upstream id). An operator who does not know that runs --apply on the same
+// id. Every guard passes -- ensureUserTx reuses that very row, the platform
+// identity matches, and the existing owner IS this user -- so the UPSERT took
+// the DO UPDATE branch, rewrote binding_method to operator_attested, reset
+// verified_at to now(), and filed an operator_bound audit row claiming the
+// operator established a binding the customer had established themselves.
+// binding_method is the only record of which happened, so the overwrite is
+// unrecoverable.
+//
+// The refusal applies in BOTH modes on purpose: a dry run printing a tidy
+// plan here would be printing a plan to destroy evidence.
+//
+// Mutation that must turn this red: drop the
+// `result.ExistingBindingMethod != BindingMethodOperatorAttested` guard.
+func TestOperatorBindRefusesToOverwriteACustomerProvedBinding(t *testing.T) {
+	store, ctx, policyStart := seedShadowBindFixture(t)
+	const parked = "82000000-0000-4000-8000-0000000000f1"
+	parkEvent(t, store, ctx, parked, "usage_event", shadowExternalID, policyStart.Add(time.Hour))
+
+	// Exactly what a platform-password login leaves behind: the same
+	// invoice_user this bind would resolve to, bound by the customer.
+	self, err := store.EnsureUser(ctx, UserRecord{
+		OIDCIssuer: shadowIssuer, OIDCSubject: shadowExternalID, Status: "active",
+	}, shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = store.ClaimPlatformIdentity(ctx, self.ID, "sub2api", shadowExternalID, shadowActor()); err != nil {
+		t.Fatal(err)
+	}
+	proved, err := store.BindExternalAccount(ctx, ExternalAccountRecord{
+		PrincipalID: self.ID, SourceInstanceID: shadowSourceID, ExternalUserID: shadowExternalID,
+		ExternalSubjectHMAC: shadowSubjectHMAC(shadowExternalID),
+		BindingMethod:       "platform_password_login", BindingStatus: "verified",
+	}, shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mode := range []struct {
+		name  string
+		apply bool
+	}{{"dry run", false}, {"apply", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			_, bindErr := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, mode.apply), shadowActor())
+			if !errors.Is(bindErr, ErrOperatorBindWouldOverwriteBinding) {
+				t.Fatalf("returned %v, want ErrOperatorBindWouldOverwriteBinding", bindErr)
+			}
+			if !strings.Contains(bindErr.Error(), "platform_password_login") {
+				t.Fatalf("the refusal does not say what it found: %v", bindErr)
+			}
+		})
+	}
+
+	var method string
+	var verifiedAt time.Time
+	if err = store.pool.QueryRow(ctx, `SELECT binding_method,verified_at FROM external_accounts WHERE id=$1`,
+		proved.ID).Scan(&method, &verifiedAt); err != nil {
+		t.Fatal(err)
+	}
+	if method != "platform_password_login" {
+		t.Fatalf("binding_method became %q; the customer's own proof was overwritten", method)
+	}
+	if !verifiedAt.Equal(proved.VerifiedAt) {
+		t.Fatalf("verified_at moved from %s to %s", proved.VerifiedAt, verifiedAt)
+	}
+	var operatorAudits int64
+	if err = store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE action=$1`,
+		operatorBoundAction).Scan(&operatorAudits); err != nil {
+		t.Fatal(err)
+	}
+	if operatorAudits != 0 {
+		t.Fatalf("%d operator_bound audit rows written for a refused bind", operatorAudits)
+	}
+	// The refusal must not have consumed the parked facts either.
+	if status, _ := eventStatus(t, store, ctx, parked); status != "parked_identity" {
+		t.Fatalf("parked fact became %q despite the refusal", status)
+	}
+}
+
+// TestOperatorBindAllowsItsOwnIdempotentRerun is the other half of the guard
+// above: refusing every pre-existing binding would break the documented
+// "running it twice is the realistic mistake" behaviour. Only a binding this
+// tool did not create is refused.
+func TestOperatorBindAllowsItsOwnIdempotentRerun(t *testing.T) {
+	store, ctx, _ := seedShadowBindFixture(t)
+	first, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatalf("the tool refused its own idempotent re-run: %v", err)
+	}
+	if second.ExistingBindingMethod != BindingMethodOperatorAttested {
+		t.Fatalf("re-run saw existing method %q", second.ExistingBindingMethod)
+	}
+	if second.ExternalAccountID != first.ExternalAccountID {
+		t.Fatal("re-run moved the binding")
+	}
+}
+
+// TestOperatorBindRefusesWhileIdentityProjectionEventsAreOpen covers the
+// second data-integrity finding.
+//
+// An identity_binding event resolves its owner with FindUserByOIDC against
+// the CENTRAL OIDC issuer and provider subject, a different pair from the
+// (platform origin, upstream id) a shadow bind uses. A shadow identity
+// therefore cannot satisfy one: the projection returns ErrForbidden, which is
+// graded PROJECTION_FAILED -- neither a dependency wait nor transient -- and
+// after eight attempts the event is dead and /readyz is 503 for everyone.
+//
+// This shape predates this tool (a first platform-password login does the
+// same thing) and production currently has no exposure: two such events, both
+// processed since 2026-08-26. What is new is that an operator can now aim it
+// at exactly the accounts most likely to trigger it, so this refuses while any
+// is unprocessed rather than reworking the projection chain.
+func TestOperatorBindRefusesWhileIdentityProjectionEventsAreOpen(t *testing.T) {
+	store, ctx, policyStart := seedShadowBindFixture(t)
+	parkEventOn(t, store, ctx, "82000000-0000-4000-8000-0000000000f2", "identity_binding",
+		"invoice_oidc_user",
+		testBlindIndex("source-dependency/invoice_oidc_user", "\nhttps://sso.example\nsome-sso-subject"),
+		policyStart.Add(time.Hour))
+
+	dry, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, false), shadowActor())
+	if err != nil {
+		t.Fatalf("dry run must still report: %v", err)
+	}
+	if dry.IdentityBindingEventsOpen != 1 {
+		t.Fatalf("open identity_binding events reported as %d, want 1", dry.IdentityBindingEventsOpen)
+	}
+
+	_, err = store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if !errors.Is(err, ErrOperatorBindIdentityProjectionOpen) {
+		t.Fatalf("apply returned %v, want ErrOperatorBindIdentityProjectionOpen", err)
+	}
+
+	// Processed events are not open, so the ordinary production state (two
+	// processed rows) must not block anything.
+	if _, err = store.pool.Exec(ctx, `
+		UPDATE source_ingest_events SET processing_status='processed',processed_at=now(),
+			dependency_kind=NULL,dependency_key_hmac=NULL,updated_at=now()
+		WHERE entity_type='identity_binding'`); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatalf("apply still refused with only processed identity_binding events: %v", err)
+	}
+	if cleared.IdentityBindingEventsOpen != 0 || !cleared.Applied {
+		t.Fatalf("unexpected result: %+v", cleared)
+	}
+}
+
+// TestOperatorBindFiresTheInvoiceOIDCUserWake covers the third wake, the one
+// Service.EnsureUser performs and this tool originally skipped. Minting an
+// identity is what satisfies an invoice_oidc_user dependency; a fact parked on
+// that pair stays parked forever otherwise, with nothing reporting it.
+//
+// Mutation that must turn this red: delete the second
+// requeueSourceDependencyTx call.
+func TestOperatorBindFiresTheInvoiceOIDCUserWake(t *testing.T) {
+	store, ctx, policyStart := seedShadowBindFixture(t)
+	const (
+		oidcParked  = "82000000-0000-4000-8000-0000000000f3"
+		otherParked = "82000000-0000-4000-8000-0000000000f4"
+	)
+	parkEventOn(t, store, ctx, oidcParked, "payment", "invoice_oidc_user",
+		shadowOIDCUserKey(shadowExternalID), policyStart.Add(time.Hour))
+	// Decoy: a different identity's invoice_oidc_user dependency.
+	parkEventOn(t, store, ctx, otherParked, "payment", "invoice_oidc_user",
+		shadowOIDCUserKey("50505"), policyStart.Add(time.Hour))
+
+	result, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Released != 1 {
+		t.Fatalf("released=%d want 1 (the fact parked on this identity)", result.Released)
+	}
+	if status, _ := eventStatus(t, store, ctx, oidcParked); status != "queued" {
+		t.Fatalf("the invoice_oidc_user fact is %q, want queued -- that wake never fired", status)
+	}
+	if status, _ := eventStatus(t, store, ctx, otherParked); status != "parked_identity" {
+		t.Fatalf("another identity's fact became %q; the wake is not scoped", status)
 	}
 }
