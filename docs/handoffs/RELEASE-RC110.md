@@ -49,6 +49,19 @@ RC108 的对账中自锁片在影子评估上 not_ready（见 `RELEASE-RC108.md`
 4. 部署后观测：18 容器 rc110、readyz 200、账本 top 仍 `0032`、Dead=0；用户 12 是否在下一个 balances 周期后出现 `idle_reevaluation:true` 证明并转 active；
    用户 34 的下两张真实检查点是否合成并 matched；出现 `eligibility.balance_blip.rebaselined` 或 `synthesis_conflict` 审计即停下看
 
+## 补记：2026-09-09 部署结果（UTC；+08 加 8 小时）
+
+- 负责人 16:1x「走」→ 签名备份 16:17:26–16:21:42（`invoice-20260909T161726Z`，Good，暂存私钥已 shred，服务由脚本拉起，18×rc109、readyz 200）
+- 负责人执行 `deploy/roll-forward.sh 277063cc…`，16:3x 报「跑完了」
+- 核实（16:35Z）：**18 个容器全部 `0.1.0-rc110`**，healthz/readyz 200；账本 top 仍 `0032`；无死信、无待处理事件；投影作业队列空；api 近 5 分钟 ERROR 0。
+- **用户 12（acdcdce9…）已退出「对账中」→ `active`**：16:23:45.9Z（部署后约一分钟、第一个 balances 周期）派生 `as_of=16:03:24` 的闲置结转证明（复述 deficit 3,610,140）→ matched →
+  `eligibility.pending_reconciliation.exited` → active。结转证明 5 → 6。这正是 C1+C2 的设计路径，与复审推演一致。
+- **用户 34（40bd883d…）仍 `not_invoiceable_pending_reconciliation`，属预期**：它最后一张真实检查点在 15:48:55Z（此后停止消费），部署后没有新事实、也没有新投影；
+  连击 0，按 D2(a) 闲置派生只对连击 ≥1 的账号，所以它不会被闲置路径放出。出路是 C5：下一次消费产生的两三张真实检查点 → 正向延后 → 下一张确认 → 合成 ≈ 加款额 + 当时 deficit
+  → matched → 连击 1 → 再一张 matched → 连击 2 → active。届时看审计 `synthesis_conflict` / `balance_blip.rebaselined` 是否出现（出现即停下看）。
+- 状态分布：active 11（原 9 + 2823 + 12）/ frozen 1（2222）/ pending 1（34）。
+- 记录目录 `deployment-records/rc110-deploy-20260909T154819Z/`（release-manifest、TRANSFER-SHA256SUMS、backup 日志、影子评估 A/B 报告与摘要、containers-after、deploy-record）。
+
 ## 回滚
 
 - 无迁移：单步 `deploy/roll-forward.sh 11159a19a828399a93589c4ee433bce84af1b568`（RC109 九个镜像仍在主机上）。
