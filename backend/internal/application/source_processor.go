@@ -286,7 +286,7 @@ func (p SourceEventProcessor) RunOnce(ctx context.Context) (int, error) {
 }
 
 func (s *Service) dependencyKey(kind, sourceID, value string) (string, error) {
-	return s.keys.BlindIndex("source-dependency/"+kind, sourceID+"\n"+value)
+	return SourceDependencyKeyHMAC(s.keys, kind, sourceID, value)
 }
 
 func (s *Service) waitForDependency(kind, sourceID, value string) error {

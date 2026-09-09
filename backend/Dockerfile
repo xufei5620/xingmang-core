@@ -20,7 +20,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-oidc-preflight ./cmd/oidc-preflight \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-eligibility-repair ./cmd/eligibility-repair \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-eligibility-shadow ./cmd/eligibility-shadow \
-    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-identity-migrate ./cmd/identity-migrate
+    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-identity-migrate ./cmd/identity-migrate \
+    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-account-bind ./cmd/account-bind
 
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS api-base
 
@@ -52,7 +53,7 @@ RUN /usr/local/bin/invoice-pdf-policy-check --self-test \
 FROM api-base AS tools
 RUN apk add --no-cache qpdf=12.3.2-r0 \
     && qpdf --version | grep -F 'qpdf version 12.3.2'
-COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-eligibility-repair /out/invoice-eligibility-shadow /out/invoice-identity-migrate /out/invoice-oidc-preflight /usr/local/bin/
+COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-oidc-logout-retention /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-eligibility-repair /out/invoice-eligibility-shadow /out/invoice-identity-migrate /out/invoice-account-bind /out/invoice-oidc-preflight /usr/local/bin/
 COPY migrations /app/migrations
 
 ENV MIGRATIONS_DIR=/app/migrations

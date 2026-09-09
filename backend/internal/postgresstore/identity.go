@@ -18,7 +18,20 @@ import (
 // to the deployment's actual bootstrapped source instance instead of a
 // second, independently-configured ID that could drift out of sync with it.
 func (s *Store) GetEnabledSourceInstanceID(ctx context.Context, sourceType string) (string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id FROM source_instances WHERE source_type=$1 AND enabled LIMIT 2`, sourceType)
+	return getEnabledSourceInstanceID(ctx, s.pool, sourceType)
+}
+
+// rowQuerier is the subset of *pgxpool.Pool and pgx.Tx that the extracted
+// helpers in this file need. They exist so OperatorBindExternalAccount
+// (operator_bind.go) can run the very same statements inside its single
+// transaction instead of carrying a second copy of each rule -- a copy that
+// would keep answering the old question once the original changed.
+type rowQuerier interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func getEnabledSourceInstanceID(ctx context.Context, q rowQuerier, sourceType string) (string, error) {
+	rows, err := q.Query(ctx, `SELECT id FROM source_instances WHERE source_type=$1 AND enabled LIMIT 2`, sourceType)
 	if err != nil {
 		return "", fmt.Errorf("resolve enabled source instance for %s: %w", sourceType, err)
 	}
@@ -143,29 +156,45 @@ func (s *Store) ApproveSourceInstance(ctx context.Context, in SourceInstanceReco
 // by every foreign key.  An unverified login can never erase a previously
 // verified delivery address.
 func (s *Store) EnsureUser(ctx context.Context, in UserRecord, actor AuditActor) (UserRecord, error) {
-	if in.ID == "" {
-		in.ID = randomUUID()
-	}
-	if strings.TrimSpace(in.OIDCIssuer) == "" || strings.TrimSpace(in.OIDCSubject) == "" {
-		return UserRecord{}, errors.New("OIDC issuer and subject are required")
-	}
-	if in.Status == "" {
-		in.Status = "active"
-	}
-	if in.EmailVerified && len(in.EmailCiphertext) == 0 {
-		return UserRecord{}, errors.New("verified OIDC email ciphertext is required")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return UserRecord{}, err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	saved, _, err := ensureUserTx(ctx, tx, in, actor)
+	if err != nil {
+		return UserRecord{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return UserRecord{}, err
+	}
+	return saved, nil
+}
+
+// ensureUserTx is EnsureUser's whole body, minus the transaction boundary, so
+// that OperatorBindExternalAccount can run it as one of the four steps of its
+// single all-or-nothing transaction. created reports whether this call minted
+// the row (the same fact that picks user.created over user.refreshed), which
+// the operator-bind summary prints.
+func ensureUserTx(ctx context.Context, tx pgx.Tx, in UserRecord, actor AuditActor) (UserRecord, bool, error) {
+	if in.ID == "" {
+		in.ID = randomUUID()
+	}
+	if strings.TrimSpace(in.OIDCIssuer) == "" || strings.TrimSpace(in.OIDCSubject) == "" {
+		return UserRecord{}, false, errors.New("OIDC issuer and subject are required")
+	}
+	if in.Status == "" {
+		in.Status = "active"
+	}
+	if in.EmailVerified && len(in.EmailCiphertext) == 0 {
+		return UserRecord{}, false, errors.New("verified OIDC email ciphertext is required")
+	}
 	var existingID string
 	lookupErr := tx.QueryRow(ctx, `SELECT id FROM invoice_users WHERE oidc_issuer=$1 AND oidc_subject=$2 FOR UPDATE`, in.OIDCIssuer, in.OIDCSubject).Scan(&existingID)
 	if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
-		return UserRecord{}, fmt.Errorf("lock invoice user identity: %w", lookupErr)
+		return UserRecord{}, false, fmt.Errorf("lock invoice user identity: %w", lookupErr)
 	}
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO invoice_users(id,oidc_issuer,oidc_subject,status,email_ciphertext,email_verified)
 		VALUES($1,$2,$3,$4,$5,$6)
 		ON CONFLICT(oidc_issuer,oidc_subject) DO UPDATE SET
@@ -179,7 +208,7 @@ func (s *Store) EnsureUser(ctx context.Context, in UserRecord, actor AuditActor)
 		&in.ID, &in.OIDCIssuer, &in.OIDCSubject, &in.Status, &in.EmailCiphertext,
 		&in.EmailVerified, &in.CreatedAt, &in.UpdatedAt)
 	if err != nil {
-		return UserRecord{}, fmt.Errorf("ensure invoice user: %w", err)
+		return UserRecord{}, false, fmt.Errorf("ensure invoice user: %w", err)
 	}
 	action := "user.created"
 	if existingID != "" {
@@ -188,12 +217,9 @@ func (s *Store) EnsureUser(ctx context.Context, in UserRecord, actor AuditActor)
 	if err = writeAudit(ctx, tx, actor, action, "invoice_user", in.ID, nil, map[string]any{
 		"status": in.Status, "email_verified": in.EmailVerified,
 	}); err != nil {
-		return UserRecord{}, err
+		return UserRecord{}, false, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return UserRecord{}, err
-	}
-	return in, nil
+	return in, existingID == "", nil
 }
 
 type OIDCVerifiedEmailBuilder func(principalID string) (*VerifiedEmailRecord, error)
@@ -687,6 +713,28 @@ func (s *Store) RevokeVerifiedEmail(ctx context.Context, principalID, normalized
 }
 
 func (s *Store) BindExternalAccount(ctx context.Context, in ExternalAccountRecord, actor AuditActor) (ExternalAccountRecord, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return ExternalAccountRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	saved, err := bindExternalAccountTx(ctx, tx, in, actor)
+	if err != nil {
+		return ExternalAccountRecord{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return ExternalAccountRecord{}, err
+	}
+	return saved, nil
+}
+
+// bindExternalAccountTx is BindExternalAccount's whole body, minus the
+// transaction boundary. OperatorBindExternalAccount runs it as step three of
+// its single transaction, which is also why the UPSERT's
+// `WHERE external_accounts.invoice_user_id=EXCLUDED.invoice_user_id` guard --
+// the one that turns "this external account already belongs to somebody else"
+// into domain.ErrForbidden -- stays in exactly one place.
+func bindExternalAccountTx(ctx context.Context, tx pgx.Tx, in ExternalAccountRecord, actor AuditActor) (ExternalAccountRecord, error) {
 	if in.ID == "" {
 		in.ID = randomUUID()
 	}
@@ -699,12 +747,7 @@ func (s *Store) BindExternalAccount(ctx context.Context, in ExternalAccountRecor
 	if in.BindingStatus == "verified" && in.VerifiedAt.IsZero() {
 		in.VerifiedAt = time.Now().UTC()
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return ExternalAccountRecord{}, err
-	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO external_accounts(
 			id,invoice_user_id,source_instance_id,external_user_id,external_subject_hmac,
 			binding_method,binding_status,verified_at)
@@ -734,9 +777,6 @@ func (s *Store) BindExternalAccount(ctx context.Context, in ExternalAccountRecor
 	}); err != nil {
 		return ExternalAccountRecord{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return ExternalAccountRecord{}, err
-	}
 	return in, nil
 }
 
@@ -760,16 +800,33 @@ func (s *Store) BindExternalAccount(ctx context.Context, in ExternalAccountRecor
 // must be rejected rather than silently letting two different platform
 // accounts collapse onto the same invoice_user.
 func (s *Store) ClaimPlatformIdentity(ctx context.Context, userID, platform, platformUserID string, actor AuditActor) (storedPlatform, storedPlatformUserID string, err error) {
-	userID = strings.TrimSpace(userID)
-	platformUserID = strings.TrimSpace(platformUserID)
-	if userID == "" || platform == "" || platformUserID == "" {
-		return "", "", errors.New("user id, platform and platform user id are required to claim an identity")
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", "", err
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	storedPlatform, storedPlatformUserID, err = claimPlatformIdentityTx(ctx, tx, userID, platform, platformUserID, actor)
+	if err != nil {
+		return "", "", err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return storedPlatform, storedPlatformUserID, nil
+}
+
+// claimPlatformIdentityTx is ClaimPlatformIdentity's whole body, minus the
+// transaction boundary. OperatorBindExternalAccount uses it to fill in the
+// shadow invoice_user's platform/platform_user_id columns with exactly the
+// semantics a later real login would apply -- never overwriting, and
+// reporting what is actually stored so the caller can refuse a row that
+// already carries a different platform identity.
+func claimPlatformIdentityTx(ctx context.Context, tx pgx.Tx, userID, platform, platformUserID string, actor AuditActor) (storedPlatform, storedPlatformUserID string, err error) {
+	userID = strings.TrimSpace(userID)
+	platformUserID = strings.TrimSpace(platformUserID)
+	if userID == "" || platform == "" || platformUserID == "" {
+		return "", "", errors.New("user id, platform and platform user id are required to claim an identity")
+	}
 	var beforePlatform, beforePlatformUserID, beforeStatus string
 	lookupErr := tx.QueryRow(ctx, `
 		SELECT COALESCE(platform,''),COALESCE(platform_user_id,''),status
@@ -803,9 +860,6 @@ func (s *Store) ClaimPlatformIdentity(ctx context.Context, userID, platform, pla
 	}
 	if err = writeAudit(ctx, tx, actor, "invoice_user.platform_identity_claimed", "invoice_user", userID, nil,
 		map[string]any{"platform": platform, "platform_user_id": platformUserID}); err != nil {
-		return "", "", err
-	}
-	if err = tx.Commit(ctx); err != nil {
 		return "", "", err
 	}
 	return storedPlatform, storedPlatformUserID, nil

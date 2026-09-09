@@ -582,6 +582,13 @@ stale or unsigned evidence is NO-GO.
   before the operator. Any new external account, verified binding proof, or
   bulk transition out of `parked_identity` is NO-GO. This freeze remains until
   the separate parked-backlog cutover is approved.
+- **2026-09-09 负责人决定（追加，上面原文不删）**：上面这条冻结对
+  **「一次一个、低峰、有人盯 /readyz」的代为绑定（`operator_attested`）解除**。
+  解除只覆盖这一种做法，不覆盖批量释放 `parked_identity`——批量仍然 NO-GO，
+  仍然要等那个单独的 parked-backlog cutover 获批。也就是说：用
+  `cmd/account-bind` 一次绑一个账号是允许的；写脚本一次绑一批、或直接对
+  `source_ingest_events` 批量改状态，仍然不允许。做法见本文
+  「代为绑定（`operator_attested`）」一节。
 - Create a fresh encrypted and Ed25519-signed full backup with the existing
   `deploy/backup/backup.sh` package using `BACKUP_SCHEMA_MODE=post-0011` and
   `BACKUP_LOCAL_KEYCLOAK=true`. It must contain the invoice PostgreSQL dump,
@@ -2361,6 +2368,106 @@ New API 的 `top_ups` 状态只有 `pending` / `success` / `failed` / `expired`�
 
 **核对建议**：每月对一次账——把当月手动退款清单与管理端的冻结/调额记录逐条
 对上。这件事今天没有自动化，也没有任何告警会提醒。
+
+## 9c. 代为绑定（`operator_attested`）
+
+**这是运营方替尚未登录过的真实客户建立绑定、让对账跑起来的唯一许可做法。**
+设计见 `docs/handoffs/XM-INV-SHADOW-BINDING-DESIGN.md` 方案一，负责人
+2026-09-09 拍板；对应本文 3.1 节里那条冻结的解除范围，见该节 2026-09-09
+的追加决定。交接见 `docs/handoffs/XM-INV-SHADOW-BINDING.md`。
+
+### 先读这三条，再往下看命令
+
+1. **绑不回来。** 系统没有解绑接口；唤醒会把该账号策略起点之前的用量/余额事实
+   永久改写成 `PRE_POLICY_SKIPPED`；硬删被 `ON DELETE RESTRICT` 挡住。已批准的
+   撤回档位只有 (a)：**保留绑定，客户日后自己登录时直接认领**。档位 (b)
+   （把 `invoice_users.status` 改成非 active）会让客户登录被拒，
+   `TestShadowBoundAccountLoginIsRejectedWhenTheShadowUserIsDisabled` 就是钉这
+   件事的；不要拿它当「撤销」用。
+2. **一次一个。** 唤醒一个账号会一次性放出几百到几千条停放事实。补数期间同一
+   来源上**所有**客户读到 `source_unavailable`，这是预期，不是故障。工具自己
+   带时机门（见下），上一次的积压没排干时下一次 `--apply` 会被直接拒绝。
+3. **绝不以影子用户身份提交申请、绝不上传文档。** 全系统只有两条通向真人的外发
+   路径（企微 `request.submitted` 通知、`AttachDocument` 邮件），这两条都只在
+   提交/上传时触发。绑定、冻结、撤销本身只写 `audit_events`，客户看不到。
+
+### 时机门（工具自己查，dry-run 与 apply 都查）
+
+`--apply` 只有在下面两条同时成立时才被接受，不成立直接报错退出：
+
+- `source_ingest_events` 里**没有未被冻结兜住的 dead 事件**（即 `/readyz` 不会
+  因 `source_ingest_dead_events` 变红）。判据用的就是 `/readyz` 用的那一个方法
+  `SourceIngestHealth.UncontainedDead()`，不是另抄一份。
+- `source_ingest_events` 里**没有 pending 事件**（`Pending=0`）。这一条比
+  `/readyz` 更严：`/readyz` 会宽容十五分钟以内的积压，代绑定不宽容，因为
+  「一次一个」的意义就在于之后出现的每一条 pending 都能算到这次绑定头上。
+
+dry-run 在门关着的时候**仍然会打出完整计划**并标 `timing gate: NO-GO`——预演
+本来就是用来问「现在能不能做」的。除此之外还要人工确认：低峰时段、有人盯
+`/readyz`、上游后台里这个用户 id 是逐字复制来的（工具无法校验上游是否真有这个
+用户）、排除用户 34。
+
+### 命令
+
+先按 3. 节的办法确认镜像 ID 与发布清单一致，然后：
+
+```bash
+docker run --rm --pull=never --network invoice-system-prod_invoice_db \
+  --user 10001:10001 \
+  -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
+  -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
+  -e SUB2API_LOGIN_BASE_URL -e NEWAPI_LOGIN_BASE_URL \
+  --entrypoint /usr/local/bin/invoice-account-bind \
+  "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+  --database-url-file=/run/secrets/invoice_owner_database_url \
+  --field-keyring-file=/run/secrets/invoice_field_keyring \
+  --platform=sub2api --external-user-id='<上游后台逐字复制的用户 id>'
+  # 计划看对了，再加 --apply --operator-id=<admin-uuid> 重跑一次
+```
+
+两个 secret 都是只读挂载，都不打印内容。`--network` 必须是
+`invoice-system-prod_invoice_db`（`deploy/docker-compose.prod.yml` 的
+`name: invoice-system-prod` 加上内部库网络 `invoice_db`），否则连不上库。
+`--pull=never` 与 `--rm` 与本文其它工具容器一致：生产从不拉取、不构建。
+
+`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` **必须与 api 容器一致**地传
+进去（不传则用与 `cmd/api` 相同的默认值）。这个值会成为
+`invoice_users.oidc_issuer`，客户的会话标识、审计身份哈希、邮箱 AAD 全从它派
+生。写错了不会当场报错：客户日后登录仍然能认领到这一行（认领走的是外部账号，
+不是 issuer），但那个错误的 issuer 会永久留在库里。
+`TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong` 就是钉这个
+结论的。
+
+`--email` 可选，存的是密文且 `email_verified` 保持 FALSE——运营在终端里敲进去的
+地址不构成验证，真正的收件地址仍然要客户自己验。
+
+### dry-run 输出怎么读
+
+- `timing gate` 要是 `GO`。
+- `invoice_user_id` / `external_account_id` 后面标 `created` 还是 `reused` /
+  `updated in place`：第一次做应该都是 `created`。
+- `PRE_POLICY_SKIPPED`：**这是不可逆的那一半**，是策略起点之前、会被永久写成
+  已处理的用量/余额条数。数字大不代表出错（起点前的事实对开票没用），但要在
+  按 `--apply` 之前看一眼，因为按下去就回不来了。
+- `released to queued`：会被放出来交给 worker 的条数，也就是接下来补数的规模。
+
+这两个数是**实测的**，不是估的：dry-run 在同一个事务里真的执行了那两条 UPDATE，
+然后整体回滚。所以 dry-run 也会短暂持有这些行的锁，请和 `--apply` 一样放在低峰
+窗口做。
+
+### 观察窗口（每个客户一次）
+
+- T+0：该 key 的 `source_ingest_events` 从 `parked_identity` 变 `queued`。
+- T+分钟级到数十分钟：worker 每 2 秒认领 100 条逐条处理。**盯 `Dead` 计数**——
+  一出现死信立刻停止后续绑定，按 9. 节的死信段处置。
+- bootstrap 完成的标志是 `source_account_eligibility_state` 出现该账号的行；
+  在那之前管理端 `/admin/accounts/{id}/ledger` 看不到它（那个查询 INNER JOIN
+  这张表）。
+- 之后还有 15 分钟的 finalization 延迟才会首次评估。「几十分钟到一小时」是设计
+  稿的估算，**未实测**；本次做的时候把实际时间记进发布记录。
+- 判断「能不能开票」只能用管理端账本的 `block_state` / `block_reason` /
+  `invoiceable_now_minor` / `threshold_reached` 做只读近似。它**不含**五流新鲜度、
+  邮箱已验证、profile 校验——真判据只在提交时跑，而提交这件事这里是禁止的。
 
 ## 10. Canary acceptance
 
