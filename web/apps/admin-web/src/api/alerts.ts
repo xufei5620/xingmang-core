@@ -51,17 +51,29 @@ export interface AlertItem {
    *  「触发 N 次 / 命中 N 次」全从它长出来。2026-09-08 生产上那条 669 正好
    *  等于 668 分钟 + 1，一分不差。措辞统一由 `FIRE_COUNT_MEANING` 一份说。 */
   fire_count: number;
-  /** 真正的触发次数（XM-OPS-TRUTH 计划新增，**今天还不存在**）。
+  /** 真正的触发次数（XM-OPS-TRUTH 已上线）。
    *
-   *  字段不在时一律只显示评估轮数，**不要 `?? 0`**：0 会被读成「一次都没
-   *  触发」，而事实是「我们不知道」。判据统一走 `describeFireCount`。 */
+   *  **可空，且不回填**：迁移 000054 之前就存在的行不知道自己被触发过几次，
+   *  填 0 是造假答案。字段不在（老后端）或为 null 时一律只显示评估轮数，
+   *  **不要 `?? 0`**：0 会被读成「一次都没触发」，而事实是「我们不知道」。
+   *  判据统一走 `describeFireCount`。 */
   trigger_count?: number | null;
-  /** 第一次打开这条告警的时刻（XM-OPS-TRUTH 计划新增，**今天还不存在**）。
+  /** 第一次打开这条告警的时刻，跨复发继承（XM-OPS-TRUTH 已上线）。
    *
    *  `opened_at` 不是它：告警恢复后再次触发走的是 InsertAlert 新开一行
    *  （db/queries/alerts.sql 的 InsertAlert / GetLatestResolvedAlertByDedupKey），
-   *  `opened_at` 每次都归零，于是抖动型告警的「已持续」系统性偏小。 */
+   *  `opened_at` 每次都归零，于是抖动型告警的「已持续」系统性偏小。
+   *
+   *  新后端**恒非空**（服务端用 `opened_at` 兜底，规则只写在
+   *  `alerts.Alert.EffectiveFirstOpenedAt` 一处）；可选是为了老后端还没有
+   *  这个字段的那段部署窗口。是不是兜底的由下一个字段说。 */
   first_opened_at?: string | null;
+  /** 上一行是不是兜底估计（XM-OPS-TRUTH 复审处置轮）。
+   *
+   *  true 表示服务端没有真正的首开时刻（本列上线前的旧行），拿 `opened_at`
+   *  兜的底——也就是说「已持续」仍然是那个系统性偏小的数。字段本身缺席
+   *  （老后端）时按 true 处理：**我们同样不知道**，见 `alertAgeAnchor`。 */
+  first_opened_at_estimated?: boolean;
   notify_status: AlertNotifyStatus;
   notify_error: string;
   notified_at: string | null;
@@ -121,19 +133,48 @@ export function describeFireCount(
   };
 }
 
-/** 这条告警「已持续」该从哪个时刻算，以及要不要附一句说明。
+/** 首开时刻是兜底估计时，时刻旁边标的那个字。 */
+export const FIRST_OPENED_AT_ESTIMATED_MARK = "约";
+
+/** 上面那个字该不该加，**连同它后面那个空格一起**给出来。
  *
- *  `first_opened_at` 在就用它（那才是真正的首次打开）；不在就退回 `opened_at`
- *  并挂 `ALERT_AGE_RESET_HINT`——把一个系统性偏小的数字不加说明地摆出来，
- *  与摆一个错数字没有区别。 */
+ *  四处要标（告警中心、平台告警面板、工作台待办行、工作台已确认组），四处各写
+ *  一次三元表达式，迟早出现「约3 小时」与「约 3 小时」两种写法——同一个标记
+ *  在两个页面上长得不一样，人会以为是两个意思。 */
+export function estimatedPrefix(anchor: { estimated: boolean }): string {
+  return anchor.estimated ? `${FIRST_OPENED_AT_ESTIMATED_MARK} ` : "";
+}
+
+/** 上一个标记的悬停说明。**一份，四处共用**（告警中心的「首次 / 最近」列、
+ *  平台告警面板的同一列、工作台待办行与已确认组）。 */
+export const FIRST_OPENED_AT_ESTIMATED_HINT =
+  "首次打开时刻是兜底估计（旧告警复发时接不上前一条）";
+
+/** 这条告警「已持续」该从哪个时刻算、那个时刻是不是估计出来的，以及要不要
+ *  附一句说明。
+ *
+ *  三条分支，**判据各不相同，不要合并**：
+ *
+ *  - `first_opened_at` 整个不在（老后端还没上这一列）：退回 `opened_at`，
+ *    并挂 `ALERT_AGE_RESET_HINT` 说清楚为什么这个数偏小。这时连
+ *    `first_opened_at_estimated` 都没有，所以估计与否只能由缺席本身来答。
+ *  - 在，且 `first_opened_at_estimated` 为真：值就是服务端拿 `opened_at` 兜的
+ *    底，同样是估计——标出来，说明换成后端那句更准确的措辞。
+ *  - 在，且没标估计：这才是真正的首次打开时刻，不标不挂。
+ *
+ *  把一个系统性偏小的数字不加说明地摆出来，与摆一个错数字没有区别；反过来，
+ *  把一个**确定**的首开时刻也标上「约」，则是白白让人不敢信它。 */
 export function alertAgeAnchor(
-  alert: Pick<AlertItem, "opened_at" | "first_opened_at">,
-): { since: string; hint: string | null } {
+  alert: Pick<AlertItem, "opened_at" | "first_opened_at" | "first_opened_at_estimated">,
+): { since: string; estimated: boolean; hint: string | null } {
   const first = alert.first_opened_at;
   if (first === undefined || first === null || first === "") {
-    return { since: alert.opened_at, hint: ALERT_AGE_RESET_HINT };
+    return { since: alert.opened_at, estimated: true, hint: ALERT_AGE_RESET_HINT };
   }
-  return { since: first, hint: null };
+  if (alert.first_opened_at_estimated === true) {
+    return { since: first, estimated: true, hint: FIRST_OPENED_AT_ESTIMATED_HINT };
+  }
+  return { since: first, estimated: false, hint: null };
 }
 
 interface ListResponse<T> {

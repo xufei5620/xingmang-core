@@ -17,6 +17,7 @@ import {
 } from "../api/alerts";
 import { listApprovals, type ApprovalItem } from "../api/approvals";
 import { listJobRuns, type JobRunItem } from "../api/jobs";
+import { getOpsOverview } from "../api/ops";
 import {
   listAuditEvents,
   listMetrics,
@@ -36,6 +37,8 @@ import {
   recentlyRecoveredCount,
   urgentCount,
   truncationNote,
+  failedJobsAggregate,
+  failedJobsAggregateNote,
   workItemsFromAlerts,
   workItemsFromApprovals,
   workItemsFromJobRuns,
@@ -46,6 +49,7 @@ import {
   WORK_APPROVALS_LIMIT,
   WORK_CATEGORIES,
   WORK_JOBS_LIMIT,
+  type FailedJobsAggregate,
   type MatrixRow,
   type WorkItem,
 } from "../lib/workbench";
@@ -107,6 +111,20 @@ export function OverviewPage() {
     queryFn: ({ signal }) => listJobRuns({ signal, state: "discarded", limit: WORK_JOBS_LIMIT }),
     retry: false,
   });
+  // 失败作业按类型的合计（XM-WORKBENCH-WIRE-OPS）。
+  //
+  // 上面那条 query 只取最新 20 条，前端自己分组数出来的条数封顶就是 20——
+  // 而 2026-09-08 现场那一类真实是 288。这一条把「一共几次、最早最近各是什么
+  // 时候」交给后端算好的 `failed_jobs_by_kind`，前端不再自己数。
+  //
+  // queryKey 与运行保障页共用同一个端点但**另起一个键**：那边整页读这份快照、
+  // 有自己的刷新节奏，共用会让两屏互相改写对方的缓存。retry: false 与上面两条
+  // 同理——没挂载不会因为再试三次就挂上，而这一格拿不到聚合时本来就能退回旧路。
+  const opsOverviewQuery = useQuery({
+    queryKey: ["ops", "overview", "workbench"],
+    queryFn: ({ signal }) => getOpsOverview(undefined, undefined, signal),
+    retry: false,
+  });
   // 待审批的动作（XM-WORKBENCH-APPROVALS）。
   //
   // queryKey 不与「操作与审批」页的审批队列共用：那边按状态筛选、缓存的是整条
@@ -132,6 +150,7 @@ export function OverviewPage() {
     void servicesQuery.refetch();
     void auditQuery.refetch();
     void discardedJobsQuery.refetch();
+    void opsOverviewQuery.refetch();
     void approvalsQuery.refetch();
   };
   useAutoRefresh(refreshAll);
@@ -143,6 +162,9 @@ export function OverviewPage() {
   const pendingApprovals = approvalsQuery.data?.items ?? [];
   // 任务那条的权威判据是游标：还有下一页就是还有没显示的。
   const jobsTruncated = discardedJobsQuery.data?.nextBefore != null;
+  // 聚合取不到时是 null（还在加载、或这条 query 自己失败了）——那与后端答了
+  // 「没接」「查库失败」不是一回事，判据统一在 lib/workbench 那一处。
+  const jobsAggregate = failedJobsAggregate(opsOverviewQuery.data);
 
   return (
     <section>
@@ -175,6 +197,7 @@ export function OverviewPage() {
           approvals={pendingApprovals}
           alertsTruncated={alertsQuery.data?.truncated === true}
           jobsTruncated={jobsTruncated}
+          jobsAggregate={jobsAggregate}
           approvalsTruncated={approvalsQuery.data?.truncated === true}
           now={now}
           pending={alertsQuery.isPending}
@@ -385,6 +408,7 @@ function WorkList({
   approvals,
   alertsTruncated,
   jobsTruncated,
+  jobsAggregate,
   approvalsTruncated,
   now,
   pending,
@@ -402,6 +426,7 @@ function WorkList({
   approvals: ApprovalItem[];
   alertsTruncated: boolean;
   jobsTruncated: boolean;
+  jobsAggregate: FailedJobsAggregate | null;
   approvalsTruncated: boolean;
   now: Date;
   pending: boolean;
@@ -432,9 +457,13 @@ function WorkList({
   const items = [
     ...workItemsFromAlerts(alerts, now),
     ...workItemsFromApprovals(approvals, now),
-    // truncated 这一位必须传进去：合并行显示的是「×20」，而生产上真实是 288。
-    // 不带这一位，一个看起来权威的错数字比 288 行刷屏更危险。
-    ...workItemsFromJobRuns(jobs, now, { truncated: jobsTruncated }),
+    // 聚合在场时条数、最早最近时刻全由后端给（生产上那一类真实是 288）；
+    // 不在场才退回前端分组，那时 truncated 这一位必须传进去——合并行只能
+    // 显示「×20」，不带这一位，一个看起来权威的错数字比 288 行刷屏更危险。
+    ...workItemsFromJobRuns(jobs, now, {
+      truncated: jobsTruncated,
+      aggregate: jobsAggregate,
+    }),
   ];
   const shown = activeId ? items.filter((item) => item.categoryId === activeId) : items;
   // 已确认的告警不与未处理的混排：它们收进列表底部一个折叠组。只在「全部」与
@@ -461,6 +490,13 @@ function WorkList({
     alertsTruncated,
     jobsTruncated,
     approvalsTruncated,
+  });
+  // 聚合这一段自己坏了要说出来（只有 query_failed 才说，见 lib/workbench）。
+  // 与上面那句分开两行：一句说「这一屏可能不全」，一句说「合计这次没算出来」,
+  // 揉成一句会让两个不同的降级看起来是同一件事。
+  const aggregateNote = failedJobsAggregateNote({
+    activeCategoryId: activeId,
+    aggregate: jobsAggregate,
   });
 
   return (
@@ -502,6 +538,11 @@ function WorkList({
           {truncation ? (
             <p role="status" className="mb-2 text-xs text-warning">
               {truncation}
+            </p>
+          ) : null}
+          {aggregateNote ? (
+            <p role="status" className="mb-2 text-xs text-warning">
+              {aggregateNote}
             </p>
           ) : null}
           {shown.length === 0 ? (

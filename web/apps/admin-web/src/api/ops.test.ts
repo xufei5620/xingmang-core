@@ -98,6 +98,9 @@ const FIXTURE: OpsOverview = {
     freshness: FRESHNESS,
   },
   database: { connected: true },
+  failed_jobs_by_kind: [],
+  failed_jobs_status: "ok",
+  failed_jobs_window_hours: 24,
 };
 
 describe("getOpsOverview", () => {

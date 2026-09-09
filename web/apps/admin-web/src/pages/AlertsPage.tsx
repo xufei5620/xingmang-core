@@ -13,7 +13,9 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
+  alertAgeAnchor,
   describeFireCount,
+  estimatedPrefix,
   FIRE_COUNT_HEADER,
   FIRE_COUNT_MEANING,
   listAlerts,
@@ -262,12 +264,19 @@ function alertColumns(
       header: "首次 / 最近",
       // 排序按「最近」：人找的是「还在响的」，不是「最早开始的」
       value: (alert) => alert.last_seen_at,
-      cell: (alert) => (
+      cell: (alert) => {
+        // 「首次」是 first_opened_at，**不是 opened_at**：告警恢复后再次触发会
+        // 新开一行、opened_at 归零，于是抖动型告警在这里显示的「首次」一直是
+        // 最近那一次。兜底与「约」的判据统一走 api/alerts 的 alertAgeAnchor，
+        // 四处不各写一套。
+        const age = alertAgeAnchor(alert);
+        return (
         <>
           {/* 两个时刻都显示：只有一个就答不出「这个问题持续了多久」，
               而那正是判断要不要升级处理的第一个依据。 */}
-          <span className="block text-xs text-fg-muted">
-            首次 {formatUtcTimestamp(alert.opened_at)}
+          <span className="block text-xs text-fg-muted" title={age.hint ?? undefined}>
+            首次 {estimatedPrefix(age)}
+            {formatUtcTimestamp(age.since)}
           </span>
           <span className="block text-xs text-fg-muted">
             最近 {formatUtcTimestamp(alert.last_seen_at)}
@@ -285,7 +294,8 @@ function alertColumns(
             </span>
           ) : null}
         </>
-      ),
+        );
+      },
     },
     {
       id: "fireCount",

@@ -56,6 +56,12 @@ export interface OpsSyncPipeline {
   config_available: boolean;
   /** "fake" | "real" | ""（仅当 config_available 为 false 时为空）。 */
   effective_mode: string;
+  // 后端还给了 effective_mode_source（"database" | "unknown"），**这里至今没接**。
+  // 空串的 mode 有两种由来：这个部署没挂载凭据模块，和挂载了但 connector_config
+  // 里没有这一行——后者的真正取值由 worker 进程的环境变量决定，platform-api
+  // 答不上来。界面上今天分不出这两种，接上之后才分得出。
+  // 这个缺口登记在 lib/labels.reconcile.test.ts 的 UNCONSUMED_RESPONSE_FIELDS 里，
+  // 那张清单只减不增：补上它的时候要同时把那一行删掉。
   config_updated_at: string | null;
   /** 这一行的新鲜度取自哪个指标，例如 "sub2api.channels.status"。 */
   sample_metric_key: string;
@@ -72,6 +78,47 @@ export interface OpsDatabaseStatus {
   connected: boolean;
 }
 
+/** 某一类失败作业最近那一条的错误投影（Go 侧 `opsFailedJobErrorBody`）。
+ *
+ *  `truncated` / `original_length` 一起给：一条被截断的错误如果不说自己被截断了，
+ *  读的人会以为上游就说了这么多。null 表示那条作业没有记错误。 */
+export interface OpsFailedJobError {
+  at: string;
+  message: string;
+  truncated: boolean;
+  original_length: number;
+}
+
+/** 某一类后台作业在回看窗口内的失败摘要（Go 侧 `opsFailedJobKindBody`）。
+ *
+ *  这一段存在的理由是 2026-09-08 现场那一格：card_sync 24 小时内 288 条
+ *  discarded，工作台「我的待处理」只取最新 20 条再自己按类型分组，于是那一行
+ *  只能写「×20+」——一个既不是真数、又看不出真数有多大的数字。合并所需的
+ *  **条数、最早与最近时刻、类型**由后端一次算好，前端不再自己数。 */
+export interface OpsFailedJobKind {
+  kind: string;
+  /** 窗口内这一类失败了几次。 */
+  count: number;
+  /** 窗口内最早一次。 */
+  first_at: string;
+  /** 窗口内最近一次。 */
+  last_at: string;
+  /** 跳去 `/api/v1/jobs/runs` 定位那一条用。 */
+  last_run_id: number;
+  /** 最近那条作业的尝试次数——**不是本类的失败总数**，那是 `count`。 */
+  error_count: number;
+  last_error: OpsFailedJobError | null;
+}
+
+/** `failed_jobs_by_kind` 那一段的三态，逐字对齐后端的 `opsFailedJobs*` 常量。
+ *
+ *  **前端要 switch 这个字段，不要判 `failed_jobs_by_kind` 是不是 null。**
+ *  这一格此前用同一个 JSON `null` 表达两件完全不同的事：「这个部署没接 jobs
+ *  数据源」和「接了，但这次查库失败了」。前者是良性的部署事实，后者是「运行
+ *  保障页这一格正瞎着」——要人去看。有了这个字段，null 才只剩「没有数据」
+ *  一个意思，为什么没有由它说。 */
+export type OpsFailedJobsStatus = "ok" | "not_wired" | "query_failed";
+
 /** `GET /api/v1/ops/overview` 的响应体。
  *
  *  sync_pipelines 与 connector_health 按契约**始终**是 2 个元素（sub2api 在前，
@@ -84,6 +131,13 @@ export interface OpsOverview {
   alert_delivery: OpsAlertDelivery;
   retention: OpsMetricSnapshot;
   database: OpsDatabaseStatus;
+  /** null 表示这一段**没有数据**，为什么没有由 `failed_jobs_status` 说；
+   *  空数组表示查过了、窗口内一条失败作业都没有。两者不是一回事。 */
+  failed_jobs_by_kind: OpsFailedJobKind[] | null;
+  failed_jobs_status: OpsFailedJobsStatus;
+  /** 上一段的回看窗口，让「288 次」能说成「24 小时内 288 次」而不是一个
+   *  没有量纲的数。 */
+  failed_jobs_window_hours: number;
 }
 
 /** 取控制平面运行保障总览。只读、无分页、无筛选——一次请求换一份完整快照。

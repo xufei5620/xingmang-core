@@ -8,7 +8,9 @@ import { Badge } from "@xingmang/ui-primitives";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
+  alertAgeAnchor,
   describeFireCount,
+  estimatedPrefix,
   FIRE_COUNT_HEADER,
   FIRE_COUNT_MEANING,
   listAlerts,
@@ -118,9 +120,17 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
     id: "seen",
     header: "首次 / 最近",
     value: (alert) => alert.last_seen_at,
-    cell: (alert) => (
+    cell: (alert) => {
+      // 「首次」取 first_opened_at（与告警中心同一列同一判据，见
+      // api/alerts 的 alertAgeAnchor）：opened_at 在复发时归零，拿它当「首次」
+      // 会让一条抖了三天的告警每次都显示成刚开始。
+      const age = alertAgeAnchor(alert);
+      return (
       <div className="min-w-44 text-xs tabular-nums text-fg-muted">
-        <span className="block">首次 {formatUtcTimestamp(alert.opened_at)}</span>
+        <span className="block" title={age.hint ?? undefined}>
+          首次 {estimatedPrefix(age)}
+          {formatUtcTimestamp(age.since)}
+        </span>
         <span className="block">最近 {formatUtcTimestamp(alert.last_seen_at)}</span>
         {/* 确认时刻在场才显示（与告警中心同一列同一写法）：null 是没人确认过 */}
         {alert.acknowledged_at ? (
@@ -130,7 +140,8 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
           <span className="block">恢复 {formatUtcTimestamp(alert.resolved_at)}</span>
         ) : null}
       </div>
-    ),
+      );
+    },
   },
   {
     id: "count",
@@ -176,14 +187,25 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
     header: "持续",
     // 原型这一列的用处是一眼分出「刚抖了一下」和「已经烧了一小时」。
     // 未恢复的按「到此刻」算，于是同样时长里还在烧的排在前面。
+    //
+    // 起点与左边那一列的「首次」**是同一个时刻**（同一个 alertAgeAnchor）。
+    // 这一列原本从 opened_at 算：接上 first_opened_at 之后，同一行会一边写着
+    // 「首次 09-05」一边写着「持续 5 分」——两个数字互相打脸，而打脸的那个
+    // 正是本片要修的病（复发把计时清零，「持续」系统性偏小）。
     headerTitle: "首次发现到恢复；未恢复的算到此刻",
     numeric: true,
-    value: (alert) => alertDurationMs(alert.opened_at, alert.resolved_at, now),
-    cell: (alert) => (
-      <span className="tabular-nums text-xs text-fg-muted">
-        {formatAlertDuration(alert.opened_at, alert.resolved_at, now)}
-      </span>
-    ),
+    value: (alert) => alertDurationMs(alertAgeAnchor(alert).since, alert.resolved_at, now),
+    cell: (alert) => {
+      const age = alertAgeAnchor(alert);
+      // 这里**不**再标一次「约」：同一行左边那一列已经标过，而这是一列右对齐
+      // 的 tabular-nums 数字列，格子里多两个字会让整列对不齐。为什么可能不准，
+      // 由悬停说。
+      return (
+        <span className="tabular-nums text-xs text-fg-muted" title={age.hint ?? undefined}>
+          {formatAlertDuration(age.since, alert.resolved_at, now)}
+        </span>
+      );
+    },
   },
   ];
 }

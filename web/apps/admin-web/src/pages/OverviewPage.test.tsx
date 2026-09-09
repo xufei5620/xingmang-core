@@ -185,7 +185,23 @@ function baseHandler(url: string): Response {
   if (url.startsWith("/api/v1/audit")) return fakeResponse(auditBody);
   if (url.startsWith("/api/v1/jobs/runs")) return fakeResponse({ items: [], next_before: 0 });
   if (url.startsWith("/api/v1/approvals")) return fakeResponse({ items: [], limit: 20 });
+  // 失败作业聚合默认答「没接」，于是「前端自己分组」那一路是被显式选中的，
+  // 不是因为这个 URL 掉进了下面那个 metricsBody 兜底、字段恰好读成 undefined。
+  // 一条恰好成立的前提与一条正确的前提长得一模一样，区别只在下次改动时。
+  if (url.startsWith("/api/v1/ops/overview")) return fakeResponse(opsOverviewBody("not_wired"));
   return fakeResponse(metricsBody);
+}
+
+/** 只保留本组关心的那三个字段：这一屏不读总览的别的部分。 */
+function opsOverviewBody(
+  status: "ok" | "not_wired" | "query_failed",
+  byKind: unknown[] | null = null,
+) {
+  return {
+    failed_jobs_by_kind: byKind,
+    failed_jobs_status: status,
+    failed_jobs_window_hours: 24,
+  };
 }
 
 function renderWorkbench(path: string) {
@@ -313,6 +329,103 @@ describe("我的待处理·失败任务合并（XM-WORKBENCH-TRUTH）", () => {
     const card = workCard();
     expect(await within(card).findByText("卡片数据同步 重试 3 次后放弃")).not.toBeNull();
     expect(within(card).queryByRole("button", { name: /已放弃 ×/ })).toBeNull();
+  });
+});
+
+// XM-WORKBENCH-WIRE-OPS：上面那一组走的是「前端自己数」。纯函数那一层的三态
+// 已经在 lib/workbench.test.ts 里逐条钉过了，这一组只回答另一个问题——
+// **那条路真的被这一屏走到了吗**。判据写对了但没人调用，单测一样全绿。
+describe("我的待处理·失败任务合计取自后端（XM-WORKBENCH-WIRE-OPS）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(APPROVALS_NOW);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const twenty = Array.from({ length: 20 }, (_, i) => discardedRun({ id: 100 + i }));
+  const cardSyncAggregate = {
+    kind: "card_sync",
+    count: 288,
+    first_at: "2026-09-06T10:00:00Z",
+    last_at: "2026-09-07T09:59:00Z",
+    last_run_id: 90210,
+    error_count: 3,
+    last_error: null,
+  };
+
+  function stub(jobs: unknown, overview: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        if (input.startsWith("/api/v1/jobs/runs")) return Promise.resolve(fakeResponse(jobs));
+        if (input.startsWith("/api/v1/ops/overview")) {
+          return Promise.resolve(fakeResponse(overview));
+        }
+        return Promise.resolve(baseHandler(input));
+      }),
+    );
+  }
+
+  it("这一屏真的去问了那个端点", async () => {
+    // 少了这一条，下面每一条都可能只是因为别的原因恰好成立。
+    stub({ items: twenty, next_before: 12345 }, opsOverviewBody("ok", [cardSyncAggregate]));
+    renderWorkbench("/?work=jobs");
+    await within(workCard()).findByText(/卡片数据同步 已放弃/);
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(
+      fetchMock.mock.calls.filter((c) => String(c[0]).startsWith("/api/v1/ops/overview")).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("界面上那个数是后端的 288，不是取到的 20", async () => {
+    stub({ items: twenty, next_before: 12345 }, opsOverviewBody("ok", [cardSyncAggregate]));
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×288/)).not.toBeNull();
+    // 后端给的是确数，「+」那个尾巴不该再挂着——它说的是「还不止这些」
+    expect(within(card).queryByText(/×20\+/)).toBeNull();
+    expect(within(card).queryByText(/已放弃 ×20$/)).toBeNull();
+  });
+
+  it("查库失败时退回前端分组，并在这一屏上说出来", async () => {
+    stub({ items: twenty, next_before: 12345 }, opsOverviewBody("query_failed", null));
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×20\+/)).not.toBeNull();
+    expect(within(card).getByText(/后端查库失败/)).not.toBeNull();
+  });
+
+  it("未接入时同样退回前端分组，但**不**说那句话——那是良性的部署事实", async () => {
+    stub({ items: twenty, next_before: 12345 }, opsOverviewBody("not_wired", null));
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×20\+/)).not.toBeNull();
+    expect(within(card).queryByText(/后端查库失败/)).toBeNull();
+  });
+
+  it("总览端点自己 500 时不影响这一格：退回前端分组，也不说后端坏了", async () => {
+    // 我们没有依据说后端哪里不对——可能只是这一次网络抖了。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string) => {
+        if (input.startsWith("/api/v1/jobs/runs")) {
+          return Promise.resolve(fakeResponse({ items: twenty, next_before: 12345 }));
+        }
+        if (input.startsWith("/api/v1/ops/overview")) {
+          return Promise.resolve(
+            fakeResponse({ error: { code: "INTERNAL", message: "boom" } }, 500),
+          );
+        }
+        return Promise.resolve(baseHandler(input));
+      }),
+    );
+    renderWorkbench("/?work=jobs");
+    const card = workCard();
+    expect(await within(card).findByText(/卡片数据同步 已放弃 ×20\+/)).not.toBeNull();
+    expect(within(card).queryByText(/后端查库失败/)).toBeNull();
   });
 });
 

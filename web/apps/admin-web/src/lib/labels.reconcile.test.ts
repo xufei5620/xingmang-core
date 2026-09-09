@@ -1337,3 +1337,158 @@ describe("变异验证：后端多一个枚举值时，对账真的会把它算�
     expect(translated(jobKindLabel("platform_heartbeat"), "platform_heartbeat")).toBe(true);
   });
 });
+
+// --- 响应字段：后端给了、前端要么接、要么把没接这件事写下来 -----------------
+
+/** 一个 Go 文件里所有 struct 的 json 标签名。
+ *
+ *  **范围是走出来的，不是列出来的**：抽取器直接扫文件里每一个 `type X struct`
+ *  块，后端加一个字段、加一个 struct 都自动进范围。手抄一份字段名清单来对账，
+ *  与被对账的对象同源，那种闸永远绿（同「枚举清点」那一组的教训）。
+ *
+ *  `json:"-"` 与选项（`,omitempty`）都去掉：前者压根不出现在响应里，后者不是
+ *  字段名的一部分。 */
+function goJSONTags(source: string): string[] {
+  const tags = new Set<string>();
+  for (const block of source.matchAll(/type\s+\w+\s+struct\s*\{([\s\S]*?)\n\}/g)) {
+    for (const tag of (block[1] ?? "").matchAll(/json:"([^"]+)"/g)) {
+      const name = (tag[1] ?? "").split(",")[0] ?? "";
+      if (name && name !== "-") tags.add(name);
+    }
+  }
+  return [...tags].sort();
+}
+
+/** 前端某个 TS 文件里被声明成属性名的那些字段。
+ *
+ *  剥掉注释再找：本仓的契约注释里逐字写着后端字段名（那正是它们该写的地方），
+ *  不剥的话「前端接了这个字段」会被一句注释冒充过去——一个恒真的闸。 */
+function tsDeclaredFields(source: string): Set<string> {
+  const code = source.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/(?<!:)\/\/[^\n]*/g, "");
+  const out = new Set<string>();
+  for (const m of code.matchAll(/(?:^|[\s{;,])([a-z_][a-z0-9_]*)\??\s*:/gm)) {
+    out.add(m[1] as string);
+  }
+  return out;
+}
+
+/** 后端给了、前端至今没接的字段。**只减不增。**
+ *
+ *  键是字段名，值是「今天为什么还没接」。写在这里不是为了放行，是为了让「没接」
+ *  这件事有一个会被人看见的位置——一个没人记得的缺口与一个被记下来的缺口，
+ *  差别是后者会被下一个人补上。 */
+const UNCONSUMED_RESPONSE_FIELDS: Readonly<Record<string, string>> = {
+  // XM-OPS0 建这一段时就没接：界面上「采集链路」那一行只显示 effective_mode，
+  // 而后端明说了「客户端必须渲染 source，不要假设默认值」——mode 为空串时
+  // source 是 unknown 还是 database，今天在界面上分不出来。
+  effective_mode_source: "运行保障页的采集链路行只渲染 effective_mode，来源列还没做",
+};
+
+describe("响应字段：后端 JSON 里给的，前端类型里要么接了、要么写下了没接", () => {
+  // Go 文件 → 消费它的前端 api 文件。这一层配对是手写的（没有别的地方记着
+  // 这个对应关系），但**字段一级是抽出来的**：闸会不会红，由后端文件里实际
+  // 有哪些标签决定，不由这里写了什么决定。
+  const PAIRS = [
+    {
+      go: "internal/platform/httpapi/ops_overview.go",
+      ts: "web/apps/admin-web/src/api/ops.ts",
+    },
+    {
+      go: "internal/platform/httpapi/alerts.go",
+      ts: "web/apps/admin-web/src/api/alerts.ts",
+    },
+  ] as const;
+
+  const scanned = PAIRS.map((pair) => ({
+    ...pair,
+    tags: goJSONTags(goSource(pair.go)),
+    declared: tsDeclaredFields(readFileSync(new URL(pair.ts, REPO_ROOT), "utf8")),
+  }));
+
+  it("两个抽取器都确实抓到了东西", () => {
+    // 抽空会让下面每一条恒真——这类门禁最典型的假绿。
+    for (const s of scanned) {
+      expect(s.tags.length).toBeGreaterThanOrEqual(8);
+      expect(s.declared.size).toBeGreaterThanOrEqual(8);
+    }
+    // 正向锚点：本片接的这五个字段确实在抽出来的清单里
+    const opsTags = scanned[0]?.tags ?? [];
+    expect(opsTags).toContain("failed_jobs_by_kind");
+    expect(opsTags).toContain("failed_jobs_status");
+    expect(opsTags).toContain("failed_jobs_window_hours");
+    const alertTags = scanned[1]?.tags ?? [];
+    expect(alertTags).toContain("first_opened_at");
+    expect(alertTags).toContain("first_opened_at_estimated");
+  });
+
+  it("剥注释真的生效：注释里写着的字段名不算「接了」", () => {
+    // api/ops.ts 的注释里逐字写着 effective_mode_source（说明它为什么还没接）。
+    // 少了这一条，下面那条「未接清单」可能只是因为剥注释顺手把正文也剥没了。
+    const raw = readFileSync(new URL(PAIRS[0].ts, REPO_ROOT), "utf8");
+    expect(raw).toContain("effective_mode_source");
+    expect(scanned[0]?.declared.has("effective_mode_source")).toBe(false);
+  });
+
+  it("后端每一个响应字段，前端类型里都声明了", () => {
+    const missing = scanned.flatMap((s) =>
+      s.tags
+        .filter((tag) => !s.declared.has(tag) && !(tag in UNCONSUMED_RESPONSE_FIELDS))
+        .map((tag) => `${s.ts} 缺 ${tag}（来自 ${s.go}）`),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("未接清单只减不增，而且每一条今天都还需要", () => {
+    // 三条规矩缺一不可（同 fire_count 那张豁免清单的写法）：清单逐字钉死、
+    // 里面的字段后端今天还在给、**并且**它今天确实还没被接。
+    // 第三条最容易漏——一条已经补齐的豁免留在清单里，就是一个永远不会红的洞。
+    // 第三条红了，说明那个字段已经接上了：把清单里那一行删掉即可，那正是这张
+    // 清单唯一允许的方向。
+    expect(Object.keys(UNCONSUMED_RESPONSE_FIELDS)).toEqual(["effective_mode_source"]);
+    for (const [field, why] of Object.entries(UNCONSUMED_RESPONSE_FIELDS)) {
+      expect(why.length).toBeGreaterThan(0);
+      const owner = scanned.find((s) => s.tags.includes(field));
+      expect(owner).toBeDefined();
+      expect(owner?.declared.has(field)).toBe(false);
+    }
+  });
+
+  describe("变异验证：后端多一个字段时，对账真的会把它算成缺失", () => {
+    const realOps = goSource(PAIRS[0].go);
+
+    it("对照组：真源码走这条流水线，抽出来的标签前端都有", () => {
+      const declared = scanned[0]?.declared as Set<string>;
+      expect(
+        goJSONTags(realOps).filter(
+          (t) => !declared.has(t) && !(t in UNCONSUMED_RESPONSE_FIELDS),
+        ),
+      ).toEqual([]);
+    });
+
+    it("往 struct 里加一个字段：差集里恰好多出它", () => {
+      const mutated = realOps.replace(
+        'Connected bool `json:"connected"`',
+        'Connected bool `json:"connected"`\n\tReplicaLagSeconds int `json:"replica_lag_seconds"`',
+      );
+      expect(mutated).not.toBe(realOps);
+      const declared = scanned[0]?.declared as Set<string>;
+      expect(
+        goJSONTags(mutated).filter(
+          (t) => !declared.has(t) && !(t in UNCONSUMED_RESPONSE_FIELDS),
+        ),
+      ).toEqual(["replica_lag_seconds"]);
+    });
+
+    it("改掉 struct 写法让抽取器抓空时，「数量下界」那条断言拦得住", () => {
+      const renamed = realOps.replaceAll(" struct {", " STRUCTURE {");
+      expect(goJSONTags(renamed)).toEqual([]);
+      expect(goJSONTags(renamed).length).toBeLessThan(8);
+    });
+
+    it("「前端声明了」的判据能判出没声明：喂一个后端不存在的字段", () => {
+      const declared = scanned[0]?.declared as Set<string>;
+      expect(declared.has("failed_jobs_status")).toBe(true);
+      expect(declared.has("moon_phase")).toBe(false);
+    });
+  });
+});

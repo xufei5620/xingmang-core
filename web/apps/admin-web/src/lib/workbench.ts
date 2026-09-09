@@ -8,11 +8,17 @@ import {
 import {
   alertAgeAnchor,
   describeFireCount,
+  estimatedPrefix,
   FIRE_COUNT_MEANING,
   type AlertItem,
 } from "../api/alerts";
 import type { ApprovalItem } from "../api/approvals";
 import { jobKindLabel, type JobRunItem } from "../api/jobs";
+import type {
+  OpsFailedJobKind,
+  OpsFailedJobsStatus,
+  OpsOverview,
+} from "../api/ops";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, describeStatus, sortForDisplay } from "./alerts";
 import { groupByRisk, isEffectivelyExpired, voteProgress } from "./approvals";
@@ -190,11 +196,11 @@ export function workItemsFromAlerts(alerts: readonly AlertItem[], now: Date): Wo
       categoryLabel: severity.label,
       tone: severity.tone,
       title: alert.title,
-      // 「已持续」优先用 first_opened_at；那个字段今天还不存在，所以退回
-      // opened_at 并把「恢复后重新打开会重新计时」挂到 hint 上（见
-      // api/alerts 的 alertAgeAnchor）——一个系统性偏小的数字不加说明地摆
-      // 出来，与摆一个错数字没有区别。
-      meta: `${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(age.since, now)}`,
+      // 「已持续」优先用 first_opened_at（后端已经给了，跨复发继承）；它是
+      // 兜底估计、或者老后端压根没有这一列时，时长前面标一个「约」并把为什么
+      // 挂到 hint 上（判据统一走 api/alerts 的 alertAgeAnchor）——一个系统性
+      // 偏小的数字不加说明地摆出来，与摆一个错数字没有区别。
+      meta: `${alert.rule_key} · ${alert.environment} · 已持续 ${estimatedPrefix(age)}${ageText(age.since, now)}`,
       // 相对时长之外再给两个绝对时刻：「已持续 13 小时」核对不了任何事，
       // 「打开 09-08 13:31 UTC · 最近评估 09-09 02:31 UTC」才能拿去和自己的
       // 记忆、和 IM 记录对时间。
@@ -245,13 +251,70 @@ export function acknowledgedWorkItems(alerts: readonly AlertItem[], now: Date): 
         categoryLabel: status.label,
         tone: status.tone,
         title: alert.title,
-        meta: `${severity.label} · ${alert.rule_key} · ${alert.environment} · 已持续 ${ageText(age.since, now)}`,
+        // 「已持续」与「约」的口径与未处理那一组逐字相同（同一个
+        // alertAgeAnchor / estimatedPrefix）：同一条告警折叠前后显示两个时长，
+        // 人会以为确认这个动作把计时改了。
+        meta: `${severity.label} · ${alert.rule_key} · ${alert.environment} · 已持续 ${estimatedPrefix(age)}${ageText(age.since, now)}`,
         timeline: `打开 ${formatUtcTimestamp(alert.opened_at)} · ${acknowledged} · 仍在成立：${lastEvaluatedText(alert)}`,
         due: describeFireCount(alert).combined,
         to: "/alerts",
         hint: [status.hint, FIRE_COUNT_MEANING, age.hint].filter(Boolean).join(" "),
       };
     },
+  );
+}
+
+/** 后端算好的「失败作业按类型合并」那一段（`GET /api/v1/ops/overview`）。
+ *
+ *  三个字段一起取才有意义：`status` 说这一段为什么有 / 为什么没有，`byKind`
+ *  是数据本身，`windowHours` 是这些数字的量纲。少取一个，「288」就退回成一个
+ *  没有出处的数。 */
+export interface FailedJobsAggregate {
+  status: OpsFailedJobsStatus;
+  /** `status` 不是 `ok` 时恒为空数组——**不是「窗口内没有失败」**，
+   *  是「这一段没有数据」。要分辨两者请看 `status`。 */
+  byKind: readonly OpsFailedJobKind[];
+  windowHours: number;
+}
+
+/** 从总览响应里取出上面那一段。
+ *
+ *  返回 null 表示**这一趟根本没问到后端**（总览那条 query 还在加载、或者它自己
+ *  失败了）——与后端答了「没接」「查库失败」都不是一回事，所以不折成同一个值。
+ *  调用方拿到 null 时退回旧的客户端分组，并且什么都不说：我们没有依据说后端
+ *  哪里不对。 */
+export function failedJobsAggregate(
+  overview: OpsOverview | undefined | null,
+): FailedJobsAggregate | null {
+  if (!overview) return null;
+  return {
+    status: overview.failed_jobs_status,
+    byKind: overview.failed_jobs_by_kind ?? [],
+    windowHours: overview.failed_jobs_window_hours,
+  };
+}
+
+/** 聚合这一段自己出了问题时，在「我的待处理」上要说的那句话。
+ *
+ *  只有 `query_failed` 才说。另外两态都不说，理由各不相同：
+ *
+ *  - `not_wired` 是一个良性的部署事实——这个部署没挂载作业数据源，那么
+ *    `/api/v1/jobs/runs` 也没挂载（router 里两处喂的是同一个 `d.Jobs`），
+ *    「失败任务」那一格会用它自己的未接入态说清楚，这里再说一遍是噪声。
+ *  - null（没问到后端）不说：见 `failedJobsAggregate` 的注释。
+ *
+ *  `query_failed` 必须说，因为降级后**看起来完全正常**：清单照常有行、条数
+ *  照常有数字，只是那个数字变回了「前端按取到的 20 条数出来的」。一个看起来
+ *  权威的错数字比空白更危险——这正是 2026-09-08 那一格的病根。 */
+export function failedJobsAggregateNote(input: {
+  activeCategoryId: string;
+  aggregate: FailedJobsAggregate | null;
+}): string | null {
+  if (input.activeCategoryId !== "" && input.activeCategoryId !== "jobs") return null;
+  if (input.aggregate === null || input.aggregate.status !== "query_failed") return null;
+  return (
+    "失败作业的按类型合计这次没取到（后端查库失败）：下面的条数是前端按取到的" +
+    "那几条自己数的，可能远小于真实值。运行保障页同一格现在也是瞎的。"
   );
 }
 
@@ -263,11 +326,28 @@ export function acknowledgedWorkItems(alerts: readonly AlertItem[], now: Date): 
  *  清单抖动（一条目跳出来又自己消失），而一张会抖的待办清单，人很快就不看了。
  *  重试中的任务在后台任务页「失败与重试」页签里，那里才是看过程的地方。
  *
- *  也不收 `cancelled`：那是有人主动取消的，不是失败。 */
+ *  也不收 `cancelled`：那是有人主动取消的，不是失败。
+ *
+ *  ## 合并所需的数字**优先由后端给**（XM-WORKBENCH-WIRE-OPS）
+ *
+ *  这个函数原本只有一条路：拿 `/api/v1/jobs/runs` 的最新 20 条，自己按 kind
+ *  分组、自己数个数。2026-09-08 生产上 card_sync 24 小时内有 288 条，于是这一行
+ *  写的是「×20+」——`+` 至少说了「还不止」，但它答不出「还不止多少」，而 20 与
+ *  288 之间差着「要不要现在放下手里的事」。
+ *
+ *  后端为此加了 `failed_jobs_by_kind`。`options.aggregate` 在场且 `status`
+ *  为 `ok` 时，**条数、最早与最近时刻、类型全部取自它**，前端一个都不再自己数；
+ *  取到的那 20 条只降级成展开后的明细。聚合缺席（老后端、没挂载、查库失败、
+ *  或者这一趟压根没问）时才退回旧路，`+` 号的逻辑原样保留——那时它仍然是
+ *  唯一诚实的说法。
+ *
+ *  两条路**都不丢行**：聚合的窗口是最近 24 小时，而 `/jobs/runs` 那 20 条里可能
+ *  有更早的已放弃作业。聚合没盖到的 kind 仍然走旧路单独成行，不因为「聚合没提」
+ *  就从待办里消失。 */
 export function workItemsFromJobRuns(
   runs: readonly JobRunItem[],
   now: Date,
-  options: { truncated?: boolean } = {},
+  options: { truncated?: boolean; aggregate?: FailedJobsAggregate | null } = {},
 ): WorkItem[] {
   const discarded = runs.filter((run) => run.state === "discarded");
 
@@ -299,23 +379,23 @@ export function workItemsFromJobRuns(
     else groups.set(run.kind, [run]);
   }
 
-  const items = [...groups.entries()].map(([kind, group]) => {
-    // 明细按放弃时刻倒序：展开第一眼看到的应当是最近那一次。
-    const detail = [...group]
-      .sort((a, b) => discardedAt(b).localeCompare(discardedAt(a)))
-      .map(single);
-    // 只有一条时**逐字保持原样**：不出现「×1」这种噪声，也不给一个展开箭头
-    // 后面空无一物。
-    if (detail.length === 1) return detail[0] as WorkItem;
+  /** 同一 kind 的明细：按放弃时刻倒序，展开第一眼看到的应当是最近那一次。 */
+  const detailOf = (group: readonly JobRunItem[]): WorkItem[] =>
+    [...group].sort((a, b) => discardedAt(b).localeCompare(discardedAt(a))).map(single);
 
+  /** 旧路：条数、最早与最近时刻全由前端从取到的这几条里数出来。 */
+  const clientSideRow = (kind: string, group: readonly JobRunItem[]): WorkItem => {
+    const detail = detailOf(group);
     const newest = discardedAt(group[0] as JobRunItem);
-    const oldest = newest;
     const span = group.reduce(
       (acc, run) => {
         const at = discardedAt(run);
-        return { newest: at > acc.newest ? at : acc.newest, oldest: at < acc.oldest ? at : acc.oldest };
+        return {
+          newest: at > acc.newest ? at : acc.newest,
+          oldest: at < acc.oldest ? at : acc.oldest,
+        };
       },
-      { newest, oldest },
+      { newest, oldest: newest },
     );
     // 队列去重后列出来：同一 kind 正常只在一个队列上，真出现两个也不能替它
     // 挑一个说。
@@ -334,16 +414,81 @@ export function workItemsFromJobRuns(
       to: "/jobs?sub=repeated",
       children: detail,
     } satisfies WorkItem;
-  });
+  };
+
+  /** 新路：条数、最早与最近时刻、类型全部来自后端那一段。 */
+  const aggregateRow = (
+    entry: OpsFailedJobKind,
+    detail: WorkItem[],
+    windowHours: number,
+  ): WorkItem => {
+    // 「×1」仍然不写（与旧路同一条：不给一个后面空无一物的展开箭头）。
+    const times = entry.count > 1 ? ` ×${entry.count}` : "";
+    // 窗口写进 meta：一个「288」不带量纲，读的人无从判断这是三天攒的还是
+    // 一小时炸的。后端把窗口一起给了，就没有理由不说。
+    const meta = `近 ${windowHours} 小时 · 最近 ${ageText(entry.last_at, now)}前 · 最早 ${ageText(entry.first_at, now)}前`;
+    // 明细比条数少是常态（`/jobs/runs` 只取了一屏）。**必须说出来**，否则
+    // 展开看见 20 行的人会以为 288 是算错的。
+    const partial =
+      detail.length > 0 && detail.length < entry.count
+        ? `展开列出的是取到的 ${detail.length} 条，不是全部 ${entry.count} 条；完整清单在后台任务页。`
+        : undefined;
+    return {
+      id: `job-kind-${entry.kind}`,
+      categoryId: "jobs",
+      categoryLabel: "已放弃",
+      tone: "danger" as const,
+      title: `${jobKindLabel(entry.kind)} 已放弃${times}`,
+      meta,
+      due: "需人工处理",
+      to: "/jobs?sub=repeated",
+      ...(detail.length > 0 ? { children: detail } : {}),
+      ...(partial ? { hint: partial } : {}),
+    } satisfies WorkItem;
+  };
+
+  const aggregate = options.aggregate;
+  const useAggregate = aggregate != null && aggregate.status === "ok";
+  // 排序权重与「这一行说自己是几条」是同一个数：聚合在场时那是后端的 count，
+  // 不在场时是前端数出来的条数。两者混用会让 288 那一行排到 3 条的后面。
+  const rows: { item: WorkItem; weight: number }[] = [];
+  const covered = new Set<string>();
+
+  if (useAggregate) {
+    for (const entry of aggregate.byKind) {
+      covered.add(entry.kind);
+      const detail = detailOf(groups.get(entry.kind) ?? []);
+      // 后端说这一类窗口内只有一条、而且那一条正好在手里：逐字保持单条行的
+      // 原样（「重试 N 次后放弃」那句里的 max_attempts 聚合里没有，也编不出来）。
+      if (entry.count === 1 && detail.length === 1) {
+        rows.push({ item: detail[0] as WorkItem, weight: 1 });
+        continue;
+      }
+      rows.push({ item: aggregateRow(entry, detail, aggregate.windowHours), weight: entry.count });
+    }
+  }
+
+  for (const [kind, group] of groups) {
+    // 聚合已经盖到的 kind 不再走旧路：同一类出现两行，一行说 288 一行说 20，
+    // 比只说 20 更糟。
+    if (covered.has(kind)) continue;
+    const detail = detailOf(group);
+    // 只有一条时**逐字保持原样**：不出现「×1」这种噪声，也不给一个展开箭头
+    // 后面空无一物。
+    if (detail.length === 1) {
+      rows.push({ item: detail[0] as WorkItem, weight: 1 });
+      continue;
+    }
+    rows.push({ item: clientSideRow(kind, group), weight: detail.length });
+  }
 
   // 条数多的排在前面（288 条的那一类必须第一眼看见）；条数相同的**保持取数
-  // 顺序**，那已经是服务端按放弃时刻倒序给的，这里不再自己排一遍。单条行没有
-  // children，按 1 参与排序。
-  const weight = (item: WorkItem): number => item.children?.length ?? 1;
-  return items
-    .map((item, index) => ({ item, index }))
-    .sort((a, b) => weight(b.item) - weight(a.item) || a.index - b.index)
-    .map((entry) => entry.item);
+  // 顺序**——聚合那一段后端已按 count 降序、同 count 按 kind 升序排好，旧路那
+  // 部分则是服务端按放弃时刻倒序给的，这里都不再自己排一遍。
+  return rows
+    .map((row, index) => ({ ...row, index }))
+    .sort((a, b) => b.weight - a.weight || a.index - b.index)
+    .map((row) => row.item);
 }
 
 /** 风险等级的色调。**与 components/ApprovalQueue.tsx 里的 RISK_TONE 是同一张表**

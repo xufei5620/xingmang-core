@@ -3,11 +3,14 @@ import { describeFreshness } from "@xingmang/ui-admin";
 import { FIRE_COUNT_HEADER, FIRE_COUNT_MEANING, type AlertItem } from "../api/alerts";
 import type { ApprovalItem } from "../api/approvals";
 import type { JobRunItem } from "../api/jobs";
+import type { OpsFailedJobKind, OpsOverview } from "../api/ops";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import {
   acknowledgedGroupHeading,
   acknowledgedWorkItems,
   approvalsDueSoonCount,
+  failedJobsAggregate,
+  failedJobsAggregateNote,
   focusRows,
   platformMatrixRows,
   recentlyRecoveredCount,
@@ -23,6 +26,7 @@ import {
   WORK_JOBS_LIMIT,
   RECOVERED_WINDOW_HOURS,
   WORK_CATEGORIES,
+  type FailedJobsAggregate,
 } from "./workbench";
 
 const NOW = new Date("2026-08-28T12:00:00Z");
@@ -313,8 +317,10 @@ describe("我的待处理", () => {
     // 这条断言原来写的是「触发 7 次」——那是错的：fire_count 数的是每 60 秒
     // 重评一轮、条件仍成立就 +1 的轮数（TouchAlert 的 fire_count + 1 与
     // DefaultAlertEvaluateInterval），生产上那条 669 正好是 668 分钟 + 1。
+    // 工厂默认不带 first_opened_at，于是「已持续」是拿 opened_at 兜的底，
+    // 前面要有那个「约」——判据见下一组。
     const [item] = workItemsFromAlerts([alert({ fire_count: 7 })], NOW);
-    expect(item?.meta).toContain("已持续 1 小时");
+    expect(item?.meta).toContain("已持续 约 1 小时");
     expect(item?.due).toBe("评估 7 轮");
     expect(item?.to).toBe("/alerts");
   });
@@ -325,8 +331,9 @@ describe("我的待处理", () => {
     it("缺席：只说评估轮数，「已持续」退回 opened_at 并挂上会重新计时的说明", () => {
       const [item] = workItemsFromAlerts([alert({ fire_count: 669 })], NOW);
       expect(item?.due).toBe("评估 669 轮");
-      // opened_at 11:00 → NOW 12:00
-      expect(item?.meta).toContain("已持续 1 小时");
+      // opened_at 11:00 → NOW 12:00。前面那个「约」是这个数不确定的记号：
+      // 一个系统性偏小的时长不加记号地摆出来，与摆一个错数字没有区别。
+      expect(item?.meta).toContain("已持续 约 1 小时");
       expect(item?.hint).toContain("恢复后重新触发会新开一条");
     });
 
@@ -353,7 +360,8 @@ describe("我的待处理", () => {
       } as AlertItem;
       const [item] = workItemsFromAlerts([nulled], NOW);
       expect(item?.due).toBe("评估 669 轮");
-      expect(item?.meta).toContain("已持续 1 小时");
+      // 显式 null 与字段缺席同一条路：退回 opened_at，并且标「约」
+      expect(item?.meta).toContain("已持续 约 1 小时");
     });
 
     // 共用一份的证据（同「安全」行与「即将到期」分类那条的写法）：这句话曾有
@@ -536,6 +544,229 @@ describe("失败任务：只收已放弃的后台任务", () => {
         "卡片数据同步 已放弃 ×20+",
       );
       expect(workItemsFromJobRuns(twenty, NOW)[0]?.title).toBe("卡片数据同步 已放弃 ×20");
+    });
+  });
+
+  // XM-WORKBENCH-WIRE-OPS：上面那一整组是「前端自己数」的路。后端从
+  // XM-OPS-TRUTH 起给了 failed_jobs_by_kind，条数不再封顶在取数上限（20）。
+  //
+  // **三态都要测**：ok / not_wired / query_failed 是后端刻意分开的三个答案
+  // （同一个 null 曾经同时表示「没接」和「查库失败」，前者良性、后者是运行
+  // 保障页正瞎着）。只测在场那一支，另外两支到时候是死的还是活的谁也答不上来。
+  describe("失败作业的按类型合计：聚合在场 / 未接入 / 查库失败", () => {
+    function entry(over: Partial<OpsFailedJobKind> = {}): OpsFailedJobKind {
+      return {
+        kind: "card_sync",
+        count: 288,
+        first_at: "2026-08-28T08:00:00Z",
+        last_at: "2026-08-28T11:59:00Z",
+        last_run_id: 90210,
+        error_count: 3,
+        last_error: null,
+        ...over,
+      };
+    }
+    function aggregate(over: Partial<FailedJobsAggregate> = {}): FailedJobsAggregate {
+      return { status: "ok", byKind: [entry()], windowHours: 24, ...over };
+    }
+    // 取数上限那一屏：20 条 card_sync，游标说还有下一页。前端自己数只能数到
+    // 20，而后端说这一类在窗口内是 288。
+    const twenty = Array.from({ length: 20 }, (_, i) =>
+      run({ id: 1000 + i, kind: "card_sync", finalized_at: "2026-08-28T11:59:00Z" }),
+    );
+
+    it("聚合在场：条数取后端的 288，不是前端数出来的 20", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, {
+        truncated: true,
+        aggregate: aggregate(),
+      });
+      expect(item?.title).toBe("卡片数据同步 已放弃 ×288");
+      // 「+」是前端自己数时唯一诚实的说法；后端给了确数，就不该再挂那个尾巴
+      expect(item?.title).not.toContain("+");
+    });
+
+    it("最近与最早两个时刻也取后端的，前端不再从取到的那几条里推", () => {
+      // 取到的 20 条 finalized_at 全是 11:59，若时刻是前端推的，「最早」会
+      // 变成 1 分钟前。后端说最早是 08:00（NOW 12:00）→ 4 小时前。
+      const [item] = workItemsFromJobRuns(twenty, NOW, { aggregate: aggregate() });
+      expect(item?.meta).toContain("最近 1 分钟前");
+      expect(item?.meta).toContain("最早 4 小时前");
+    });
+
+    it("条数带上窗口，一个「288」不带量纲读的人无从判断它是三天攒的还是一小时炸的", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, { aggregate: aggregate() });
+      expect(item?.meta).toContain("近 24 小时");
+      // 窗口也来自后端，不是前端写死的 24
+      const [other] = workItemsFromJobRuns(twenty, NOW, {
+        aggregate: aggregate({ windowHours: 6 }),
+      });
+      expect(other?.meta).toContain("近 6 小时");
+      expect(other?.meta).not.toContain("近 24 小时");
+    });
+
+    it("展开的明细比条数少时说出来，否则展开看见 20 行的人会以为 288 是算错的", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, { aggregate: aggregate() });
+      expect(item?.children).toHaveLength(20);
+      expect(item?.hint).toContain("展开列出的是取到的 20 条，不是全部 288 条");
+    });
+
+    it("明细正好齐了就不说那句话——一句永远都在的提示等于没有提示", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, {
+        aggregate: aggregate({ byKind: [entry({ count: 20 })] }),
+      });
+      expect(item?.children).toHaveLength(20);
+      expect(item?.hint).toBeUndefined();
+    });
+
+    it("后端说只有一条、而且那一条在手里：逐字保持单条行的原样，不写「×1」", () => {
+      const [item] = workItemsFromJobRuns([run({ id: 7, kind: "card_sync" })], NOW, {
+        aggregate: aggregate({ byKind: [entry({ count: 1 })] }),
+      });
+      expect(item?.title).toBe("卡片数据同步 重试 3 次后放弃");
+      expect(item?.children).toBeUndefined();
+    });
+
+    it("聚合里有、但取到的那一屏里一条都没有：仍然成行，只是没有明细可展开", () => {
+      // 288 条 card_sync 会把 20 条的那一屏占满，别的 kind 一条都取不到——
+      // 那一类要是因此从待办里消失，本片就是换个方式丢信息。
+      const [item] = workItemsFromJobRuns([], NOW, {
+        aggregate: aggregate({ byKind: [entry({ kind: "sub2api_sync", count: 3 })] }),
+      });
+      expect(item?.title).toBe("Sub2API 同步 已放弃 ×3");
+      expect(item?.children).toBeUndefined();
+    });
+
+    it("排序按后端的条数，不按手里明细的条数", () => {
+      // 手里 20 条全是 card_sync、只有 1 条 sub2api_sync；但后端说
+      // sub2api_sync 在窗口内有 500 条。按明细条数排会把 500 那一类排到后面。
+      const runs = [...twenty, run({ id: 7, kind: "sub2api_sync" })];
+      const items = workItemsFromJobRuns(runs, NOW, {
+        aggregate: aggregate({
+          byKind: [entry({ kind: "sub2api_sync", count: 500 }), entry({ count: 288 })],
+        }),
+      });
+      expect(items.map((i) => i.id)).toEqual(["job-kind-sub2api_sync", "job-kind-card_sync"]);
+    });
+
+    it("聚合没盖到的 kind 仍然单独成行，不因为「聚合没提」就从待办里消失", () => {
+      // 聚合的窗口是最近 24 小时，而 /jobs/runs 那一屏里可能有更早的已放弃
+      // 作业。把它们丢掉是本片自己制造的新的「丢信息」。
+      const older = [
+        run({ id: 5, kind: "retention_sweep", finalized_at: "2026-08-20T10:00:00Z" }),
+        run({ id: 6, kind: "retention_sweep", finalized_at: "2026-08-20T09:00:00Z" }),
+      ];
+      const items = workItemsFromJobRuns([...twenty, ...older], NOW, {
+        aggregate: aggregate(),
+      });
+      expect(items.map((i) => i.id)).toEqual([
+        "job-kind-card_sync",
+        "job-kind-retention_sweep",
+      ]);
+      // 那一行走的是旧路：条数由前端从手里这两条数出来
+      expect(items[1]?.title).toContain("×2");
+    });
+
+    it("同一个 kind 不会既出一行聚合又出一行前端分组", () => {
+      // 一行说 288 一行说 20，比只说 20 更糟
+      const items = workItemsFromJobRuns(twenty, NOW, { aggregate: aggregate() });
+      expect(items).toHaveLength(1);
+    });
+
+    // 下面两条**故意带着一份非空的 byKind**。真后端在这两态下 byKind 是 null，
+    // 喂空数组进来这两条会因为「没东西可用」而恒绿——那样测的是数组空不空，
+    // 不是 status 有没有被看。带着数据还坚持走旧路，才证明判据真的是 status。
+    it("未接入：整段退回前端分组，「×20+」那套逻辑原样还在", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, {
+        truncated: true,
+        aggregate: aggregate({ status: "not_wired" }),
+      });
+      expect(item?.title).toBe("卡片数据同步 已放弃 ×20+");
+    });
+
+    it("查库失败：同样退回前端分组——降级要留一屏能看的东西", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, {
+        truncated: true,
+        aggregate: aggregate({ status: "query_failed" }),
+      });
+      expect(item?.title).toBe("卡片数据同步 已放弃 ×20+");
+    });
+
+    it("这一趟没问到后端（null）：也退回前端分组", () => {
+      const [item] = workItemsFromJobRuns(twenty, NOW, {
+        truncated: true,
+        aggregate: null,
+      });
+      expect(item?.title).toBe("卡片数据同步 已放弃 ×20+");
+    });
+  });
+
+  // 三态里只有一态要在界面上说话。这一组把「说」与「不说」两边都钉住：
+  // 少了「不说」那一半，把函数改成恒返回那句话也是绿的。
+  describe("聚合坏了要说出来，另外两态不说", () => {
+    const at = (status: FailedJobsAggregate["status"]): FailedJobsAggregate => ({
+      status,
+      byKind: [],
+      windowHours: 24,
+    });
+
+    it("查库失败时说清楚下面那个数是前端数的，可能远小于真实值", () => {
+      const note = failedJobsAggregateNote({
+        activeCategoryId: "",
+        aggregate: at("query_failed"),
+      });
+      expect(note).toContain("后端查库失败");
+      expect(note).toContain("可能远小于真实值");
+    });
+
+    it("正常与未接入都不说：一个良性的部署事实说一遍是噪声", () => {
+      expect(
+        failedJobsAggregateNote({ activeCategoryId: "", aggregate: at("ok") }),
+      ).toBeNull();
+      expect(
+        failedJobsAggregateNote({ activeCategoryId: "", aggregate: at("not_wired") }),
+      ).toBeNull();
+    });
+
+    it("这一趟没问到后端也不说：我们没有依据说后端哪里不对", () => {
+      expect(failedJobsAggregateNote({ activeCategoryId: "", aggregate: null })).toBeNull();
+    });
+
+    it("只在「全部」与「失败任务」两格下说，别的筛选下是噪声", () => {
+      const aggregate = at("query_failed");
+      expect(failedJobsAggregateNote({ activeCategoryId: "jobs", aggregate })).not.toBeNull();
+      expect(failedJobsAggregateNote({ activeCategoryId: "", aggregate })).not.toBeNull();
+      for (const id of ["incidents", "approvals", "finance", "expiring"]) {
+        expect(failedJobsAggregateNote({ activeCategoryId: id, aggregate })).toBeNull();
+      }
+    });
+  });
+
+  // 从总览响应里取那三个字段。这一层单独测，是因为「没问到后端」与「后端答了
+  // 没接」必须分得开——两者在旧口径里都是一个 null。
+  describe("从总览响应里取出聚合那一段", () => {
+    function overview(over: Partial<OpsOverview> = {}): OpsOverview {
+      return {
+        failed_jobs_by_kind: [],
+        failed_jobs_status: "ok",
+        failed_jobs_window_hours: 24,
+        ...over,
+      } as OpsOverview;
+    }
+
+    it("没问到后端时返回 null，与后端答「没接」不是一回事", () => {
+      expect(failedJobsAggregate(undefined)).toBeNull();
+      expect(failedJobsAggregate(null)).toBeNull();
+      expect(
+        failedJobsAggregate(overview({ failed_jobs_status: "not_wired", failed_jobs_by_kind: null })),
+      ).toEqual({ status: "not_wired", byKind: [], windowHours: 24 });
+    });
+
+    it("三个字段一起取，窗口不写死在前端", () => {
+      const got = failedJobsAggregate(
+        overview({ failed_jobs_window_hours: 6, failed_jobs_by_kind: [] }),
+      );
+      expect(got?.windowHours).toBe(6);
+      expect(got?.status).toBe("ok");
     });
   });
 });

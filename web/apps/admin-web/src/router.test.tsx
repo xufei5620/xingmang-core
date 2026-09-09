@@ -490,6 +490,10 @@ const alertsBody = {
       environment: "development",
       source_metric_key: REVENUE_METRIC,
       opened_at: "2026-08-26T10:00:00Z",
+      // 首开时刻刻意早于 opened_at 一天：不这么设，「这一列渲染的到底是哪个
+      // 字段」在整条路由上根本没法证伪（后端从 XM-OPS-TRUTH 起跨复发继承它）。
+      first_opened_at: "2026-08-25T09:00:00Z",
+      first_opened_at_estimated: false,
       last_seen_at: "2026-08-26T10:05:00Z",
       acknowledged_at: null,
       resolved_at: null,
@@ -2892,7 +2896,14 @@ describe("告警中心页", () => {
     expect(alertsTable.getByText("严重")).not.toBeNull();
     expect(alertsTable.getByText("未处理")).not.toBeNull();
     // 首见与最近都要显示：只有一个就答不出「这个问题持续了多久」
-    expect(screen.getByText(/首次 2026-08-26 10:00:00 UTC/)).not.toBeNull();
+    //
+    // 「首次」渲染的是 first_opened_at（08-25 09:00），**不是** opened_at
+    // （08-26 10:00）：告警恢复后再次触发会新开一行、opened_at 归零，拿它当
+    // 「首次」会让一条抖了三天的告警每次都显示成刚开始。两条断言一起才拦得住
+    // 回退——只断言前者时，把实现改回 opened_at 只会让它变成「找不到」，而
+    // 找不到与找错了在报错信息上分不清。
+    expect(screen.getByText(/首次 2026-08-25 09:00:00 UTC/)).not.toBeNull();
+    expect(screen.queryByText(/首次 2026-08-26 10:00:00 UTC/)).toBeNull();
     expect(screen.getAllByText(/最近 2026-08-26 10:05:00 UTC/).length).toBeGreaterThan(0);
     // fire_count：抖了一下与一直在响的唯一区分依据。**它是评估轮数不是次数**
     // ——每 60 秒重评一轮、条件仍成立就 +1。口径由表头「评估轮次」与悬停整句

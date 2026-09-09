@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   FIRE_COUNT_HEADER,
+  FIRST_OPENED_AT_ESTIMATED_HINT,
   type AlertItem,
   type AlertNotifyStatus,
   type AlertStatus,
@@ -177,6 +178,52 @@ describe("「首次 / 最近」列的确认时刻", () => {
     // 「最近」晚于「确认」才读得出「确认之后还在响」，两行都要在
     expect(within(acked).getByText("最近 2026-09-01 10:05:00 UTC")).not.toBeNull();
     expect(within(open).queryByText(/^确认 /)).toBeNull();
+  });
+
+  // XM-WORKBENCH-WIRE-OPS：这一列的「首次」原本渲染 opened_at。后端从
+  // XM-OPS-TRUTH 起给了 first_opened_at（跨复发继承），opened_at 在复发时归零
+  // ——拿它当「首次」会让一条抖了三天的告警每次都显示成刚开始。
+  it("「首次」渲染 first_opened_at，不是 opened_at", async () => {
+    stubAlerts([
+      {
+        ...alert("id-first", "OPEN", "庚告警"),
+        first_opened_at: "2026-08-25T09:00:00Z",
+        first_opened_at_estimated: false,
+      },
+    ]);
+    renderAlerts();
+    const row = (await screen.findByText("庚告警")).closest("tr") as HTMLElement;
+    expect(within(row).getByText("首次 2026-08-25 09:00:00 UTC")).not.toBeNull();
+    // 两条一起才拦得住回退：只断言前者时，把实现改回 opened_at 只会让它变成
+    // 「找不到」，而找不到与找错了在报错信息上分不清。
+    expect(within(row).queryByText(/首次 2026-09-01 10:00:00 UTC/)).toBeNull();
+    // 确定值不标「约」：把一个确定的时刻也标上，是白白让人不敢信它
+    expect(within(row).queryByText(/首次 约/)).toBeNull();
+  });
+
+  it("兜底估计的首开时刻标「约」，并把为什么挂在悬停上", async () => {
+    stubAlerts([
+      {
+        ...alert("id-est", "OPEN", "辛告警"),
+        first_opened_at: "2026-09-01T10:00:00Z",
+        first_opened_at_estimated: true,
+      },
+    ]);
+    renderAlerts();
+    const row = (await screen.findByText("辛告警")).closest("tr") as HTMLElement;
+    const cell = within(row).getByText(/^首次/);
+    expect(cell.textContent).toBe("首次 约 2026-09-01 10:00:00 UTC");
+    expect(cell.getAttribute("title")).toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+  });
+
+  it("老后端没有这一列时退回 opened_at，同样标「约」", async () => {
+    stubAlerts([alert("id-old", "OPEN", "壬告警")]);
+    renderAlerts();
+    const row = (await screen.findByText("壬告警")).closest("tr") as HTMLElement;
+    const cell = within(row).getByText(/^首次/);
+    expect(cell.textContent).toBe("首次 约 2026-09-01 10:00:00 UTC");
+    // 这一支连 estimated 都没有，说明用的是「会重新计时」那句
+    expect(cell.getAttribute("title")).toContain("恢复后重新触发会新开一条");
   });
 });
 
