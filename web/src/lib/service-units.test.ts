@@ -6,6 +6,7 @@ import {
   serviceUnitDefinition,
   serviceUnitView,
   unconvertibleAmountNote,
+  unconvertibleDisplayText,
   unitContractPendingNote,
   unrecognisedUnitNote,
   type ServiceUnitDefinition,
@@ -168,15 +169,51 @@ describe("换算：换不出来时返回 null，不返回差不多的数", () =>
 });
 
 describe("serviceUnitView：一格要显示什么", () => {
-  it("认识的单位码：主显示是换算值，副标签是来源口径，原始值进 title", () => {
+  it("认识的单位码：主显示是换算值，副标签是来源口径", () => {
     const view = serviceUnitView({
       serviceUnits: "30179629498",
       unitCode: "SUB2_BALANCE_1E8",
     });
     expect(view.amount).toBe("301.80");
     expect(view.note).toBe("SoloV API 余额");
-    expect(view.title).toBe("30,179,629,498 SUB2_BALANCE_1E8");
     expect(view.converted).toBe(true);
+  });
+
+  // XM-INV-UNIT-DISPLAY-USERONLY。缺席型断言，所以先说清楚它靠什么成立：
+  //
+  //   * 扫的是**返回对象的每一个字符串字段**，不是手列 amount / note 两个名字。
+  //     上一版的 title 就是这么长出来的；将来再加一个带原始值的字段，这条会自己
+  //     变红，而不是安静地放过新字段。
+  //   * 比数字时先把非数字字符去掉再比，所以不依赖千分位怎么分组——它不是
+  //     groupThousands 的副本，那份逻辑改了也不会让这道断言悄悄失效。
+  //   * 单位码比的是形状（全大写 + 下划线）而不是那两个已知码，多一个码照样拦得住。
+  it("返回的任何字段里都没有原始刻度，也没有单位码", () => {
+    const unitCodeShape = /[A-Z][A-Z0-9]*_[A-Z0-9_]+/;
+    for (const value of [
+      { serviceUnits: "30179629498", unitCode: "SUB2_BALANCE_1E8" },
+      { serviceUnits: "99948771408", unitCode: "SUB2_BALANCE_1E8" },
+      { serviceUnits: "500000", unitCode: "NEWAPI_QUOTA" },
+      { serviceUnits: "30179629498", unitCode: "ZZ_MYSTERY_UNIT" },
+      { serviceUnits: "30179629498", unitCode: null },
+      { serviceUnits: "-5", unitCode: "SUB2_BALANCE_1E8" },
+    ]) {
+      const view = serviceUnitView(value);
+      const fields = Object.values(view).filter(
+        (field): field is string => typeof field === "string",
+      );
+      // 没有这一句，上面的 for 在字段全被删光时会一次都不跑，整条断言恒真。
+      expect(fields.length).toBeGreaterThan(0);
+      const rawDigits = value.serviceUnits.replace(/[^0-9]/g, "");
+      for (const field of fields) {
+        if (value.unitCode) expect(field).not.toContain(value.unitCode);
+        expect(field).not.toMatch(unitCodeShape);
+        // 短到几位的原始值没法跟换算结果区分（"5" 会撞上任何含 5 的数），所以只对
+        // 真正长成「后台刻度」的值查包含关系；那也正是负责人指的那种数。
+        if (rawDigits.length >= 6) {
+          expect(field.replace(/[^0-9]/g, "")).not.toContain(rawDigits);
+        }
+      }
+    }
   });
 
   it("换算结果不带货币符号——这两格不是人民币", () => {
@@ -188,19 +225,20 @@ describe("serviceUnitView：一格要显示什么", () => {
     expect(view.note).not.toMatch(/[¥$]/);
   });
 
-  it("单位码为空：保持「单位合同待建立」的现状文案", () => {
-    const view = serviceUnitView({ serviceUnits: "0", unitCode: null });
-    expect(view.amount).toBe("0");
+  it("单位码为空：主显示「暂无法换算」，原因仍是「单位合同待建立」", () => {
+    // 换算数没有，就不给数——旧版这里回落到原始数字（哪怕是 0），那条路已经关掉。
+    const view = serviceUnitView({ serviceUnits: "30179629498", unitCode: null });
+    expect(view.amount).toBe(unconvertibleDisplayText);
     expect(view.note).toBe(unitContractPendingNote);
     expect(view.converted).toBe(false);
   });
 
-  it("未识别的单位码：原始数字 + 单位码 +（未识别单位），不抛错", () => {
+  it("未识别的单位码：主显示「暂无法换算」+（未识别单位），不抛错也不摊开原始值", () => {
     const view = serviceUnitView({
       serviceUnits: "30179629498",
       unitCode: "ZZ_MYSTERY_UNIT",
     });
-    expect(view.amount).toBe("30,179,629,498 ZZ_MYSTERY_UNIT");
+    expect(view.amount).toBe(unconvertibleDisplayText);
     expect(view.note).toBe(unrecognisedUnitNote);
     expect(view.converted).toBe(false);
   });
@@ -210,9 +248,26 @@ describe("serviceUnitView：一格要显示什么", () => {
       serviceUnits: "-5",
       unitCode: "SUB2_BALANCE_1E8",
     });
+    expect(view.amount).toBe(unconvertibleDisplayText);
     expect(view.note).toBe(unconvertibleAmountNote);
     expect(view.note).not.toBe(unrecognisedUnitNote);
     expect(view.converted).toBe(false);
+  });
+
+  it("三条降级分支的主显示是同一句，区别只在原因", () => {
+    // 上面三条各自钉住一条分支的原因；这一条钉住「主显示不因分支而漏出别的东西」，
+    // 否则将来只改其中一条分支回落到原始值，另外两条的断言并不会红。
+    const degraded = [
+      { serviceUnits: "30179629498", unitCode: null },
+      { serviceUnits: "30179629498", unitCode: "ZZ_MYSTERY_UNIT" },
+      { serviceUnits: "-5", unitCode: "SUB2_BALANCE_1E8" },
+    ].map((value) => serviceUnitView(value));
+    expect(degraded.map((view) => view.amount)).toEqual([
+      unconvertibleDisplayText,
+      unconvertibleDisplayText,
+      unconvertibleDisplayText,
+    ]);
+    expect(new Set(degraded.map((view) => view.note)).size).toBe(3);
   });
 
   it("New API 的格子用 New API 的标签，不会串到 SoloV API 上", () => {
