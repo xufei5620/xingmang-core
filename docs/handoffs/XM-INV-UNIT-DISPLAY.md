@@ -8,13 +8,14 @@
 
 ## 第二轮（复审意见）
 
-复审判 pass/would_ship，留了 2 条 major、2 条 minor，全部已处理：
+复审判 pass/would_ship，留了 2 条 major、3 条 minor，全部已处理：
 
 | 复审意见 | 处理 |
 | --- | --- |
 | major：扫描根手列 `{backend/internal, agents}`，`backend/cmd` 整棵树在闸外 | 扫描根不再手列，改为**发现**：`DiscoverGoPackageDirs()` 走整个仓库，凡是含非测试 `.go` 的目录都进闸。另加一道**独立**的覆盖探针，用自己的文本扫描核对「凡提到单位码的非测试 Go 文件都落在扫过的目录里」 |
 | major：`isUnitCodePassthrough` 只看名字后缀，跨包选择器被无条件放行 | 改为要求选择器的**基名解析到一个非包对象**。解析到 `*types.PkgName`（包已导入）或解析不到（包没导入）一律拒绝 |
 | minor：CSS 与 1987 行的 `.eligibility-unit-grid span` 重复，且引了只用一次的色值；注释「两行结构」不对 | 整条 `.service-unit-origin` 规则删掉（那条规则已经覆盖它），只用一次的灰色随之消失；注释改成三行结构，并写明「想调请改那一条，别再抄」 |
+| minor（#7）：risks 3 被划成「已消除」，但全仓库没有任何护栏盯 `USDExchangeRate` | 只改措辞：risks 3 改回开着的状态（「核实一次为 1，无持续护栏」），契约 description 那句补上「时点事实，无持续校验」，补护栏的做法进 follow_ups 10，**本轮不动桥接契约** |
 | minor：三条只记文档不改代码 | 见 follow_ups 6/7/8 |
 
 **为什么覆盖探针要单独存在**：扫描根改成发现之后，`TestUnitCodeScanScopeReachesTheCommands`
@@ -68,19 +69,24 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 
 **二、NEWAPI_QUOTA 的除数 500000 已由主控者在生产核实（2026-09-09）。**
 生产 New API 库的 `options` 表里**没有** `QuotaPerUnit` 覆盖，所以生效值就是上游默认的
-500000（= 1 美元）；同次核实 `USDExchangeRate=1`，上游显示没有再折算成别的币种。
-这两条一起把交付时挂着的两条风险都消掉了。契约的 description 按主控者给的措辞写。
+500000（= 1 美元）。契约的 description 按主控者给的措辞写。
 
-另外两处静态证据仍然成立，其中第一条是一道**现成的护栏**，值得留着：
+这里要把**两种「核实过」分清楚**，交付时我把它们混为一谈了：
 
-- 本仓库 `contracts/newapi-source-projection-grants.postgresql.sql:116-117`
-  （另外两个文件同形）的投影契约在 `QuotaPerUnit ≠ 500000` 时直接拒绝出数。
+- **`QuotaPerUnit` 有持续护栏。** 本仓库
+  `contracts/newapi-source-projection-grants.postgresql.sql:159-160`
+  （另外两个文件同形）的 cfg 检查在 `QuotaPerUnit ≠ 500000` 时直接拒绝出数：
   线上一旦有人改了这个值，**采集会先停**，而不是让显示侧悄悄给出错的数。
-  这一条也一并写进了 description。
-- 上游 `common/constants.go:22` 定义 `QuotaPerUnit = 500 * 1000.0`，
-  其前端按 `quota / quotaPerUnit` 显示。
+  上游 `common/constants.go:22` 也把它定义为 `500 * 1000.0`。所以这一条是
+  「核实过 + 有人盯着」。
+- **`USDExchangeRate` 只有时点事实，没有护栏。** 同次核实它是 1，上游显示没有
+  再折算。但同一道 cfg 检查只覆盖 `QuotaPerUnit` / `Price` / `TopupGroupRatio`
+  三个键，`USDExchangeRate` 不在其中，本仓库其他任何地方也不提它
+  （`grep -rn USDExchangeRate` 只命中我自己写的这两处文档与 description）。
+  折算一开，上游页面上的数与本平台的基准数就分叉，而**显示侧发现不了**。
+  见 risks 3 与 follow_ups 10。
 
-即便如此，本平台显示的仍然只是 `quota / QuotaPerUnit` 这个基准数，不折算、不带货币符号。
+本平台显示的始终只是 `quota / QuotaPerUnit` 这个基准数，不折算、不带货币符号。
 
 **三、换算只改刻度，不改口径。**
 换算后的数仍然是非现金 / 切点前的源侧余额，不是人民币，所以页面上不带 ¥ 也不带 $，
@@ -188,10 +194,13 @@ stub importer 让所有跨包类型都是 invalid，按类型判会把 `item.Uni
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 06:11:10 | 06:11:12 | 2s | exit 0 |
-| `cd web && npm test -- --run` | 06:11:12 | 06:11:14 | 2s（vitest 自报 636ms） | exit 0，22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 06:11:00 | 06:11:01 | 1s | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:11:01 | 06:11:04 | 3s | exit 0，两个包 ok |
+| `cd web && npm run typecheck` | 06:17:24 | 06:17:27 | 3s | exit 0 |
+| `cd web && npm test -- --run` | 06:17:27 | 06:17:29 | 2s（vitest 自报 631ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 06:17:14 | 06:17:15 | 1s | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:17:15 | 06:17:18 | 3s | exit 0，两个包 ok |
+
+第二轮内先后跑过两次：代码改动后 06:11、`USDExchangeRate` 措辞改动后 06:17，
+两次四条全绿。上表是后一次。
 
 前两轮的记录（结果都是四条全绿）：第一轮 05:40，NEWAPI_QUOTA description 更新后
 05:48（typecheck 4s / web test 1s / vet <1s / go test 3s）。
@@ -222,6 +231,14 @@ R2-M21 与 R2-M21b 一起说明了为什么两条范围断言都要留：一条�
 CSS 那条改动（删重复规则）没有对应的变异：它不改任何渲染文本，行为上等价，
 `.eligibility-unit-grid span` 那条规则接管了颜色字号行高。能钉住的只有类名还在，
 R2-M24 钉的就是这个。
+
+`USDExchangeRate` 那条（复审 #7）**只改措辞，没有对应变异**：改的是契约的
+`description` 与交接文档，`description` 不进生成物（`git diff --stat` 对
+`eligibility-wire.generated.ts` 为空），也没有任何断言读它。真正能把这条风险
+钉住的是 follow_ups 10 那道 cfg 护栏，那要动桥接契约，本轮不做。
+支撑措辞的事实是实测的：`grep -rn USDExchangeRate` 在本仓库只命中我自己写的
+文档与 description，投影契约的 cfg 检查（`newapi-source-projection-grants.postgresql.sql:159-167`）
+只覆盖 `QuotaPerUnit` / `Price` / `TopupGroupRatio`。
 
 ### 第一轮
 
@@ -262,6 +279,8 @@ R2-M24 钉的就是这个。
    以及同次核实的 `USDExchangeRate=1`。多留的两句是为了让「值改了会发生什么」
    与「上游会不会再折算」在契约里各有一句话可查；要精简就删这两句，
    主控者给的那一句原样保留着。除数值 `500000` 从头到尾没变过。
+   第二轮按复审要求给后一句补了「时点事实，无持续校验」——它原来读起来像
+   `QuotaPerUnit` 那句一样有护栏撑着，实际没有。
 3. **多改了三处手抄点**：派工单在「事实」里列了 `web/src/lib/http-api.ts:694`
    等硬编码点，但「要做的」里只要求后端/代理侧的发现闸。我顺手把
    `types.ts` 的 `unitCode` 联合与 `http-api.ts` 两处 `expectedUnit` 接到了生成表上
@@ -284,10 +303,17 @@ R2-M24 钉的就是这个。
    与组件直接打的，注释里写明了这一点。
 2. ~~**New API 的除数没有在生产实例上核对过。**~~ **已消除（2026-09-09，主控者核实）**：
    生产 `options` 表无 `QuotaPerUnit` 覆盖，生效值就是默认 500000。
-3. ~~**上游可能按 `USDExchangeRate` 折算显示币种。**~~ **已消除（同次核实）**：
-   生产 `USDExchangeRate=1`，上游没有折算。若将来有人把它改成别的值，
-   本平台显示的基准数会与上游页面上的数分叉——这不是显示侧能自己发现的，
-   届时要一并调整 display_label 的口径措辞。
+   这一条能划掉，是因为它**既核实过又有护栏**：投影契约的 cfg 检查在
+   `QuotaPerUnit ≠ 500000` 时拒绝出数，值被改了采集会先停。
+3. **上游按 `USDExchangeRate` 折算显示币种的风险仍然开着。**
+   2026-09-09 核实一次为 1，**无持续护栏**：折算一开，上游显示与本平台的基准数
+   会分叉，显示侧发现不了。
+   第二轮把这一条从「已消除」改了回来——它当时是靠一次观测划掉的，而
+   `QuotaPerUnit` 那条靠的是护栏，两者不是一回事。全仓库唯一盯 New API 配置的
+   地方是 `newapi-source-projection-grants.postgresql.sql` 的 cfg 检查，它只覆盖
+   `QuotaPerUnit` / `Price` / `TopupGroupRatio`；`USDExchangeRate` 在本仓库其余
+   任何代码、SQL、schema 里都不出现。补护栏的做法见 follow_ups 10，本轮不动
+   桥接契约。
 4. **发现闸只扫非测试源码。**
    `backend/internal/postgresstore/source_readiness_integration_test.go:28` 的 fixture
    用了 `NEWAPI_CREDIT_1E6` 这个单位码，没有任何生产路径会发它，契约也没有它。
@@ -313,7 +339,8 @@ R2-M24 钉的就是这个。
 2. 决定 `mapServiceUnitSummary` 的 `UNIT_CONTRACT_MISMATCH` 要不要从抛错改成降级
    （对应 risks 1）。改了这一条，渲染层那条降级才真正在线上有意义。
 3. ~~在生产 New API 实例上核对 `options.QuotaPerUnit`~~ —— **已完成（2026-09-09，主控者）**：
-   无覆盖，取默认 500000；`USDExchangeRate=1`。契约 description 与 risks 2/3 已相应更新。
+   无覆盖，取默认 500000。同次也看了 `USDExchangeRate=1`，但那只是时点事实，
+   风险没关，见 risks 3 与本节第 10 条。
 4. 清掉 `source_readiness_integration_test.go` 里的 `NEWAPI_CREDIT_1E6` fixture，
    或者把测试源码也纳入发现闸的扫描范围（对应 risks 4）。
 5. 起前端看一眼这两格的实际排版（对应 risks 6）。
@@ -341,3 +368,14 @@ R2-M24 钉的就是这个。
    `.EligibilityStatus` 这个名字后缀，所以跨包选择器在那道闸里仍然被当作「复制」放行。
    那道闸随 RC106 上线，这一轮没动它。修法与 `isUnitCodePassthrough` 完全一样
    （基名解析到非包对象），可以直接照搬。
+10. **给 `USDExchangeRate` 补一道护栏**（对应 risks 3）：把它加进
+    `contracts/newapi-source-projection-grants.postgresql.sql` 的 cfg 检查，
+    和 `QuotaPerUnit` / `Price` 同样断言等于 1，值一变就拒绝出数。
+    **这不是改一行 SQL**。cfg 检查读的那几个键同时是 `configuration_hash` 的输入：
+    `quota_per_unit||'|'||price||'|'||topup_group_ratio_semantics||'|NEWAPI_QUOTA|rc.25|v4'`，
+    这个式子在 `newapi-source-projection-grants.postgresql.sql` 里 1 处、
+    `newapi-economic-projection-grants.postgresql.sql` 里 3 处（实测 `grep -c`），
+    四处都得一起改，改完按主控者的说法要**重钉两处哈希、重装桥接**
+    （那两处哈希在哪、怎么重装，属于发布流程，我没有核对）。
+    所以**本轮不动桥接契约**，留给 XM-INV-ADMIN-CREDITS 切片一起做。
+    在那之前，risks 3 就是开着的：核实过一次，没人盯着。
