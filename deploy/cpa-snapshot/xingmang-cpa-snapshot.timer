@@ -4,6 +4,12 @@ Description=Refresh Xingmang CPA consistent SQLite snapshot
 [Timer]
 OnBootSec=2min
 OnUnitInactiveSec=5min
+# 2026-09-08 事故：只靠上面两条单调触发时，定时器一旦"过期"（elapsed）就再也不会
+# 自己醒来——生产上它 09-01 22:47 停摆，快照停在 09-06 13:53（那次是人工 start 的，
+# 而过期的定时器不会被服务结束事件重新武装），平台连续两天报"数据陈旧"却没人知道
+# 是定时器的问题。加一条墙钟日历作兜底：单调触发失效时最迟 5 分钟内仍会跑一次。
+# 两条并存时取先到的那个，正常运行下节奏不变。
+OnCalendar=*:0/5
 RandomizedDelaySec=15s
 AccuracySec=15s
 Persistent=true
