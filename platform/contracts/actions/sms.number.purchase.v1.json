@@ -1,0 +1,67 @@
+{
+  "version": "1",
+  "risk_level": "L2",
+  "permission": "sms.purchase",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "NOT_POSSIBLE",
+  "id": "sms.number.purchase",
+  "idempotency": "REQUIRED_CLIENT_KEY",
+  "params": {
+    "provider": {
+      "type": "string",
+      "required": true
+    },
+    "operation_id": {
+      "type": "string",
+      "required": true
+    },
+    "quantity": {
+      "type": "int",
+      "required": true
+    },
+    "goods_id": {
+      "type": "string",
+      "required": false
+    },
+    "first_number": {
+      "type": "string",
+      "required": false
+    },
+    "no_first_number": {
+      "type": "string",
+      "required": false
+    },
+    "service": {
+      "type": "string",
+      "required": false
+    },
+    "country": {
+      "type": "int",
+      "required": false
+    },
+    "operator": {
+      "type": "string",
+      "required": false
+    },
+    "max_price": {
+      "type": "string",
+      "required": false
+    },
+    "duration": {
+      "type": "int",
+      "required": false
+    }
+  },
+  "notes": "XM-SMS0 买号。**花真钱且不可退**——买到的号就是买到了，compensation_mode 是 NOT_POSSIBLE 且是字面意思。权限 sms.purchase **不给 admin**，由专门的 sms-operator 角色持有：接码的单价比提现小得多（一个号几毛到几块），但它的花法更容易失控——数量上限 200，一次手滑就是两百个号。风险等级 L2（XM-RISK-RESTORE 恢复，此前是 L1）：花真钱且买到的号不可退，数量上限 200——一次手滑就是两百个号，按 ADR-003 的 L2 要「预览 + 幂等 + 写后确认 + 完整审计」。此前的 L1 是因为内核对 L2+ 返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2 会让它变成永远跑不起来的摆设，那时平台没有第二人审批；审批中心实装后这个理由不再成立。独立权限、已验证检查、未决防重、七态台账与页面确认这些护栏照旧。**注意 sms.number.request 仍是 L1**：它对机器身份开放，那一路靠消费者配额限额而不是审批。operation_id 必须由调用方稳定生成：它是幂等键，重试要带同一个；而未决唯一索引会挡住「换一个 UUID 重发同一份请求」。两家的字段互不通用：62 要三段正整数的 goods_id（详情接口只接受两段，**不能自己把两段扩成三段**，那样拼出来的 ID 指向别的商品），Hero 要 service（2–4 位小写字母数字）与 country。verification_type 由后端固定为 sms，调用方改不了——call 是另一种计费与交付方式，做成参数等于让一次手滑买成语音验证。**62 的关键形态**：买完只回订单 ID，号码要再读一次 order/tokens 才拿得到；那次补读失败时（哪怕上游回 4xx）钱已经花了，操作落 unknown 而不是 failed——那个 4xx 说的是「这次读失败」，不是「那次买没成功」。判成 failed 会让页面告诉人可以重来，而重来就是再买一次。"
+}

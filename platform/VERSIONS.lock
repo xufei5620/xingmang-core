@@ -1,0 +1,66 @@
+# VERSIONS.lock — 精确版本锁（规格 §5.3；P-6）
+# 建仓核对日：2026-08-26；来源：官方发布源（go.dev / npmjs / hub.docker / quay.io）
+# 规则：只允许精确版本；禁止范围表达式；禁止 latest。
+
+[toolchain]
+go            = 1.27.0
+node          = 24.13.0
+pnpm          = 11.24.0
+
+[backend]
+postgresql       = 18
+pgx              = v5.10.0
+golang-migrate   = v4.19.1
+uuid             = v1.6.0
+sqlc             = v1.31.1
+chi              = v5.3.2
+river            = 0.45.0
+minio-go         = v7.3.0
+# XM-CPA0：CPA 只读文件后端读 usage.sqlite 用的驱动。纯 Go（WASM 内嵌 SQLite），
+# 无 CGO；此前已作为间接依赖存在于 go.sum（未变更版本），本片提升为直接依赖。
+go-sqlite3       = v0.32.0
+
+[frontend]
+react         = 19.2.8
+react-dom     = 19.2.8
+react-router  = 7.18.2
+tanstack-query = 5.102.4
+typescript    = 5.9.3
+vite          = 8.2.2
+tailwindcss   = 4.3.3
+storybook     = 10.5.10
+vitest        = 4.1.11
+radix-dialog  = 1.1.23
+radix-label   = 2.1.15
+radix-select  = 2.3.7
+radix-tabs    = 1.1.21
+radix-tooltip = 1.2.16
+
+[images]
+# postgres digest 为 2026-08-26 docker manifest inspect（amd64 平台清单）实际值；
+# 首次生产部署 pull 时按 RepoDigest 复核
+postgres.image     = docker.io/library/postgres:18
+postgres.digest    = sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7
+postgres.verified_at = 2026-08-26
+# AUD2 disposable qualification image. The tag is retained for human
+# provenance; harnesses must pull the immutable index digest below.
+minio.image     = docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+minio.digest    = sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+minio.verified_at = 2026-08-30
+# keycloak 本批不部署；digest 于 XM-0007 部署时锁定（quay 现行最新 patch 26.7.2）
+keycloak.image     = quay.io/keycloak/keycloak:26.7.2
+keycloak.digest    = 待XM-0007部署时锁定
+keycloak.verified_at = 2026-08-26
+# uptime-kuma 是外部看门狗（XM-0033，deploy/watchdog/）。它**不属于平台栈**，
+# 部署在异故障域的另一台机器上（宪法 23 条），但版本纪律一视同仁。
+# digest 为 2026-08-27 docker manifest inspect（amd64 平台清单）实际值。
+uptime-kuma.image     = docker.io/louislam/uptime-kuma:1.23.16
+uptime-kuma.digest    = sha256:b4c3a4d186b4612b3a7bbb39c56a634626276615c21871c837a86e4a43d8e047
+uptime-kuma.verified_at = 2026-08-27
+
+[github-actions]
+actions/checkout        = fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+actions/setup-go        = 924ae3a1cded613372ab5595356fb5720e22ba16  # v6
+actions/setup-node      = 249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
+pnpm/action-setup       = f40ffcd9367d9f12939873eb1018b921a783ffaa  # v4
+gitleaks/gitleaks-action = dcedce43c6f43de0b836d1fe38946645c9c638dc # v2

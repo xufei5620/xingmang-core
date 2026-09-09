@@ -1,0 +1,324 @@
+# 运营指标与数据新鲜度模块
+
+规格 §9.1 的数据新鲜度模型。
+
+## 核心铁律：禁止裸数字冒充实时完整数据
+
+规格 §9.1 明文禁止。这条在代码里由**结构本身**保证，而不是靠约定：
+`GET /api/v1/metrics` 返回的每一项，`freshness` 都不是可选字段——
+没有「只返回值」的路径可走。有测试专门断言每项都带非空 `state`，
+防止将来有人加个「精简模式」把它绕过去。
+
+## 新鲜度是派生的，不是存的
+
+库里只存事实：`observed_at`、`status`、`is_partial`、`staleness_threshold_seconds`。
+状态在**查询时**算。
+
+这样时间推移会自动让「新鲜」变成「延迟」——不需要任何后台任务去扫表翻转标记，
+也就不存在「任务挂了导致看板一直显示新鲜」这种故障模式。
+
+`staleness_seconds` 同理，规格 §9.1 明文要求不持久化。
+
+## 状态优先级
+
+一个徽章只能显示一个状态，所以必须定义次序：
+
+```
+失败 > 未初始化 > 延迟 > 部分 > 新鲜
+```
+
+理由：从运维视角，「同步失败了」比「数据旧了」更需要立即动作；「数据旧了」
+又比「数据不全」更严重——不全但新的数据至少反映当前。
+
+被主状态盖住的信息**不会丢**：`is_partial`、`last_error_code`、`staleness_seconds`
+等原始字段照样返回，UI 可以在徽章旁显示细节。
+
+### 失败排在未初始化前面（XM-0031 修正）
+
+原来的次序是「未初始化 > 失败」，于是**第一次采集就失败**的指标被判成
+`uninitialized`。那是把一个正在发生的故障（凭据过期、连接配置缺项、上游
+拒绝）说成中性的「尚未接入」——前端把 `uninitialized` 定为 neutral 徽章，
+错误码只剩 hover title 能看见。
+
+「从未采集过」与「第一次采集就失败了」是两个不同的事实，后者必须可见。
+判据是 `last_error_code` 非空（等价于 `status = 'failed'`，两者由 CHECK 绑死）。
+
+## observed_at 可空的含义
+
+`observed_at == NULL` 表示**从未成功采集过**。它本身不足以判定「未初始化」：
+还要 `last_error_code` 为空才是——带着错误码且没有观测时刻的记录是
+「第一次就失败了」，判 `failed`（见上一节）。
+不要用零值时间冒充——那会让「1970 年采集的」和「从未采集」变得无法区分。
+
+即使从未采集，记录本身也要落库：前端需要显示「这个指标存在，但还没数据」，
+而不是干脆看不到它。
+
+## 存储范围
+
+`ops.metric_observation` 里每个 `(metric_key, environment)` 只保留**最新一条**。
+看板首屏要回答的是「现在是什么」。
+
+「这段时间是怎么变的」由**另一张表**回答，见下一节。
+
+## DS1：UTC 日粒度 policy/schema 基座
+
+DS1 将每条 raw sample 的 `rollup_policy_version` 与实际
+`expected_interval_seconds` 一起落库，并提供 `metric_observation_daily`、
+`metric_rollup_receipt`、`metric_rollup_state` 三张前进式 schema。纯整数
+accumulator 位于 `internal/platform/ops/rollup.go`，策略 loader 位于
+`internal/platform/ops/rollup_policy.go`；它们在写入前拒绝浮点、失败旧值进入
+numeric、partial 冒充 full、混币求和与非 UTC 桶。
+
+当前 registry 有 16 个 key，DS1 active policy 精确覆盖 14 个；两个 invoice key
+保留为 CR-0002 gated exclusion，不会因为缺少冻结契约而静默生成 v1 policy。receipt
+的 exactly-once、late/backfill、worker 与 raw 删除仍分别属于 DS2/DS4，DS1 不开启
+任何删除或生产运行时行为。
+
+## 历史样本（XM-0024）
+
+`ops.metric_observation_sample` 是追加型样本表：同步任务每写一次最新态，
+就在这里追加一个点。趋势图从它取数，端点是
+`GET /api/v1/metrics/history?metric_key=<k>&hours=<n>`。
+
+### 为什么单独一张表，而不是在 upsert 表里存数组
+
+最新态那张表是**覆盖**语义，历史是**追加**语义，把追加塞进覆盖里要付三份代价：
+
+1. **写放大随保留期线性增长。** 每次同步都得读出整个 jsonb 数组、反序列化、
+   追加一个元素、再把越来越大的整体写回去。一天 288 个点，一周就是两千个元素
+   每五分钟重写一遍。追加型独立表让每次写只是一条 `INSERT`。
+2. **并发写互相覆盖。** 「读—改—写」不是原子的。多副本部署时两个进程同时刷新
+   同一条指标，后写的那个会把前一个刚追加的点抹掉——而且抹得悄无声息。
+3. **查询要在应用层过滤。** 「最近 6 小时」在数组里意味着把整段历史取回进程再筛，
+   索引帮不上忙。独立表上 `(environment, metric_key, synced_at DESC)`
+   一条索引就够，等值 + 范围 + 排序全覆盖。
+
+分表还顺带让两种语义在**类型**上就分得开：`Store.Upsert` 与 `Store.InsertSample`
+是两个方法，谁也不会误用成另一个。采集路径两者都不用，用把它们包进同一个事务的
+`Store.UpsertWithSample`（见下面「最新态与样本同事务写入」）。
+
+### 横轴是 synced_at，不是 observed_at
+
+失败的那一轮没有新的 `observed_at`（它停在上一次成功的时刻，见「失败也要写」）。
+若按 `observed_at` 排点，一整段失败期的点会全部堆在最后一次成功的位置上——
+图上看不出中间断过。`synced_at` 是「这一刻尝试过同步」，无论成败都会前进，
+所以它才是时间轴。
+
+### 失败观测也留样
+
+趋势图上那段红完全由 `status=failed` 的样本画出来。不留样，图上只会看到一条
+平直的旧值，看不出中间断过——那是**用沉默撒谎**，正是宪法 12 条禁止的东西。
+
+样本表和最新态表共用同一条 CHECK：`(status = 'failed') = (last_error_code <> '')`。
+放行一条没有错误码的失败样本，图上就会出现一段没人解释得了的红。
+
+### 最新态与样本**同事务**写入（XM-R010）
+
+采集路径调用 `Store.UpsertWithSample`：一条指标的最新态与它的历史样本在**同一个
+数据库事务**里写完，要么都生效，要么两张表都没动。
+
+#### 此前的写法错在哪
+
+XM-0024 的实现是先 `Upsert` 提交、再单独 `InsertSample`，并在注释与本文里声称
+「样本失败让 River 重试，代价只是同一个 `synced_at` 上多出一个重复点，图上同一
+位置，无害」。**这个说法是错的**（Codex 冷审 PR #48 第 1 条）：
+
+- 同步任务每次执行——首轮和每一次重试——都**重新取当前时间、重新读一遍上游**。
+  重试写的是 T2 的新快照，不是 T1 那份的补写。
+- 所以样本写失败留下的不是「重复点」，而是两个不可接受的事实：**T1 那个点永久
+  缺失**（那一刻的上游数据已经过去，没有补数途径），同时最新态却已经提交，库里
+  自称「T1 采到了 V」——一条**历史里查无对证**的记录。
+- 本轮先写成功的那几条指标，重试时还会各添一个 T2 的点，值可能与 T1 不同。
+
+#### 现在的语义
+
+不变式：**最新态里出现过的每一个 `(metric_key, synced_at)`，历史里都有对应的点。**
+
+写失败 = 两张表都没动 = 这条指标这一轮什么都没说。River 重试取新的 `now`、重读
+上游，是一次**完整重放**而不是打补丁：上一轮没有留下任何半截状态，也就没有缺口
+需要补。任务日志里的错误码相应合成一个 `observation_write_failed`——分成
+`upsert` / `sample` 两个码，前提是两写会分别失败留下半截状态，现在不会了。
+
+#### 事务粒度是**一条指标**，不是一整轮
+
+一轮同步写五条指标，每条各开一个事务。整轮同事务会让一条指标的库错连带回滚另外
+四条已经算好的观测——包括那几条如实记录上游失败的 `failed` 观测，把「四条真话 +
+一条写不进去」变成「一条都不写」。
+
+所以一轮**可能只写进去前几条**：撞错的那条及其后的指标这一轮两张表都没有记录，
+重试时它们从 T2 开始有点，先写成功的那几条则在 T1 和 T2 各有一个点。这不是缺口
+——**没有任何一条曲线声称自己在 T1 有值却查不到**，只是几条曲线的起点不同。缺口
+指的是「最新态说有、历史里没有」，那个才是被根除的东西。
+
+#### 回归测试
+
+- `internal/platform/ops/atomicity_store_test.go`：真库上给样本表挂一个只针对本
+  用例 `source` 的 `BEFORE INSERT` 触发器，让**第二条**语句必然失败，断言最新态
+  也没留下；拆掉触发器后重放，两张表各恰好一条、都停在 T2。
+- `internal/platform/jobs/sub2api_sync_atomicity_integration_test.go`：真库 + 真
+  `ops.Store` 上**跑两次 `Work`**，闭合冷审点名的「从未真正执行第二次 Work」。
+- 单元层 `TestSub2APISyncRetryIsCleanReplay` /
+  `TestSub2APISyncPartialRoundLeavesNoOrphanLatestState`。
+
+用触发器而不是「构造一条非法的值」，是因为两张表的列约束逐条对齐：任何能让样本
+`INSERT` 撞库错的值，都会让同一事务里前一条 `upsert` 先撞上同一条错，那样测到的
+是「第一条语句失败」，证明不了「第一条成功、第二条失败时前者也被撤销」。也没有在
+产品代码里留测试钩子——一个「让写入失败」的开关会被编译进生产二进制。
+
+### 历史点不带 freshness
+
+`/metrics` 的每一项都必须带 `freshness`，`/metrics/history` 的每个点**都不带**。
+这不是偷懒：新鲜度是相对「现在」算的派生量，对一个过去的时刻算它没有意义。
+
+但历史点也不是裸数字——每个点都带 `observed_at` / `synced_at` / `status` /
+`is_partial` / `last_error_code`，也就是新鲜度的全部原料。前端据此把失败区间画成
+红段、把 `is_partial` 画成虚线。每个点仍然自带「这一刻数据是什么成色」的说明。
+
+同理，`ops.metric_observation_sample` 不存 `staleness_threshold_seconds`：
+阈值是「现在这条数据算不算旧」的判据，属于最新态。`Store.ListSamples` 返回的
+`Observation` 里该字段恒为零值，**不要对样本调用 `Freshness()`**。
+
+### 窗口超量时丢最旧的，而且**如实说**（XM-0031）
+
+`hours` 默认 24、最大 168；单次最多返回 `ops.MaxSampleLimit`（1000）条。
+5 分钟粒度下 168 小时约 2016 条，必然截断。
+
+截断时保留的是**最新**的 1000 条，不是最旧的：留最旧的会让曲线在窗口中途断掉，
+看起来像同步早就死了——那是假的故障信号，比少几个点糟得多。留最新的让曲线右端
+始终贴着「现在」。
+
+**截断本身必须出现在响应里**。此前只返回 `{items}`，前端无从区分「前 3.5 天真
+的没有数据」与「服务端把它裁掉了」——把不完整的窗口画成完整趋势，正是宪法 12 条
+禁止的事。`items` 里第一个 `synced_at` 只说明返回从何处开始，**不说明为何从那里
+开始**。现在响应顶层带 `truncated`（布尔）与 `limit`（本次生效的条数上限），
+两个字段恒在，未截断时是 `false`。
+
+判据是多取一行：`Store.ListSamples` 向库要 `limit+1` 条，真拿到 `limit+1` 条就
+说明窗口内至少还剩一条。多一行的代价是常数。`ListSamples` 把它作为**第二个返回
+值**而不是可选字段，签名强迫每个调用方处理它——忘记转达会在编译期显形。
+
+### 同时间戳样本按 (synced_at, id) 全序排（XM-0031）
+
+River 重试、多副本、同一秒内两次采集都能产生相同的 `synced_at`。只按 `synced_at`
+排序时，撞点的相对顺序由 PostgreSQL 自行决定，于是 limit 边界上「留哪一条、丢哪
+一条」在两次相同的查询之间可能不同——趋势图会莫名抖动而且无法复现。`id` 是自增
+主键，天然唯一且单调，用它做次级键让排序全序化。
+
+### 每个点都带 source（XM-0031）
+
+样本表本来就按点存 `source`，而查询只按 `(environment, metric_key)` 过滤，所以
+一条曲线上完全可能混着不同来源：Fake 切 real、换实例、接第二个 Sub2API 部署。
+此前的响应把 `source` 删掉，等于把「这段是演示数据、那段是真实数据」拼成一条无
+差别的曲线。现在 `source` **逐点**返回，前端据此在换源处断线或加标记。
+
+### 没有 UPDATE / DELETE 路径，也没有加防改规则
+
+`db/queries/ops.sql` 里这张表只有 `INSERT` 与 `SELECT` 两条语句，
+`ops.Store` 也只暴露 `UpsertWithSample` / `InsertSample` / `ListSamples`
+（前两个都只 INSERT，没有任何 UPDATE/DELETE 语句可用）。
+
+**没有**像 `audit.audit_event` 那样加 `DO INSTEAD NOTHING` 规则，因为两张表的义务
+不同。audit 是合规证据，宪法 11 条要求 append-only 并在库外锚定签名摘要，
+「永远不删」本身就是需求。本表是运营遥测，它的路线图里明确包含保留期清理
+（见下一节）。加规则会让将来那个清理任务的 `DELETE` 变成**静默空操作**——不报错、
+不删数据、表照样涨，而且要再写一条只为 `DROP RULE` 的前进式迁移才能解开。
+用一个静默失败的机制去防一个本来就没有代码路径的风险，代价大于收益。
+
+库层真正的闸门是部署时对应用账号 `REVOKE UPDATE`。**注意这里只剩 UPDATE**：
+自 XM-R012 起本表有了一条 `DELETE`（保留期清理），照旧文里那样连 DELETE 一起
+REVOKE 会让清理任务每轮报权限错误。两者的分界是有意的——
+
+- `UPDATE` 永远不该有：改一条已记录的样本等于篡改历史，没有任何合法场景；
+- `DELETE` 只允许按**时间窗口批量**发生，即保留期清理，见下一节。
+
+⚠️ **这个闸门今天并没有生效**，这是一个已知缺口而不是遗漏：当前部署里应用
+账号 `xingmang` 同时是**超级用户与表 owner**（见 `deploy/compose/launch.yaml`），
+而超级用户绕过一切权限检查，`REVOKE` 对它是空操作。要让这句承诺变成真的，
+需要把「跑迁移的 owner」与「跑应用的受限角色」拆成两个角色——那是一次部署
+拓扑变更（迁移、备份、bootstrap 都要跟着改），不属于本次加固的范围。
+证据查询见 `deploy/bootstrap/002_grants_evidence.sql`，它会如实报出
+「超级用户，闸门未生效」而不是让检查空过。
+
+### 保留策略：原始样本 90 天（XM-R012）
+
+**已实现。** `internal/platform/jobs/retention.go` 里的 River 周期任务
+`retention_prune` 每 24 小时跑一次，删掉 `synced_at` 早于 90 天的样本，
+以及 `resolved_at` 早于 180 天的**已解决**告警。
+
+量级背景：5 分钟粒度 → 每指标每天约 288 条。当前 5 个指标 × 3 个环境，
+约 4300 条/天、160 万条/年。单行很小（value_json 是几十字节的小对象），
+这个量级 PostgreSQL 毫无压力，但它不会自己停下来。
+
+几条值得知道的纪律：
+
+**分批删，不开长事务。** 每批 2000 行，走 `FOR UPDATE SKIP LOCKED` 选行。
+一条 `DELETE ... WHERE synced_at < cutoff` 在积压一年后会一次删掉上百万行：
+单个长事务持有大量行锁、撑大 WAL、把 autovacuum 挤在后面，而采集任务正在往
+同一张表写。单轮最多 500 批；删不完不算失败，打一条 Warn，明天那轮接着删。
+
+**告警只删已解决的。** 未解决 / 已认领的告警**永远不删**，与年龄无关——
+一条至今没人处理的老告警恰恰是最不该被删的那种。
+
+**审计事件一条都不删。** 不是还没做，是不会做：宪法 11 条要求审计 append-only
+并在库外锚定；删掉中间任意一条都会断链（`VerifyChain` 立刻报 `sequence_gap`）；
+而且 `audit.audit_event` 上的 `audit_event_no_delete` 规则会让 `DELETE` 变成
+静默空操作。审计的容量问题走**归档**（导出 + 链根锚定后转冷存储），另立任务。
+完整理由写在 `internal/platform/jobs/retention.go` 的文件头。
+
+保留天数由 `XM_METRIC_SAMPLE_RETENTION_DAYS` / `XM_ALERT_RETENTION_DAYS` 配置，
+必须为正；填 0 会让 worker 拒绝启动（0 天 = 把整张表删空，与「不清理」是两回事，
+后者请关 `XM_RETENTION_ENABLED`）。
+
+**降采样仍未做。** 冷审建议的「90 天原始 + 降采样至日粒度」只落实了前半句。
+后半句需要一张日粒度汇总表、一个聚合任务，以及 `ListSamples` 在跨度超过原始
+保留期时改读汇总表——那是一个功能，不是一次加固，独立立项更合适。
+今天不做它是**安全的**：`/metrics/history` 单次最多返回 1000 个点
+（`MaxSampleLimit`），90 天原始样本已经远超任何现有消费方读取的跨度，
+所以这次清理不会让任何现存查询少拿到数据。
+
+## 这些观测是谁写的
+
+`internal/platform/jobs` 的 Sub2API 周期同步任务（XM-0022）：默认每 300 秒
+读一次 `connectors/sub2api` 的只读契约，经 `sub2api.ToObservations` 转成
+Observation 后逐条 `Store.UpsertWithSample`——最新态与历史点在同一个事务里写完
+（XM-0024 + XM-R010，见「历史样本」一节）。运行手册见 `cmd/platform-worker/README.md`。
+
+三条调用方必须知道的纪律：
+
+**失败也要写。** 上游读取失败时任务仍为每个指标写一条
+`status=failed` + `last_error_code=<connector.ErrorKind>` 的观测。不写的话，
+库里那条记录会**停在上一次成功的样子**——`observed_at` 不再前进，看板只能
+等它超过阈值才降级成「延迟」，而真正的原因（认证过期？限流？）一个字都没留下。
+
+**`Upsert` 是整行覆盖。** `ON CONFLICT DO UPDATE` 里 `observed_at`、
+`last_success` 都取 `EXCLUDED.*`，本模块**不会**替调用方保留旧值。写失败
+观测的调用方必须自己先 `Get` 回旧行再把这两个字段带上，否则「半小时前成功过」
+会被抹成「从未采集」。这条留给调用方而不是藏进 SQL：「保留旧值」在补数据、
+改口径、换来源这些场景下并不总是对的，仓储层替所有人默默做决定会更难排查。
+
+**Fake 数据不伪装成真实来源，而且 production 根本不许用它。** 真实只读凭据要一个
+个环境去开，未开的环境仍跑 fake 模式，`source` 默认是 `sub2api-staging`——`source`
+是前端必须显示的字段（`/metrics` 与 `/metrics/history` 都逐点返回），它同时承担
+「这批数字从哪来」的告知义务。
+
+XM-0031 起，`environment=production` 且同步开启时配 `fake` 会让 Worker
+**启动即退出**：构造出来的用户/收入/余额一旦写进本表，看板就会以正常主数字 +
+「数据新鲜」徽章呈现它们，`source` 那行小字挡不住这件事。生产只有两条合法出路：
+`XM_SUB2API_MODE=real`（连接配置缺项时每周期写一条明确的 `SyncFailed` +
+`last_error_code=not_supported`，那是诚实的失败，不是假数据），或显式关闭同步。
+详见 `cmd/platform-worker/README.md`。
+
+## 指标白名单（XM-0031）
+
+`ops.ValidMetricKey` 只验**形态**（落库判据）；「这个指标存不存在」由
+`ops.KnownMetricKey` 回答，`/metrics/history` 用后者。
+
+原因：只验形态时，一个拼错的 `sub2api.revenu.daily` 返回 200 + 空数组，前端无从
+区分「这个指标真的没有数据」与「这个指标根本不存在」——后者是调用错误，静默返回
+空正是「用沉默撒谎」。现在未注册的指标当场 400，错误文案列出全部已注册指标。
+
+白名单在 `ops` 里是**字面量重复**（`connectors/*` 依赖本包，反向 import 会成环），
+覆盖 `connectors/sub2api` 的五条与 `connectors/invoice` 的两条。漂移由
+`internal/platform/ops/metrickeys_test.go` 的一致性测试兜住——它在外部测试包里，
+同时看得见两边，任何一边加减指标都会当场失败。新采集模块可以用
+`ops.RegisterMetricKey` 在自己的 init 里注册，不必回来改这张表。

@@ -1,0 +1,18 @@
+{
+  "id": "sms.favorite.remove",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "provider": { "type": "string", "required": true, "enum": ["hero_sms"] },
+    "service": { "type": "string", "required": true },
+    "country": { "type": "int", "required": true }
+  },
+  "notes": "XM-SMS1 移除一个收藏（DELETE，严格 204）。不花钱，不进七态台账，理由同 sms.favorite.set。反方向再执行一次 sms.favorite.set 即可恢复。"
+}

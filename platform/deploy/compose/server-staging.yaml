@@ -1,0 +1,45 @@
+# 星芒统一控制平台 —— 服务器 staging 覆盖
+#
+# 与 launch.yaml 叠加使用。发布脚本会固定项目名为 xingmang-staging，
+# 因此 staging 的网络、卷和容器不会碰开发栈或生产栈。真实服务器入口
+# 应再由宿主 Nginx 反代到这个仅回环发布口（见 deploy/nginx/server-staging.conf.example）。
+services:
+  # launch.yaml 的 bootstrap SQL 明确写入 staging environment；服务器档
+  # 通过 profile 显式启用它，避免有人把同一组文件误用到 production。
+  bootstrap:
+    profiles: ["staging"]
+    environment:
+      PGDATABASE: ${POSTGRES_DB:-xingmang}
+
+  migrate:
+    environment:
+      ENVIRONMENT: staging
+
+  platform-api:
+    environment:
+      ENVIRONMENT: staging
+      # staging 仍允许开发期身份注入，真实共享验收环境切 OIDC 前需另立 CR。
+      XM_AUTH_MODE: ${XM_AUTH_MODE:-dev-header}
+
+  platform-worker:
+    environment:
+      ENVIRONMENT: staging
+      XM_SUB2API_SYNC_ENABLED: ${XM_SUB2API_SYNC_ENABLED:-true}
+      XM_SUB2API_SYNC_INTERVAL: ${XM_SUB2API_SYNC_INTERVAL:-300s}
+      XM_SUB2API_INSTANCE_ID: ${XM_SUB2API_INSTANCE_ID:-sub2api-staging}
+      XM_SUB2API_MODE: ${XM_SUB2API_MODE:-fake}
+      XM_NEWAPI_SYNC_ENABLED: ${XM_NEWAPI_SYNC_ENABLED:-true}
+      XM_NEWAPI_SYNC_INTERVAL: ${XM_NEWAPI_SYNC_INTERVAL:-300s}
+      XM_NEWAPI_INSTANCE_ID: ${XM_NEWAPI_INSTANCE_ID:-newapi-staging}
+      XM_NEWAPI_MODE: ${XM_NEWAPI_MODE:-fake}
+      XM_FINANCE_COLLECT_MODE: ${XM_FINANCE_COLLECT_MODE:-fake}
+      XM_FINANCE_COLLECT_ENABLED: ${XM_FINANCE_COLLECT_ENABLED:-true}
+      XM_FINANCE_COLLECT_INTERVAL: ${XM_FINANCE_COLLECT_INTERVAL:-300s}
+      XM_FINANCE_COLLECT_REQUEST_TIMEOUT: ${XM_FINANCE_COLLECT_REQUEST_TIMEOUT:-30s}
+      XM_FINANCE_COLLECT_INSTANCE_ID: ${XM_FINANCE_COLLECT_INSTANCE_ID:-finance-staging}
+      HEARTBEAT_RUN_ON_START: ${HEARTBEAT_RUN_ON_START:-true}
+
+  web:
+    ports: !override
+      # 不默认暴露到公网；宿主 Nginx 通过回环端口接入。
+      - "127.0.0.1:18088:80"

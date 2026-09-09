@@ -1,0 +1,52 @@
+{
+  "id": "publishing.channel.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "publishing.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "UPSERT_BY_ENVIRONMENT_PLATFORM_HANDLE",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "platform": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "x",
+        "telegram",
+        "other"
+      ]
+    },
+    "handle": {
+      "type": "string",
+      "required": true
+    },
+    "display_name": {
+      "type": "string",
+      "required": false
+    },
+    "purpose": {
+      "type": "string",
+      "required": false
+    },
+    "credential_ref": {
+      "type": "string",
+      "required": false
+    },
+    "note": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "渠道账号登记。credential_ref 只收 secret://<scope>/<name> 引用，领域层与库层各一道正则挡住粘进来的明文（宪法 7 条）。**刻意是 L1 而不是 L2**：内核对 L2+ 会在 Handler 之前把参数冻进 core.approval_request.params_json，而 action.Schema 只支持 Required/Enum、表达不了引用形状，于是 L2 会让一次手滑粘贴的明文永久落库并显示给审批人。等 Schema 支持字段形状校验后可安全回到 L2。启停走 publishing.channel.set_status，本动作不改状态。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

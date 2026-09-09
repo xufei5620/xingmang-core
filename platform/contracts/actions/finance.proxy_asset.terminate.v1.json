@@ -1,0 +1,35 @@
+{
+  "id": "finance.proxy_asset.terminate",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "proxy_asset_id": {
+      "type": "string",
+      "required": true
+    },
+    "terminated_on": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-0037c 代理资产提前失效并结转损失。语义与 finance.subscription_batch.terminate 逐条相同（当天起不再摊销、剩余转单列损失科目、一次性、终止与结转同事务）。注意与 mounted=false 的区别：未挂载是「这份代理今天没在为这个账号服务，成本为 0」，终止是「这份代理没了，剩下的钱摊不出去」——前者可来回切换且不结转，后者不可逆且结转一笔损失。"
+}

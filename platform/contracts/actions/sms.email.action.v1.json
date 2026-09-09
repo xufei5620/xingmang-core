@@ -1,0 +1,18 @@
+{
+  "id": "sms.email.action",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "operation_id": { "type": "string", "required": true },
+    "email_id": { "type": "string", "required": true },
+    "kind": { "type": "string", "required": true, "enum": ["email_cancel", "email_reorder"] }
+  },
+  "notes": "XM-SMS1 对一个邮箱接码做取消（DELETE /emails/{id}，严格 204）或重下单（POST /emails/{id}/reorder）。重下单**可能花钱**，取消不花——两者仍共用 sms.manage，因为重下单的前提是这条邮箱已经买过，钥匙在买的那一步已经验过。取消成功后**不自行改本地状态**：上游只回了 204，没说它变成了什么；替它写一个「已取消」，页面上就会显示一个上游并不认可的状态，下一次刷新又会把它变回去。走七态台账留痕；email_id 是本地 UUID，台账里的 email_id 列指向它。"
+}

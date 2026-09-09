@@ -1,0 +1,35 @@
+{
+  "id": "finance.subscription_batch.terminate",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "subscription_batch_id": {
+      "type": "string",
+      "required": true
+    },
+    "terminated_on": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-0037c 订阅批次提前失效并结转损失（设计稿 §3.5 + §12 拍板第 5 项）。与 refund 分开而不是合成一个「改批次」：终止**结转一笔损失**，那是会出现在报表上的独立会计事件，混进通用更新里，「这个月退订了几笔、共损失多少」就只能靠比对每条更新的 before/after 才答得出（同 recharge_ratio 单独成 Action 的理由）。terminated_on **当天起不再摊销**，[terminated_on, expires_on] 的剩余未摊销额一次性转入 finance.amortization_loss——**单列科目，不计入渠道当日成本**（§12 拍板）：计进 cost_minor 会让失效当天的渠道毛利凭空塌一个月的量，看板上像是渠道出了事，而真相是我们退订了一个没用完的订阅。终止日必须落在有效期内（到期之后的「提前失效」什么也没提前）。终止是**一次性**的：重复终止被拒，改终止日等于让一个已经出现在报表上的损失悄悄变个数。终止与结转在同一个事务里——终止而没结转钱就从账上消失，结转而没终止同一笔钱被记两遍。结转金额一并进审计的 after 摘要。"
+}

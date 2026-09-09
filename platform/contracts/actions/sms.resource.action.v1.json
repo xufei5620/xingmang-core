@@ -1,0 +1,39 @@
+{
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "id": "sms.resource.action",
+  "idempotency": "REQUIRED_CLIENT_KEY",
+  "params": {
+    "operation_id": {
+      "type": "string",
+      "required": true
+    },
+    "resource_id": {
+      "type": "string",
+      "required": true
+    },
+    "kind": {
+      "type": "string",
+      "required": true
+    },
+    "duration": {
+      "type": "int",
+      "required": false
+    }
+  },
+  "notes": "XM-SMS0 号码的生命周期动作：cancel / finish / replace / reactivate / prolong。**只有 Hero 支持**——62 一个都没有，领域层直接拒绝而不是让它打到上游换一个含糊的 404（那种 404 看起来像「号码不存在」，会把人引到完全错的方向）。枚举里**刻意不含 purchase**：买号走另一个 Action，因为它要的权限不同（花钱 vs 管理）；放进同一个枚举会让一个只有 sms.manage 的人买得了号。reactivate / prolong 花钱，cancel / finish 不花。cancel/finish 严格 204 才算成功，而**成功之后不自行改资源状态**：上游只回了一个 204，没说这个号变成了什么；替它说一个「已取消」，页面上就会显示一个上游并不认可的状态，而下一次同步又会把它变回去。replace **可能返回新的 activation ID**：新资源落库，而操作台账里仍保留原目标——那笔操作针对的是「那张旧号」，改写它会让事后对账找不到起点。reactivate/prolong 的档位价格与指纹只是**本地预检绑定**，上游写体只带 duration；读选项到执行之间的价格变化不受它保护，那需要真实合同保证，代码给不了这个承诺。"
+}

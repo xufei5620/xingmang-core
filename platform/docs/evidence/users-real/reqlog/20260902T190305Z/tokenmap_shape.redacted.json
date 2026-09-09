@@ -1,0 +1,9 @@
+{
+  "carries_source_user_id": false,
+  "finding": "the value shape has no field for an upstream numeric/opaque user id - only a display identifier (username or email) suffixed with the source. cmd/reqlog-recorder/tokenmap.go's own export queries only SELECT username/email, never id, from both upstream databases. Today's tokenmap therefore cannot supply platform + source_user_id (REQLOG_USERREF_APPROVAL's evidence requirement) without a change to that export query - this is a schema-level fact, true regardless of which tokenmap.json was sampled.",
+  "malformed_suffix": 0,
+  "schema": "flat map[string]string; key = token prefix, value = \"\u003cusername-or-email\u003e@\u003csource\u003e\"",
+  "suffix_newapi": 239,
+  "suffix_sub2api": 3333,
+  "total_entries": 3572
+}

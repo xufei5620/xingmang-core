@@ -1,0 +1,346 @@
+package main
+
+import (
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/xufei5620/xingmang-platform/connectors/reqlog"
+	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/channelassurance"
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/requestlog"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
+)
+
+// reqlogTokenEnvVar 是 reqlog 控制台 Basic Auth 凭据在 env Provider 下的落点。
+//
+// Connector **不认识**这个名字：它只拿到 secret://<scope>/<name> 形式的引用，
+// 由这里的登记表决定去哪儿取（ADR-014）。将来换 SOPS/Vault，改的只有本文件。
+//
+// 值的形态是 `用户名:口令` 整串——理由见 reqlog.applyBasicAuth 的注释：
+// 把用户名单独放进配置，等于让凭据的一半有了一个不受 CredentialRef 管辖的落点。
+const reqlogTokenEnvVar = "XM_REQLOG_TOKEN"
+
+// reqlogMode 决定「请求详情」用哪个 ReadClient 实现。
+type reqlogMode string
+
+const (
+	// reqlogModeFake 用 reqlog.NewFake：控制台 API 形状核实之前唯一走得通的模式。
+	reqlogModeFake reqlogMode = "fake"
+	// reqlogModeReal 走真实只读客户端骨架；数据方法目前一律 not_supported。
+	reqlogModeReal reqlogMode = "real"
+	// reqlogModeFile 读记录代理（cmd/reqlog-recorder）落盘的数据（XM-REQLOG-
+	// MERGE）：不经 HTTP，直接只读挂载记录代理的数据目录与 tokenmap.json。
+	// 这条路径不依赖 reqlog 控制台的 HTTP API 形状（那正是 real 模式卡住的
+	// 地方，见 ErrConsoleAPIShapeUnverified 与 contracts/connectors/
+	// reqlog.read.v1.md §5 的未决冲突），因此**在生产可用**——与 fake 不同，
+	// file 模式读的是记录代理写下的真实用户对话，不是编出来的样本。
+	reqlogModeFile reqlogMode = "file"
+	// reqlogModeOff 完全不挂载「请求」两个端点。
+	//
+	// 比 fake 多出来的这一档是必要的：一个没部署 reqlog 的环境，
+	// 端点**不存在**（404）比端点存在却只回演示数据诚实得多——
+	// 后者会让前端把演示对话渲染成真实用户的问答。
+	reqlogModeOff reqlogMode = "off"
+)
+
+// parseReqlogMode 解析模式，空串按 off 处理。
+//
+// 默认 off 而不是 fake：这条通道读的是**用户与模型的完整对话**，
+// 而 fake 模式会把一批编出来的对话摆进一个长得像真的详情页。别的连接器默认
+// fake 的代价是「看板上几个数字是假的」，这里的代价是「有人以为自己在看
+// 真实用户问了什么」——默认值必须选那个更难出错的方向。
+//
+// staging 要演示就显式配 XM_REQLOG_MODE=fake，那是一次有意的选择。
+func parseReqlogMode(s string) (reqlogMode, error) {
+	switch mode := reqlogMode(strings.ToLower(strings.TrimSpace(s))); mode {
+	case "":
+		return reqlogModeOff, nil
+	case reqlogModeFake, reqlogModeReal, reqlogModeFile, reqlogModeOff:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("XM_REQLOG_MODE %q: 只接受 off / fake / real / file", s)
+	}
+}
+
+// reqlogConfig 是「请求详情」这条链路的配置。
+type reqlogConfig struct {
+	Mode reqlogMode
+	// 以下四项只在 real 模式用到。**只读进配置、不解析**：
+	// 凭据只经 CredentialRef，明文由 SecretProvider 在拼 Authorization 头的
+	// 那一瞬才出现（ADR-014、宪法 7 条）。
+	Endpoint        string
+	TargetAllowlist []string
+	CredentialRef   string
+	Timeout         time.Duration
+	// 以下三项只在 file 模式用到。都是**路径**，不是凭据——不经
+	// CredentialRef（见 reqlog.FileConfig 的文档：DataDir/TokenMapPath 与
+	// XM_SECRET_ROOT 是同一类基础设施路径，权限边界由只读挂载本身承担，
+	// 不是"向第三方系统认证用的凭据"）。
+	DataDir      string
+	TokenMapPath string
+	// TokenMapV2Path 是 tokenmap.v2.json（CR-0008）在**容器内**的路径，
+	// 可留空——留空、文件不存在或解析失败时 RequestLogSummary.User 恒为
+	// nil，与 TokenMapPath 留空时 Username 恒为空串同一条"映射不到"纪律。
+	TokenMapV2Path string
+}
+
+// defaultReqlogTimeout 是单次控制台读取的超时。
+//
+// 比 sub2api 的 15s 宽一点：这条通道要取回完整 SSE 流，单条记录可以到几十 MB，
+// 而它又不在任何热路径上——一次由人点击触发的详情读取，多等几秒好过读不回来。
+const defaultReqlogTimeout = 30 * time.Second
+
+// defaultReqlogDataDir 是 file 模式下记录代理数据目录在**容器内**的挂载点。
+//
+// 与宿主机路径（记录代理落盘用的 /root/reqlog/data）不是一回事：容器内
+// 路径由 deploy/compose/server-prod.yaml 的只读绑定挂载决定，宿主机那侧
+// 路径可由 .env 的 XM_REQLOG_HOST_DATA_DIR 覆盖，两者故意分成两层——改
+// 宿主机目录位置不需要碰这个默认值。
+const defaultReqlogDataDir = "/var/lib/xm/reqlog"
+
+func reqlogConfigFromEnv(getenv func(string) string) (reqlogConfig, error) {
+	mode, err := parseReqlogMode(getenv("XM_REQLOG_MODE"))
+	if err != nil {
+		return reqlogConfig{}, err
+	}
+	c := reqlogConfig{
+		Mode:            mode,
+		Endpoint:        strings.TrimSpace(getenv("XM_REQLOG_ENDPOINT")),
+		TargetAllowlist: parseHostAllowlist(getenv("XM_REQLOG_TARGET_ALLOWLIST")),
+		CredentialRef:   strings.TrimSpace(getenv("XM_REQLOG_CREDENTIAL_REF")),
+		Timeout:         defaultReqlogTimeout,
+		DataDir:         defaultReqlogDataDir,
+		// TokenMapPath 默认留空而不是猜一个路径：没配就是没有用户名映射
+		// 能力（Username 恒为空串，契约允许的合法状态），不是"用一个大概率
+		// 不存在的路径去连"。
+		TokenMapPath: strings.TrimSpace(getenv("XM_REQLOG_TOKENMAP")),
+		// TokenMapV2Path 同样默认留空（CR-0008 新增可选字段，同 TokenMapPath
+		// 的"留空即不生效"约定）：没配就是没有稳定 UserRef 关联能力
+		// （User 恒为 nil，契约允许的合法状态），不是新错误类别。
+		TokenMapV2Path: strings.TrimSpace(getenv("XM_REQLOG_TOKENMAP_V2")),
+	}
+	if v := strings.TrimSpace(getenv("XM_REQLOG_DATA_DIR")); v != "" {
+		c.DataDir = v
+	}
+	if v := strings.TrimSpace(getenv("XM_REQLOG_TIMEOUT")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return reqlogConfig{}, fmt.Errorf("XM_REQLOG_TIMEOUT: %w", err)
+		}
+		if d <= 0 {
+			return reqlogConfig{}, fmt.Errorf("XM_REQLOG_TIMEOUT 必须为正, got %s", v)
+		}
+		c.Timeout = d
+	}
+	return c, nil
+}
+
+// parseHostAllowlist 把逗号分隔的主机清单拆成精确匹配用的切片。
+//
+// 只做拆分、去空白、转小写——**不做**任何补全或推断（比如从 endpoint 猜一个
+// 主机塞进去）。allowlist 的全部价值就在于它是人显式写下的那一份，
+// 系统替人填进去的那一项等于没有。与 cmd/platform-worker 里的同名函数一致。
+func parseHostAllowlist(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		host := strings.ToLower(strings.TrimSpace(part))
+		if host != "" {
+			out = append(out, host)
+		}
+	}
+	return out
+}
+
+// requestLogsOrNil 把「没启用」翻译成一个**真正为 nil 的接口值**。
+//
+// 直接把 `(*requestlog.Service)(nil)` 赋给接口字段，得到的接口**不是 nil**
+// （它带着类型信息），于是 router 里的 `d.RequestLogs != nil` 为真，端点照挂，
+// 第一次调用就 panic。这是 Go 里最经典的一个坑，而它在这里的后果是
+// 「本该 404 的端点变成 500」——正是我们特意区分开的那两种状态。
+func requestLogsOrNil(s *requestlog.Service) httpapi.RequestLogQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// newRequestLogService 按配置装配「请求详情」查询入口。
+//
+// 返回 (nil, nil) 表示这条链路没有启用——路由因此不挂载那两个端点。
+// 「没启用」不是错误：reqlog 是一个外挂系统，没部署它的环境照样该起得来。
+//
+// 生产禁 fake：与 worker 那边对 Sub2API 的处理同一条纪律，但理由更硬一档。
+// 那边的 fake 会让看板上几个数字是假的；这里的 fake 会让一个标着真实用户名的
+// 详情页显示一段编出来的对话——有人会拿它去回复客诉、去做风控判断。
+//
+// **file 不在这条"生产禁"名单里**：它读的是记录代理落盘的真实数据，
+// 与 real（目前读不出数据，见 newReqlogClient 的注释）和 fake（编造数据）
+// 都不一样，是当前唯一能在生产提供真实请求详情的模式。
+func newRequestLogService(
+	cfg reqlogConfig, environment string, sink *audit.Store, logger *slog.Logger,
+) (*requestlog.Service, error) {
+	switch cfg.Mode {
+	case reqlogModeOff:
+		logger.Info("reqlog_disabled",
+			slog.String("module", "platform.api"),
+			slog.String("detail", "XM_REQLOG_MODE 未配置或为 off：请求详情端点不挂载"))
+		return nil, nil
+
+	case reqlogModeFake:
+		if environment == "production" {
+			return nil, fmt.Errorf(
+				"XM_REQLOG_MODE=fake 不允许在生产环境使用：请求详情页会把编造的对话" +
+					"显示成真实用户的问答。生产请配 real 或 file，或显式设为 off")
+		}
+		logger.Warn("reqlog_fake_mode",
+			slog.String("module", "platform.api"),
+			slog.String("detail", "请求详情返回演示数据，不是真实用户对话"))
+		return requestlog.NewService(reqlog.NewFake(reqlog.FakeOptions{}), sink)
+
+	case reqlogModeReal:
+		client, err := newReqlogClient(cfg, environment, logger)
+		if err != nil {
+			return nil, err
+		}
+		return requestlog.NewService(client, sink)
+
+	case reqlogModeFile:
+		client, err := newReqlogFileClient(cfg, logger)
+		if err != nil {
+			return nil, err
+		}
+		return requestlog.NewService(client, sink)
+
+	default:
+		return nil, fmt.Errorf("未知的 reqlog 模式 %q", cfg.Mode)
+	}
+}
+
+// channelAssuranceOrNil 把「没启用」翻译成一个真正为 nil 的接口值——与
+// requestLogsOrNil 同一个理由（把具体类型的 nil 指针直接赋给接口字段会得到
+// 一个非 nil 的接口，router 里的 `!= nil` 判断会失真，端点会带着 nil 依赖
+// 照挂，第一次调用直接 panic 而不是我们想要的「未启用即 404」）。
+func channelAssuranceOrNil(s *channelassurance.Service) httpapi.ChannelAssuranceQuerier {
+	if s == nil {
+		return nil
+	}
+	return s
+}
+
+// newChannelAssuranceService 按配置装配「渠道保障」被动指标查询入口
+// （XM-ASSURE0 第一片）。
+//
+// **只在 reqlogModeFile 下才构造**，fake/real/off 三种模式一律返回
+// (nil, nil)（端点不挂载）——理由与 internal/platform/jobs/reqlog_metrics.go
+// 的 reqlog_metrics 周期任务完全同源（那条任务遇到 fake/real 同样退化成
+// 不注册，见其 ParseReqlogMetricsMode 的注释）：
+//
+//   - fake 模式：reqlog.NewFake 是一个纯内存的 ReadClient，不落盘任何
+//     index.jsonl，MetricsReader 扫的是一个真实文件系统路径，两者天生不是
+//     同一份数据，硬接上只会让「保障概览」显示一堆与请求列表页对不上的假
+//     聚合数字；
+//   - real 模式：控制台 HTTP API 形状尚未核实（§5 未决冲突），根本没有
+//     数据可读；
+//   - file 模式：MetricsReader 与 file 模式的 NewFileClient 读的是**同一份**
+//     磁盘数据（同一个 DataDir），聚合出来的数字与「请求详情」列表页显示
+//     的记录是同一件事的两种视角，这是唯一诚实的组合。
+func newChannelAssuranceService(cfg reqlogConfig, logger *slog.Logger) (*channelassurance.Service, error) {
+	if cfg.Mode != reqlogModeFile {
+		return nil, nil
+	}
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return nil, fmt.Errorf("XM_REQLOG_MODE=file 需要 XM_REQLOG_DATA_DIR 非空（渠道保障复用同一份数据目录）")
+	}
+	reader, err := reqlog.NewMetricsReader(reqlog.MetricsReaderConfig{DataDir: cfg.DataDir, Logger: logger})
+	if err != nil {
+		return nil, err
+	}
+	return channelassurance.NewService(reader)
+}
+
+// newReqlogFileClient 构造只读文件后端客户端（XM-REQLOG-MERGE）。
+//
+// 配置不全时**启动即拒**，与 real 模式同一条纪律（见 newReqlogClient 的
+// 注释）：这是一个由人点击触发的只读端点，半套配置起来的症状是"点进去
+// 报错，查半天发现挂载路径是空的"，不如启动时就说清楚。
+func newReqlogFileClient(cfg reqlogConfig, logger *slog.Logger) (requestlog.Client, error) {
+	if strings.TrimSpace(cfg.DataDir) == "" {
+		return nil, fmt.Errorf("XM_REQLOG_MODE=file 需要 XM_REQLOG_DATA_DIR 非空")
+	}
+	client, err := reqlog.NewFileClient(reqlog.FileConfig{
+		DataDir:        cfg.DataDir,
+		TokenMapPath:   cfg.TokenMapPath,
+		TokenMapV2Path: cfg.TokenMapV2Path,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if cfg.TokenMapPath == "" {
+		logger.Warn("reqlog_file_mode_no_tokenmap",
+			slog.String("module", "platform.api"),
+			slog.String("detail", "XM_REQLOG_TOKENMAP 未配置：请求详情里的用户名将恒为空串"))
+	}
+	return client, nil
+}
+
+// newReqlogClient 构造真实只读客户端。
+//
+// ⚠️ 客户端今天读不出数据：控制台 API 形状未核实，数据方法返回 not_supported
+// （见 connectors/reqlog/client.go）。仍然把它接起来而不是也走 off，理由是
+// **配置链路要能被验证**：endpoint 拼错、allowlist 漏填、凭据引用格式不对，
+// 这些在启动时就该被发现，而不是等真实 API 补上那天才一起暴露。
+//
+// 配置不全时**启动即拒**（与 worker 那边「写一条 SyncFailed 观测继续跑」相反）：
+// 那边是后台采集，一条通道配错不该拖垮心跳；这里是一个由人点击触发的只读端点，
+// 让它带着半套配置起来，症状会是「点进去报 502，查半天发现 allowlist 是空的」。
+func newReqlogClient(cfg reqlogConfig, environment string, logger *slog.Logger) (requestlog.Client, error) {
+	if cfg.Endpoint == "" || len(cfg.TargetAllowlist) == 0 || cfg.CredentialRef == "" {
+		return nil, fmt.Errorf(
+			"XM_REQLOG_MODE=real 需要 XM_REQLOG_ENDPOINT / XM_REQLOG_TARGET_ALLOWLIST / " +
+				"XM_REQLOG_CREDENTIAL_REF 三项齐备")
+	}
+	provider, err := reqlogSecretsFromEnv(cfg.CredentialRef, environment, logger)
+	if err != nil {
+		return nil, err
+	}
+	client, err := reqlog.NewClient(connector.Config{
+		ServiceInstanceID: "reqlog-" + environment,
+		Environment:       environment,
+		Endpoint:          cfg.Endpoint,
+		CredentialRef:     cfg.CredentialRef,
+		TargetAllowlist:   cfg.TargetAllowlist,
+		Timeout:           cfg.Timeout,
+	}, provider)
+	if err != nil {
+		return nil, err
+	}
+	logger.Warn("reqlog_real_mode_incomplete",
+		slog.String("module", "platform.api"),
+		slog.String("detail", "reqlog 控制台 API 形状未核实：请求详情端点会返回 501（XM-0039）"))
+	return client, nil
+}
+
+// reqlogSecretsFromEnv 装配 Basic Auth 凭据的 Provider：
+// 显式登记的 EnvProvider + 每次读取都留审计的 Audited 装饰器。
+func reqlogSecretsFromEnv(
+	refText, environment string, logger *slog.Logger,
+) (secrets.SecretProvider, error) {
+	ref, err := secrets.ParseCredentialRef(refText)
+	if err != nil {
+		return nil, fmt.Errorf("XM_REQLOG_CREDENTIAL_REF: %w", err)
+	}
+	provider, err := secrets.NewEnvProvider(
+		map[string]string{ref.String(): reqlogTokenEnvVar},
+	)
+	if err != nil {
+		return nil, err
+	}
+	// 审计装饰器包在外面：每次解析（无论成败）都留一条不含明文的记录，
+	// 「这个只读账号什么时候被谁用过」才查得出来（规格 §4.5）
+	return secrets.NewAudited(provider, secrets.NewSlogRecorder(logger), environment), nil
+}

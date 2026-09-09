@@ -1,0 +1,22 @@
+{
+  "id": "sms.rent.purchase",
+  "version": "1",
+  "risk_level": "L2",
+  "permission": "sms.purchase",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "provider": { "type": "string", "required": true, "enum": ["hero_sms"] },
+    "operation_id": { "type": "string", "required": true },
+    "service": { "type": "string", "required": true },
+    "country": { "type": "int", "required": true },
+    "duration_hours": { "type": "int", "required": true },
+    "operator": { "type": "string", "required": false },
+    "currency": { "type": "int", "required": false }
+  },
+  "notes": "XM-SMS1 租用一个号码（Hero-SMS 兼容层 getRentNumber，官方 OpenAPI 2026-09-06 核对）。**花真钱且按小时计费**：与买号同一把钥匙 sms.purchase，因为两者都是「向供应商付费换一个资源」。只有 Hero 有租用，provider 枚举里就只放它一家——页面上的供应商下拉据此只显示 Hero，而不是让 62 出现后再报「不支持」。走与买号相同的七态台账：prepared → submitted → succeeded | failed | unknown；上游成功但资源落库失败落 unknown 交人工，绝不重试——重试就是再租一次。同参数未决时再发一次被未决唯一索引挡住，换 operation_id 也不行。租到的号进 sms_resource，subtype=2（官方 ActivationSubtype：1 激活 / 2 租用），页面据此把它与 20 分钟就过期的普通激活号区分开。duration_hours 是官方 RentDuration（小时），本地要求为正；currency 只接受官方枚举 643/840/978/156。兼容层的响应形状（successfulNumberv2Response：activationId / phoneNumber / activationCost / activationEndTime…）与现代层不同，连接器单独解析，不复用 activation 解析器。密钥在兼容层走 query 的 api_key（官方 apiKeyQuery），会进上游访问日志；本仓的日志与错误文本一律不带 URL。compensation_mode 是 MANUAL：租出去的号上游不退。"
+}

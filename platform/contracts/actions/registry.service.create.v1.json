@@ -1,0 +1,24 @@
+{
+  "id": "registry.service.create",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "registry.service.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_IMPLEMENTED_FOUNDATION_A",
+  "write_confirmation": "NOT_IMPLEMENTED_FOUNDATION_A",
+  "approval": {"required": false},
+  "compensation_mode": "MANUAL",
+  "params": {
+    "service_type": {"type": "string", "required": true},
+    "instance_id": {"type": "string", "required": true},
+    "environment": {"type": "string", "required": true, "enum": ["development", "staging", "production"]},
+    "endpoint": {"type": "string", "required": true},
+    "owner": {"type": "string", "required": true},
+    "internal_endpoint": {"type": "string", "required": false},
+    "health_check_path": {"type": "string", "required": false},
+    "native_console_url": {"type": "string", "required": false},
+    "runbook_path": {"type": "string", "required": false}
+  },
+  "notes": "Foundation-A：无幂等键与写后读取确认，两者在 XM-0030 补齐。未声明的参数字段一律拒绝（白名单语义）。"
+}

@@ -1,0 +1,19 @@
+{
+  "id": "sms.favorite.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "sms.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "provider": { "type": "string", "required": true, "enum": ["hero_sms"] },
+    "service": { "type": "string", "required": true },
+    "country": { "type": "int", "required": true },
+    "operator": { "type": "string", "required": false }
+  },
+  "notes": "XM-SMS1 新增或编辑一个收藏（PUT /activations/favorites/services/{service}/countries/{country}，官方 Activation Favorites 组）。收藏是「服务 × 国家 × 运营商」三元组，是买号页的快捷入口，**不花钱**，也不进七态台账——一次 PUT 是幂等的，没有「不知道成没成」的第三态需要收敛；审计由 Action 内核负责。operator 官方默认 any，留空即 any。compensation_mode 是 REVERSIBLE：sms.favorite.remove 即可撤销。"
+}

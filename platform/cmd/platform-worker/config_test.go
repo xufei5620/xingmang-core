@@ -1,0 +1,877 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/connector"
+	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
+	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
+)
+
+func TestConfigFromEnv(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":            "staging",
+		"HEARTBEAT_INTERVAL":     "2s",
+		"HEARTBEAT_RUN_ON_START": "false",
+		"HEARTBEAT_FAILURES":     "1",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Environment != "staging" || cfg.HeartbeatInterval != 2*time.Second || cfg.HeartbeatRunOnStart || cfg.HeartbeatFailures != 1 {
+		t.Fatalf("configFromEnv = %+v", cfg)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"HEARTBEAT_INTERVAL":     "not-a-duration",
+		"HEARTBEAT_RUN_ON_START": "maybe",
+		"HEARTBEAT_FAILURES":     "not-an-int",
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", key: value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q should fail", key, value)
+		}
+	}
+}
+
+func TestConfigFromEnvRequiresExplicitEnvironment(t *testing.T) {
+	if _, err := configFromEnv(func(string) string { return "" }); err == nil {
+		t.Fatal("missing ENVIRONMENT should fail closed")
+	}
+}
+
+// TestConfigFromEnvDefaultsSub2APIToFake：真实凭据要一个个环境去开，
+// 默认必须是 fake；来源标识也必须一眼可辨，不能伪装成真实来源。
+func TestConfigFromEnvDefaultsSub2APIToFake(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Sub2APISyncEnabled {
+		t.Fatal("默认应开启 Sub2API 周期同步——看板要的是持续更新的数据")
+	}
+	if cfg.Sub2APIMode != jobs.Sub2APIModeFake {
+		t.Fatalf("默认模式 = %q, want fake", cfg.Sub2APIMode)
+	}
+	if cfg.Sub2APIInstanceID != jobs.DefaultSub2APIInstanceID {
+		t.Fatalf("默认来源 = %q, want %q", cfg.Sub2APIInstanceID, jobs.DefaultSub2APIInstanceID)
+	}
+	if cfg.Sub2APISyncInterval != jobs.DefaultSub2APISyncInterval {
+		t.Fatalf("默认周期 = %s, want %s", cfg.Sub2APISyncInterval, jobs.DefaultSub2APISyncInterval)
+	}
+	if cfg.Sub2APICredentialRef != "" {
+		t.Fatalf("未配置时不该凭空造出凭据引用: %q", cfg.Sub2APICredentialRef)
+	}
+}
+
+func TestConfigFromEnvReadsSub2APISettings(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":               "staging",
+		"XM_SUB2API_MODE":           "real",
+		"XM_SUB2API_INSTANCE_ID":    "sub2api-acceptance",
+		"XM_SUB2API_SYNC_INTERVAL":  "60s",
+		"XM_SUB2API_SYNC_ENABLED":   "false",
+		"XM_SUB2API_CREDENTIAL_REF": "secret://sub2api/readonly-token",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sub2APIMode != jobs.Sub2APIModeReal {
+		t.Fatalf("mode = %q, want real", cfg.Sub2APIMode)
+	}
+	if cfg.Sub2APIInstanceID != "sub2api-acceptance" {
+		t.Fatalf("source = %q, want sub2api-acceptance", cfg.Sub2APIInstanceID)
+	}
+	if cfg.Sub2APISyncEnabled || cfg.Sub2APISyncInterval != time.Minute {
+		t.Fatalf("停用开关与周期未生效: %+v", cfg)
+	}
+	// 引用只被接住、不被解析出明文（ADR-014）。
+	if cfg.Sub2APICredentialRef != "secret://sub2api/readonly-token" {
+		t.Fatalf("credential ref = %q", cfg.Sub2APICredentialRef)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidSub2APIValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"XM_SUB2API_MODE":          "production",
+		"XM_SUB2API_SYNC_INTERVAL": "not-a-duration",
+		"XM_SUB2API_SYNC_ENABLED":  "maybe",
+	} {
+		values := map[string]string{"ENVIRONMENT": "staging", key: value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q should fail", key, value)
+		}
+	}
+}
+
+// TestConfigFromEnvReadsSub2APIConnection：XM-0017 的连接配置。
+//
+// 缺配置**不在启动时报错**：一个配错的采集通道不该把心跳和别的任务一起
+// 拖垮，缺什么会在每轮同步写成一条说得清的 SyncFailed 观测。
+func TestConfigFromEnvReadsSub2APIConnection(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                 "staging",
+		"XM_SUB2API_MODE":             "real",
+		"XM_SUB2API_ENDPOINT":         "https://api.solov.cc",
+		"XM_SUB2API_TARGET_ALLOWLIST": " api.solov.cc , API.Backup.Solov.CC ,, ",
+		"XM_SUB2API_CREDENTIAL_REF":   "secret://sub2api/readonly-token",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sub2APIEndpoint != "https://api.solov.cc" {
+		t.Fatalf("endpoint = %q", cfg.Sub2APIEndpoint)
+	}
+	// 拆分只做去空白与转小写，不做补全：allowlist 的全部价值就在于
+	// 它是人显式写下的那一份。
+	want := []string{"api.solov.cc", "api.backup.solov.cc"}
+	if len(cfg.Sub2APITargetAllowlist) != len(want) {
+		t.Fatalf("allowlist = %v, want %v", cfg.Sub2APITargetAllowlist, want)
+	}
+	for i := range want {
+		if cfg.Sub2APITargetAllowlist[i] != want[i] {
+			t.Fatalf("allowlist = %v, want %v", cfg.Sub2APITargetAllowlist, want)
+		}
+	}
+	if cfg.Sub2APIRequestTimeout <= 0 {
+		t.Fatal("单次请求必须有超时（规格 §18.1-4）")
+	}
+
+	// 一项都没配时也不报错：mode 还可能是 fake
+	bare := map[string]string{"ENVIRONMENT": "staging", "XM_SUB2API_MODE": "real"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("缺连接配置不该让 worker 起不来: %v", err)
+	}
+	if cfg.Sub2APIEndpoint != "" || len(cfg.Sub2APITargetAllowlist) != 0 {
+		t.Fatalf("没配的东西不该被凭空造出来: %+v", cfg)
+	}
+}
+
+func TestSub2APISecretsFromEnv(t *testing.T) {
+	values := map[string]string{"XM_SUB2API_TOKEN": "placeholder-placeholder"}
+	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
+
+	// 没配 env 引用**也有** Provider（XM-CRED0）：引用可以来自
+	// core.connector_config，凭据可以来自后台写进 XM_SECRET_ROOT 的文件。
+	provider, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	fileRef := secrets.MustCredentialRef("secret://sub2api-prod/read-token")
+	if _, err := provider.Resolve(t.Context(), fileRef, "test"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("文件还没写时应 not_found（不回退去读任何变量）, got %v", err)
+	}
+	writeSecretFileAt(t, root, "sub2api-prod/read-token", "test-value-file\n")
+	value, err := provider.Resolve(t.Context(), fileRef, "test")
+	if err != nil || value.Reveal() != "test-value-file" {
+		t.Fatalf("文件出现后无需重建 Provider 即可解析: %q, %v", value.Reveal(), err)
+	}
+
+	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
+	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+	// 根目录不是绝对路径同样启动即拒。
+	if _, err := sub2apiSecretsFromEnv(getenv, nil, "staging", "", "relative/dir"); err == nil {
+		t.Fatal("相对路径的 secret root 必须被拒")
+	}
+
+	provider, err = sub2apiSecretsFromEnv(getenv, nil, "staging", "secret://sub2api/readonly-token", root)
+	if err != nil || provider == nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	ref := secrets.MustCredentialRef("secret://sub2api/readonly-token")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "placeholder-placeholder" {
+		t.Fatal("文件缺失时应落到 env 登记表")
+	}
+	// 打印/日志一律脱敏（宪法 7 条）——这条纪律由 SecretValue 的类型保证，
+	// 这里再钉一次是因为装配处最容易有人顺手把它 fmt 出来。
+	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
+		t.Fatalf("SecretValue 不该被打印出明文: %s", got)
+	}
+	// 同一个引用文件一出现即优先于 env：后台填的凭据压过 .env 里的旧值。
+	writeSecretFileAt(t, root, "sub2api/readonly-token", "test-value-file-2")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil || value.Reveal() != "test-value-file-2" {
+		t.Fatalf("文件应优先于 env: %q, %v", value.Reveal(), err)
+	}
+
+	// 登记表之外的引用解析不出来：禁止静默回退到别的数据源（规格 §18.1-5）
+	other := secrets.MustCredentialRef("secret://sub2api/another-token")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
+
+// writeSecretFileAt 按文件 Provider 的嵌套布局写一份测试凭据文件。
+func writeSecretFileAt(t *testing.T, root, rel, content string) {
+	t.Helper()
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConfigFromEnvReadsSecretRoot：XM_SECRET_ROOT 的默认值与形状校验。
+func TestConfigFromEnvReadsSecretRoot(t *testing.T) {
+	cfg, err := configFromEnv(func(key string) string {
+		return map[string]string{"ENVIRONMENT": "staging"}[key]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SecretRoot != "/run/xm/secrets" {
+		t.Fatalf("默认 secret root = %q, want /run/xm/secrets", cfg.SecretRoot)
+	}
+	cfg, err = configFromEnv(func(key string) string {
+		return map[string]string{"ENVIRONMENT": "staging", "XM_SECRET_ROOT": " /srv/xm/secrets "}[key]
+	})
+	if err != nil || cfg.SecretRoot != "/srv/xm/secrets" {
+		t.Fatalf("显式 secret root = %q, %v", cfg.SecretRoot, err)
+	}
+	for _, bad := range []string{"relative/secrets", "/"} {
+		if _, err := configFromEnv(func(key string) string {
+			return map[string]string{"ENVIRONMENT": "staging", "XM_SECRET_ROOT": bad}[key]
+		}); err == nil {
+			t.Fatalf("XM_SECRET_ROOT=%q 应被拒", bad)
+		}
+	}
+}
+
+// TestConfigFromEnvReadsNewAPIConnection：XM-0038 的连接配置。
+//
+// 与 Sub2API 同一条纪律：缺配置**不在启动时报错**——一个配错的采集通道不该
+// 把心跳和别的任务一起拖垮，缺什么会在每轮同步写成一条说得清的 SyncFailed
+// 观测（规格 §9.1）。
+func TestConfigFromEnvReadsNewAPIConnection(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_NEWAPI_MODE":             "real",
+		"XM_NEWAPI_ENDPOINT":         "https://xm.solov.cc",
+		"XM_NEWAPI_TARGET_ALLOWLIST": " xm.solov.cc , XM.Backup.Solov.CC ,, ",
+		"XM_NEWAPI_CREDENTIAL_REF":   "secret://newapi/readonly-token",
+		"XM_NEWAPI_USER_ID":          " 1 ",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.NewAPIMode != jobs.NewAPIModeReal {
+		t.Fatalf("mode = %q, want real", cfg.NewAPIMode)
+	}
+	if cfg.NewAPIEndpoint != "https://xm.solov.cc" {
+		t.Fatalf("endpoint = %q", cfg.NewAPIEndpoint)
+	}
+	if cfg.NewAPICredentialRef != "secret://newapi/readonly-token" {
+		t.Fatalf("credential ref = %q", cfg.NewAPICredentialRef)
+	}
+	// user id 是可选的普通配置，不是凭据——去空白即可。
+	if cfg.NewAPIUserID != "1" {
+		t.Fatalf("user id = %q, want 1", cfg.NewAPIUserID)
+	}
+	// 拆分只做去空白与转小写，不做补全：allowlist 的全部价值就在于
+	// 它是人显式写下的那一份。
+	want := []string{"xm.solov.cc", "xm.backup.solov.cc"}
+	if len(cfg.NewAPITargetAllowlist) != len(want) {
+		t.Fatalf("allowlist = %v, want %v", cfg.NewAPITargetAllowlist, want)
+	}
+	for i := range want {
+		if cfg.NewAPITargetAllowlist[i] != want[i] {
+			t.Fatalf("allowlist = %v, want %v", cfg.NewAPITargetAllowlist, want)
+		}
+	}
+
+	// 一项都没配时也不报错：mode 还可能是 fake
+	bare := map[string]string{"ENVIRONMENT": "staging", "XM_NEWAPI_MODE": "real"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("缺连接配置不该让 worker 起不来: %v", err)
+	}
+	if cfg.NewAPIEndpoint != "" || len(cfg.NewAPITargetAllowlist) != 0 || cfg.NewAPIUserID != "" {
+		t.Fatalf("没配的东西不该被凭空造出来: %+v", cfg)
+	}
+}
+
+func TestNewAPISecretsFromEnv(t *testing.T) {
+	values := map[string]string{"XM_NEWAPI_TOKEN": "placeholder-placeholder"}
+	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
+
+	// 没配 env 引用也有 Provider（只有文件一环），见 TestSub2APISecretsFromEnv。
+	provider, err := newapiSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	writeSecretFileAt(t, root, "newapi/readonly-token", "test-value-file")
+	value, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://newapi/readonly-token"), "test")
+	if err != nil || value.Reveal() != "test-value-file" {
+		t.Fatalf("文件解析失败: %q, %v", value.Reveal(), err)
+	}
+
+	// 引用拼错了要在启动时就炸：这是配置错误，等到采集那天才发现更贵
+	if _, err := newapiSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+
+	provider, err = newapiSecretsFromEnv(getenv, nil, "staging", "secret://newapi/readonly-token", t.TempDir())
+	if err != nil || provider == nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	ref := secrets.MustCredentialRef("secret://newapi/readonly-token")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "placeholder-placeholder" {
+		t.Fatal("文件缺失时应落到 env 登记表")
+	}
+	// 打印/日志一律脱敏（宪法 7 条）
+	if got := fmt.Sprintf("%v/%s", value, value); strings.Contains(got, "placeholder") {
+		t.Fatalf("SecretValue 不该被打印出明文: %s", got)
+	}
+
+	// 两条采集链路各用各的登记表：NewAPI 的 Provider 绝不能解析出
+	// Sub2API 的引用，否则一次凭据轮换会静默影响到另一条链路。
+	other := secrets.MustCredentialRef("secret://sub2api/readonly-token")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}
+
+func TestFinanceSecretProviderConfigFromEnv(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                        "staging",
+		"XM_FINANCE_COLLECT_SECRET_PROVIDER": "env",
+		"XM_FINANCE_COLLECT_SECRET_SCOPES":   "sub2api, newapi, sub2api",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.FinanceCollectSecretProvider != "env" {
+		t.Fatalf("provider = %q", cfg.FinanceCollectSecretProvider)
+	}
+	if got, want := strings.Join(cfg.FinanceCollectSecretScopes, ","), "sub2api,newapi"; got != want {
+		t.Fatalf("scopes = %q, want %q", got, want)
+	}
+}
+
+func TestFinanceSecretsFromEnvConventionAndFile(t *testing.T) {
+	values := map[string]string{
+		"XM_FINANCE_SECRET_SUB2API__TOKEN_A": "env-token",
+	}
+	getenv := func(key string) string { return values[key] }
+	provider, err := financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "env", "", []string{"sub2api"})
+	if err != nil || provider == nil {
+		t.Fatalf("env provider = %v, %v", provider, err)
+	}
+	value, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/token-a"), "test")
+	if err != nil || value.Reveal() != "env-token" {
+		t.Fatalf("env resolve = %q, %v", value.Reveal(), err)
+	}
+	if _, err := financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "wat", "", []string{"sub2api"}); err == nil {
+		t.Fatal("非法 provider 必须拒绝")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sub2api"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub2api", "token-a"), []byte("file-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err = financeSecretsFromEnv(getenv, nil, "staging", jobs.FinanceCollectModeReal, "file", root, []string{"sub2api"})
+	if err != nil || provider == nil {
+		t.Fatalf("file provider = %v, %v", provider, err)
+	}
+	value, err = provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/token-a"), "test")
+	if err != nil || value.Reveal() != "file-token" {
+		t.Fatalf("file resolve = %q, %v", value.Reveal(), err)
+	}
+	provider, err = financeSecretsFromLookup(func(name string) (string, bool) {
+		if name == "XM_FINANCE_SECRET_SUB2API__EMPTY" {
+			return "", true
+		}
+		return "", false
+	}, nil, "staging", jobs.FinanceCollectModeReal, "env", "", []string{"sub2api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Resolve(t.Context(), secrets.MustCredentialRef("secret://sub2api/empty"), "test"); !errors.Is(err, secrets.ErrEmptySecret) {
+		t.Fatalf("显式空值应 ErrEmptySecret, got %v", err)
+	}
+}
+
+// TestNewAPIRevenueFromEnvNotConfigured：没配 DSN = 这条能力没启用，**不是错误**。
+//
+// 这条锁住 XM-0044 最重要的兼容性承诺：没配的部署行为与本任务之前逐字相同
+// （收入侧 not_supported、台账写 NULL）。
+func TestNewAPIRevenueFromEnvNotConfigured(t *testing.T) {
+	for _, dsn := range []string{"", "   "} {
+		values := map[string]string{"XM_NEWAPI_REVENUE_DSN": dsn}
+		src, closer, err := newapiRevenueFromEnv(
+			t.Context(), func(k string) string { return values[k] }, nil, "staging", t.TempDir())
+		if src != nil || closer != nil || err != nil {
+			t.Fatalf("没配 DSN 应返回 (nil, nil, nil), got (src=%v, closer!=nil=%v, err=%v)",
+				src, closer != nil, err)
+		}
+	}
+}
+
+// TestNewAPIRevenueFromEnvDegradesLoudly：配了但立不起来时，**不能伪装成没配**。
+//
+// 两者在台账里都写 NULL（收入未知），但对运维是完全不同的两件事：
+// 没配 → not_supported（这条链路还没接通，正常）；
+// 配错 → unavailable（你配了但它不通，要去修）。
+// 把 source 留成 nil 会让后者显示成前者，然后一个拼错的 DSN 可以安静躺几个星期。
+func TestNewAPIRevenueFromEnvDegradesLoudly(t *testing.T) {
+	cases := []struct {
+		name   string
+		values map[string]string
+		hint   string
+	}{
+		{
+			name: "配了 DSN 没配口令引用",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN": "postgres://reader@db.example.test/newapi",
+			},
+			hint: "XM_NEWAPI_REVENUE_PASSWORD_REF",
+		},
+		{
+			name: "口令引用拼错",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN":          "postgres://reader@db.example.test/newapi",
+				"XM_NEWAPI_REVENUE_PASSWORD_REF": "not-a-ref",
+			},
+			hint: "XM_NEWAPI_REVENUE_PASSWORD_REF",
+		},
+		{
+			// 连接串里带内联口令：pgdsn 会拒（宪法 7 条）。
+			name: "DSN 里带内联口令",
+			values: map[string]string{
+				"XM_NEWAPI_REVENUE_DSN":          "postgres://reader:inline@db.example.test/newapi",
+				"XM_NEWAPI_REVENUE_PASSWORD_REF": "secret://newapi/revenue-db",
+				"XM_NEWAPI_REVENUE_PASSWORD":     "placeholder-placeholder",
+			},
+			hint: "CredentialRef",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src, closer, err := newapiRevenueFromEnv(
+				t.Context(), func(k string) string { return tc.values[k] }, nil, "staging", t.TempDir())
+			if err == nil {
+				t.Fatal("配错了必须回一个错误供启动日志用")
+			}
+			if !strings.Contains(err.Error(), tc.hint) {
+				t.Fatalf("错误应说清问题出在哪（含 %q）: %v", tc.hint, err)
+			}
+			if closer != nil {
+				t.Fatal("没建起池就不该回 closer")
+			}
+			if src == nil {
+				t.Fatal("配错了也必须挂一个降级通道——留 nil 会让「配错」伪装成「没配」")
+			}
+			// 降级通道必须报 unavailable，**不是** not_supported。
+			_, readErr := src.AccountRevenue(t.Context(), "1", "2026-08-28")
+			if got := connector.KindOf(readErr); got != connector.KindUnavailable {
+				t.Fatalf("降级通道的分类 = %q, want unavailable（「配了但不通」≠「没配」）", got)
+			}
+		})
+	}
+}
+
+// TestNewAPIRevenueDegradedNeverLeaksPassword：降级通道带着的那个错误会进启动日志。
+func TestNewAPIRevenueDegradedNeverLeaksPassword(t *testing.T) {
+	values := map[string]string{
+		"XM_NEWAPI_REVENUE_DSN":          "postgres://reader:hunter2@db.example.test/newapi",
+		"XM_NEWAPI_REVENUE_PASSWORD_REF": "secret://newapi/revenue-db",
+	}
+	src, _, err := newapiRevenueFromEnv(
+		t.Context(), func(k string) string { return values[k] }, nil, "staging", t.TempDir())
+	if err == nil {
+		t.Fatal("内联口令必须被拒")
+	}
+	_, readErr := src.AccountRevenue(t.Context(), "1", "2026-08-28")
+	for name, dump := range map[string]string{
+		"startup_error": err.Error(),
+		"read_error":    fmt.Sprintf("%v/%+v", readErr, readErr),
+	} {
+		if strings.Contains(dump, "hunter2") {
+			t.Fatalf("%s 泄漏了数据库口令: %s", name, dump)
+		}
+	}
+}
+
+// TestConfigFromEnvReadsRetentionSettings：XM-R012 保留期可配。
+// TestConfigFromEnvReadsConnectorProbeSettings：XM-OPS0 的连接器健康探测
+// 与其它周期任务同一套读法——_ENABLED / _INTERVAL 两个旋钮，都可选。
+func TestConfigFromEnvReadsConnectorProbeSettings(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                 "staging",
+		"XM_CONNECTOR_PROBE_ENABLED":  "false",
+		"XM_CONNECTOR_PROBE_INTERVAL": "10m",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConnectorProbeEnabled {
+		t.Fatal("XM_CONNECTOR_PROBE_ENABLED=false 应当关闭探测")
+	}
+	if cfg.ConnectorProbeInterval != 10*time.Minute {
+		t.Fatalf("探测周期 = %s, want 10m", cfg.ConnectorProbeInterval)
+	}
+}
+
+// TestConfigFromEnvDefaultsConnectorProbeToEnabled：不配这两个变量时，
+// 探测走 jobs.DefaultConfig 的默认值（开、5 分钟）——与 Sub2API/NewAPI
+// 同步默认打开是同一条理由：一个默认关闭的探测会让运行保障页的连接器
+// 健康区一直空着，空着与「探测坏了」在页面上长得一模一样。
+func TestConfigFromEnvDefaultsConnectorProbeToEnabled(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ConnectorProbeEnabled {
+		t.Fatal("未配置时探测应当默认开启")
+	}
+	if cfg.ConnectorProbeInterval != jobs.DefaultConnectorProbeInterval {
+		t.Fatalf("探测周期 = %s, want 默认值 %s", cfg.ConnectorProbeInterval, jobs.DefaultConnectorProbeInterval)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidConnectorProbeValues(t *testing.T) {
+	for _, bad := range []struct{ key, value string }{
+		{"XM_CONNECTOR_PROBE_ENABLED", "maybe"},
+		{"XM_CONNECTOR_PROBE_INTERVAL", "not-a-duration"},
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", bad.key: bad.value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q 应当被拒绝", bad.key, bad.value)
+		}
+	}
+}
+
+func TestConfigFromEnvReadsRetentionSettings(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                     "staging",
+		"XM_RETENTION_ENABLED":            "true",
+		"XM_RETENTION_INTERVAL":           "6h",
+		"XM_METRIC_SAMPLE_RETENTION_DAYS": "30",
+		"XM_ALERT_RETENTION_DAYS":         "365",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.RetentionEnabled || cfg.RetentionInterval != 6*time.Hour {
+		t.Fatalf("清理开关/周期 = %v / %s", cfg.RetentionEnabled, cfg.RetentionInterval)
+	}
+	if cfg.MetricSampleRetentionDays != 30 || cfg.AlertRetentionDays != 365 {
+		t.Fatalf("保留天数 = %d / %d", cfg.MetricSampleRetentionDays, cfg.AlertRetentionDays)
+	}
+}
+
+// TestConfigFromEnvRejectsNonPositiveRetentionDays：0 天不是「不清理」。
+//
+// 0 天最自然的读法是「不保留」，也就是**把整张表删空**；而想表达「不清理」的人
+// 该去关 XM_RETENTION_ENABLED。两种意图差得太远，不能让一个手滑的 0 去猜——
+// 猜错的那一次没有撤销键。
+func TestConfigFromEnvRejectsNonPositiveRetentionDays(t *testing.T) {
+	// 用切片而不是 map：同一个变量要试多个坏值。
+	for _, bad := range []struct{ key, value string }{
+		{"XM_METRIC_SAMPLE_RETENTION_DAYS", "0"},
+		{"XM_METRIC_SAMPLE_RETENTION_DAYS", "-1"},
+		{"XM_ALERT_RETENTION_DAYS", "0"},
+		{"XM_ALERT_RETENTION_DAYS", "-30"},
+		{"XM_RETENTION_INTERVAL", "not-a-duration"},
+		{"XM_RETENTION_ENABLED", "maybe"},
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", bad.key: bad.value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q 应当被拒绝", bad.key, bad.value)
+		}
+	}
+}
+
+// TestConfigFromEnvHasNoAuditRetentionKnob：审计没有保留天数这个旋钮。
+//
+// 审计链一条都不删（宪法 11 条 append-only，理由见 jobs/retention.go 文件头）。
+// 给一个删不掉东西的旋钮比不给更误导：填了之后审计表照涨，而填的人以为自己
+// 已经配好了清理。
+func TestConfigFromEnvHasNoAuditRetentionKnob(t *testing.T) {
+	var asked []string
+	values := map[string]string{"ENVIRONMENT": "test"}
+	if _, err := configFromEnv(func(name string) string {
+		asked = append(asked, name)
+		return values[name]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range asked {
+		if strings.Contains(name, "AUDIT") && strings.Contains(name, "RETENTION") {
+			t.Fatalf("不该存在审计保留期变量，却读了 %s", name)
+		}
+	}
+}
+
+// TestConfigFromEnvDefaultsReqlogMetricsToOff：默认 off，没有部署记录代理
+// 的环境不该凭空产出三张卡片的假数据（与 sub2api/newapi 默认 fake 不同——
+// 这批指标没有「安全的假数据」可以顶替，只有「不存在」)。
+func TestConfigFromEnvDefaultsReqlogMetricsToOff(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeOff {
+		t.Fatalf("默认模式 = %q, want off", cfg.ReqlogMetricsMode)
+	}
+	if !cfg.ReqlogMetricsModeRecognized {
+		t.Fatal("空值应该被识别为合法的 off，不该触发 unrecognized")
+	}
+	if cfg.ReqlogMetricsInterval != jobs.DefaultReqlogMetricsInterval {
+		t.Fatalf("默认周期 = %s, want %s", cfg.ReqlogMetricsInterval, jobs.DefaultReqlogMetricsInterval)
+	}
+}
+
+// TestConfigFromEnvDefaultsCPAToOff：一个没配 XM_CPA_MODE 的环境必须保持
+// 关闭——CPA 没有 fake 模式垫底，默认打开只会让每轮同步都对着一个不存在的
+// 挂载路径报错（同 jobs.DefaultConfig 的理由）。
+func TestConfigFromEnvDefaultsCPAToOff(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false when XM_CPA_MODE is unset")
+	}
+	if cfg.CPAMode != jobs.CPAModeOff {
+		t.Fatalf("CPAMode = %q, want off", cfg.CPAMode)
+	}
+}
+
+func TestConfigFromEnvFileModeEnablesSyncByDefault(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":     "staging",
+		"XM_CPA_MODE":     "file",
+		"XM_CPA_DATA_DIR": "/var/lib/xm/cpa",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = false, want true when XM_CPA_MODE=file")
+	}
+	if cfg.CPADataDir != "/var/lib/xm/cpa" {
+		t.Fatalf("CPADataDir = %q, want /var/lib/xm/cpa", cfg.CPADataDir)
+	}
+}
+
+func TestConfigFromEnvCPASyncEnabledOverrideCanOnlyDisable(t *testing.T) {
+	pauseValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "file",
+		"XM_CPA_DATA_DIR":     "/var/lib/xm/cpa",
+		"XM_CPA_SYNC_ENABLED": "false",
+	}
+	cfg, err := configFromEnv(func(key string) string { return pauseValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPASyncEnabled {
+		t.Fatal("CPASyncEnabled = true, want false (explicit override must be able to pause file mode)")
+	}
+
+	forceOnValues := map[string]string{
+		"ENVIRONMENT":         "staging",
+		"XM_CPA_MODE":         "off",
+		"XM_CPA_SYNC_ENABLED": "true",
+	}
+	cfg, err = configFromEnv(func(key string) string { return forceOnValues[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CPAMode != jobs.CPAModeOff || !cfg.CPASyncEnabled {
+		t.Fatalf("configFromEnv should surface the requested (off, enabled) combination as-is: %+v", cfg)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidCPAValues(t *testing.T) {
+	for key, value := range map[string]string{
+		"XM_CPA_MODE":          "bogus",
+		"XM_CPA_SYNC_ENABLED":  "maybe",
+		"XM_CPA_SYNC_INTERVAL": "not-a-duration",
+	} {
+		values := map[string]string{"ENVIRONMENT": "test", key: value}
+		if _, err := configFromEnv(func(name string) string { return values[name] }); err == nil {
+			t.Fatalf("%s=%q should fail", key, value)
+		}
+	}
+}
+
+// TestConfigFromEnvReadsReqlogMetricsFileMode 覆盖与 platform-api 共享同一个
+// 环境变量名这条契约：XM_REQLOG_MODE=file 时 worker 侧必须认出 file。
+func TestConfigFromEnvReadsReqlogMetricsFileMode(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_REQLOG_MODE":             "file",
+		"XM_REQLOG_DATA_DIR":         "/custom/reqlog/data",
+		"XM_REQLOG_METRICS_INTERVAL": "2m",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeFile {
+		t.Fatalf("模式 = %q, want file", cfg.ReqlogMetricsMode)
+	}
+	if !cfg.ReqlogMetricsModeRecognized {
+		t.Fatal("file 是合法值，不该被判成 unrecognized")
+	}
+	if cfg.ReqlogMetricsDataDir != "/custom/reqlog/data" {
+		t.Fatalf("data dir = %q, want /custom/reqlog/data", cfg.ReqlogMetricsDataDir)
+	}
+	if cfg.ReqlogMetricsInterval != 2*time.Minute {
+		t.Fatalf("interval = %s, want 2m", cfg.ReqlogMetricsInterval)
+	}
+}
+
+// TestConfigFromEnvReqlogMetricsUnrecognizedValueDegradesToOff 覆盖「worker
+// 只认 off/file，其余值退化成 off 但不报错」这条契约——platform-api 那边的
+// fake/real 是合法配置，不该把 worker 启动打断。
+func TestConfigFromEnvReqlogMetricsUnrecognizedValueDegradesToOff(t *testing.T) {
+	for _, raw := range []string{"fake", "real", "typo"} {
+		values := map[string]string{"ENVIRONMENT": "staging", "XM_REQLOG_MODE": raw}
+		cfg, err := configFromEnv(func(key string) string { return values[key] })
+		if err != nil {
+			t.Fatalf("XM_REQLOG_MODE=%q 不该让 worker 启动失败: %v", raw, err)
+		}
+		if cfg.ReqlogMetricsMode != jobs.ReqlogMetricsModeOff {
+			t.Fatalf("XM_REQLOG_MODE=%q: 模式 = %q, want off", raw, cfg.ReqlogMetricsMode)
+		}
+		if cfg.ReqlogMetricsModeRecognized {
+			t.Fatalf("XM_REQLOG_MODE=%q 应该被标记为 unrecognized，好让 NewClient 记一条 warn", raw)
+		}
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidReqlogMetricsInterval(t *testing.T) {
+	values := map[string]string{"ENVIRONMENT": "staging", "XM_REQLOG_METRICS_INTERVAL": "soon"}
+	if _, err := configFromEnv(func(key string) string { return values[key] }); err == nil {
+		t.Fatal("非法的 XM_REQLOG_METRICS_INTERVAL 应该报错")
+	}
+}
+
+// TestConfigFromEnvReadsAlertWeComWebhookRef：只读进配置、不解析
+// （XM-ALERT-WECOM）——明文由 AlertWeComSecrets 在发送那一瞬才现场给出。
+func TestConfigFromEnvReadsAlertWeComWebhookRef(t *testing.T) {
+	values := map[string]string{
+		"ENVIRONMENT":                "staging",
+		"XM_ALERT_WECOM_WEBHOOK_REF": " secret://alerts/wecom-webhook ",
+	}
+	cfg, err := configFromEnv(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AlertWeComWebhookRef != "secret://alerts/wecom-webhook" {
+		t.Fatalf("AlertWeComWebhookRef = %q（应去空白）", cfg.AlertWeComWebhookRef)
+	}
+
+	// 没配也不报错：三个投递渠道都允许全空（告警照常评估落库）。
+	bare := map[string]string{"ENVIRONMENT": "staging"}
+	cfg, err = configFromEnv(func(key string) string { return bare[key] })
+	if err != nil {
+		t.Fatalf("没配企微渠道不该让 worker 起不来: %v", err)
+	}
+	if cfg.AlertWeComWebhookRef != "" {
+		t.Fatalf("没配的东西不该被凭空造出来: %q", cfg.AlertWeComWebhookRef)
+	}
+}
+
+// TestAlertWeComSecretsFromEnv 照 TestSub2APISecretsFromEnv 的模式：
+// 文件优先、env 兜底，且文件一出现即压过 env（XM-CRED0）。与 Telegram 现在
+// 还在用的纯 env 装配（alertSecretsFromEnv）不是同一条链路，需要单独覆盖。
+func TestAlertWeComSecretsFromEnv(t *testing.T) {
+	values := map[string]string{alertWeComWebhookEnvVar: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only"}
+	getenv := func(key string) string { return values[key] }
+	root := t.TempDir()
+
+	// 没配 env 引用也有 Provider：引用可以来自登记簿，凭据可以来自后台
+	// 写进 XM_SECRET_ROOT 的文件。
+	provider, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "", root)
+	if err != nil || provider == nil {
+		t.Fatalf("没配引用时应返回只有文件一环的链, got %v %v", provider, err)
+	}
+	fileRef := secrets.MustCredentialRef("secret://alerts/wecom-webhook")
+	if _, err := provider.Resolve(t.Context(), fileRef, "test"); !errors.Is(err, secrets.ErrNotFound) {
+		t.Fatalf("文件还没写时应 not_found（不回退去读任何变量）, got %v", err)
+	}
+	writeSecretFileAt(t, root, "alerts/wecom-webhook",
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-file\n")
+	value, err := provider.Resolve(t.Context(), fileRef, "test")
+	if err != nil || value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-file" {
+		t.Fatalf("文件出现后无需重建 Provider 即可解析: %q, %v", value.Reveal(), err)
+	}
+
+	// 引用拼错了要在启动时就炸：配置错误，等到真出事那天才发现更贵。
+	if _, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "not-a-ref", root); err == nil {
+		t.Fatal("非法 CredentialRef 必须被拒")
+	}
+	// 根目录不是绝对路径同样启动即拒。
+	if _, err := alertWeComSecretsFromEnv(getenv, nil, "staging", "", "relative/dir"); err == nil {
+		t.Fatal("相对路径的 secret root 必须被拒")
+	}
+
+	ref := secrets.MustCredentialRef("secret://alerts/wecom-webhook")
+	// 尚未写文件的全新 root：应落到 env 登记表。
+	freshRoot := t.TempDir()
+	provider, err = alertWeComSecretsFromEnv(getenv, nil, "staging", "secret://alerts/wecom-webhook", freshRoot)
+	if err != nil {
+		t.Fatalf("装配失败: %v", err)
+	}
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only" {
+		t.Fatal("文件缺失时应落到 env 登记表")
+	}
+	// 同一个引用文件一出现即优先于 env：后台填的凭据压过 .env 里的旧值。
+	writeSecretFileAt(t, freshRoot, "alerts/wecom-webhook",
+		"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-2")
+	value, err = provider.Resolve(t.Context(), ref, "test")
+	if err != nil || value.Reveal() != "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test-only-2" {
+		t.Fatalf("文件应优先于 env: %q, %v", value.Reveal(), err)
+	}
+
+	// 登记表之外的引用解析不出来：禁止静默回退到别的数据源（规格 §18.1-5）。
+	other := secrets.MustCredentialRef("secret://alerts/another-webhook")
+	if _, err := provider.Resolve(t.Context(), other, "test"); err == nil {
+		t.Fatal("未登记的引用必须解析失败，不能回退去读别的变量")
+	}
+}

@@ -1,0 +1,14 @@
+[      35ms] [ERROR] Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "application/json". Strict MIME type checking is enforced for module scripts per HTML spec. @ http://127.0.0.1:5175/src/api/client.ts:0
+[   29869ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5175/node_modules/.vite/deps/react-dom_client.js?v=1fcd74a2:14335
+[  284653ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:5175/src/components/PeriodControls.tsx?t=1787967914803:0
+[  284653ms] [ERROR] [vite] Failed to reload /src/components/PeriodControls.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://127.0.0.1:5175/@vite/client:532
+[  284686ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:5175/src/components/PeriodControls.tsx?t=1787967914988:0
+[  284686ms] [ERROR] [vite] Failed to reload /src/components/PeriodControls.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://127.0.0.1:5175/@vite/client:532
+[  284692ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:5175/src/components/PeriodRangeControl.tsx?t=1787967914989:0
+[  284692ms] [ERROR] [vite] Failed to reload /src/components/PeriodRangeControl.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://127.0.0.1:5175/@vite/client:532
+[  284887ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5175/node_modules/.vite/deps/react-dom_client.js?v=1fcd74a2:14335
+[  400594ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5175/src/pages/PlatformUserDetailPage.tsx:0
+[  400594ms] [ERROR] [vite] Failed to reload /src/router.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://127.0.0.1:5175/@vite/client:532
+[  401601ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://127.0.0.1:5175/src/pages/PlatformUserDetailPage.tsx?t=1787968031896:0
+[  401601ms] [ERROR] [vite] Failed to reload /src/router.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://127.0.0.1:5175/@vite/client:532
+[  548389ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://127.0.0.1:5175/node_modules/.vite/deps/react-dom_client.js?v=1fcd74a2:14335

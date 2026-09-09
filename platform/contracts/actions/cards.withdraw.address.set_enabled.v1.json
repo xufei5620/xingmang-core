@@ -1,0 +1,31 @@
+{
+  "id": "cards.withdraw.address.set_enabled",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "fund.address.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NOT_REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REVERSIBLE",
+  "params": {
+    "address_id": {
+      "type": "string",
+      "required": true
+    },
+    "enabled": {
+      "type": "bool",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD6 上线或下线一条已登记的提现地址。**用停用而不是删除**：一条曾经被列入白名单的地址，它存在过这件事本身就是审计事实——「这条地址当初是谁登记的、什么时候下线的」正是出事之后第一个要问的问题，删掉就再也回答不了。已经发出去的提现不受影响：提现台账里存的是登记时的地址快照（见迁移 000033 的 address 列），下线一条登记不会让历史记录变得查不到钱转去了哪儿。停用的地址仍然出现在清单里（可查、可重新启用），但提现表单不提供它，领域层也在打上游之前拒绝它——只靠前端不渲染是不够的，一个还留着旧页面的标签页仍然能提交。错误文案区分「未登记」与「已停用」：前者去登记，后者去启用，两者的下一步动作不同。权限与登记同为 fund.address.manage：决定「钱能去哪儿」是一件事，上线和下线是它的两个方向。改一条不存在的登记会报错而不是静默成功——静默会让页面显示「已停用」，而那条地址其实压根不在这个环境里。相关的一条不变量在库层面：地址登记 id **不能被改指到另一条地址**（主键是 id，冲突键是 environment+account+chain+address，两者对不上会撞主键），因为改指意味着以后所有选中「冷钱包」的提现都悄悄转去了新地方而标签一个字都没变；要换地址只能新登记一条再把旧的停用。compensation_mode 是 REVERSIBLE：反方向再执行一次即可。"
+}

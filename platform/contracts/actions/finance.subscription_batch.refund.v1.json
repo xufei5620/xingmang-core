@@ -1,0 +1,39 @@
+{
+  "id": "finance.subscription_batch.refund",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "subscription_batch_id": {
+      "type": "string",
+      "required": true
+    },
+    "refunded_minor": {
+      "type": "string",
+      "required": true
+    },
+    "refunded_on": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-0037c 部分退款冲减成本基础（设计稿 §3.5 + §12.1）。refunded_minor 是**累计值**不是增量：增量要求调用方先知道当前值，两个人同时报销会各加一次；累计值幂等，重放同一请求不会让退款翻倍。**只增不减**——调小它等于凭空多算一笔成本，而那笔钱已按旧基础摊进过去的台账行里，那些行冻结改不了。refunded_on 必填且必须落在有效期内：它决定从哪天起**只重算剩余未摊天**（§12.1 的「不追溯改已摊日额」），没有它每日摊销额就不再是 (批次, 业务日) 的函数；期外的退款没有剩余未摊天可吸收那笔冲减，而平台 v1 没有「过期后信用」科目，故当场拒绝而不是静默丢掉那笔钱（宪法 12 条）。批次若已终止，本动作**顺带按新基础重算已结转的损失**（先退订后到账是常态），前后态进审计。reason 必填：退款直接改变毛利报表。"
+}

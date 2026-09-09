@@ -1,0 +1,94 @@
+- generic [ref=f3e4]:
+  - complementary [ref=f3e5]:
+    - generic [ref=f3e6]: 星芒统一控制平台
+    - navigation "主导航" [ref=f3e9]:
+      - generic [ref=f3e10]:
+        - heading "全局" [level=3] [ref=f3e11]
+        - generic [ref=f3e12]:
+          - link "运营工作台" [ref=f3e13] [cursor=pointer]:
+            - /url: /dashboard
+          - link "告警与故障" [ref=f3e15] [cursor=pointer]:
+            - /url: /alerts
+          - link "操作与审批 未建·F-B" [ref=f3e17] [cursor=pointer]:
+            - /url: /actions
+            - generic [ref=f3e18]: 操作与审批
+            - generic [ref=f3e19]: 未建·F-B
+          - link "后台任务 未建·F-A" [ref=f3e20] [cursor=pointer]:
+            - /url: /jobs
+            - generic [ref=f3e21]: 后台任务
+            - generic [ref=f3e22]: 未建·F-A
+          - link "审计记录" [ref=f3e23] [cursor=pointer]:
+            - /url: /audit
+      - generic [ref=f3e25]:
+        - heading "平台" [level=3] [ref=f3e26]
+        - generic [ref=f3e27]:
+          - generic "正在读取服务注册表，暂时无法判断该平台是否已接入" [ref=f3e28]:
+            - generic [ref=f3e29]: Sub2API
+            - generic [ref=f3e30]: 读取中
+          - generic "正在读取服务注册表，暂时无法判断该平台是否已接入" [ref=f3e31]:
+            - generic [ref=f3e32]: NewAPI
+            - generic [ref=f3e33]: 读取中
+          - generic "正在读取服务注册表，暂时无法判断该平台是否已接入" [ref=f3e34]:
+            - generic [ref=f3e35]: CPA
+            - generic [ref=f3e36]: 读取中
+          - generic "正在读取服务注册表，暂时无法判断该平台是否已接入" [ref=f3e37]:
+            - generic [ref=f3e38]: 服务器
+            - generic [ref=f3e39]: 读取中
+      - generic [ref=f3e40]:
+        - heading "平台治理" [level=3] [ref=f3e41]
+        - generic [ref=f3e42]:
+          - link "资源目录" [ref=f3e43] [cursor=pointer]:
+            - /url: /registry
+          - link "人员与权限 未建·F-A" [ref=f3e45] [cursor=pointer]:
+            - /url: /identity
+            - generic [ref=f3e46]: 人员与权限
+            - generic [ref=f3e47]: 未建·F-A
+          - link "跨平台财务 未建·M3+" [ref=f3e48] [cursor=pointer]:
+            - /url: /finance
+            - generic [ref=f3e49]: 跨平台财务
+            - generic [ref=f3e50]: 未建·M3+
+          - link "运行保障 未建·M1+" [ref=f3e51] [cursor=pointer]:
+            - /url: /ops
+            - generic [ref=f3e52]: 运行保障
+            - generic [ref=f3e53]: 未建·M1+
+          - link "版本与发布 未建·F-B" [ref=f3e54] [cursor=pointer]:
+            - /url: /changes
+            - generic [ref=f3e55]: 版本与发布
+            - generic [ref=f3e56]: 未建·F-B
+          - link "界面规范 未建·UI" [ref=f3e57] [cursor=pointer]:
+            - /url: /design
+            - generic [ref=f3e58]: 界面规范
+            - generic [ref=f3e59]: 未建·UI
+          - link "设置" [ref=f3e60] [cursor=pointer]:
+            - /url: /settings
+      - group [ref=f3e62]:
+        - generic "扩展能力 后置" [ref=f3e63] [cursor=pointer]:
+          - heading "扩展能力" [level=3] [ref=f3e64]
+          - generic [ref=f3e65]: 后置
+  - generic [ref=f3e66]:
+    - banner [ref=f3e67]:
+      - button "搜索页面与页签 Ctrl K" [ref=f3e69]:
+        - generic [ref=f3e70]: 搜索页面与页签
+        - generic [ref=f3e71]: Ctrl K
+      - generic [ref=f3e72]:
+        - generic [ref=f3e73]: 开发模式
+        - button "退出登录" [ref=f3e74]
+    - generic [ref=f3e75]:
+      - navigation "面包屑" [ref=f3e76]:
+        - list [ref=f3e77]:
+          - listitem [ref=f3e78]:
+            - generic [ref=f3e79]: 平台
+          - listitem [ref=f3e80]:
+            - generic [ref=f3e81]: /
+            - generic [ref=f3e82]: Sub2API
+      - generic "前端未显式指定 environment，读取范围由服务端按调用者所在环境决定（跨环境读取本就不允许）" [ref=f3e84]: 环境 由服务端解析
+    - main [ref=f3e85]:
+      - generic [ref=f3e86]:
+        - generic [ref=f3e87]:
+          - generic [ref=f3e88]:
+            - generic [ref=f3e89]:
+              - heading "Sub2API" [level=2] [ref=f3e90]
+              - generic "本环境未登记该平台的实例" [ref=f3e93]: 未登记
+            - paragraph [ref=f3e94]: 订阅转 API 的售卖与计费：用户数与余额、日收入/成本、渠道令牌与余额。
+          - button "刷新" [disabled] [ref=f3e96]
+        - status [ref=f3e100]: 加载中…

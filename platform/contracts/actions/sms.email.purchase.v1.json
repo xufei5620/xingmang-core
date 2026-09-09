@@ -1,0 +1,21 @@
+{
+  "id": "sms.email.purchase",
+  "version": "1",
+  "risk_level": "L2",
+  "permission": "sms.purchase",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": { "required": false },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "provider": { "type": "string", "required": true, "enum": ["hero_sms"] },
+    "operation_id": { "type": "string", "required": true },
+    "site": { "type": "string", "required": true },
+    "domain": { "type": "string", "required": true },
+    "count": { "type": "int", "required": false },
+    "service": { "type": "string", "required": false }
+  },
+  "notes": "XM-SMS1 买邮箱接码（Hero-SMS Emails 组）。**花真钱。** 邮箱与手机号是两种资源：按「站点 + 域名」买，状态只有 WAIT / CANCEL / SUCCESS，收到的是邮件里的验证内容（官方叫 value）；所以它单独一张表 sms.sms_email（迁移 000040），不进 sms_resource。count=1 走单买（POST /emails，成功是 201，响应带 id）；count 2–10 走批量（POST /emails/batch，官方上限 10）——**批量响应里没有每条的 id**（官方 schema 如此），要再读一次列表按邮箱地址把 id 找回来，与 62 买号「买完再读一次」同一个形态：那次补读缺任何一条都落 unknown 交人工，因为钱已经花了。七态台账、未决防重与买号相同。收到的验证内容（value）与验证码同一档敏感度，对外 DTO 由 sms.reveal 把守；收到时推企业微信（配了 secret://sms/notify-webhook 才推，群成员都看得到）。compensation_mode 是 MANUAL：可用 sms.email.action 取消，但已经收到验证内容的上游不退。"
+}

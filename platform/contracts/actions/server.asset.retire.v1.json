@@ -1,0 +1,31 @@
+{
+  "id": "server.asset.retire",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "server.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "asset_id": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-SERVER0：单独把一台服务器资产标记为已退役，与 server.asset.set 分开是有意的（同 finance.recharge_ratio.set 分开 finance.upstream_account.set 的理由）：这是一个能被单独审计检索的状态迁移（「这台服务器什么时候退役、谁操作的」不该靠比对一次整行更新的 before/after 才答得出），也让列表页能提供一个不必打开完整编辑表单的一键退役按钮。reason 必填：退役会让这台资产从「使用中」台数与月度成本合计里消失，事后复盘的第一个问题就是「当时为什么退役」。只改 status，不动其它字段。"
+}

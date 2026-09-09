@@ -1,0 +1,1109 @@
+openapi: 3.0.0
+info:
+  title: Infini Fund API
+  version: 1.0.0
+  description: >-
+    Organization fund APIs for Infini UID transfers, withdrawals, withdrawal
+    fees, and USDT/USDC/USD available balances. All endpoints use the
+    independent `/v2/funds` prefix.
+
+
+    Requests require [HMAC-SHA256 authentication](/docs/en/4-authorization) and
+    the `fund.withdraw` permission. To use **Try it**, save Sandbox credentials
+    on [API Credentials](/credentials), or enter Key and Secret under **Security
+    → HMAC**.
+servers:
+  - url: https://openapi.infini.money/v2/funds
+    description: Production
+  - url: https://openapi-sandbox.infini.money/v2/funds
+    description: Sandbox
+tags:
+  - name: Fund
+    description: Organization fund operations
+paths:
+  /withdraw:
+    post:
+      operationId: applyFundWithdrawal
+      summary: Withdraw organization funds
+      description: >-
+        Creates a withdrawal. Requires `fund.withdraw` permission.
+
+
+        `request_id` is optional. When supplied, it must be a UUID and acts as
+        the idempotency key. When the same merchant retries with the same
+        `request_id`, the API returns the previously created withdrawal
+        information with `is_duplicate=true`.
+
+
+        `source_currency` is optional and defaults to `token_type`. Set it to
+        `USD` to deduct from the organization's USD Cash Account when
+        withdrawing USDT or USDC. Other cross-currency pairs are rejected.
+      tags:
+        - Fund
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApplyWithdrawRequest'
+            example:
+              request_id: e94b4e88-36c2-4550-907e-839742cf5fae
+              chain: ETHEREUM
+              token_type: USDT
+              source_currency: USD
+              amount: '10.00'
+              wallet_address: '0x5f716e5775b18409917e2a2f0762d29d6c385cb0'
+              note: Treasury withdrawal
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ApplyWithdrawEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  request_id: e94b4e88-36c2-4550-907e-839742cf5fae
+                  status: pending
+                  is_duplicate: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/withdraw' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "request_id": "e94b4e88-36c2-4550-907e-839742cf5fae",
+                "chain": "ETHEREUM",
+                "token_type": "USDT",
+                "source_currency": "USD",
+                "amount": "10.00",
+                "wallet_address": "0x5f716e5775b18409917e2a2f0762d29d6c385cb0",
+                "note": "Treasury withdrawal"
+              }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest: SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/funds/withdraw"
+            method := "POST"
+  /internal-transfer:
+    post:
+      operationId: createFundInternalTransfer
+      summary: Transfer funds to a UID
+      description: >-
+        Transfers funds from the authenticated organization to an Infini UID.
+        Requires `fund.withdraw` permission.
+
+
+        V1 supports same-currency transfers in USDT, USDC, or USD only.
+        `source_currency` is optional and defaults to `token_type`; when
+        supplied, it must equal `token_type`. The transfer has no fee, so the
+        amount deducted from the sender equals the amount received by the
+        recipient.
+
+
+        `request_id` is optional. When supplied, it must be a UUID and acts as
+        the idempotency key. A retry by the same organization with an already
+        completed `request_id` returns `status=completed` and
+        `is_duplicate=true`.
+      tags:
+        - Fund
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalTransferRequest'
+            example:
+              request_id: 4b4436ba-90a1-4f26-940d-97177a7a3400
+              recipient_uid: '12345678'
+              token_type: USDC
+              source_currency: USDC
+              amount: '10.25'
+              note: Customer refund
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/InternalTransferEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  request_id: 4b4436ba-90a1-4f26-940d-97177a7a3400
+                  status: completed
+                  is_duplicate: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/internal-transfer' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date, e.g. Tue, 21 Jan 2025 12:00:00 GMT>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "request_id": "4b4436ba-90a1-4f26-940d-97177a7a3400",
+                "recipient_uid": "12345678",
+                "token_type": "USDC",
+                "source_currency": "USDC",
+                "amount": "10.25",
+                "note": "Customer refund"
+              }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest: SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/funds/internal-transfer"
+            method := "POST"
+  /withdraw/status:
+    get:
+      operationId: getFundWithdrawalStatus
+      summary: Get withdrawal status
+      description: >-
+        Returns the current withdrawal status for the authenticated merchant.
+        Requires `fund.withdraw` permission.
+      tags:
+        - Fund
+      parameters:
+        - name: request_id
+          in: query
+          required: true
+          description: Withdrawal request ID. Must be a UUID.
+          schema:
+            $ref: '#/components/schemas/WithdrawalStatusRequestId'
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/GetWithdrawStatusEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  request_id: e94b4e88-36c2-4550-907e-839742cf5fae
+                  status: completed
+                  amount: '11'
+                  fee: '0.1'
+                  actual_amount: '10.9'
+                  transaction_hash: '0xabc123'
+                  chain: ETHEREUM
+                  token_type: USDT
+                  source_currency: USD
+                  gas_fee: '0.08'
+                  gas_fee_currency: USD
+                  fx_fee: '0.02'
+                  fx_fee_currency: USD
+                  fee_paid_by: BENEFICIARY
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            # The HMAC signing path must include the complete query string.
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/withdraw/status?request_id=e94b4e88-36c2-4550-907e-839742cf5fae' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: >-
+            // Signing string: {keyId}\n{METHOD} {path-with-query}\ndate:
+            {GMT}\n
+
+            keyID := "{{INFINI_KEY_ID}}"
+
+            secretKey := "{{INFINI_SECRET}}"
+
+            path :=
+            "/v2/funds/withdraw/status?request_id=e94b4e88-36c2-4550-907e-839742cf5fae"
+
+            method := "GET"
+  /withdraw/status/batch:
+    post:
+      operationId: listFundWithdrawalStatuses
+      summary: List withdrawal statuses
+      description: >-
+        Returns withdrawals owned by the authenticated merchant whose creation
+        times fall within the inclusive Unix-second range. Requires
+        `fund.withdraw` permission.
+
+
+        Results are ordered by `created_at` descending. `page` defaults to 1 and
+        `page_size` defaults to 20 with a maximum of 100. A range with no
+        matching withdrawals returns HTTP 200 with an empty `withdrawals` array.
+        Invalid time ranges or pagination values return HTTP 400.
+      tags:
+        - Fund
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+        - $ref: '#/components/parameters/DigestHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ListWithdrawStatusesRequest'
+            example:
+              start_time: 1787500000
+              end_time: 1787599999
+              page: 1
+              page_size: 20
+      responses:
+        '200':
+          description: Standard response envelope with paginated withdrawal statuses
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ListWithdrawStatusesEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  withdrawals:
+                    - request_id: e94b4e88-36c2-4550-907e-839742cf5fae
+                      created_at: 1787564636
+                      status: completed
+                      amount: '11'
+                      fee: '0.1'
+                      actual_amount: '10.9'
+                      transaction_hash: '0xabc123'
+                      chain: ETHEREUM
+                      token_type: USDT
+                      source_currency: USDT
+                      gas_fee: '0.1'
+                      gas_fee_currency: USDT
+                      fx_fee: '0'
+                      fx_fee_currency: USDT
+                      fee_paid_by: BENEFICIARY
+                  total: 1
+                  page: 1
+                  page_size: 20
+                  total_pages: 1
+        '400':
+          description: Invalid time range or pagination values
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 30013
+                message: start_time and end_time must define a valid Unix-second range
+                data: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: >-
+            The withdrawal list could not be processed because of an internal or
+            downstream failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 500
+                message: An error occurred internally
+                data: null
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X POST \
+              '{{INFINI_BASE_URL}}/withdraw/status/batch' \
+              -H 'Content-Type: application/json' \
+              -H 'Date: <GMT date>' \
+              -H 'Digest: SHA-256=<base64(sha256(request body))>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"' \
+              -d '{
+                "start_time": 1787500000,
+                "end_time": 1787599999,
+                "page": 1,
+                "page_size": 20
+              }'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            // Digest: SHA-256=<base64(sha256(body))>
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/funds/withdraw/status/batch"
+            method := "POST"
+  /withdraw/fees:
+    get:
+      operationId: listFundWithdrawalFees
+      summary: List withdrawal fees
+      description: >-
+        Lists currently enabled public chain and token pairs with their
+        withdrawal fees. Requires `fund.withdraw` permission.
+      tags:
+        - Fund
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ListWithdrawFeesEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  fees:
+                    - chain: ARBITRUM
+                      token_type: USDC
+                      withdraw_fee: '0.5'
+                    - chain: ETHEREUM
+                      token_type: USDT
+                      withdraw_fee: '2'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/withdraw/fees' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/funds/withdraw/fees"
+            method := "GET"
+  /balances:
+    get:
+      operationId: getFundAvailableBalances
+      summary: Get available balances
+      description: >-
+        Returns only the authenticated merchant's USDT, USDC, and USD Cash
+        `AVAILABLE_BALANCE` values. Requires `fund.withdraw` permission. USD is
+        returned as `"0"` when the USD Cash Account is not open.
+      tags:
+        - Fund
+      parameters:
+        - $ref: '#/components/parameters/DateHeader'
+        - $ref: '#/components/parameters/AuthorizationHeader'
+      responses:
+        '200':
+          description: Standard response envelope
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/GetAvailableBalancesEnvelope'
+                  - $ref: '#/components/schemas/ErrorEnvelope'
+              example:
+                code: 0
+                message: ''
+                data:
+                  available_balance_usdt: '120.50'
+                  available_balance_usdc: '75.25'
+                  available_balance_usd: '1000.00'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+      x-codeSamples:
+        - lang: curl
+          label: cURL (HMAC)
+          source: |-
+            curl -i -X GET \
+              '{{INFINI_BASE_URL}}/balances' \
+              -H 'Date: <GMT date>' \
+              -H 'Authorization: Signature keyId="{{INFINI_KEY_ID}}",algorithm="hmac-sha256",headers="@request-target date",signature="<signature>"'
+        - lang: Go
+          label: Go (HMAC)
+          source: |-
+            // Signing string: {keyId}\n{METHOD} {path}\ndate: {GMT}\n
+            keyID := "{{INFINI_KEY_ID}}"
+            secretKey := "{{INFINI_SECRET}}"
+            path := "/v2/funds/balances"
+            method := "GET"
+components:
+  parameters:
+    DateHeader:
+      name: Date
+      in: header
+      required: false
+      description: >-
+        GMT server time, e.g. Tue, 21 Jan 2025 12:00:00 GMT. Required on the
+        wire; the Try it signer injects it automatically.
+      schema:
+        type: string
+    AuthorizationHeader:
+      name: Authorization
+      in: header
+      required: false
+      description: >-
+        HMAC-SHA256 `Signature` header. Required on the wire; the Try it signer
+        injects it automatically. See the
+        [Authentication](/docs/en/4-authorization) guide.
+      schema:
+        type: string
+    DigestHeader:
+      name: Digest
+      in: header
+      required: false
+      description: >-
+        SHA-256 digest required on the wire when a body is present; the Try it
+        signer injects it automatically.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: Invalid application request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 30013
+            message: request_id must be a UUID
+            data: null
+    Unauthorized:
+      description: HMAC gateway validation or application authentication failed
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/GatewayError'
+          example:
+            message: client request can't be validated
+    Forbidden:
+      description: >-
+        API key permission, IP whitelist, or endpoint policy rejected the
+        request
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorEnvelope'
+              - $ref: '#/components/schemas/GatewayError'
+          example:
+            code: 403
+            message: permission "fund.withdraw" required
+            data: null
+    NotFound:
+      description: Withdrawal request was not found for the authenticated organization
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+          example:
+            code: 404
+            message: Resource does not exist
+            data: null
+  schemas:
+    StandardEnvelope:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: integer
+          enum:
+            - 0
+          description: Business code. `0` means success.
+          example: 0
+        message:
+          type: string
+          description: Response message.
+          example: ''
+    ErrorEnvelope:
+      type: object
+      required:
+        - code
+        - message
+        - data
+      properties:
+        code:
+          type: integer
+          minimum: 1
+          description: Non-zero business error code.
+          example: 30013
+        message:
+          type: string
+          description: Error details.
+          example: request_id must be a UUID
+        data:
+          type: object
+          nullable: true
+          description: Error responses return null.
+          example: null
+    GatewayError:
+      type: object
+      additionalProperties: false
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          description: Gateway validation error.
+          example: client request can't be validated
+    WithdrawalStatusRequestId:
+      type: string
+      format: uuid
+      description: Withdrawal request ID.
+      example: e94b4e88-36c2-4550-907e-839742cf5fae
+    ApplyWithdrawRequest:
+      type: object
+      required:
+        - chain
+        - token_type
+        - amount
+        - wallet_address
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Optional idempotency key. Must be a UUID when supplied.
+          example: e94b4e88-36c2-4550-907e-839742cf5fae
+        chain:
+          type: string
+          description: >-
+            Public chain name. Use a currently enabled pair returned by the
+            withdrawal fees endpoint.
+          example: ETHEREUM
+        token_type:
+          type: string
+          description: >-
+            Token type. Use a currently enabled pair returned by the withdrawal
+            fees endpoint.
+          example: USDT
+        source_currency:
+          type: string
+          description: >-
+            Source account currency. Defaults to token_type. Set to USD to
+            deduct from the organization's USD Cash Account when withdrawing
+            USDT or USDC; other cross-currency pairs are rejected.
+          example: USD
+        amount:
+          type: string
+          description: >-
+            Maximum amount deducted from the source account. Digits after the
+            sixth decimal place are truncated without rounding; when
+            source_currency is USD, at most two decimal places are allowed. The
+            resulting amount must be at least 1 and greater than the applicable
+            fees.
+          example: '10.00'
+        wallet_address:
+          type: string
+          description: Destination wallet address valid for the selected chain.
+          example: '0x5f716e5775b18409917e2a2f0762d29d6c385cb0'
+        note:
+          type: string
+          description: Optional withdrawal note.
+          example: Treasury withdrawal
+    ApplyWithdrawResponse:
+      type: object
+      required:
+        - request_id
+        - status
+        - is_duplicate
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Withdrawal request ID.
+          example: e94b4e88-36c2-4550-907e-839742cf5fae
+        status:
+          type: string
+          description: Current withdrawal status.
+          enum:
+            - pending
+            - processing
+            - completed
+            - failed
+          example: pending
+        is_duplicate:
+          type: boolean
+          description: Whether the response refers to an existing request ID.
+          example: false
+    ApplyWithdrawEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/ApplyWithdrawResponse'
+    InternalTransferRequest:
+      type: object
+      required:
+        - recipient_uid
+        - token_type
+        - amount
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Optional idempotency key. Must be a UUID when supplied.
+          example: 4b4436ba-90a1-4f26-940d-97177a7a3400
+        recipient_uid:
+          type: string
+          description: >-
+            Recipient Infini UID. The UID cannot belong to the source
+            organization.
+          example: '12345678'
+        token_type:
+          type: string
+          description: Recipient account currency.
+          enum:
+            - USDT
+            - USDC
+            - USD
+          example: USDC
+        source_currency:
+          type: string
+          description: >-
+            Source account currency. Defaults to `token_type`; V1 requires the
+            same currency as `token_type`.
+          enum:
+            - USDT
+            - USDC
+            - USD
+          example: USDC
+        amount:
+          type: string
+          description: >-
+            Positive amount deducted and received. USDT and USDC support up to
+            six decimal places; USD supports up to two. V1 internal transfers
+            have no fee.
+          example: '10.25'
+        note:
+          type: string
+          description: Optional transfer note.
+          example: Customer refund
+    InternalTransferResponse:
+      type: object
+      required:
+        - request_id
+        - status
+        - is_duplicate
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Internal transfer request ID.
+          example: 4b4436ba-90a1-4f26-940d-97177a7a3400
+        status:
+          type: string
+          description: >-
+            Internal transfer status. V1 completes the ledger transfer
+            synchronously.
+          enum:
+            - completed
+          example: completed
+        is_duplicate:
+          type: boolean
+          description: >-
+            Whether the same request ID was already completed for the
+            authenticated organization.
+          example: false
+    InternalTransferEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/InternalTransferResponse'
+    GetWithdrawStatusResponse:
+      type: object
+      required:
+        - request_id
+        - status
+        - amount
+        - fee
+        - actual_amount
+        - transaction_hash
+        - chain
+        - token_type
+        - source_currency
+        - gas_fee
+        - gas_fee_currency
+        - fx_fee
+        - fx_fee_currency
+        - fee_paid_by
+      properties:
+        request_id:
+          $ref: '#/components/schemas/WithdrawalStatusRequestId'
+        status:
+          type: string
+          description: Current withdrawal status.
+          enum:
+            - pending
+            - processing
+            - completed
+            - failed
+          example: completed
+        amount:
+          type: string
+          description: Total amount deducted from the source account.
+          example: '11'
+        fee:
+          type: string
+          description: >-
+            Legacy Gas fee field. New integrations should use `gas_fee` and
+            `gas_fee_currency`.
+          example: '0.1'
+        actual_amount:
+          type: string
+          description: Actual amount sent on-chain in `token_type`.
+          example: '10.9'
+        transaction_hash:
+          type: string
+          description: On-chain transaction hash. Empty before submission.
+          example: '0xabc123'
+        chain:
+          type: string
+          description: Public chain name.
+          example: ETHEREUM
+        token_type:
+          type: string
+          description: Token type.
+          example: USDT
+        source_currency:
+          type: string
+          description: Source account currency.
+          example: USD
+        gas_fee:
+          type: string
+          description: Customer-facing Gas fee charged for the withdrawal.
+          example: '0.08'
+        gas_fee_currency:
+          type: string
+          description: Currency of `gas_fee`.
+          example: USD
+        fx_fee:
+          type: string
+          description: >-
+            FX fee charged for a cross-currency withdrawal; zero for
+            same-currency withdrawals.
+          example: '0.02'
+        fx_fee_currency:
+          type: string
+          description: Currency of `fx_fee`.
+          example: USD
+        fee_paid_by:
+          type: string
+          description: Fee liability, either `PAYER` or `BENEFICIARY`.
+          enum:
+            - PAYER
+            - BENEFICIARY
+          example: BENEFICIARY
+    GetWithdrawStatusEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/GetWithdrawStatusResponse'
+    ListWithdrawStatusesRequest:
+      type: object
+      required:
+        - start_time
+        - end_time
+      properties:
+        start_time:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Inclusive withdrawal creation start time, as a Unix timestamp in
+            seconds.
+          example: 1787500000
+        end_time:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >-
+            Inclusive withdrawal creation end time, as a Unix timestamp in
+            seconds. Must be greater than or equal to `start_time`.
+          example: 1787599999
+        page:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Page number.
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+          description: Number of withdrawals per page.
+          example: 20
+    WithdrawalStatusListItem:
+      type: object
+      required:
+        - request_id
+        - created_at
+        - status
+      properties:
+        request_id:
+          $ref: '#/components/schemas/WithdrawalStatusRequestId'
+        created_at:
+          type: integer
+          format: int64
+          description: Withdrawal creation time, as a Unix timestamp in seconds.
+          example: 1787564636
+        status:
+          type: string
+          description: Current withdrawal status.
+          enum:
+            - pending
+            - processing
+            - completed
+            - failed
+          example: completed
+        amount:
+          type: string
+          description: Total amount deducted from the source account.
+          example: '11'
+        fee:
+          type: string
+          description: >-
+            Legacy Gas fee field. New integrations should use `gas_fee` and
+            `gas_fee_currency`.
+          example: '0.1'
+        actual_amount:
+          type: string
+          description: Actual amount sent on-chain in `token_type`.
+          example: '10.9'
+        transaction_hash:
+          type: string
+          description: On-chain transaction hash. Empty before submission.
+          example: '0xabc123'
+        chain:
+          type: string
+          description: Public chain name.
+          example: ETHEREUM
+        token_type:
+          type: string
+          description: Token type sent on-chain.
+          example: USDT
+        source_currency:
+          type: string
+          description: Source account currency.
+          example: USDT
+        gas_fee:
+          type: string
+          description: Customer-facing Gas fee charged for the withdrawal.
+          example: '0.1'
+        gas_fee_currency:
+          type: string
+          description: Currency of `gas_fee`.
+          example: USDT
+        fx_fee:
+          type: string
+          description: >-
+            FX fee charged for a cross-currency withdrawal; zero for
+            same-currency withdrawals.
+          example: '0'
+        fx_fee_currency:
+          type: string
+          description: Currency of `fx_fee`.
+          example: USDT
+        fee_paid_by:
+          type: string
+          description: Fee liability, either `PAYER` or `BENEFICIARY`.
+          enum:
+            - PAYER
+            - BENEFICIARY
+          example: BENEFICIARY
+    ListWithdrawStatusesResponse:
+      type: object
+      required:
+        - withdrawals
+        - total
+        - page
+        - page_size
+        - total_pages
+      properties:
+        withdrawals:
+          type: array
+          description: Matching withdrawal statuses ordered by creation time descending.
+          items:
+            $ref: '#/components/schemas/WithdrawalStatusListItem'
+        total:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total number of withdrawals matching the time range.
+          example: 1
+        page:
+          type: integer
+          minimum: 1
+          description: Current page number.
+          example: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Number of withdrawals requested per page.
+          example: 20
+        total_pages:
+          type: integer
+          minimum: 0
+          description: Total number of pages. Zero when no withdrawals match.
+          example: 1
+    ListWithdrawStatusesEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/ListWithdrawStatusesResponse'
+    WithdrawFeeItem:
+      type: object
+      required:
+        - chain
+        - token_type
+        - withdraw_fee
+      properties:
+        chain:
+          type: string
+          description: Public chain name.
+          example: ARBITRUM
+        token_type:
+          type: string
+          description: Token type.
+          example: USDC
+        withdraw_fee:
+          type: string
+          description: Withdrawal fee denominated in `token_type`.
+          example: '0.5'
+    ListWithdrawFeesResponse:
+      type: object
+      required:
+        - fees
+      properties:
+        fees:
+          type: array
+          description: Currently enabled public chain and token withdrawal fees.
+          items:
+            $ref: '#/components/schemas/WithdrawFeeItem'
+    ListWithdrawFeesEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/ListWithdrawFeesResponse'
+    GetAvailableBalancesResponse:
+      type: object
+      required:
+        - available_balance_usdt
+        - available_balance_usdc
+        - available_balance_usd
+      properties:
+        available_balance_usdt:
+          type: string
+          description: USDT `AVAILABLE_BALANCE`.
+          example: '120.50'
+        available_balance_usdc:
+          type: string
+          description: USDC `AVAILABLE_BALANCE`.
+          example: '75.25'
+        available_balance_usd:
+          type: string
+          description: >-
+            USD Cash `AVAILABLE_BALANCE`; returns `"0"` when the USD Cash
+            Account is not open.
+          example: '1000.00'
+    GetAvailableBalancesEnvelope:
+      allOf:
+        - $ref: '#/components/schemas/StandardEnvelope'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: '#/components/schemas/GetAvailableBalancesResponse'
+  securitySchemes:
+    InfiniHmac:
+      type: http
+      scheme: basic
+      description: Sandbox API **Key** (keyId) and **Secret** from the Infini dashboard.
+security:
+  - InfiniHmac: []

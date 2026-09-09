@@ -1,0 +1,195 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/registry.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/registry/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/action.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/action/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/audit.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/audit/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/ops.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/ops/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/alerts.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/alerts/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/finance.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/finance/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # 可空 uuid 必须映射成**指针**，否则 uuid.Nil 会被当成一个合法的
+          # 全零 UUID 写进库（而不是 NULL），外键立刻炸——或者更糟，
+          # 指向一个恰好存在的全零行。schema 里唯一的可空 uuid 列是
+          # XM-0037c 的 subscription_cost_batch.proxy_batch_id 与
+          # amortization_loss.{batch_id,proxy_asset_id}（迁移 000010）。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/savedviews.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/savedviews/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true
+  - engine: "postgresql"
+    schema: "db/migrations"
+    queries: "db/queries/server.sql"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/platform/server/gen"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        emit_json_tags: false
+        overrides:
+          - db_type: "uuid"
+            go_type: "github.com/google/uuid.UUID"
+          # server_asset.supplier_id 是本迁移唯一的可空 uuid 列——一台服务器
+          # 可以先登记、后补供应商。必须映射成指针，否则 uuid.Nil 会被当成
+          # 一个合法的全零 UUID 写进库（而不是 NULL），外键立刻炸。
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              type: "UUID"
+              pointer: true

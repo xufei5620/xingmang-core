@@ -1,0 +1,135 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read  # gitleaks-action 在 pull_request 事件读取 PR commits 所需
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    runs-on: [self-hosted, linux]
+    steps:
+      # fetch-depth: 0 是迁移不可变检查（v5）的前提。默认的浅检出里没有
+      # origin/main，那段检查会整段跳过并 exit 0——在唯一会拦住人的路径上
+      # 从未真正执行过（XM-R006）。
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - name: 治理红线检查
+        env:
+          # PR 上比对 base 分支；push 到 main 时比对推送前的 main。
+          # 后者为空（首次推送）时脚本会走「基线缺失」分支。
+          GOVERNANCE_BASE_REF: >-
+            ${{ github.event_name == 'pull_request'
+                && format('origin/{0}', github.base_ref)
+                || github.event.before }}
+          # PR 上基线必须存在：取不到就是 CI 配错了，不能当作通过。
+          GOVERNANCE_REQUIRE_BASE: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+        run: bash scripts/check-governance.sh
+      - name: 安全测试（脚本路径穿越等）
+        run: |
+          for t in tests/security/*.test.sh; do
+            [ -e "$t" ] || continue
+            echo "== $t =="
+            bash "$t"
+          done
+
+  secret-scan:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  backend:
+    runs-on: [self-hosted, linux]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: xingmang
+          POSTGRES_PASSWORD: xingmang-ci
+          POSTGRES_DB: xingmang
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U xingmang -d xingmang"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      XM_TEST_DATABASE_URL: postgres://xingmang:xingmang-ci@127.0.0.1:55432/xingmang?sslmode=disable
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: has
+        run: echo "go=$([ -f go.mod ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.go == 'true'
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - if: steps.has.outputs.go == 'true'
+        name: gofmt 检查
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - if: steps.has.outputs.go == 'true'
+        name: go vet
+        run: go vet ./...
+      - if: steps.has.outputs.go == 'true'
+        name: sqlc 生成一致性（规格 §19.2）
+        run: |
+          go tool sqlc generate
+          if ! git diff --exit-code -- internal/platform/registry/gen; then
+            echo "sqlc 生成结果与提交不一致：请运行 go tool sqlc generate 并提交" >&2
+            exit 1
+          fi
+      - if: steps.has.outputs.go == 'true'
+        name: 数据库迁移
+        run: go run ./cmd/migrate -database "$XM_TEST_DATABASE_URL" up
+      - if: steps.has.outputs.go == 'true'
+        name: go test
+        # -p 1:集成测试用 TRUNCATE 独占共享的 Postgres,包间并行会互踩
+        # (audit 与 httpapi 都写 audit_event,并行时计数断言必挂——XM-0025 实测)。
+        # 本地惯例本就是逐包串行跑容器内测试,CI 与之对齐。
+        run: go test -p 1 ./...
+
+  frontend:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - id: has
+        run: echo "web=$([ -f pnpm-workspace.yaml ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - if: steps.has.outputs.web == 'true'
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.24.0
+      - if: steps.has.outputs.web == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.13.0
+          cache: pnpm
+      - if: steps.has.outputs.web == 'true'
+        run: pnpm install --frozen-lockfile
+      - if: steps.has.outputs.web == 'true'
+        name: typecheck
+        run: pnpm -r run typecheck
+      - if: steps.has.outputs.web == 'true'
+        name: unit tests
+        run: pnpm -r run test
+      - if: steps.has.outputs.web == 'true'
+        name: storybook build
+        run: |
+          if [ -d web/apps/ui-storybook ]; then pnpm --filter ui-storybook run build; fi
+      - if: steps.has.outputs.web == 'true'
+        name: admin-web build
+        run: |
+          if [ -d web/apps/admin-web ]; then pnpm --filter admin-web run build; fi

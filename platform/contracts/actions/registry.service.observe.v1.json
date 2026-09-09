@@ -1,0 +1,19 @@
+{
+  "id": "registry.service.observe",
+  "version": "1",
+  "risk_level": "L0",
+  "permission": "registry.service.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "NOT_IMPLEMENTED_FOUNDATION_A",
+  "write_confirmation": "NOT_IMPLEMENTED_FOUNDATION_A",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "service_type": {"type": "string", "required": true},
+    "instance_id": {"type": "string", "required": true},
+    "watermark": {"type": "string", "required": true},
+    "status": {"type": "string", "required": true, "enum": ["active", "degraded", "retired"]}
+  },
+  "notes": "数据新鲜度回写（规格 §9.1）。补偿方式为 AUTOMATIC：下一次成功采集会覆盖本次观测。"
+}

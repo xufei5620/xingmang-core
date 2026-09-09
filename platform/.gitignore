@@ -1,0 +1,34 @@
+# --- Go ---
+/bin/
+*.exe
+*.test
+*.out
+# --- Node ---
+node_modules/
+dist/
+storybook-static/
+tools/local-progress/progress.json
+.vite/
+*.tsbuildinfo
+# --- 环境与凭据（宪法 7 条：仓库禁明文凭据）---
+.env
+.env.*
+*.age
+!*.example
+/secrets/
+var/
+*.pem
+*.key
+# --- 系统/编辑器 ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+# --- 测试产物 ---
+coverage/
+playwright-report/
+test-results/
+
+# Claude Code 会话产物(代理 worktree 等),永不入库
+/.claude/
+/.playwright-cli/

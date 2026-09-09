@@ -1,0 +1,19 @@
+{
+  "id": "finance.token_map.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.token_map.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "upstream_account_id": {"type": "string", "required": true},
+    "upstream_token_id": {"type": "string", "required": true},
+    "own_account_id": {"type": "string", "required": true},
+    "credential_ref": {"type": "string", "required": false}
+  },
+  "notes": "XM-0037a 令牌映射（设计稿 §2.1、§11.11/§12 拍板：映射手工 Action 维护 + 自动发现候选）。upstream_token_id 是**成本侧键**（sub2api=上游令牌 id，newapi=token_name），own_account_id 是**收入侧键**（sub2api=自营账号 id，newapi=channel_id）。重复登记同一令牌是**纠正**不是冲突，走 upsert。映射写错的后果是成本记到别的渠道上：两条渠道的毛利一个虚高一个虚低而合计完全正确，是最难从总数上看出来的一类错误——所以它有独立权限。credential_ref 是**每令牌**凭据引用：sub2api 的计量型渠道**必填**（成本侧要用该令牌自己的明文打 /v1/usage，§3.1，apikey 自鉴权非 admin key），newapi 留空（走账号级 New-Api-User + Cookie）。明文经 SecretProvider 解析，Reveal() 只在拼 HTTP 头那一瞬出现（ADR-014、宪法 7 条）。"
+}

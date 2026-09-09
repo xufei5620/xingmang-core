@@ -1,0 +1,19 @@
+{
+  "id": "finance.platform_channel_binding.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.platform_channel_binding.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "EXPECTED_BINDING_ID",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "MANUAL",
+  "params": {
+    "service_id": {"type": "string", "required": true},
+    "external_channel_id": {"type": "string", "required": true},
+    "upstream_account_id": {"type": "string", "required": true},
+    "expected_binding_id": {"type": "string", "required": false},
+    "reason": {"type": "string", "required": true}
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "id": "finance.subscription_batch.register",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "upstream_account_id": {
+      "type": "string",
+      "required": true
+    },
+    "paid_minor": {
+      "type": "string",
+      "required": true
+    },
+    "surcharge_minor": {
+      "type": "string",
+      "required": false
+    },
+    "currency": {
+      "type": "string",
+      "required": false
+    },
+    "starts_on": {
+      "type": "string",
+      "required": true
+    },
+    "expires_on": {
+      "type": "string",
+      "required": true
+    },
+    "account_count": {
+      "type": "int",
+      "required": true
+    },
+    "proxy_asset_id": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-0037c 订阅成本批次登记（设计稿 §2.5/§3.5）。叫 register 而不是 set：批次**没有修改路径**——续费是再来一笔，不覆盖历史（§3.5/§10.3）；允许原地改会让「上个月按 99 摊」在改完之后变成「上个月按 129 摊」，而历史台账已按 99 入过账，两份记录从此对不上且不报错。金额是**整数最小单位的十进制字符串**（scale-6 微单位，$29.99 写作 \"29990000\"），不是 JSON 数字：后者一路解成 float64，scale-6 下超过 $9,007,199 就丢精度且不报错（宪法 13 条、§2.4）。starts_on/expires_on 是自然日、**含两端**（§12 拍板），有效天数 = expires_on − starts_on + 1。无 environment 参数——环境取自调用者身份（宪法 15 条），Handler 读出账号后再复核一次，并要求它的 access_method 确实是 subscription_account：挂在计量型账号下的批次永远不会被摊销读到，既不入成本也不报错。proxy_asset_id 可空（无代理 ⇒ 代理成本为 0，§2.5），给了则必须与账号同环境。登记时不得直接给 terminated_on：终止要结转一笔损失并留独立审计，走 finance.subscription_batch.terminate。"
+}

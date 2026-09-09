@@ -1,0 +1,57 @@
+# Xingmang audit archive object store.
+#
+# This is an independent MinIO project. It is intentionally a fixture profile:
+# the platform launch stack never includes it, and no archive scheduler consumes
+# the River queue in this slice. Operators must provide an ignored env file via
+# XM_ARCHIVE_CREDENTIAL_ENV_FILE; no credential value belongs in this repository.
+# Production activation remains gated by R2-10, DB-role split and lifecycle
+# approval even though the project name is fixed to xingmang-archive.
+name: xingmang-archive
+
+services:
+  minio:
+    profiles: ["archive-fixture"]
+    image: docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    platform: linux/amd64
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    restart: "no"
+    # The file is generated/managed out-of-band from CredentialRefs. It must
+    # contain MINIO_ROOT_USER, MINIO_ROOT_PASSWORD and MINIO_KMS_SECRET_KEY;
+    # this compose file never carries their values.
+    env_file:
+      - ${XM_ARCHIVE_CREDENTIAL_ENV_FILE:?XM_ARCHIVE_CREDENTIAL_ENV_FILE must point to an ignored operator-managed env file}
+    environment:
+      MINIO_KMS_AUTO_ENCRYPTION: "on"
+    ports:
+      - "127.0.0.1::9000"
+      - "127.0.0.1::9001"
+    volumes:
+      - archive-minio-data:/data
+    networks:
+      - archive-internal
+    labels:
+      com.xingmang.archive.fixture: "true"
+      com.xingmang.archive.production: "false"
+      com.xingmang.archive.project: "xingmang-archive"
+      com.xingmang.archive.credential-ref.object-writer: "secret://archive/minio-runtime"
+      com.xingmang.archive.credential-ref.kms: "secret://archive/minio-kms"
+      com.xingmang.archive.credential-ref.qualification: "secret://archive/minio-qualification"
+      com.xingmang.archive.credential-ref.security-sink: "secret://archive/security-sink"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+volumes:
+  archive-minio-data:
+    name: xingmang-archive-minio-data
+    labels:
+      com.xingmang.archive.fixture: "true"
+      com.xingmang.archive.production: "false"
+
+networks:
+  archive-internal:
+    name: xingmang-archive-internal
+    internal: true

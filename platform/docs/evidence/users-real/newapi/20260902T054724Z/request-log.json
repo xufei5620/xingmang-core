@@ -1,0 +1,19 @@
+[
+  {
+    "purpose": "version_and_quota",
+    "method": "GET",
+    "path": "/api/status",
+    "status": 200,
+    "observed_at": "2026-09-02T05:47:24.845176106Z",
+    "latency_ms": 324
+  },
+  {
+    "purpose": "users_page",
+    "method": "GET",
+    "path": "/api/user/",
+    "query": "p=1\u0026page_size=5",
+    "status": 200,
+    "observed_at": "2026-09-02T05:47:25.17115178Z",
+    "latency_ms": 84
+  }
+]

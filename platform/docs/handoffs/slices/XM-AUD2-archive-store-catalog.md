@@ -1,0 +1,245 @@
+sprint-section: 7
+
+# XM-AUD2-archive-store-catalog · Exact-version archive store / catalog
+
+## status
+
+READY · AUD2-impl (000018 + PostgreSQL catalog/journal); S3 adapter/qualification is a separate slice
+
+This branch starts from the exact accepted release tip and records the approved AUD2
+input digest below. Both input and generated-artifact approvals are recorded; this slice's
+000018 PostgreSQL catalog/journal implementation is complete. The MinIO adapter and its
+qualification are separate follow-up slices. Shared-stack execution and production access
+remain prohibited throughout this slice.
+
+## branch / base
+
+- branch: `ai/codex/XM-AUD2-archive-store-catalog`
+- worktree: `K:/星芒统一控制平台/wt-xmAUD2-impl`
+- fresh release tip at implementation start: `db9d4cabe4092defc3f07b11d511a825491f56ae`
+- current rebased release/base: `7a66e775694a257c121834df3acb4bc3d01d43f3`
+- top-level migration max at fresh tip: `17`
+- allocated migration number: `000018` (`000018_audit_archive_catalog`)
+- commit: see final delivery line / branch HEAD
+
+## approval and exact boundary
+
+The `2026-08-30T06:57Z APPROVED AUD2` record authorizes the provider direction:
+self-hosted MinIO, production project `xingmang-archive`, `region=local`, own-server
+residency, versioning + Object Lock COMPLIANCE with 3650-day retention, no lifecycle
+deletion, TLS + MinIO SSE-S3 (`MINIO_KMS_SECRET_KEY` via
+`secret://archive/minio-kms`), PII excluded, `github.com/minio/minio-go/v7` with the
+current stable version pinned by Codex, and content-addressed conditional Put/HEAD
+recovery. It also requires a disposable random MinIO qualification project using
+`secret://archive/minio-qualification`.
+
+The provider approval did not itself approve migration bytes; the acceptance log contains
+`2026-08-30T08:04Z APPROVED AUD2 INPUT 000018` for the corrected five-file candidate
+(`digest=caaa33624b93c5d5fc2ee02688bf0d1207d8799f`). The branch has since been rebased to
+the newer release `7a66e77` (migration max remains 17); the approved five input bytes are
+unchanged. Migration application is limited to disposable PG18 probes. `go tool sqlc
+generate` has run with the pinned tool, and the acceptance log contains
+`2026-08-30T08:26Z APPROVED AUD2 GENERATED` for the generated files below. Catalog/journal
+and provider implementation may proceed on disposable fixtures; shared
+`xingmang-launch`, production endpoints, servers and real credentials remain prohibited
+until the final implementation slice is READY and merged.
+
+## migration input pin (pre-generation)
+
+The manifest covers the five plan-mandated pre-generation inputs:
+
+| path | SHA-256 |
+|---|---|
+| `db/migrations/000018_audit_archive_catalog.up.sql` | `559dbf9346df300cb65482e0c2af0bdc060c629d` |
+| `db/migrations/000018_audit_archive_catalog.down.sql` | `0cf6a623f4ed3765496e173248319ec7dfdeff14` |
+| `db/queries/audit.sql` | `db8f953e1a174c506731460e6d4b0922ef26e7fa` |
+| `internal/platform/audit/archive/catalog_integration_test.go` | `1145d666422da7677eb500eee6c644fd56ca1631` |
+| `internal/platform/audit/archive/receipt_journal_integration_test.go` | `24ae0703fce3c4399dc906961c954e5432e71d24` |
+
+`migration_input_digest` is computed as the SHA-256 of the sorted `hash-object + two
+spaces + path` lines plus one final LF, exactly as the implementation plan specifies.
+The `2026-08-30T08:04Z` approval covers the corrected receipt-test bytes (savepoint
+handling for expected duplicate-key errors) and the five-file digest
+`caaa33624b93c5d5fc2ee02688bf0d1207d8799f`. The earlier e3ba approval is superseded.
+The earlier PowerShell pipeline digest `6113a7453907148508697458b8be2ce2ffedeaba` was
+an encoding artifact and is superseded. Any input byte edit or release-tip migration
+movement invalidates approval and requires a fresh recomputation.
+
+## generated artifact pin (sqlc)
+
+`go tool sqlc version` returned `v1.31.1`; `go tool sqlc generate` completed successfully
+after the exact input approval. `git diff --exit-code -- sqlc.yaml` is clean. Because the
+repository's sqlc configs share one PostgreSQL schema, the generator refreshed three
+`internal/platform/audit/gen` files plus six collateral package model files; all nine are
+listed and frozen here (no hand edits):
+
+| generated path | SHA-1 (`git hash-object`) |
+|---|---|
+| `internal/platform/action/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/alerts/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/audit/gen/audit.sql.go` | `ac259d14e3470fd1abb4e864dbf50ab283d7454c` |
+| `internal/platform/audit/gen/db.go` | `3456a021e22e5ccca67590f8c3f47d4855852189` |
+| `internal/platform/audit/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/finance/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/ops/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/registry/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+| `internal/platform/savedviews/gen/models.go` | `8577186b474ad1f4646b0e678ea70d1390516767` |
+
+The all-nine sorted-manifest digest (UTF-8 bytes of `hash  path` lines plus one LF) is
+`52ee14cccebb36e866eb0648a459b1867e18897d`. For the plan's audit-only path set
+(`internal/platform/audit/gen/*`), the corresponding digest is
+`2b3f7899acbff5111ea4d658e20c51e562afd53d`. These generated artifacts are approved by
+the `2026-08-30T08:26Z APPROVED AUD2 GENERATED` acceptance-log entry, but are not deployment
+evidence; runtime wiring remains disposable-only until READY merge.
+
+## TDD stage
+
+1. RED first: contract tests assert catalog ranges, checkpoint/generation
+   coverage, append-only journal semantics, duplicate/conflicting bytes, and role-bound
+   fixed-column access. They are opt-in to a disposable database and must not target the
+   shared stack.
+2. GREEN now: provider-independent validation, fixed locator/recovery-index models and
+   filesystem fixture may be implemented and tested without the migration.
+3. Final implementation gate: PostgreSQL catalog/journal runtime wiring and disposable
+   MinIO qualification may proceed under the approved boundaries. Shared-stack deploy,
+   staging/production access and any real credential remain out of scope until READY merge.
+
+### RED evidence
+
+- A disposable PostgreSQL 18 container with a random name and loopback port was started
+  solely for the schema probe and removed immediately. With
+  `XM_AUD2_EXPECT_SCHEMA=1`,
+  `go test ./internal/platform/audit/archive -run '^TestAUD2ArchiveSchemaMissingIsAVisibleRedFailure$' -count=1 -v`
+  failed as intended: `AUD2 migration RED: audit.archive_segment is absent` (exit 1).
+- The default archive package run compiles the new tests and skips database cases unless
+  the explicit `XM_AUD2_CONTRACT_DATABASE_URL` is set; it does not target the shared stack.
+- A fresh disposable PostgreSQL 18 probe (`xm-aud2-pg-51a19baf423c`, random loopback
+  port; removed immediately) applied all 18 top-level migrations and ran the complete
+  archive package with `XM_AUD2_CONTRACT_DATABASE_URL`:
+  `go test ./internal/platform/audit/archive -count=1` — **PASS**. It then verified all
+  four archive tables existed, confirmed the three AUD2 capability roles were absent as
+  expected (DBR2 provisioning remains separate), applied the disposable down file, and
+  observed all four archive relations as `NULL`. This is disposable evidence only; no
+  shared stack, server, MinIO endpoint or production database was touched.
+- A final disposable PG18 run (`xm-aud2-pg-8cfbe961a23f`, removed immediately) exercised
+  `TestAUD2PostgresStoresRoundTrip` after the runtime hardening: generated catalog writer
+  commit/replay, strict receipt journal intent/put/terminal round-trip, role absence and
+  down migration all passed. The run was isolated from the shared stack.
+
+## files / non-goals for this stage
+
+- Allowed preparation: this Handoff, the exact draft migration/query/test inputs, pure
+  archive models/validation, filesystem fixture, and protocol-only MinIO qualification
+  harness.
+- Not done and not claimed in this slice: shared/staging application of `000018`, provisioning
+  roles, starting MinIO, connecting any external endpoint, changing the worker/API, or
+  deploying to `xingmang-launch`. The disposable-only `000018` apply/probe, sqlc generation
+  and PostgreSQL catalog/journal runtime proof are recorded above; generated bytes are
+  approved but not deployed to the shared stack. `s3_store.go`, minio-go dependency pin and
+  live/disposable MinIO qualification are intentionally a separate `AUD2-s3-adapter` slice.
+- No `audit.audit_event` UPDATE/DELETE/TRUNCATE/DROP path is introduced.
+
+### files_changed
+
+- `db/migrations/000018_audit_archive_catalog.up.sql` (approved input; disposable apply only)
+- `db/migrations/000018_audit_archive_catalog.down.sql` (disposable teardown only)
+- `db/queries/audit.sql` (approved fixed-column query input; generated output is pinned below)
+- generated `internal/platform/audit/gen/{audit.sql.go,db.go,models.go}` plus six collateral
+  `*/gen/models.go` files listed in the generated-artifact manifest
+- `internal/platform/audit/archive/{objectstore,filesystem_store,catalog,receipt_journal,recovery_index,checkpoint,provider_qualification}.go`
+- corresponding pure/integration contract tests under `internal/platform/audit/archive/*_test.go`
+- this Handoff
+
+### tests_not_run
+
+- No MinIO process/provider SDK call, shared Docker stack,
+  worker/API restart, staging, production or external credential qualification has been
+  run yet. The disposable PostgreSQL migration/apply, sqlc generation and full archive
+  package probe are recorded above.
+- Live/disposable MinIO qualification remains pending in the separate adapter slice and
+  requires the one-time CredentialRef `secret://archive/minio-qualification`; no secret
+  value is recorded here.
+
+### risks / follow_ups
+
+- DB owner/ACL provisioning for `xm_audit_archive_catalog_writer`,
+  `xm_audit_archive_receipt_reader` and `xm_audit_archive_receipt_writer` is intentionally
+  deferred to the separately approved DBR2 policy; this migration does not create roles.
+- PostgreSQL `archive_segment` cross-row contiguity and RecoveryIndex coverage remain
+  application/transaction invariants enforced by the advisory-lock/proof path; disposable
+  evidence does not authorize shared-stack deployment.
+- **AccessRecorder approval conflict:** the latest acceptance notes say to record restricted
+  reads in `audit.audit_event`, while the normative archive design requires an independent
+  append-only/WORM security sink outside both the audit schema and archive bucket and forbids
+  recursive writes to `audit.audit_event`. AUD2 does not implement AccessRecorder; this
+  contradiction is explicitly unresolved and blocks any AUD3 restricted-read claim until a
+  new CR/acceptance decision reconciles it.
+- Before any runtime claim, re-fetch the release tip, recompute max/000018 and all five
+  input hashes/digest, verify the `2026-08-30T08:04Z APPROVED AUD2 INPUT` line, and
+  re-check the nine generated hashes/digest against the exact `APPROVED AUD2 GENERATED`
+  line. Any changed input or generated byte invalidates the corresponding approval.
+
+### Pure contract implementation delivered in this stage
+
+- `objectstore.go`: exact capability interfaces, intent/version validation, canonical
+  digest helpers and bounded object-size guard. The approved MinIO SSE-S3 exception is
+  accepted through a local validation shim alongside the historical SSE-KMS wire fixture;
+  both remain explicitly bound to an opaque key identifier and Object Lock metadata.
+- `filesystem_store.go`: disposable local fixture implementing only PutIfAbsent,
+  RecoverPutResult, HeadVersion and GetVersion. Writes are content-addressed, atomic,
+  loopback/local-root constrained, symlink checked, and readback verifies exact bytes,
+  size and metadata. It is not production evidence and has no deletion/list API.
+- `catalog.go`, `receipt_journal.go`, `recovery_index.go`, `checkpoint.go`: in-memory
+  protocol doubles for contiguous catalog commit, append-only intent/put/terminal
+  receipts, fixed-locator generation CAS and exact signed-wire digests. They are test
+  doubles only; PostgreSQL wiring is implemented separately in
+  `postgres_catalog.go` and `postgres_receipt_journal.go`.
+- `postgres_catalog.go`: generated-query catalog writer/reader with advisory-lock
+  contiguous commit, full row-vs-manifest reconciliation, immutable RecoveryIndex proof
+  binding and resolver-based exact manifest metadata (no synthetic object refs). The
+  production constructor is `NewPostgresCatalogWithProofAndChecker`; the callback-only
+  constructor remains compatibility/test-only because it cannot carry a transaction-bound
+  signed range proof.
+- `postgres_receipt_journal.go`: generated-query append-only intent/put/terminal journal;
+  strict canonical JSON decoding, digest/ordinal validation, idempotent replay and
+  optional artifact-ref equality checks. No role provisioning or live cutover is included.
+- `postgres_store_integration_test.go`: opt-in disposable PG18 end-to-end proof for the
+  generated catalog/journal paths; it refuses non-loopback DSNs through the shared helper.
+- `provider_qualification.go`: approved MinIO qualification config validator and
+  sanitized result shape; no endpoint/credential is opened.
+
+### Verification evidence
+
+- `go test ./internal/platform/audit/archive -count=1` — PASS (pure package run; opt-in
+  PostgreSQL tests skipped in the no-DSN run). The fresh disposable DSN run also passed
+  the same full command with all archive integration probes enabled.
+- `go test -p 1 ./... -count=1` — PASS after rebase to `7a66e77`; all backend/connector,
+  generated and archive packages completed without failures.
+- `go tool sqlc version` — `v1.31.1`; `go tool sqlc generate` — PASS; `git diff --exit-code
+  -- sqlc.yaml` — PASS; generated artifacts approved at `2026-08-30T08:26Z`.
+- `go test ./internal/platform/audit/archive -run 'TestAUD2' -count=1` — PASS (pure
+  MemoryCatalog/ReceiptJournal/RecoveryIndex/Filesystem and provider checks).
+- Disposable PG18 runtime proof `TestAUD2PostgresStoresRoundTrip` plus
+  `TestAUD2PostgresReceiptRejectsCompressedIncompleteOrdinals` — PASS after the strict
+  row/ordinal hardening; `up=PASS migrations=18`, `down=PASS`, all resources cleaned.
+- Partial receipt-gap safety is fail-closed: `LoadOperation` returns
+  `ErrJournalIncomplete` rather than exposing compressed/misindexed `PutResults`.
+- `go vet ./internal/platform/audit/archive` — PASS; `gofmt -l internal/platform/audit/archive`
+  — no output; `git diff --check` — PASS.
+- GOPROXY query recorded by the implementation line: `go list -m -json
+  github.com/minio/minio-go/v7@latest` resolved current stable `v7.3.0` (2026-08-15).
+  The dependency is not yet added because the MinIO adapter is a separate follow-up; it
+  must be pinned exactly to `v7.3.0` in `go.mod`, `go.sum` and `VERSIONS.lock` (never
+  `latest` or a range).
+- Provider-independent migration review used disposable PG18 probes and reported
+  `up=PASS migrations=18`, full archive tests `PASS`, roles absent as expected, and
+  `down=PASS tables_after=NULL|NULL|NULL|NULL`; no shared stack or production database
+  was touched by this branch.
+
+## references
+
+- `docs/superpowers/specs/2026-08-28-audit-archive-design.md` §§6.1–6.3, 12–13.
+- `docs/superpowers/plans/2026-08-28-audit-archive-implementation.md` Task 2, Steps 1–9.
+- `docs/handoffs/CODEX-SPRINT-2026-08-29.md` §7.1–§7.2.
+- `docs/handoffs/ACCEPTANCE-LOG.md` `2026-08-30T08:04Z APPROVED AUD2 INPUT` and
+  `2026-08-30T08:26Z APPROVED AUD2 GENERATED`.

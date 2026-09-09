@@ -1,0 +1,51 @@
+# 治理防篡改守卫。
+#
+# 关键：on:pull_request_target 始终使用 **base 分支（main）** 上的本文件与
+# scripts/guard-governance-files.sh，PR 无法通过修改自己分支上的副本来绕过
+# （对比 ci.yml 的 on:pull_request 跑的是 PR 头的版本——红队 Issue #17）。
+#
+# 安全：本工作流**不检出、不执行** PR 代码；只读取 PR 的文件名清单。
+# permissions 保持只读，不使用任何 secret。
+name: guard
+
+on:
+  # labeled/unlabeled 必须包含：governance-change 标签是放行开关，
+  # 而默认触发类型（opened/synchronize/reopened）不含打标签事件，
+  # 会导致「打了标签但检查仍是旧的失败结果」（XM-R003 端到端验证发现）。
+  #
+  # branches 必须限定 main（XM-R004）：pull_request_target 跑的是 **PR base
+  # 分支上的** workflow 文件，不是永远 main。不限定的话，攻击者可以从 main 拉一个
+  # pwn-base、在上面把本文件改成空操作、开 pwn-head → pwn-base 的 PR，
+  # 于是在 pull_request_target 这个特权上下文里跑他自己的 workflow。
+  #
+  # edited 必须包含（XM-R004）：改 PR 的 base 分支只触发 edited，不触发
+  # synchronize。缺了它，攻击者可以先在自控 base 上拿到一个绿的 guard，
+  # 再把 base 改到 main —— main 上的守卫不会重跑，那个绿勾就一路留到合并。
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      # 用 base.ref（分支名）而非 base.sha：后者是 PR 创建/上次同步时的旧 main，
+      # 那个提交可能还没有守卫脚本，也不是正确的 diff 基线（XM-R003）。
+      - name: 检出 base 分支当前 tip（不是 PR 头）
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          fetch-depth: 0
+      - name: 治理文件防篡改检查
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: bash scripts/guard-governance-files.sh

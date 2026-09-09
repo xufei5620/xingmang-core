@@ -1,0 +1,31 @@
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "items": [
+      {
+        "id": 20031,
+        "username": "test-user-a",
+        "display_name": "Test User A",
+        "email": "test-user-a@example.invalid",
+        "status": 1,
+        "quota": 5000000,
+        "last_login_at": 1798531200,
+        "DeletedAt": null,
+        "github_id": "should-be-dropped",
+        "remark": "internal note that must never leave this process"
+      },
+      {
+        "id": 20032,
+        "username": "test-user-b",
+        "display_name": "",
+        "email": "test-user-b@example.invalid",
+        "status": 2,
+        "quota": 0,
+        "last_login_at": 0,
+        "DeletedAt": "2026-08-20T00:00:00Z"
+      }
+    ],
+    "total": 2
+  }
+}

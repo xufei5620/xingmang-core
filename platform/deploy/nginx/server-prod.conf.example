@@ -1,0 +1,48 @@
+# 服务器 production 外层入口示例（仓库只保存模板，不保存证书/私钥）。
+#
+# 生产鉴权由 platform-api 的 OIDC 完成，不在这里配置 Basic Auth。
+# 私钥、证书及任何 OIDC client secret 必须由服务器密钥管理提供，不能提交到仓库。
+# 确认 deploy.sh prod 使用的 PROD_WEB_PORT 与这里一致。
+
+server {
+    listen 80;
+    server_name admin.example.invalid;
+    server_tokens off;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name admin.example.invalid;
+    server_tokens off;
+
+    ssl_certificate     /etc/ssl/xingmang/prod/fullchain.pem;
+    ssl_certificate_key /etc/ssl/xingmang/prod/privkey.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # OIDC Bearer 必须从 edge 原样传到 web/API；不要在 Nginx 写入固定 token。
+    proxy_set_header Authorization     $http_authorization;
+    proxy_read_timeout 60s;
+
+    # 让外部看门狗只看到活性/就绪状态，不需要登录；可按监控网段加 allow/deny。
+    location = /healthz {
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://127.0.0.1:18089/healthz;
+    }
+    location = /readyz {
+        allow 127.0.0.1;
+        deny all;
+        proxy_pass http://127.0.0.1:18089/readyz;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:18089;
+    }
+}

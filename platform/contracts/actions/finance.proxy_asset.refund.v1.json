@@ -1,0 +1,39 @@
+{
+  "id": "finance.proxy_asset.refund",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "finance.subscription.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "proxy_asset_id": {
+      "type": "string",
+      "required": true
+    },
+    "refunded_minor": {
+      "type": "string",
+      "required": true
+    },
+    "refunded_on": {
+      "type": "string",
+      "required": true
+    },
+    "reason": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-0037c 代理资产部分退款。语义与 finance.subscription_batch.refund 逐条相同（累计值、只增不减、生效日必填且须落在有效期内、已终止时顺带重算损失），共用同一套摊销算术——两份实现迟早在退款或末日那一格上分叉，而那种分叉不会报错。"
+}

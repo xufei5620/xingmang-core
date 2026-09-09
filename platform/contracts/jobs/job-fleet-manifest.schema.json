@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/jobs/job-fleet-manifest.v1.schema.json",
+  "title": "Signed JobFleetManifestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "environment", "worker_cluster_id", "river_schema", "database_binding_hash", "epoch", "job_contract_version", "effective_manifest_hash", "replicas", "build_capabilities", "active_binding_inventory_epoch", "active_binding_inventory_sha256", "issued_at", "valid_from", "valid_until", "change_ref", "nonce", "unsigned_sha256", "signature_algorithm", "signature_key_id", "signature"],
+  "properties": {
+    "kind": {"const": "xingmang-job-fleet-manifest"},
+    "version": {"const": 1},
+    "environment": {"$ref": "#/$defs/id"},
+    "worker_cluster_id": {"$ref": "#/$defs/id"},
+    "river_schema": {"$ref": "#/$defs/id"},
+    "database_binding_hash": {"$ref": "#/$defs/hash"},
+    "epoch": {"type": "integer", "minimum": 1},
+    "job_contract_version": {"type": "integer", "minimum": 1},
+    "effective_manifest_hash": {"$ref": "#/$defs/hash"},
+    "replicas": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/replica"}},
+    "build_capabilities": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/capability"}},
+    "active_binding_inventory_epoch": {"type": "integer", "minimum": 1},
+    "active_binding_inventory_sha256": {"$ref": "#/$defs/hash"},
+    "issued_at": {"$ref": "#/$defs/time"},
+    "valid_from": {"$ref": "#/$defs/time"},
+    "valid_until": {"$ref": "#/$defs/time"},
+    "change_ref": {"type": "string", "pattern": "^[!-~]{1,256}$"},
+    "nonce": {"$ref": "#/$defs/nonce"},
+    "unsigned_sha256": {"$ref": "#/$defs/hash"},
+    "signature_algorithm": {"const": "Ed25519"},
+    "signature_key_id": {"$ref": "#/$defs/id"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
+    "nonce": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,126}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "build": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "time": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "replica": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logical_replica_id", "build_digest"],
+      "properties": {"logical_replica_id": {"$ref": "#/$defs/id"}, "build_digest": {"$ref": "#/$defs/build"}}
+    },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["build_digest", "river_version", "river_migration_version", "job_contract_version", "effective_manifest_hash"],
+      "properties": {
+        "build_digest": {"$ref": "#/$defs/build"},
+        "river_version": {"type": "string", "pattern": "^[!-~]{1,127}$"},
+        "river_migration_version": {"type": "string", "pattern": "^[!-~]{1,127}$"},
+        "job_contract_version": {"type": "integer", "minimum": 1},
+        "effective_manifest_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

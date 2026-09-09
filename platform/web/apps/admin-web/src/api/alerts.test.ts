@@ -1,0 +1,213 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  ACTIVE_ALERT_STATUSES,
+  ALERT_AGE_RESET_HINT,
+  ALERT_RULES,
+  ALERT_STATUS_ALL,
+  acknowledgeAlert,
+  alertAgeAnchor,
+  createSilence,
+  estimatedPrefix,
+  FIRST_OPENED_AT_ESTIMATED_HINT,
+  FIRST_OPENED_AT_ESTIMATED_MARK,
+  listAlerts,
+  ruleLabel,
+} from "./alerts";
+import type { ApiClient } from "./client";
+import type { PlatformApiConfig } from "./config";
+
+const config: PlatformApiConfig = {
+  baseUrl: "",
+  principalId: "dev-operator",
+  principalType: "HUMAN",
+  scopes: ["ops.read", "alerts.alert.manage", "alerts.silence.manage"],
+};
+
+function fakeClient(body: unknown): ApiClient {
+  return {
+    get: vi.fn().mockResolvedValue(body),
+    post: vi.fn().mockResolvedValue(body),
+  } as unknown as ApiClient;
+}
+
+/** 取出第一次 post 的三个实参。
+ *
+ *  tsconfig 开了 noUncheckedIndexedAccess，`mock.calls[0]` 的类型带 undefined。
+ *  在这里显式断言一次，好过在每个用例里各写一遍非空断言。 */
+function firstPost(client: ApiClient): [string, { params: Record<string, unknown> }, { requestId?: string }] {
+  const call = (client.post as ReturnType<typeof vi.fn>).mock.calls[0];
+  if (!call) throw new Error("没有发出任何 POST 请求");
+  return call as [string, { params: Record<string, unknown> }, { requestId?: string }];
+}
+
+describe("listAlerts", () => {
+  it("items 为 null 时按空数组处理，页面不会炸", async () => {
+    const client = fakeClient({ items: null });
+    await expect(listAlerts({}, client, config)).resolves.toEqual([]);
+  });
+
+  it("不传 status 时不带该查询参数（后端默认返回全部活跃告警）", async () => {
+    const client = fakeClient({ items: [] });
+    await listAlerts({}, client, config);
+    expect(client.get).toHaveBeenCalledWith("/api/v1/alerts", {
+      searchParams: { environment: undefined, status: undefined },
+    });
+  });
+
+  it("状态数组拼成逗号分隔", async () => {
+    const client = fakeClient({ items: [] });
+    await listAlerts({ status: ["OPEN", "REOPENED"] }, client, config);
+    expect(client.get).toHaveBeenCalledWith("/api/v1/alerts", {
+      searchParams: { environment: undefined, status: "OPEN,REOPENED" },
+    });
+  });
+
+  it("status=all 原样传给后端（含已解决的路径）", async () => {
+    const client = fakeClient({ items: [] });
+    await listAlerts({ status: ALERT_STATUS_ALL }, client, config);
+    expect(client.get).toHaveBeenCalledWith("/api/v1/alerts", {
+      searchParams: { environment: undefined, status: "all" },
+    });
+  });
+
+  it("environment 跟随配置——前端不自己猜环境（跨环境读取后端会拒）", async () => {
+    const client = fakeClient({ items: [] });
+    await listAlerts({}, client, { ...config, environment: "production" });
+    expect(client.get).toHaveBeenCalledWith("/api/v1/alerts", {
+      searchParams: { environment: "production", status: undefined },
+    });
+  });
+
+  it("limit 传了才带上", async () => {
+    const client = fakeClient({ items: [] });
+    await listAlerts({ limit: 50 }, client, config);
+    expect(client.get).toHaveBeenCalledWith("/api/v1/alerts", {
+      searchParams: { environment: undefined, status: undefined, limit: "50" },
+    });
+  });
+});
+
+describe("活跃状态清单", () => {
+  it("包含 SILENCED——静默不是终态", () => {
+    // 去掉它的话，界面上会出现「静默期间告警凭空消失、窗口一过又凭空出现」。
+    expect(ACTIVE_ALERT_STATUSES).toContain("SILENCED");
+    expect(ACTIVE_ALERT_STATUSES).not.toContain("RESOLVED");
+    expect(ACTIVE_ALERT_STATUSES).toHaveLength(4);
+  });
+});
+
+describe("写路径", () => {
+  it("确认走 alerts.alert.acknowledge@1，只传 alert_id", async () => {
+    const client = fakeClient({ action_run_id: "run-1" });
+    const run = await acknowledgeAlert("alert-42", {}, client);
+    expect(run.runId).toBe("run-1");
+    const [path, body, opts] = firstPost(client);
+    expect(path).toBe("/api/v1/actions/alerts.alert.acknowledge/versions/1/execute");
+    expect(body).toEqual({ params: { alert_id: "alert-42" } });
+    // request_id 走请求头而不是请求体：后端用 DisallowUnknownFields 解析，
+    // 塞进 body 会 400（规格 §5.8）
+    expect(opts.requestId).toBeTruthy();
+  });
+
+  it("静默走 alerts.silence.create@1，三个字段一个不多一个不少", async () => {
+    const client = fakeClient({ action_run_id: "run-2" });
+    await createSilence(
+      { rule_key: "metric.sync.failed", duration_minutes: 60, reason: "上游维护" },
+      {},
+      client,
+    );
+    const [path, body] = firstPost(client);
+    expect(path).toBe("/api/v1/actions/alerts.silence.create/versions/1/execute");
+    // 后端 Schema 是白名单语义：多一个字段就是 400
+    expect(body).toEqual({
+      params: { rule_key: "metric.sync.failed", duration_minutes: 60, reason: "上游维护" },
+    });
+  });
+
+  it("全局静默传空串 rule_key（这是一个明确的选择，不是漏填）", async () => {
+    const client = fakeClient({ action_run_id: "run-3" });
+    await createSilence({ rule_key: "", duration_minutes: 30, reason: "全站发布窗口" }, {}, client);
+    const [, body] = firstPost(client);
+    expect(body.params.rule_key).toBe("");
+  });
+});
+
+describe("规则清单", () => {
+  it("键的形态与后端 CHECK 一致", () => {
+    // 条数不写死在这里：清单该有几条由后端 alerts/rules.go 说了算，
+    // 那条对账在 lib/labels.reconcile.test.ts（它直接读 rules.go 求差集）。
+    // 这里写一个数字只会在后端加规则时红在一个说不清原因的地方。
+    expect(ALERT_RULES.length).toBeGreaterThan(0);
+    for (const rule of ALERT_RULES) {
+      // 库层 CHECK：^[a-z0-9][a-z0-9_.-]{0,127}$
+      expect(rule.key).toMatch(/^[a-z0-9][a-z0-9_.-]{0,127}$/);
+      expect(rule.label.length).toBeGreaterThan(0);
+    }
+    const keys = ALERT_RULES.map((r) => r.key);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("未知规则键原样显示，不换成「未知规则」", () => {
+    // 后端加了新规则而前端还没跟上时，显示原始键仍然是有用的信息；
+    // 显示成「未知规则」则是在丢事实。
+    expect(ruleLabel("metric.sync.failed")).toBe("指标同步失败");
+    expect(ruleLabel("brand.new.rule")).toBe("brand.new.rule");
+  });
+});
+
+// XM-WORKBENCH-WIRE-OPS：后端 XM-OPS-TRUTH 起给了 first_opened_at（跨复发继承）
+// 与 first_opened_at_estimated（这个值是不是拿 opened_at 兜的底）。三条分支的
+// 判据各不相同，**三条都要测**：只测其中一条，另外两条到时候是死的还是活的，
+// 谁也答不上来。
+describe("首开时刻：真值 / 兜底估计 / 老后端没有这一列", () => {
+  const base = { opened_at: "2026-09-08T11:00:00Z" };
+
+  it("确定值：用它、不标「约」、不挂说明", () => {
+    const anchor = alertAgeAnchor({
+      ...base,
+      first_opened_at: "2026-09-05T04:00:00Z",
+      first_opened_at_estimated: false,
+    });
+    expect(anchor.since).toBe("2026-09-05T04:00:00Z");
+    expect(anchor.estimated).toBe(false);
+    expect(anchor.hint).toBeNull();
+    expect(estimatedPrefix(anchor)).toBe("");
+  });
+
+  it("兜底估计：仍然用它，但标「约」并换成后端那句更准确的说明", () => {
+    const anchor = alertAgeAnchor({
+      ...base,
+      first_opened_at: "2026-09-08T11:00:00Z",
+      first_opened_at_estimated: true,
+    });
+    expect(anchor.since).toBe("2026-09-08T11:00:00Z");
+    expect(anchor.estimated).toBe(true);
+    expect(anchor.hint).toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+    expect(estimatedPrefix(anchor)).toBe("约 ");
+  });
+
+  it("字段整个不在（老后端）：退回 opened_at，同样标「约」，说明用「会重新计时」那句", () => {
+    // 这一支连 first_opened_at_estimated 都没有，所以「是不是估计」只能由缺席
+    // 本身来答——答案是「是」，而不是默认 false。默认成 false 会让一个系统性
+    // 偏小的时长看起来是确定的。
+    const anchor = alertAgeAnchor(base);
+    expect(anchor.since).toBe("2026-09-08T11:00:00Z");
+    expect(anchor.estimated).toBe(true);
+    expect(anchor.hint).toBe(ALERT_AGE_RESET_HINT);
+    expect(anchor.hint).not.toBe(FIRST_OPENED_AT_ESTIMATED_HINT);
+  });
+
+  it("显式 null 与空串走的是「字段不在」那一支", () => {
+    for (const value of [null, ""] as const) {
+      const anchor = alertAgeAnchor({ ...base, first_opened_at: value });
+      expect(anchor.since).toBe(base.opened_at);
+      expect(anchor.estimated).toBe(true);
+    }
+  });
+
+  it("estimated 为假时前缀是空串，不是「约」——「约」不能长在确定值上", () => {
+    // 反向判据：把一个确定的首开时刻也标上「约」，是白白让人不敢信它。
+    expect(estimatedPrefix({ estimated: false })).toBe("");
+    expect(estimatedPrefix({ estimated: true })).toContain(FIRST_OPENED_AT_ESTIMATED_MARK);
+  });
+});

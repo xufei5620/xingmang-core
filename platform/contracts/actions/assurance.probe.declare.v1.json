@@ -1,0 +1,25 @@
+{
+  "id": "assurance.probe.declare",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "assurance.probe.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "EXPECTED_DECLARATION_VERSION",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {"required": false},
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "platform": {"type": "string", "required": true},
+    "name": {"type": "string", "required": true},
+    "prompt_template_key": {"type": "string", "required": true},
+    "target_host": {"type": "string", "required": true},
+    "targets": {"type": "string", "required": true},
+    "max_tokens": {"type": "int", "required": true},
+    "expected_shape": {"type": "string", "required": true},
+    "schedule_cron": {"type": "string", "required": false},
+    "declaration_id": {"type": "string", "required": false},
+    "expected_version": {"type": "int", "required": false}
+  },
+  "notes": "XM-ASSURE1-core 检测任务声明。platform 只接受 sub2api/newapi；prompt_template_key 只接受 model_fingerprint/benchmark_set/context_length/min_viable_request 四个代码固化的枚举（不接受自由文本 Prompt，ADR-019 决策·五）；max_tokens 须在 (0, 512] 内。targets/expected_shape 是 JSON 编码的字符串（分别形如 [{\"channel_id\":\"...\",\"external_channel_id\":\"...\",\"model\":\"...\"}] 与 {\"min_length\":1,\"max_length\":2000,\"must_contain\":[],\"timeout_ms\":30000}）——internal/platform/action 的 Schema 目前只有 string/int/bool/string_slice 四种字段类型，没有对象数组/嵌套对象，这与设计稿 docs/superpowers/specs/2026-09-03-xm-assure1-active-probes-design.md §1.2.2/§1.2.3 的 JSON 示例形状一致，只是编码成字符串参数传递（与 connector.config.set@1 把 target_allowlist 编码成逗号分隔字符串是同一类折衷）。environment 不是参数，取自调用者 Principal。declaration_id 省略则新建（version=1）；提供则为更新既有声明，expected_version 必填且必须与当前 version 一致，否则 PRECONDITION_FAILED（与 finance.platform_channel_binding.set@1 同一先例）。targets 里每个 channel_id 都会回查渠道目录（<platform>.channels.status 的 ops 观测）做存在性校验，查无此渠道直接拒绝。已 cancelled 的声明不允许通过带 declaration_id 的 declare 复活，必须新建。"
+}

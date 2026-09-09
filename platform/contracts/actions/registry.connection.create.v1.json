@@ -1,0 +1,22 @@
+{
+  "id": "registry.connection.create",
+  "version": "1",
+  "risk_level": "L3",
+  "permission": "registry.connection.manage",
+  "principal_types": ["HUMAN"],
+  "environments": ["development", "staging", "production"],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {"required": true, "step_up_mfa": true},
+  "compensation_mode": "MANUAL",
+  "params": {
+    "connector_id": {"type": "string", "required": true},
+    "service_id": {"type": "string", "required": true},
+    "environment": {"type": "string", "required": true, "enum": ["development", "staging", "production"]},
+    "credential_ref": {"type": "string", "required": true},
+    "target_allowlist": {"type": "string_slice", "required": true},
+    "granted_capabilities": {"type": "string_slice", "required": false},
+    "kill_switch": {"type": "string", "required": false}
+  },
+  "notes": "L3：Foundation-A 下被拒绝。credential_ref 只接受 secret://<scope>/<name>（ADR-014），领域层与数据库 CHECK 双重校验。具写能力时 kill_switch 必填。"
+}

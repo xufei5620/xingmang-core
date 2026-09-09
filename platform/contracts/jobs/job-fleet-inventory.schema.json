@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xingmang.local/contracts/jobs/job-fleet-inventory.v1.schema.json",
+  "title": "Signed JobFleetInventoryV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "version", "epoch", "bindings", "issued_at", "valid_from", "valid_until", "change_ref", "nonce", "unsigned_sha256", "signature_algorithm", "signature_key_id", "signature"],
+  "properties": {
+    "kind": {"const": "xingmang-job-fleet-inventory"},
+    "version": {"const": 1},
+    "epoch": {"type": "integer", "minimum": 1},
+    "bindings": {"type": "array", "items": {"$ref": "#/$defs/binding"}},
+    "issued_at": {"$ref": "#/$defs/time"},
+    "valid_from": {"$ref": "#/$defs/time"},
+    "valid_until": {"$ref": "#/$defs/time"},
+    "change_ref": {"type": "string", "pattern": "^[!-~]{1,256}$"},
+    "nonce": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,126}$"},
+    "unsigned_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "signature_algorithm": {"const": "Ed25519"},
+    "signature_key_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
+    "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
+  },
+  "$defs": {
+    "time": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "binding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["database_binding_hash", "environment", "worker_cluster_id", "status"],
+      "properties": {
+        "database_binding_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "environment": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
+        "worker_cluster_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$"},
+        "status": {"enum": ["active", "closed"]}
+      }
+    }
+  }
+}

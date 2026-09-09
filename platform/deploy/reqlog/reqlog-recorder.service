@@ -1,0 +1,28 @@
+# reqlog-recorder：宝塔 nginx 与 NewAPI(:3000)/Sub2API(:8081) 之间的透明记录
+# 代理，落盘请求/响应明文供 connectors/reqlog 的文件后端只读连接器消费。
+#
+# XM-REQLOG-MERGE 从桌面端原型 /root/reqlog/reqlogger（同一份 systemd 事实见
+# _import/reqlog/DEPLOY-FACTS.txt）收编而来：After/Restart/User/LimitNOFILE
+# 四项原样沿用（token 映射刷新经 docker exec 读两个上游库，见
+# cmd/reqlog-recorder/tokenmap.go 的说明），ExecStart 换成本仓库构建的
+# /usr/local/bin/reqlog-recorder。切换步骤见
+# docs/runbooks/REQLOG-RECORDER.md，不要凭这份文件直接覆盖生产单元。
+#
+# 全部配置项都有与原型行为一致的默认值（cmd/reqlog-recorder/config.go），
+# 下面只显式列出运维最需要一眼确认的几项；没列出的项按默认值生效。
+[Unit]
+Description=XM-REQLOG-MERGE request/response logger proxy (newapi + sub2api)
+After=docker.service network.target
+
+[Service]
+ExecStart=/usr/local/bin/reqlog-recorder \
+  --data-dir=/root/reqlog/data \
+  --tokenmap-path=/root/reqlog/tokenmap.json \
+  --group-id=10001
+Restart=always
+RestartSec=2
+User=root
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

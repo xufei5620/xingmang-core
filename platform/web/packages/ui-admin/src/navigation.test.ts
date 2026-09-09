@@ -1,0 +1,365 @@
+import { describe, expect, it } from "vitest";
+import {
+  allNavItems,
+  navItemByPath,
+  navLabel,
+  navStageHint,
+  placeholderNavItems,
+  platformNavSpec,
+  NAV_GROUPS,
+  PLATFORM_GROUP_TITLE,
+  PLATFORM_NAV_ITEMS,
+} from "./navigation";
+
+const group = (id: string) => NAV_GROUPS.find((g) => g.id === id);
+const groupLabels = (id: string) => group(id)?.items.map((item) => item.label) ?? [];
+const subLabels = (path: string) =>
+  navItemByPath(path)?.item.subTabs.map((sub) => sub.label) ?? [];
+
+describe("侧栏四分组（ADMIN-IA v3 §一，逐字）", () => {
+  it("分组标题与顺序：全局 / 平台 / 平台治理 / 扩展能力", () => {
+    // 分组 2 的标题在原型里写死的就是「平台」，不是 v2 的「被管平台」，
+    // 也不是交接文档 §7.2 的「被管平台」
+    expect(NAV_GROUPS.map((g) => g.title)).toEqual(["全局", "平台", "平台治理", "扩展能力"]);
+    expect(PLATFORM_GROUP_TITLE).toBe("平台");
+  });
+
+  it("只有「扩展能力」是可折叠的，且带阶段标签「后置」", () => {
+    expect(NAV_GROUPS.filter((g) => g.collapsible).map((g) => g.id)).toEqual(["ext"]);
+    expect(group("ext")?.stage).toBe("后置");
+  });
+
+  it("全局段 5 条（分组 1）", () => {
+    expect(groupLabels("global")).toEqual([
+      "运营工作台",
+      "告警与故障",
+      "操作与审批",
+      "后台任务",
+      "审计记录",
+    ]);
+  });
+
+  it("平台治理段 9 条（分组 3）", () => {
+    expect(groupLabels("governance")).toEqual([
+      // XM-CARD3 增补：「卡片管理」在 ADMIN-IA v3 里**没有**对应条目——
+      // 原型画的四个平台里没有卡片这一块。放在本组是实现期的判断
+      // （它管的是平台自己持有的支付工具，不属于任何一个上游平台），
+      // **归属待产品负责人确认**。确认结论若是别处，改导航同时改这条断言。
+      "卡片管理",
+      // XM-SMS0 增补：同上，ADMIN-IA v3 里也没有「接码」这一条。
+      // 它与卡片同属「平台自己持有的、会花钱的外部资源」，所以挨着放。
+      // **归属同样待产品负责人确认。**
+      "接码中心",
+      "资源目录",
+      "人员与权限",
+      "跨平台财务",
+      "运行保障",
+      "版本与发布",
+      "界面规范",
+      "设置",
+    ]);
+  });
+
+  it("扩展能力段 4 条（分组 4）——「AI能力管理」没有空格", () => {
+    // 交接文档 §7.4 把这一组写作「后置能力」、条目写作「集成与自动化」「AI 控制平面」，
+    // 以原型为准（ADMIN-IA §一 分组 4 下的注）
+    expect(groupLabels("ext")).toEqual(["应用与配置", "接口与自动化", "内容发布", "AI能力管理"]);
+  });
+
+  it("平台段的条目由 Registry 驱动，静态数据里是空的", () => {
+    expect(group("platforms")?.items).toEqual([]);
+  });
+
+  it("路径互不重复：路由表由这份数据生成，重了会有一条永远进不去", () => {
+    const paths = allNavItems().map((item) => item.path);
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it("每条路径都以 / 开头，且不以 / 结尾", () => {
+    for (const item of allNavItems()) {
+      expect(item.path.startsWith("/")).toBe(true);
+      expect(item.path.endsWith("/")).toBe(false);
+    }
+  });
+});
+
+describe("页内子页签（ADMIN-IA v3 §2.2，逐字）", () => {
+  it("全局段四页的子页签", () => {
+    expect(subLabels("/alerts")).toEqual(["告警", "故障事件", "规则", "通知", "暂停告警"]);
+    expect(subLabels("/actions")).toEqual([
+      "操作目录",
+      "待审批",
+      "执行记录",
+      "风险与启用条件",
+    ]);
+    expect(subLabels("/jobs")).toEqual([
+      "运行中",
+      "定时任务",
+      "同步批次",
+      "失败与重试",
+      "多次失败任务",
+    ]);
+    expect(subLabels("/audit")).toEqual(["审计记录", "操作证据", "审计链验证"]);
+  });
+
+  it("治理段的子页签，含「开票集成」与「模型质量保障」两格", () => {
+    expect(subLabels("/registry")).toEqual([
+      "服务",
+      "连接器",
+      "连接",
+      "支持能力",
+      "应用与模块",
+      "环境",
+    ]);
+    expect(subLabels("/identity")).toEqual([
+      "账号与身份",
+      "权限规则",
+      "权限范围",
+      "密钥引用",
+      "会话",
+    ]);
+    expect(subLabels("/finance")).toEqual([
+      "财务总览",
+      "支付通道",
+      "财务对账",
+      "异常与冻结",
+      "开票集成",
+      "财务配置",
+    ]);
+    expect(subLabels("/ops")).toEqual([
+      "控制平面健康",
+      "稳定性与外部监控",
+      "备份与恢复",
+      "故障处理手册（Runbook）",
+      "迁移与数据对比",
+      "模型质量保障",
+    ]);
+    expect(subLabels("/changes")).toEqual([
+      "变更单",
+      "发布与回滚",
+      "自动测试与质量",
+      "发布包与安全检查",
+      "数据库变更",
+    ]);
+    expect(subLabels("/design")).toEqual([
+      "颜色与排版",
+      "按钮与表单",
+      "卡片与状态",
+      "表格与详情",
+      "页面状态",
+      "复杂组件",
+    ]);
+  });
+
+  it("扩展能力四页的子页签", () => {
+    expect(subLabels("/ext/app")).toEqual(["应用目录", "页面配置", "页面组件", "版本与发布"]);
+    expect(subLabels("/ext/integration")).toEqual([
+      "API调用方",
+      "Webhook",
+      "自动化流程",
+      "运行记录",
+    ]);
+    expect(subLabels("/ext/publishing")).toEqual([
+      "内容日历",
+      "草稿与素材",
+      "审批队列",
+      "渠道与账号",
+      "发布记录",
+    ]);
+    expect(subLabels("/ext/ai")).toEqual(["模型线路", "AI角色", "AI工具", "运行与预算"]);
+  });
+
+  it("运营工作台与设置没有子页签——原型用筛选条与周期控件组织它们", () => {
+    expect(subLabels("/dashboard")).toEqual([]);
+    expect(subLabels("/settings")).toEqual([]);
+  });
+
+  it("子页签 id 在同一页内不重复：`?sub=` 认不出唯一一格就没法分享", () => {
+    for (const item of allNavItems()) {
+      const ids = item.subTabs.map((sub) => sub.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    }
+  });
+});
+
+describe("平台页签（ADMIN-IA v3 §2.1，逐字）", () => {
+  it("4 个平台，名称与顺序照文档", () => {
+    expect(PLATFORM_NAV_ITEMS.map((p) => p.label)).toEqual([
+      "Sub2API",
+      "NewAPI",
+      "CPA",
+      "服务器",
+    ]);
+    expect(PLATFORM_NAV_ITEMS.map((p) => p.prototypeId)).toEqual([
+      "s2",
+      "newapi",
+      "cpa",
+      "server",
+    ]);
+  });
+
+  it("Sub2API / NewAPI 各 8 格，「渠道保障」在末位（裁定 #1 的落点）", () => {
+    // 2026-09-02 产品负责人裁定：「上游管理」并入「渠道管理」页内区块，
+    // 不再单独占一格页签——9 格降为 8 格，「渠道保障」仍在末位不变
+    for (const serviceType of ["sub2api", "newapi"]) {
+      const tabs = platformNavSpec(serviceType)?.tabs ?? [];
+      expect(tabs).toHaveLength(8);
+      expect(tabs.map((t) => t.value)).not.toContain("suppliers");
+      expect(tabs.at(-1)?.value).toBe("model");
+      expect(tabs.at(-1)?.label).toBe("渠道保障");
+      expect(tabs.at(-1)?.stage).toBe("M1.5");
+    }
+  });
+
+  it("CPA 的「渠道保障」按原型字面排在第 4 格，不跟着挪到末位", () => {
+    const tabs = platformNavSpec("cpa")?.tabs ?? [];
+    expect(tabs[3]?.value).toBe("model");
+    expect(tabs[3]?.stage).toBe("M1.5");
+  });
+
+  it("每个平台的页签 value 不重复", () => {
+    for (const platform of PLATFORM_NAV_ITEMS) {
+      const values = platform.tabs.map((tab) => tab.value);
+      expect(new Set(values).size).toBe(values.length);
+    }
+  });
+
+  it("认不出的 serviceType 返回 undefined，不编一套页签出来", () => {
+    expect(platformNavSpec("someday-crm")).toBeUndefined();
+  });
+
+  it("Sub2API 的「支付与财务」5 个子页签，末位是「开票」", () => {
+    const finance = platformNavSpec("sub2api")?.tabs.find((tab) => tab.value === "finance");
+    expect(finance?.subTabs.map((sub) => sub.id)).toEqual([
+      "overview",
+      "orders",
+      "refunds",
+      "profit",
+      "invoices",
+    ]);
+    expect(finance?.subTabs.at(-1)?.label).toBe("开票");
+  });
+
+  it("NewAPI 的「支付与财务」现在有「开票」子页签（CR-0005 推翻 ADMIN-IA §8.2 #2）", () => {
+    const finance = platformNavSpec("newapi")?.tabs.find((tab) => tab.value === "finance");
+    expect(finance?.subTabs.map((sub) => sub.id)).toEqual(["orders", "profit", "invoices"]);
+    expect(finance?.subTabs.map((sub) => sub.label)).toEqual(["资金与订单", "利润核算", "开票"]);
+  });
+});
+
+describe("查表与状态标签", () => {
+  it("navItemByPath 认路径，结尾斜杠不影响", () => {
+    expect(navItemByPath("/registry")?.item.label).toBe("资源目录");
+    expect(navItemByPath("/registry/")?.item.label).toBe("资源目录");
+    expect(navItemByPath("/registry")?.group.title).toBe("平台治理");
+    expect(navItemByPath("/nope")).toBeUndefined();
+  });
+
+  it("navLabel 找不到就抛，不兜底成别的名字", () => {
+    // 兜底显示一个别的名字，等于把「导航数据被改坏了」藏到线上让运营去发现
+    expect(navLabel("/dashboard")).toBe("运营工作台");
+    expect(() => navLabel("/nope")).toThrow(/ADMIN-IA/);
+  });
+
+  it("已实装的页不挂阶段标签，未实装的挂「未建·<阶段>」", () => {
+    // 先取到条目再断言，**不写 `item && navStageHint(item)`**：那种写法在条目
+    // 不存在时整个表达式就是 undefined，三条 toBeUndefined() 会一起恒真——
+    // 路径写错、导航项被删掉都照样绿。这是本仓库栽过的「缺席型断言」坑。
+    const stageHintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
+    // 操作与审批在 XM-ACTIONS0 接了操作目录/执行记录的真实数据，已实装，
+    // 不再挂阶段标签。
+    expect(stageHintOf("/dashboard")).toBeUndefined();
+    expect(stageHintOf("/actions")).toBeUndefined();
+    // 2026-09-07 三页建成（XM-FINANCE-GLOBAL0 / XM-CHANGES0 / XM-DESIGN0）之后，
+    // 「版本与发布」也不再挂标签了。
+    expect(stageHintOf("/changes")).toBeUndefined();
+    expect(stageHintOf("/design")).toBeUndefined();
+    expect(stageHintOf("/finance")).toBeUndefined();
+    // 2026-09-08：扩展能力段三页全部建成（XM-EXT-APP / XM-EXT-INTEGRATION /
+    // XM-EXT-PUBLISHING，裁定变更见 ADMIN-IA §5.4），于是它们都不再挂阶段标签。
+    // **仍挂标签的只剩 `/ext/ai` 一页**——它按 §5.4 原裁定**刻意只做只读蓝图**，
+    // 不是缺口。
+    expect(stageHintOf("/ext/app")).toBeUndefined();
+    expect(stageHintOf("/ext/integration")).toBeUndefined();
+    expect(stageHintOf("/ext/publishing")).toBeUndefined();
+    expect(stageHintOf("/ext/ai")).toBe("未建·后置");
+  });
+
+  it("placeholderNavItems 就是全部 built=false 的条目", () => {
+    const paths = placeholderNavItems().map((item) => item.path);
+    // 全局段 0 + 治理段 0 + 扩展能力 1。
+    //
+    // 2026-09-07 治理段清零：跨平台财务 / 版本与发布 / 界面规范三页建成。
+    // 2026-09-08 产品负责人推翻了 ADMIN-IA §5.4「扩展能力四页只读蓝图、
+    // 不得因此提前建后端」对其中三页的适用：`应用与配置`（XM-EXT-APP）、
+    // `接口与自动化`（XM-EXT-INTEGRATION）、`内容发布`（XM-EXT-PUBLISHING）
+    // 三页均已建成，从这份清单里掉出去。
+    //
+    // **只剩 `/ext/ai` 一条,而它是刻意的**——按 §5.4 与实施计划 §2.5 仍是
+    // 只读蓝图（不预留后端、不做写入、不做执行），built:false 在这里表达的是
+    // 「后端未接**且不打算接**」，与治理段那三页当初的含义不是一回事。
+    //
+    // **合并三片时这份清单必须重算,不能取任何一侧**：三片各自基于同一基线、
+    // 各自只删掉自己那一页，机械合并会留下一个多余的条目。这类冲突取任一侧
+    // 都是错的。
+    expect(paths).toEqual([
+      "/ext/ai",
+    ]);
+    expect(placeholderNavItems().every((item) => navStageHint(item) !== undefined)).toBe(true);
+  });
+
+  it("已实装页清单与真有内容的页面一致", () => {
+    expect(allNavItems().filter((item) => item.built).map((item) => item.path)).toEqual([
+      "/dashboard",
+      "/alerts",
+      "/actions",
+      "/jobs",
+      "/audit",
+      // XM-CARD3：见上方「平台治理段」那条注释——同一次 IA 增补
+      "/cards",
+      // XM-SMS0：同上
+      "/sms",
+      "/registry",
+      "/identity",
+      // 2026-09-07 建成的三页。顺序即 navigation.ts 的声明顺序：
+      // finance 在 identity 之后、ops 之前；changes 与 design 在 ops 之后。
+      "/finance",
+      "/ops",
+      "/changes",
+      "/design",
+      "/settings",
+      // XM-EXT-APP / XM-EXT-INTEGRATION / XM-EXT-PUBLISHING（2026-09-08）：
+      // 扩展能力段前三页建成。它们排在最后是因为顺序即 navigation.ts 的
+      // **声明顺序**（扩展能力是第四个分组），**不是按建成时间排的**——
+      // 三者之间的先后也照声明顺序，不照合并顺序。
+      "/ext/app",
+      "/ext/integration",
+      "/ext/publishing",
+    ]);
+  });
+
+  it("接口与自动化建成后不再挂「未建」标签，同段其余三页仍挂", () => {
+    // 这一条与上面两条不重复：它盯的是**侧栏上看得见的那个字**。
+    // 一页已经接了真数据却仍挂着「未建·后置」，会让人以为里面的数字是假的。
+    //
+    // 先取条目再断言，理由同上面那条 stageHintOf：写成
+    // `navStageHint(navItemByPath(path)?.item!)` 的话，路径写错会让
+    // toBeUndefined() 恒真。
+    const hintOf = (path: string) => {
+      const item = navItemByPath(path)?.item;
+      expect(item, `导航里没有 ${path}`).toBeDefined();
+      return navStageHint(item!);
+    };
+    // 三片各自写这条时都只知道自己那一页，于是各自把「其余三页仍挂标签」
+    // 写进了断言。**合并后三页都建成了，这类断言必须整体重算**——这正是
+    // 「取任一侧都错」的那类冲突在测试里的表现。
+    for (const path of ["/ext/app", "/ext/integration", "/ext/publishing"]) {
+      expect(hintOf(path), `${path} 已建成，不该再挂「未建」标签`).toBeUndefined();
+    }
+    expect(hintOf("/ext/ai"), "/ext/ai 仍是只读蓝图，标签必须留着").toBe("未建·后置");
+  });
+});

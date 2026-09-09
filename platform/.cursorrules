@@ -1,0 +1,9 @@
+# Cursor 工作规则入口（xingmang-platform）
+本仓库唯一完整规则来源：PROJECT-CONSTITUTION.md；工作入口与专属规则：AGENTS.md。
+动手前先读这两个文件与你的任务 Issue（Task Spec YAML 是硬边界）。
+
+- 分支命名 ai/cursor/XM-xxxx-<slug>；禁止直推 main；合并权属于人类。
+- 前端铁律：禁止硬编码颜色/圆角/阴影，一律用 @xingmang/design-tokens；
+  新组件先查 Storybook 与 ui-primitives，禁止重复造已有组件。
+- 禁止引入 Ant Design / MUI / 第二套图表库；依赖精确版本（.npmrc 已 save-exact）。
+- 测试用 vitest（globals:true 勿改）；PR 前 pnpm -r typecheck && pnpm -r test 全绿。

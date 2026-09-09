@@ -1,0 +1,430 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { PageHeader, type PlatformTabSpec } from "@xingmang/ui-admin";
+import { Badge, EmptyState, Tabs } from "@xingmang/ui-primitives";
+import type { ReactNode } from "react";
+import { useParams, useSearchParams } from "react-router";
+import { listServices } from "../api/platform";
+import { platformHasUsers } from "../api/users";
+import { BlueprintTabView, blueprintTabForPlatform } from "../blueprints";
+import { ApiStateView } from "../components/ApiStateView";
+import { ChannelsPanel } from "../components/ChannelsPanel";
+import { NewApiChannelsPanel } from "../components/NewApiChannelsPanel";
+import { METRIC_HISTORY_QUERY_PREFIX } from "../components/MetricSparkline";
+import { assuranceSubTab } from "../components/PlatformAssurancePanel";
+import { cpaAssuranceSubTab } from "../components/CPAAssurancePanel";
+import { CPAKeysPanel } from "../components/CPAKeysPanel";
+import { CPAOverviewPanel } from "../components/CPAOverviewPanel";
+import { financeSubTab } from "../components/PlatformFinancePanel";
+import { PlatformAlertsPanel } from "../components/PlatformAlertsPanel";
+import { PlatformCredentialsPanel } from "../components/PlatformCredentialsPanel";
+import { PlatformUsersPanel } from "../components/PlatformUsersPanel";
+import {
+  PlatformOverviewPanel,
+  platformHasPrototypeOverview,
+} from "../components/PlatformOverviewPanel";
+import { RequestsPanel } from "../components/RequestsPanel";
+import { ServerAssetsPanel } from "../components/ServerAssetsPanel";
+import { ServerDomainsPanel } from "../components/ServerDomainsPanel";
+import { ServerOverviewPanel } from "../components/ServerOverviewPanel";
+import { ServerServiceNotesPanel } from "../components/ServerServiceNotesPanel";
+import { ServerSuppliersPanel } from "../components/ServerSuppliersPanel";
+import {
+  findPlatform,
+  pendingBadge,
+  pendingHeadline,
+  platformOpens,
+  resolvePlatformTab,
+  tabsForPlatform,
+  DEFAULT_PLATFORM_TAB,
+  type PlatformEntry,
+} from "../lib/platforms";
+
+/** 平台详情页。页签集合**按平台各不相同**（ADMIN-IA v3 §2.1）。
+ *
+ *  这是 XM-0042 换掉的那件事：v2 是「全平台统一 6~7 格模板」，而原型给 4 个平台
+ *  画的是 4 套不同的页签条（9 / 9 / 5 / 7）。统一模板看着整齐，代价是每个平台都
+ *  有几格是空的、又缺几格它真正需要的——服务器需要「域名与证书」，而模板里没有。
+ *
+ *  页签选择放在 URL 的 `?tab=` 上而不是组件 state：这样某一格是可以贴给同事的
+ *  地址，旧的 /channels 书签也才有地方可以重定向过去。子页签同理走 `?sub=`。 */
+export function PlatformDetailPage() {
+  const params = useParams();
+  const serviceType = params.serviceType ?? "";
+  const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
+
+  // 旧页签名改跳、认不出来的 404，都已经在路由 loader 里处理掉了
+  // （见 router 的 platformTabLoader），到这里剩下的一定是合法值
+  const resolution = resolvePlatformTab(serviceType, searchParams.get("tab"));
+  const activeTab = resolution.kind === "ok" ? resolution.tab : DEFAULT_PLATFORM_TAB;
+
+  const servicesQuery = useQuery({
+    queryKey: ["services"],
+    queryFn: ({ signal }) => listServices({ signal }),
+  });
+
+  const entry = findPlatform(serviceType, servicesQuery.data ?? []);
+
+  // 换页签用 replace：连点五个页签不该在浏览器里堆五条历史，
+  // 否则「后退」变成逐格倒着走，而人想回的是上一个页面
+  const selectTab = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", value);
+    // 换大页签时把子页签清掉：`?sub=` 属于上一格，带着它跳过去要么无效、
+    // 要么恰好撞上新格子里的同名子页签，后者比无效更难发现
+    next.delete("sub");
+    setSearchParams(next, { replace: true });
+  };
+
+  const selectSub = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("sub", value);
+    setSearchParams(next, { replace: true });
+  };
+
+  // 刷新把三样一起拉：注册状态、指标卡、卡下面那条折线。少刷任何一样，
+  // 屏幕上就会有一块停在旧时刻却不声张（与总览页同一条理由）
+  const refreshAll = () => {
+    void servicesQuery.refetch();
+    void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+    void queryClient.invalidateQueries({ queryKey: [METRIC_HISTORY_QUERY_PREFIX] });
+    // 渠道保障 · 保障概览 / 历史记录（XM-ASSURE0）：两个查询键都以
+    // "assurance" 开头，一次失效两者，与其余指标一起刷新
+    void queryClient.invalidateQueries({ queryKey: ["assurance"] });
+  };
+
+  const pending = entry && !platformOpens(entry);
+
+  return (
+    <section>
+      <PageHeader
+        title={entry?.spec.label ?? serviceType}
+        // 状态与标题同层（§11.2）：「服务器」和「服务器·未接入·M2」在运营眼里
+        // 是完全不同的两页，这件事不能等人滚到页面中间才发现
+        status={
+          pending ? (
+            <Badge tone="warning" title={pendingHeadline(entry.spec.plan)}>
+              {pendingBadge(entry.spec.plan)}
+            </Badge>
+          ) : null
+        }
+        description={entry?.spec.scope}
+        onRefresh={refreshAll}
+        refreshing={servicesQuery.isFetching}
+        lastRefreshedAt={servicesQuery.dataUpdatedAt || undefined}
+      />
+      <ApiStateView
+        isPending={servicesQuery.isPending}
+        error={servicesQuery.error}
+        onRetry={() => void servicesQuery.refetch()}
+      >
+        <PlatformBody
+          entry={entry}
+          serviceType={serviceType}
+          activeTab={activeTab}
+          activeSub={searchParams.get("sub")}
+          onTabChange={selectTab}
+          onSubChange={selectSub}
+        />
+      </ApiStateView>
+    </section>
+  );
+}
+
+function PlatformBody({
+  entry,
+  serviceType,
+  activeTab,
+  activeSub,
+  onTabChange,
+  onSubChange,
+}: {
+  entry: PlatformEntry | undefined;
+  serviceType: string;
+  activeTab: string;
+  activeSub: string | null;
+  onTabChange: (value: string) => void;
+  onSubChange: (value: string) => void;
+}) {
+  if (!entry) {
+    return (
+      <EmptyState
+        title="未知平台"
+        description={`平台目录与服务注册表里都没有 ${serviceType}；地址可能已过期或拼写有误`}
+      />
+    );
+  }
+
+  const tabs = tabsForPlatform(serviceType);
+  if (tabs.length === 0) {
+    // Registry 里登记了、但 ADMIN-IA 还没给它定页签。不编一套模板套上去：
+    // 编出来的六格页签会让人以为我们已经想清楚这个平台该怎么管
+    return (
+      <EmptyState
+        title="这个平台还没有页签定义"
+        description={`${serviceType} 在服务注册表里有登记，但 ADMIN-IA 还没给它定义页签集合。要接入它，先在 docs/architecture/ADMIN-IA.md 里补一行，再改 ui-admin 的 navigation.ts。`}
+      />
+    );
+  }
+
+  return (
+    <Tabs
+      ariaLabel="平台主页签"
+      value={activeTab}
+      onValueChange={onTabChange}
+      items={tabs.map((tab) => ({
+        value: tab.value,
+        label: tab.label,
+        content: (
+          <TabBody tab={tab} entry={entry} activeSub={activeSub} onSubChange={onSubChange} />
+        ),
+      }))}
+    />
+  );
+}
+
+/** 一格页签的内容。有子页签的先展开子页签条，再往里放内容。 */
+function TabBody({
+  tab,
+  entry,
+  activeSub,
+  onSubChange,
+}: {
+  tab: PlatformTabSpec;
+  entry: PlatformEntry;
+  activeSub: string | null;
+  onSubChange: (value: string) => void;
+}) {
+  if (tab.subTabs.length === 0) return tabContent(tab, entry);
+
+  const active = activeSub === null || activeSub === "" ? tab.subTabs[0]?.id : activeSub;
+  if (!tab.subTabs.some((sub) => sub.id === active)) {
+    // 与未知 `?tab=` 同一条规矩：不静默回落第一格（交接文档 §8）。
+    // 这里用 EmptyState 而不是整页的 NotFoundView——页头已经是平台名了，
+    // 再叠一个「页面不存在」的标题，人会以为整个平台都没了
+    return (
+      <EmptyState
+        title="没有这个子页签"
+        description={`「${tab.label}」下没有名为 ${activeSub} 的子页签；地址可能已过期或拼写有误。本格现有：${tab.subTabs.map((s) => s.label).join(" / ")}。`}
+      />
+    );
+  }
+
+  return (
+    <Tabs
+      ariaLabel={`${tab.label}子页签`}
+      value={active}
+      onValueChange={onSubChange}
+      items={tab.subTabs.map((sub) => ({
+        value: sub.id,
+        label: sub.label,
+        content: subTabContent(tab, sub.id, entry) ?? (
+          <EmptyState
+            title={`「${sub.label}」尚未实现`}
+            description={pendingNote(entry, tab)}
+          />
+        ),
+      }))}
+    />
+  );
+}
+
+/** 有内容的子页签走各自的面板；没有的返回 undefined，由调用方回落到通用占位。
+ *
+ *  做成一个解析器而不是在 TabBody 里堆 switch：页签内容是**按片交付**的,
+ *  每一片只往这里加一行，不必碰渲染逻辑。 */
+function subTabContent(
+  tab: PlatformTabSpec,
+  subId: string,
+  entry: PlatformEntry,
+): ReactNode | undefined {
+  switch (tab.value) {
+    case "model":
+      // CPA 的"渠道保障"读的是 codex_inspection 账号巡检（真实数据，
+      // XM-CPA0），与 Sub2API/NewAPI 那套仍是纯 UI 蓝图的模型路由验证
+      // 完全是两回事，只是落在同一个页签位置——只判平台，先问 CPA 有没有
+      // 接管这个子页签，没有（probes/history）才落回共享蓝图。
+      // 其余平台：Sub2API/NewAPI 共用同一套组件，「保障概览」「历史记录」
+      // 两个子页签接被动指标（XM-ASSURE0），「检测任务」（主动探测）接
+      // XM-ASSURE1-core 的真实 Query/Action（XM-ASSURE1-ui）。
+      // serviceId：与上面 tabContent 的 "upstream"/"overview" 分支同一个
+      // 判据——"检测任务"子页签的「发起检测」对话框要读渠道目录，需要恰好
+      // 一个已登记 service 才能定位是哪个 service_id，多实例或未登记时
+      // 由 AssuranceProbeDeclareDialog 自己说明原因，不猜一个出来。
+      return (
+        (entry.spec.serviceType === "cpa" ? cpaAssuranceSubTab(subId) : undefined) ??
+        assuranceSubTab(
+          subId,
+          entry.spec.serviceType,
+          entry.services.length === 1 ? entry.services[0]?.id : undefined,
+        )
+      );
+    case "finance":
+      return financeSubTab(entry.spec.serviceType, subId);
+    default:
+      return undefined;
+  }
+}
+
+/** 未实装页签的一句话。
+ *
+ *  说清楚两件事：这一格现在为什么空（本片只搬导航），以及它归哪个阶段。
+ *  空白页签会让人以为「这个平台没有告警」——而事实是这块还没建。 */
+function pendingNote(entry: PlatformEntry, tab: PlatformTabSpec): string {
+  const stage = tab.stage ?? (entry.spec.plan.kind === "milestone" ? entry.spec.plan.milestone : "");
+  const suffix = stage ? `阶段 ${stage}。` : "";
+  return `XM-0042 只重构了导航与路由：这一格的位置、命名与地址已经定下来，内容按实施计划的后续切片实现。${suffix}`;
+}
+
+function tabContent(tab: PlatformTabSpec, entry: PlatformEntry): ReactNode {
+  const { spec } = entry;
+  switch (tab.value) {
+    case "overview":
+      // CPA 没有原型可对齐（它在原型里是占位平台）——XM-CPA0 从观测形状
+      // 直接搭了一版真实概览，判在 platformHasPrototypeOverview 之前，
+      // 不然会落进"没有原型"的蓝图/占位分支
+      if (spec.serviceType === "cpa") return <CPAOverviewPanel />;
+      // 服务器的概览走登记簿汇总（XM-SERVER0，拍板「服务器只做记录」），
+      // 是 sub2api/newapi 的 PlatformOverviewPanel 与蓝图两条路之外的第三条：
+      // 前者读的是采集来的 `sub2api.*`/`newapi.*` 指标，与服务器无关；
+      // 蓝图路数字全是「—」，而服务器的台数/月成本/到期风险现在是真数据，
+      // 落回蓝图会把已经接好的东西显示成未接入。必须放在
+      // platformHasPrototypeOverview 判断之前——那个判断对 server 是 false，
+      // 顺序反了就会先落到蓝图分支。
+      if (spec.serviceType === "server") return <ServerOverviewPanel />;
+      // 只有 sub2api / newapi 有按原型对齐的概览（两版结构还不一样）。
+      // **不匹配时落回蓝图那条路**：服务器的概览由 UI 第 6 片画了蓝图，
+      // 在这里截胡会把它悄悄换成一屏通用指标卡（与 suppliers 同一类错误）
+      //
+      // serviceId/serviceStatus：与下面 "upstream" case 的 usesChannelRefGrain
+      // 同一个判据（XM-NEWAPI-OVERVIEW0）——NewAPI 概览的「渠道健康」卡要读
+      // 真实渠道目录，需要恰好一个已登记 service 的 id；Sub2API 分支忽略
+      // 这两个参数，多传不影响它的渲染。
+      return platformHasPrototypeOverview(spec.serviceType) ? (
+        <PlatformOverviewPanel
+          serviceType={spec.serviceType}
+          label={spec.label}
+          serviceId={entry.services.length === 1 ? entry.services[0]?.id : undefined}
+          serviceStatus={entry.services.length === 1 ? entry.services[0]?.status : undefined}
+        />
+      ) : (
+        fallbackTabContent(entry, tab)
+      );
+    case "upstream":
+      // 两个平台的渠道表**指标形状不同**(sub2api 是余额+令牌，newapi 是启停+
+      // 错误率+延迟)，所以是两个组件而不是一个带参数的通用表：硬凑成一张表
+      // 要么列对不上，要么长出一堆各平台各半空的列。
+      //
+      // 原型把 v2 的「渠道/资源」拆成了「渠道管理」(一行=一个账号/一把 Key)与
+      // 「上游管理」（按上游账号汇总）两格。这里是前者，按交接文档 §9.5 收窄；
+      // 后者见下面的 suppliers 格
+      switch (spec.serviceType) {
+        case "sub2api":
+          return entry.services.length === 1 ? (
+            <ChannelsPanel serviceId={entry.services[0]?.id} serviceStatus={entry.services[0]?.status} />
+          ) : (
+            <ChannelsPanel />
+          );
+        case "newapi":
+          return entry.services.length === 1 ? (
+            <NewApiChannelsPanel serviceId={entry.services[0]?.id} serviceStatus={entry.services[0]?.status} />
+          ) : (
+            <NewApiChannelsPanel />
+          );
+        case "cpa":
+          // 渠道管理保持"未接入"，但写明具体缺什么：usage.sqlite 只有用量与
+          // 账号巡检，没有渠道 ↔ 模型映射或供给侧配置的只读接口
+          // （contracts/connectors/cpa.read.v1.md，XM-CPA0 第一片范围之外）。
+          return (
+            <EmptyState
+              title="渠道管理尚未接入"
+              description="CPA 只读到 usage.sqlite 的用量与账号巡检结果，没有渠道 ↔ 模型映射或供给侧配置的只读接口；需要 CLI Proxy API / cpa-manager-plus 提供这部分配置的只读通道才能接入这一格。"
+            />
+          );
+        default:
+          return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
+      }
+    case "suppliers":
+      // 服务器「供应商与采购」= XM-SERVER0 登记簿（供应商、购买账号联系方式）。
+      // 唯一还会走到这个 value 的平台：Sub2API/NewAPI 的「上游管理」
+      // 2026-09-02 起并入了渠道管理页（登记簿字段直接并进 `ManagedChannelTable`
+      // 的行与渠道详情页，07:20 补充裁定连页内独立区块也一并推翻了），不再是
+      // 一个独立页签，`suppliers` 这个 tab 值在它们的页签集合里已经不存在——
+      // `?tab=suppliers` 在 `resolvePlatformTab` 里会被 `LEGACY_TAB_ALIASES`
+      // 改跳到 `upstream`，走不到这条 case（见 router.tsx 的 platformTabLoader）。
+      if (spec.serviceType === "server") return <ServerSuppliersPanel />;
+      // 不匹配时落回蓝图那条路：没在这条分支里认领的平台如果画了蓝图,
+      // 在这里截胡会把它悄悄下线（`default` 分支才认蓝图）
+      return fallbackTabContent(entry, tab);
+    case "assets":
+      // 服务器专属页签，标签「服务器资产」——其它平台没有这一格，值本身
+      // 唯一，理论上不需要再判 serviceType，但仍显式判一遍：与
+      // suppliers/overview 同一个规矩，避免以后哪个平台复用了这个 value
+      // 时无声地渲染出登记簿。
+      return spec.serviceType === "server" ? <ServerAssetsPanel /> : fallbackTabContent(entry, tab);
+    case "domains":
+      return spec.serviceType === "server" ? <ServerDomainsPanel /> : fallbackTabContent(entry, tab);
+    case "services":
+      return spec.serviceType === "server" ? <ServerServiceNotesPanel /> : fallbackTabContent(entry, tab);
+    case "users":
+      // CPA 原型字面保留"用户管理"这个名字（ADMIN-IA §8.6 裁定 #5），但它的
+      // "用户"其实是 API Key，不是终端用户身份——platformusers 域明确不认
+      // "cpa"（platformHasUsers 恒为 false），所以判在它之前，走完全不同的
+      // 组件 / 数据源（connectors/cpa 逐 key 用量，XM-CPA0）。
+      if (spec.serviceType === "cpa") return <CPAKeysPanel />;
+      // 逐用户资金明细。邮箱在**连接器**层就打了码，平台不持有明文;
+      // 逐用户充值/消费在 v1 上游契约里给不出，面板里逐格说明（原型 warnbar）
+      return platformHasUsers(spec.serviceType) ? (
+        <PlatformUsersPanel platform={spec.serviceType} />
+      ) : (
+        <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />
+      );
+    case "usage":
+      // 数据来自生产上已在运行的外挂请求审计系统，平台只是带权限与审计的
+      // 只读网关——正文永不落平台库。脱敏、`request.content.read` 与查看审计
+      // 属于第 8 片
+      return <RequestsPanel platform={spec.serviceType} />;
+    case "creds":
+      return spec.serviceType === "sub2api" || spec.serviceType === "newapi" ? (
+        <PlatformCredentialsPanel platform={spec.serviceType} />
+      ) : (
+        fallbackTabContent(entry, tab)
+      );
+    case "alerts":
+      return spec.serviceType === "sub2api" || spec.serviceType === "newapi" ? (
+        <PlatformAlertsPanel platform={spec.serviceType} />
+      ) : (
+        fallbackTabContent(entry, tab)
+      );
+    case "finance":
+      // CPA 的"支付与财务"保持"未接入"，但写明缺什么：usage.sqlite 只记
+      // 用量与折算成本，没有支付订单、充值或对账数据（XM-CPA0 范围之外）。
+      // 其余平台没有专属面板也没有蓝图，落回既有的 fallbackTabContent
+      // （目前只有服务器有 finance 蓝图，行为与改动前逐字一致）。
+      if (spec.serviceType === "cpa") {
+        return (
+          <EmptyState
+            title="支付与财务尚未接入"
+            description="usage.sqlite 只记录用量与折算成本，没有支付订单、充值或对账数据；CPA 目前没有可用的支付/财务数据源。"
+          />
+        );
+      }
+      return fallbackTabContent(entry, tab);
+    default:
+      return fallbackTabContent(entry, tab);
+  }
+}
+
+/** 没有专属面板的页签落到哪里。
+ *
+ *  有蓝图规格的走蓝图（UI 第 6 片，目前只有服务器的 7 格）：页签结构与列头
+ *  照原型，数字一个不显示。没有的才是那句「尚未实现」。
+ *
+ *  抽成函数而不是只留在 `default` 分支里：`suppliers` 这类**一个 value 两种
+ *  语义**的页签必须先判平台、判不中再回到这条路——写在 default 里的话，
+ *  任何一个 case 拦下它就等于把蓝图悄悄下线了。 */
+function fallbackTabContent(entry: PlatformEntry, tab: PlatformTabSpec): ReactNode {
+  const blueprint = blueprintTabForPlatform(entry.spec.serviceType, tab.value);
+  if (blueprint) return <BlueprintTabView tab={blueprint} />;
+  return <EmptyState title={`「${tab.label}」尚未实现`} description={pendingNote(entry, tab)} />;
+}

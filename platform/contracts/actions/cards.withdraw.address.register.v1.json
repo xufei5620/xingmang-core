@@ -1,0 +1,43 @@
+{
+  "id": "cards.withdraw.address.register",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "fund.address.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_CLIENT_KEY",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    },
+    "address_id": {
+      "type": "string",
+      "required": true
+    },
+    "chain": {
+      "type": "string",
+      "required": true
+    },
+    "address": {
+      "type": "string",
+      "required": true
+    },
+    "label": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-CARD6 登记一条可提现地址。这个动作本身不动钱，但它决定了 cards.withdraw.execute 的钱能去哪儿——登记错一条地址与提现到错地址是同一个后果，只是晚一步发生，所以它与提现同属 fund-operator 角色而不是 admin。权限串与提现分开（fund.address.manage / fund.withdraw），是为了以后想拆成「登记要另一个人」时拆得开；今天由同一个角色持有。address_id 由调用方给定并充当幂等键：同一条地址重复登记应当得到同一条记录，而不是两条内容相同、id 不同的白名单项。审计摘要带账号、链与标签，**不带完整地址**——地址本身不是秘密，但审计摘要会被广泛展示，一个转账地址被抄去做钓鱼是真事。compensation_mode 是 MANUAL：登记可以被撤销（删掉那条白名单），但已经据此发出的提现追不回来。"
+}
