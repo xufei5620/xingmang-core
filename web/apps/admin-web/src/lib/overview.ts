@@ -1,4 +1,4 @@
-import type { AlertItem } from "../api/alerts";
+import { describeFireCount, type AlertItem } from "../api/alerts";
 import type { UpstreamAccountItem } from "../api/finance";
 import type { ChannelRow, Sub2ApiChannelStatusRow } from "./metrics";
 
@@ -45,7 +45,13 @@ export function toWorkItems(
     id: a.id,
     tone: (a.severity === "critical" ? "bad" : "warn") as WorkItem["tone"],
     title: a.title,
-    detail: `${a.rule_key} · 最近 ${a.last_seen_at}${a.fire_count > 1 ? ` · 命中 ${a.fire_count} 次` : ""}`,
+    // 「命中 N 次」是同一句错话的第五份副本：fire_count 是每 60 秒重评一轮、
+    // 条件仍成立就 +1 的轮数，措辞统一走 describeFireCount（见 api/alerts）。
+    //
+    // 只响了一轮时不说「评估 1 轮」（那是噪音）；但 trigger_count 在场时不管
+    // 轮数是几都要带——「触发 5 次」与「评估 1 轮」是两个事实，一个和它无关的
+    // 守卫不能把另一个整段吞掉。
+    detail: `${a.rule_key} · 最近 ${a.last_seen_at}${a.fire_count > 1 || a.trigger_count != null ? ` · ${describeFireCount(a).combined}` : ""}`,
     href: "/alerts",
   }));
 

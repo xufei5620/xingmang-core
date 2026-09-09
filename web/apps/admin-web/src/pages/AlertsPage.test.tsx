@@ -2,7 +2,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AlertItem, AlertNotifyStatus, AlertStatus } from "../api/alerts";
+import {
+  FIRE_COUNT_HEADER,
+  type AlertItem,
+  type AlertNotifyStatus,
+  type AlertStatus,
+} from "../api/alerts";
 import { AlertsPage } from "./AlertsPage";
 
 const ACK_URL = "/api/v1/actions/alerts.alert.acknowledge/versions/1/execute";
@@ -113,6 +118,67 @@ function ackedIds(fetchMock: ReturnType<typeof stubAlerts>): string[] {
 }
 
 afterEach(() => vi.unstubAllGlobals());
+
+/** 「评估轮次」那一列每一行的格子文本，按表头定位列，不按文本猜。 */
+function fireCountCells(): { text: string; title: string | null }[] {
+  const table = screen.getByRole("table");
+  const headers = within(table).getAllByRole("columnheader");
+  const index = headers.findIndex((h) => (h.textContent ?? "").includes(FIRE_COUNT_HEADER));
+  expect(index).toBeGreaterThanOrEqual(0);
+  return within(table)
+    .getAllByRole("row")
+    .filter((row) => within(row).queryAllByRole("cell").length > 0)
+    .map((row) => {
+      const cell = within(row).getAllByRole("cell")[index]!;
+      return { text: cell.textContent ?? "", title: cell.querySelector("[title]")?.getAttribute("title") ?? null };
+    });
+}
+
+// --- XM-WORKBENCH-TRUTH 评审回合三：数字列里只放数字 --------------------------
+
+describe("「评估轮次」列", () => {
+  it("格子里是纯数字：口径由表头与悬停整句承担，数字列里再写整句既重复又对不齐", async () => {
+    stubAlerts(ALERTS);
+    renderAlerts();
+    await screen.findByText("甲告警");
+
+    const cells = fireCountCells();
+    expect(cells.length).toBe(ALERTS.length);
+    for (const cell of cells) {
+      expect(cell.text).toBe("3");
+      expect(cell.text).toMatch(/^\d+$/);
+      // 整句没有丢，只是退到了悬停里
+      expect(cell.title).toContain("评估 3 轮");
+      expect(cell.title).toContain("这是评估轮数，不是发生次数");
+    }
+  });
+
+  it("trigger_count 到位后格子写「M / N」，悬停说清哪个是触发、哪个是评估", async () => {
+    stubAlerts([{ ...alert("id-9", "OPEN", "己告警"), trigger_count: 5 } as AlertItem]);
+    renderAlerts();
+    await screen.findByText("己告警");
+
+    const [cell] = fireCountCells();
+    expect(cell!.text).toBe("5 / 3");
+    expect(cell!.title).toContain("触发 5 次 · 评估 3 轮");
+  });
+});
+
+describe("「首次 / 最近」列的确认时刻", () => {
+  it("已确认的行多一行「确认 <时刻>」，没人确认过的行没有这一行", async () => {
+    stubAlerts([
+      { ...alert("id-a", "ACKNOWLEDGED", "戊告警"), acknowledged_at: "2026-09-01T10:03:00Z" },
+      alert("id-b", "OPEN", "己告警"),
+    ]);
+    renderAlerts();
+    const acked = (await screen.findByText("戊告警")).closest("tr") as HTMLElement;
+    const open = screen.getByText("己告警").closest("tr") as HTMLElement;
+    expect(within(acked).getByText("确认 2026-09-01 10:03:00 UTC")).not.toBeNull();
+    // 「最近」晚于「确认」才读得出「确认之后还在响」，两行都要在
+    expect(within(acked).getByText("最近 2026-09-01 10:05:00 UTC")).not.toBeNull();
+    expect(within(open).queryByText(/^确认 /)).toBeNull();
+  });
+});
 
 // --- 缺口 1：批量确认 -------------------------------------------------------
 

@@ -13,6 +13,9 @@ import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
+  describeFireCount,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
   listAlerts,
   listAlertsPage,
   ruleLabel,
@@ -269,6 +272,13 @@ function alertColumns(
           <span className="block text-xs text-fg-muted">
             最近 {formatUtcTimestamp(alert.last_seen_at)}
           </span>
+          {/* 确认时刻在场才显示：它回答「我确认之后它还在不在响」——「最近」晚于
+              「确认」就是还在。null 表示没人确认过，不拿零值时间冒充 */}
+          {alert.acknowledged_at ? (
+            <span className="block text-xs text-fg-muted">
+              确认 {formatUtcTimestamp(alert.acknowledged_at)}
+            </span>
+          ) : null}
           {alert.resolved_at ? (
             <span className="block text-xs text-fg-muted">
               恢复 {formatUtcTimestamp(alert.resolved_at)}
@@ -279,12 +289,25 @@ function alertColumns(
     },
     {
       id: "fireCount",
-      header: "次数",
+      // 这一列以前叫「次数」，悬停说的是「被去重合并掉的命中次数（含首次）」
+      // ——两句都不对：fire_count 数的是每 60 秒重评一轮、条件仍成立就 +1 的
+      // 轮数（见 api/alerts 的 fire_count 契约注释）。措辞与工作台待办、平台
+      // 告警面板共用 FIRE_COUNT_HEADER / FIRE_COUNT_MEANING 一份。
+      header: FIRE_COUNT_HEADER,
       numeric: true,
       value: (alert) => alert.fire_count,
-      cell: (alert) => (
-        <span title="被去重合并掉的命中次数（含首次）">{alert.fire_count}</span>
-      ),
+      cell: (alert) => {
+        // 格子里只放数字：这是一列右对齐 tabular-nums 的数字列，表头已经写着
+        // 「评估轮次」，再写一遍「评估 N 轮」既重复又对不齐。整句退到悬停里
+        // （trigger_count 到位后格子写「M / N」，悬停说清哪个是触发、哪个是评估：
+        // 它们是不同的事实，「触发几次」替代不了「已经这样多少轮」）。
+        const counts = describeFireCount(alert);
+        return (
+          <span title={`${counts.combined}。${FIRE_COUNT_MEANING}`} className="block">
+            {counts.figure}
+          </span>
+        );
+      },
     },
     {
       id: "notify",
@@ -338,7 +361,7 @@ function AlertsTable({
 }) {
   return (
     <DataTableV2
-      caption="告警列表：严重度、状态、首次与最近发现、命中次数与投递结果"
+      caption={`告警列表：严重度、状态、首次与最近发现、${FIRE_COUNT_HEADER}与投递结果`}
       columns={alertColumns(onAcknowledged)}
       // 默认顺序仍是「最严重的在最上面」：DataTableV2 不排序时保持入参顺序
       rows={sortForDisplay(items)}

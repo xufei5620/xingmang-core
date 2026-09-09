@@ -6,7 +6,15 @@ import {
 } from "@xingmang/ui-admin";
 import { Badge } from "@xingmang/ui-primitives";
 import { Link, useSearchParams } from "react-router";
-import { ALERT_STATUS_ALL, listAlerts, ruleLabel, type AlertItem } from "../api/alerts";
+import {
+  ALERT_STATUS_ALL,
+  describeFireCount,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
+  listAlerts,
+  ruleLabel,
+  type AlertItem,
+} from "../api/alerts";
 import {
   describeNotifyStatus,
   describeSeverity,
@@ -114,6 +122,10 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
       <div className="min-w-44 text-xs tabular-nums text-fg-muted">
         <span className="block">首次 {formatUtcTimestamp(alert.opened_at)}</span>
         <span className="block">最近 {formatUtcTimestamp(alert.last_seen_at)}</span>
+        {/* 确认时刻在场才显示（与告警中心同一列同一写法）：null 是没人确认过 */}
+        {alert.acknowledged_at ? (
+          <span className="block">确认 {formatUtcTimestamp(alert.acknowledged_at)}</span>
+        ) : null}
         {alert.resolved_at ? (
           <span className="block">恢复 {formatUtcTimestamp(alert.resolved_at)}</span>
         ) : null}
@@ -122,10 +134,21 @@ function alertColumns(now: number): DataTableColumn<AlertItem>[] {
   },
   {
     id: "count",
-    header: "次数",
+    // 与告警中心那一列共用同一份表头与说明（api/alerts 的 FIRE_COUNT_*）：
+    // 同一个数在两个页面上叫两个名字，人会以为看的是两个量。
+    header: FIRE_COUNT_HEADER,
     numeric: true,
     value: (alert) => alert.fire_count,
-    cell: (alert) => <span title="含首次及被去重合并的重复命中">{alert.fire_count}</span>,
+    cell: (alert) => {
+      // 数字列里只放数字（与告警中心那一列同一写法）：表头已是「评估轮次」，
+      // 整句留给悬停与表格说明。
+      const counts = describeFireCount(alert);
+      return (
+        <span title={`${counts.combined}。${FIRE_COUNT_MEANING}`} className="block">
+          {counts.figure}
+        </span>
+      );
+    },
   },
   {
     id: "notify",
@@ -246,7 +269,7 @@ export function PlatformAlertsPanel({ platform }: { platform: string }) {
       >
         <PersistentDataTable
           tableKey={savedViewKey ?? platformSavedViewTableKey("sub2api", "alerts")}
-          caption={`${label} 告警：编号、严重度、状态、来源指标、首次与最近发现、持续时长、次数及投递结果`}
+          caption={`${label} 告警：编号、严重度、状态、来源指标、首次与最近发现、持续时长、${FIRE_COUNT_HEADER}及投递结果`}
           columns={alertColumns(now)}
           rows={rows}
           rowKey={(alert) => alert.id}

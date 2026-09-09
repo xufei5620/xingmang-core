@@ -7,7 +7,7 @@ import {
   navLabel,
 } from "@xingmang/ui-admin";
 import { Badge, EmptyState } from "@xingmang/ui-primitives";
-import type { ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   ALERT_STATUS_ALL,
@@ -29,6 +29,8 @@ import { APPROVAL_QUEUE_PATH } from "../components/ActionResultNote";
 import { ApiStateView } from "../components/ApiStateView";
 import { OVERVIEW_POLL_INTERVAL_MS, useAutoRefresh } from "../lib/autoRefresh";
 import {
+  acknowledgedGroupHeading,
+  acknowledgedWorkItems,
   focusRows,
   platformMatrixRows,
   recentlyRecoveredCount,
@@ -286,7 +288,13 @@ function TileRow({
         <StatTile
           label="紧急"
           value={String(urgent)}
-          note={urgent === 0 ? "当前没有未解决的严重告警" : "未解决的严重（critical）告警"}
+          // 「未处理」不是「未解决」：已确认的严重告警仍未解决，但有人在管，
+          // 不再催人放下手里的事——口径见 lib/workbench 的 urgentCount。
+          note={
+            urgent === 0
+              ? "当前没有未处理的严重告警（已确认的不算）"
+              : "未处理的严重（critical）告警，已确认的不算"
+          }
           link={
             <Link to="/alerts" className="text-xs font-medium text-accent hover:underline">
               查看全部告警 →
@@ -369,7 +377,7 @@ const EMPTY_DESCRIPTIONS: Readonly<Record<string, string>> = {
 /** 「全部」以及没有专属文案的分类用这一句。**必须点名还有哪几类没接**：
  *  一个「没有待处理事项」如果被读成「都处理完了」，人就会据此收工。 */
 const DEFAULT_EMPTY_DESCRIPTION =
-  "当前没有未解决的告警、没有等着投票的审批单，也没有失败的后台任务。注意：财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。";
+  "当前没有未处理的告警、没有等着投票的审批单，也没有失败的后台任务。注意：财务异常、到期项与待评审变更还没有接入，这一屏并不代表全部待办。";
 
 function WorkList({
   alerts,
@@ -424,9 +432,15 @@ function WorkList({
   const items = [
     ...workItemsFromAlerts(alerts, now),
     ...workItemsFromApprovals(approvals, now),
-    ...workItemsFromJobRuns(jobs, now),
+    // truncated 这一位必须传进去：合并行显示的是「×20」，而生产上真实是 288。
+    // 不带这一位，一个看起来权威的错数字比 288 行刷屏更危险。
+    ...workItemsFromJobRuns(jobs, now, { truncated: jobsTruncated }),
   ];
   const shown = activeId ? items.filter((item) => item.categoryId === activeId) : items;
+  // 已确认的告警不与未处理的混排：它们收进列表底部一个折叠组。只在「全部」与
+  // 「故障」两个筛选下出现——它们是告警，别的筛选下不该冒出来。
+  const acknowledged =
+    activeId === "" || activeId === "incidents" ? acknowledgedWorkItems(alerts, now) : [];
 
   // 加载态与错误态跟着**当前这一格自己**那条 query 走。写成按分类查表，而不是
   // 一串 `a ? … : b ? … : …`：三选一还勉强读得懂，第四类进来就没人敢动了，而
@@ -468,7 +482,9 @@ function WorkList({
       <p className="mb-3 text-xs text-fg-muted">
         本阶段有数据源的是「故障」「待审批」与「失败任务」三类：「故障」的内容是活跃告警——故障事件（Incident）对象随治理段切片建立后再单列；
         「待审批」是审批中心里仍等着投票的单，最多 {WORK_APPROVALS_LIMIT} 条，已过期的不算——它已经批不动了；
-        「失败任务」只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条。
+        「失败任务」只收已放弃（重试用尽、不会再跑）的后台任务，最多 {WORK_JOBS_LIMIT} 条，
+        同一类型的已放弃作业合并成一行显示计数（点标题展开明细），所以计数只统计这最多{" "}
+        {WORK_JOBS_LIMIT} 条、不是该类型的全部；条数后带「+」就表示还有没取到的。
         重试中的任务不在这里，它不需要人动手，看过程请去后台任务页的「失败与重试」。
         其余各类的空是「还没接」，不是「没有问题」。
       </p>
@@ -500,6 +516,7 @@ function WorkList({
               ))}
             </ul>
           )}
+          {acknowledged.length > 0 ? <AcknowledgedGroup items={acknowledged} /> : null}
         </ApiStateView>
       )}
     </Card>
@@ -533,17 +550,106 @@ function FilterChip({
 }
 
 function WorkRow({ item }: { item: WorkItem }) {
+  // 合并行与单条行是两种交互，分成两个组件而不是在一个里面判：hook 不能条件
+  // 调用，而合并行需要自己的展开状态。
+  if (item.children) return <MergedWorkRow item={item} />;
   return (
     <li>
       <Link
         to={item.to}
+        title={item.hint}
         className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-edge px-3 py-2 hover:bg-surface-muted"
       >
         <Badge tone={item.tone}>{item.categoryLabel}</Badge>
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-fg">{item.title}</span>
         <span className="truncate text-xs text-fg-muted">{item.meta}</span>
         <span className="shrink-0 text-xs text-fg-muted tabular-nums">{item.due}</span>
+        {/* 绝对时刻独占一行（basis-full 让它在 flex-wrap 里换行）：三个带 UTC
+            后缀的时间戳挤在 meta 后面会被 truncate 吃掉，而它们正是负责人要核对
+            「我确认之后它还在不在响」的那几个数 */}
+        {item.timeline ? (
+          <span className="basis-full text-xs text-fg-muted tabular-nums">{item.timeline}</span>
+        ) : null}
       </Link>
+    </li>
+  );
+}
+
+/** 已确认、等待自愈的告警折叠在列表底部。
+ *
+ *  默认收起、明细**条件渲染**（理由同 MergedWorkRow：`<details>` 折叠时内容仍
+ *  在 DOM 里，「收起时看不到明细」那条断言会恒真）。组头写条数，让人不展开也
+ *  知道底下压着几条。 */
+function AcknowledgedGroup({ items }: { items: WorkItem[] }) {
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={detailId}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 rounded-md border border-edge px-3 py-2 text-left text-sm text-fg-muted hover:bg-surface-muted"
+      >
+        <span className="font-medium text-fg">{acknowledgedGroupHeading(items.length)}</span>
+        <span className="text-xs">
+          有人认领了，条件仍在成立；恢复后会自动解决，这里不再催
+        </span>
+        <span className="ml-auto shrink-0 text-xs">{open ? "收起明细" : "展开明细"}</span>
+      </button>
+      {open ? (
+        <ul id={detailId} className="mt-2 flex flex-col gap-2">
+          {items.map((item) => (
+            <WorkRow key={item.id} item={item} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** 合并成一行的已放弃作业（同一个 job kind）。
+ *
+ *  **展开与跳转是两个可点区域**：整行套一个 `<Link>` 再往里塞一个 `<button>`
+ *  是嵌套交互控件，读屏与键盘都会失灵。
+ *
+ *  明细用**条件渲染**，不用 `<details>`、也不用 CSS 隐藏：折叠时 `<details>`
+ *  的内容仍然留在 DOM 里，testing-library 照样查得到，于是「折叠时看不到明细」
+ *  那条断言会恒真——本仓在 Portal / 懒渲染上踩过同一个坑。 */
+function MergedWorkRow({ item }: { item: WorkItem }) {
+  const [open, setOpen] = useState(false);
+  const detailId = useId();
+  const children = item.children ?? [];
+  return (
+    <li>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-edge px-3 py-2">
+        <Badge tone={item.tone}>{item.categoryLabel}</Badge>
+        <button
+          type="button"
+          aria-expanded={open}
+          aria-controls={detailId}
+          onClick={() => setOpen((v) => !v)}
+          className="min-w-0 flex-1 truncate text-left text-sm font-medium text-fg hover:underline"
+        >
+          {item.title}
+          <span className="ml-2 text-xs font-normal text-fg-muted">
+            {open ? "收起明细" : "展开明细"}
+          </span>
+        </button>
+        <span className="truncate text-xs text-fg-muted">{item.meta}</span>
+        <span className="shrink-0 text-xs text-fg-muted tabular-nums">{item.due}</span>
+        <Link to={item.to} className="shrink-0 text-xs text-accent hover:underline">
+          去后台任务页
+        </Link>
+      </div>
+      {open ? (
+        <ul id={detailId} className="mt-1 flex flex-col gap-1 pl-6">
+          {children.map((child) => (
+            <WorkRow key={child.id} item={child} />
+          ))}
+        </ul>
+      ) : null}
     </li>
   );
 }
@@ -688,6 +794,14 @@ function MatrixTableRow({ row }: { row: MatrixRow }) {
         <Link to={row.to} className="font-medium text-accent hover:underline">
           {row.label}
         </Link>
+        {/* 这一行说的是什么范围。今天只有开票那一行挂：它写着「未接入」，而
+            点进去是一个能用的嵌入管理端，两者不是一回事——这句话必须在格子
+            里，不能只靠 hover。 */}
+        {row.scopeNote ? (
+          <span className="mt-1 block max-w-80 text-xs font-normal text-fg-muted">
+            {row.scopeNote}
+          </span>
+        ) : null}
       </td>
       <td className="py-2 text-xs text-fg-muted">{row.stage}</td>
       <td className="py-2">
@@ -695,6 +809,16 @@ function MatrixTableRow({ row }: { row: MatrixRow }) {
       </td>
       <td className="py-2">
         <FreshnessBadge freshness={row.freshness} />
+        {/* 「数据新鲜度必须可见」在这一屏上原来只剩四个字的徽章：NewAPI 那格
+            的黄灯亮了两周，没人说得出为什么。原因由 workbench 从数据里得出。 */}
+        {row.freshnessNote ? (
+          <span
+            className="mt-1 block max-w-80 text-xs text-fg-muted"
+            title={row.freshnessEvidence}
+          >
+            {row.freshnessNote}
+          </span>
+        ) : null}
       </td>
       <td className="py-2 text-right tabular-nums text-fg">{row.events}</td>
       <td className="py-2 text-xs text-fg-muted tabular-nums">

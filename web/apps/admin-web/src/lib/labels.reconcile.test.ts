@@ -26,8 +26,13 @@
  *  非 file: 的地址，readFileSync 直接拒收（"The URL must be of scheme file"）。 */
 import { describe, expect, it } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
-import { describeServiceStatus } from "@xingmang/ui-admin";
-import { ALERT_RULES } from "../api/alerts";
+import { describeFreshness, describeServiceStatus } from "@xingmang/ui-admin";
+import {
+  ALERT_EVALUATE_INTERVAL_SECONDS,
+  ALERT_RULES,
+  FIRE_COUNT_HEADER,
+  FIRE_COUNT_MEANING,
+} from "../api/alerts";
 import { appStatusLabel, authModeLabel, releaseKindLabel } from "../api/extapp";
 import {
   CLIENT_STATUS_HINTS,
@@ -58,6 +63,7 @@ import {
   RISK_LEVELS,
   UPSTREAM_ACCOUNT_STATUSES,
 } from "./labels";
+import { FRESHNESS_PRIORITY } from "./workbench";
 
 /** 仓库根。本文件在 web/apps/admin-web/src/lib/ 下，往上五层。 */
 const REPO_ROOT = new URL("../../../../../", import.meta.url);
@@ -80,6 +86,22 @@ export function goTypedConstValues(source: string, typeName: string): string[] {
     "gm",
   );
   return [...source.matchAll(pattern)].map((m) => m[1] ?? "");
+}
+
+/** 抽出前端手写的字符串字面量联合类型的成员，如
+ *  `export type FreshnessState = "uninitialized" | "failed" | …;`。
+ *
+ *  与 goTypedConstValues 是同一个思路：按**类型名**定位那一句声明，再把引号
+ *  里的值一个个抽出来。这种手写联合类型是后端枚举在前端的又一份副本——它
+ *  只被 typecheck 用，不会在界面上露出来，于是最容易被对账漏掉（评审的变异：
+ *  往里加一个后端不存在的 "melted"，160 条全绿）。 */
+export function tsUnionValues(source: string, typeName: string): string[] {
+  const declaration = new RegExp(
+    String.raw`^\s*(?:export\s+)?type\s+${typeName}\s*=\s*([^;]*);`,
+    "m",
+  ).exec(source);
+  if (!declaration) return [];
+  return [...(declaration[1] ?? "").matchAll(/"([^"]*)"/g)].map((m) => m[1] ?? "");
 }
 
 /** 抽出「无类型字符串常量」中常量名匹配某形态的那些，如
@@ -615,6 +637,485 @@ describe("资源目录：连接状态要有中文", () => {
   });
 });
 
+// --- 数据新鲜度：五个档位的中文，以及「取最差」的顺序 ----------------------
+
+/** 从 `Freshness()` 的**函数体**里把优先级推导出来。
+ *
+ *  后端没有导出有序清单（那才是真正该有的东西，见交接文档 follow_up），今天
+ *  唯一的真相是那个函数**先判哪个、后判哪个**。所以按 `f.State = StateX` 的
+ *  首次出现顺序去重，得到的就是「从最严重到最不严重」。
+ *
+ *  **这条判据依赖一个结构习惯**（函数写成最严重优先的早返回 / switch），不是
+ *  契约。习惯变了它不会报错，只会给出一个更短的清单——所以下面第一条断言先
+ *  钉住数量下界：被信任的过期闸比没有闸更坏。 */
+export function freshnessPriorityFromBody(source: string): string[] {
+  const start = source.indexOf("func (o Observation) Freshness(");
+  if (start < 0) return [];
+  const end = source.indexOf("\n}\n", start);
+  const body = source.slice(start, end < 0 ? source.length : end);
+  const byName = new Map<string, string>();
+  for (const m of source.matchAll(/^\s*(?:const\s+)?([A-Za-z_]\w*)\s+State\s*=\s*"([^"]*)"/gm)) {
+    byName.set(m[1] ?? "", m[2] ?? "");
+  }
+  const out: string[] = [];
+  for (const m of body.matchAll(/f\.State\s*=\s*(State\w+)/g)) {
+    const value = byName.get(m[1] ?? "");
+    if (value !== undefined && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+describe("数据新鲜度：五个档位要有中文，取最差的顺序要与后端一致", () => {
+  const source = goSource("internal/platform/ops/freshness.go");
+  const states = goTypedConstValues(source, "State");
+  const fromBody = freshnessPriorityFromBody(source);
+
+  /** 这份枚举在前端还有两份**手写的 TS 联合类型**副本：`api/ops.ts` 的
+   *  `OpsFreshnessState` 与 `ui-admin/freshness.ts` 的 `FreshnessState`。它们
+   *  只被 typecheck 用、不露到界面上，所以中文对账与优先级对账都碰不到它们
+   *  ——评审往两者各加一个后端不存在的 "melted"，全量用例照样全绿。
+   *  这里把两者也纳入同一条差集断言。goSource 只是按仓库根读文件，读 TS 也一样。 */
+  const opsApiSource = goSource("web/apps/admin-web/src/api/ops.ts");
+  const uiFreshnessSource = goSource("web/packages/ui-admin/src/freshness.ts");
+  const opsApiStates = tsUnionValues(opsApiSource, "OpsFreshnessState");
+  const uiStates = tsUnionValues(uiFreshnessSource, "FreshnessState");
+
+  it("两个抽取器都确实抓到了东西", () => {
+    // 抽空会让下面每一条断言恒真——这类测试最典型的假绿
+    expect(states.length).toBeGreaterThanOrEqual(5);
+    expect(states).toContain("failed");
+    expect(states).toContain("uninitialized");
+    expect(fromBody.length).toBeGreaterThanOrEqual(5);
+    // 两份 TS 联合类型的抽取器也一样：抽空了下面「不多不少」会对空数组恒假
+    // 而不是恒真，但抽成只剩一个值时仍可能撞对——数量下界照样要有
+    expect(opsApiStates.length).toBeGreaterThanOrEqual(5);
+    expect(uiStates.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it("前端两份手写的 TS 联合类型不多不少，正好是后端那五个状态", () => {
+    expect([...opsApiStates].sort()).toEqual([...states].sort());
+    expect([...uiStates].sort()).toEqual([...states].sort());
+  });
+
+  /** 新鲜度的兜底带一层「未知状态（…）」的包装，与原值**不逐字相同**，所以
+   *  通用的 `translated` 判据在这里恒为真——不能用它，否则「每一档都有中文」
+   *  会对任何一个后端新增的状态自动成立。判据改成「中文名里不含原始取值」，
+   *  下面的反向验证喂 "melted" 确认它真的判得出。 */
+  const freshnessTranslated = (state: string): boolean => {
+    const label = describeFreshness(state).label;
+    return label !== "" && label !== state && !label.includes(state);
+  };
+
+  it("每一个新鲜度状态都有中文", () => {
+    const missing = states.filter((s) => !freshnessTranslated(s));
+    expect(missing).toEqual([]);
+  });
+
+  // 「发现而非手列」：后端加第六个状态，这一条红。
+  it("前端的优先级清单不多不少，正好是后端那五个状态", () => {
+    expect([...FRESHNESS_PRIORITY].sort()).toEqual([...states].sort());
+  });
+
+  // 顺序不再是第二份手写副本：它被后端函数体钉住。
+  it("取最差的顺序与后端 Freshness() 的判定顺序逐值相同", () => {
+    expect([...FRESHNESS_PRIORITY]).toEqual(fromBody);
+  });
+
+  it("逐值钉死：失败排在未初始化之前（XM-0031 的修正方向）", () => {
+    // 两个抽取器同时失灵时的最后一道。前端曾把这两个反过来，于是一个正在
+    // 发生的故障被显示成中性的「尚未接入」。
+    expect(FRESHNESS_PRIORITY[0]).toBe("failed");
+    expect(FRESHNESS_PRIORITY.indexOf("failed")).toBeLessThan(
+      FRESHNESS_PRIORITY.indexOf("uninitialized"),
+    );
+  });
+
+  /** 文档注释里那句「优先级：失败 > 未初始化 > 延迟 > 部分 > 新鲜。」用的是
+   *  中文简称，与 describeFreshness 的中文名（同步失败 / 数据延迟 / 数据不完整
+   *  / 数据新鲜）**不逐字相同**，所以要一座桥。
+   *
+   *  这座桥是人写的，因此它自己也要被钉住：下面两条断言分别把它的两端对上
+   *  「注释里实际出现的词」与「后端实际有的状态」——后端换词或加状态，桥先红，
+   *  而不是让顺序对账悄悄少比一项。 */
+  const COMMENT_WORD_TO_STATE: Readonly<Record<string, string>> = {
+    失败: "failed",
+    未初始化: "uninitialized",
+    延迟: "stale",
+    部分: "partial",
+    新鲜: "fresh",
+  };
+  const commentWords = (/优先级：([^\n]*)。/.exec(source)?.[1] ?? "").split(" > ");
+
+  it("注释里那句优先级确实抓到了，而且中文桥两端都对得上", () => {
+    expect(commentWords).toHaveLength(5);
+    expect([...commentWords].sort()).toEqual(Object.keys(COMMENT_WORD_TO_STATE).sort());
+    expect([...Object.values(COMMENT_WORD_TO_STATE)].sort()).toEqual([...states].sort());
+  });
+
+  it("后端自己的注释与自己的实现先对得上", () => {
+    // 这一条红说明后端的注释与代码漂开了——那是后端的问题，但也该有人看见
+    expect(commentWords.map((w) => COMMENT_WORD_TO_STATE[w])).toEqual(fromBody);
+  });
+
+  describe("变异验证：换成合成源码走同一条流水线", () => {
+    it("对调 failed / uninitialized 两个分支，推导顺序跟着变", () => {
+      // 改输入而不是删实现：删实现红的是编译，什么也证明不了
+      const mutated = source
+        .replace("f.State = StateFailed", "f.State = StateTmpMarker")
+        .replace("f.State = StateUninitialized", "f.State = StateFailed")
+        .replace("f.State = StateTmpMarker", "f.State = StateUninitialized");
+      expect(mutated).not.toBe(source);
+      expect(freshnessPriorityFromBody(mutated)[0]).toBe("uninitialized");
+      // 而前端那一份没跟着变 —— 顺序对账会红，正是要的
+      expect([...FRESHNESS_PRIORITY]).not.toEqual(freshnessPriorityFromBody(mutated));
+    });
+
+    it("后端多一个状态时，「不多不少」那条会把它算成缺失", () => {
+      const mutated = source.replace(
+        '\tStateFresh         State = "fresh"',
+        '\tStateFresh         State = "fresh"\n\tStateDegraded      State = "degraded"',
+      );
+      expect(mutated).not.toBe(source);
+      const added = goTypedConstValues(mutated, "State").filter(
+        (s) => !FRESHNESS_PRIORITY.includes(s),
+      );
+      expect(added).toEqual(["degraded"]);
+    });
+
+    it("函数体改掉赋值写法让抽取器抓空时，数量下界那条拦得住", () => {
+      const renamed = source.replaceAll("f.State = ", "f.state = ");
+      expect(freshnessPriorityFromBody(renamed)).toEqual([]);
+      // 抽空之后顺序对账会「恒真地」通过吗？不会——空数组与五个值不相等。
+      // 但集合断言那一条仍然只比 goTypedConstValues 的结果，所以数量下界
+      // 必须单独存在。
+      expect(freshnessPriorityFromBody(renamed).length).toBeLessThan(5);
+    });
+
+    it("给前端的 TS 联合类型加一个后端不存在的成员，差集里恰好多出它", () => {
+      // 评审做过的那个变异，现在长期跑在这里：改的是输入不是实现
+      const mutatedOps = opsApiSource.replace(
+        'export type OpsFreshnessState = "uninitialized"',
+        'export type OpsFreshnessState = "melted" | "uninitialized"',
+      );
+      const mutatedUi = uiFreshnessSource.replace(
+        'export type FreshnessState = "uninitialized"',
+        'export type FreshnessState = "uninitialized" | "melted"',
+      );
+      expect(mutatedOps).not.toBe(opsApiSource);
+      expect(mutatedUi).not.toBe(uiFreshnessSource);
+      const extra = (values: string[]) => values.filter((s) => !states.includes(s));
+      expect(extra(tsUnionValues(mutatedOps, "OpsFreshnessState"))).toEqual(["melted"]);
+      expect(extra(tsUnionValues(mutatedUi, "FreshnessState"))).toEqual(["melted"]);
+      // 对照：真源码的差集为空——否则上面只是「恒多一个」
+      expect(extra(opsApiStates)).toEqual([]);
+      expect(extra(uiStates)).toEqual([]);
+    });
+
+    it("联合类型改了名让抽取器抓空时，数量下界那条拦得住", () => {
+      const renamed = uiFreshnessSource.replace("type FreshnessState =", "type FreshState =");
+      expect(renamed).not.toBe(uiFreshnessSource);
+      expect(tsUnionValues(renamed, "FreshnessState")).toEqual([]);
+      expect(tsUnionValues(renamed, "FreshnessState").length).toBeLessThan(5);
+    });
+
+    it("「已翻译」的判据能判出没翻译：喂一个后端不存在的状态", () => {
+      // 通用的 translated 在这里会说 true（兜底包了一层「未知状态（…）」），
+      // 那正是本组不能用它的原因——先把这件事钉住，免得有人顺手换回去
+      expect(translated(describeFreshness("melted").label, "melted")).toBe(true);
+      expect(freshnessTranslated("melted")).toBe(false);
+      expect(describeFreshness("melted").label).toContain("melted");
+      // 对照：真的翻译过的值，判据说 true。少了这一条，上面也可能只是恒假
+      expect(freshnessTranslated("failed")).toBe(true);
+    });
+  });
+});
+
+// --- 告警计数：「评估 N 轮」这句话钉在后端事实上 ----------------------------
+
+/** `60 * time.Second` → 60；认不出来返回 NaN（同 goDurationHours 的纪律）。 */
+export function goDurationSeconds(expression: string): number {
+  const seconds = /^(\d+)\s*\*\s*time\.Second$/.exec(expression.trim());
+  return seconds ? Number(seconds[1]) : Number.NaN;
+}
+
+describe("告警计数：界面上的「评估 N 轮」要与后端的评估周期、SQL 对得上", () => {
+  const jobSource = goSource("internal/platform/jobs/alert_evaluate.go");
+  const sqlSource = goSource("db/queries/alerts.sql");
+  const interval = /DefaultAlertEvaluateInterval\s*=\s*([^\n/]+)/.exec(jobSource)?.[1] ?? "";
+  const touchAlert = (() => {
+    const start = sqlSource.indexOf("-- name: TouchAlert");
+    if (start < 0) return "";
+    const next = sqlSource.indexOf("-- name:", start + 1);
+    return sqlSource.slice(start, next < 0 ? sqlSource.length : next);
+  })();
+
+  it("两个抽取器确实抓到了东西", () => {
+    expect(interval).not.toBe("");
+    expect(goDurationSeconds(interval)).toBeGreaterThan(0);
+    expect(touchAlert).toContain("UPDATE alerts.alert");
+  });
+
+  it("前端说的秒数就是后端的评估周期", () => {
+    expect(ALERT_EVALUATE_INTERVAL_SECONDS).toBe(goDurationSeconds(interval));
+    expect(FIRE_COUNT_MEANING).toContain(`${goDurationSeconds(interval)} 秒`);
+  });
+
+  // 这一条是「评估 N 轮」这句文案的**依据**：TouchAlert 每命中一轮 +1。
+  // 后端哪天把 fire_count 改成真正的发生次数，这里会红，提醒把文案改回
+  // 「触发 N 次」——一句钉不住后端事实的文案，只是把一个猜测换成另一个猜测。
+  it("fire_count 确实是每评估一轮 +1，而不是别的什么口径", () => {
+    expect(touchAlert).toMatch(/fire_count\s*=\s*fire_count \+ 1/);
+    expect(FIRE_COUNT_MEANING).toContain("评估轮数，不是发生次数");
+    expect(FIRE_COUNT_HEADER).toBe("评估轮次");
+  });
+
+});
+
+// --- 界面文案的跨文件扫描：范围要发现，不要手列 ----------------------------
+
+/** 所有会渲染到界面的源码文件（发现式，不是一张名单）。
+ *
+ *  **为什么不能是名单。** 这条门禁最初写成 `suspects = [四个文件]`，于是它
+ *  真正保护的是「这四个文件里」，而不是测试名承诺的「界面上」。评审当场种了
+ *  两份副本证明这个洞：一份进 pages/OverviewPage.tsx，一份进
+ *  components/AlertNotifyDeliveries.tsx，两个都不在名单上，门禁全绿。今天四个
+ *  消费方恰好齐全，所以它「碰巧」是对的；下一个渲染这个数的组件天生豁免——
+ *  「闸的范围要发现不要手列」，一字不差的旧账。
+ *
+ *  两个包都扫：admin-web 是页面，ui-admin 是它用的那套组件，两边都会把字
+ *  渲染出去。
+ *
+ *  排除 `*.test.*`：判据反向验证必须能逐字写出那句旧话，否则门禁会把证明
+ *  自己有效的证据也判成违规。 */
+const UI_SOURCE_ROOTS = ["web/apps/admin-web/src/", "web/packages/ui-admin/src/"] as const;
+
+function uiSourceFiles(): { path: string; code: string }[] {
+  const out: { path: string; code: string }[] = [];
+  for (const root of UI_SOURCE_ROOTS) {
+    const dirUrl = new URL(root, REPO_ROOT);
+    // 一次递归列完。子目录自己也在返回值里，但目录名不以 .ts/.tsx 结尾，
+    // 下一行就把它们滤掉了。
+    for (const entry of readdirSync(dirUrl, { recursive: true })) {
+      const relative = entry.split("\\").join("/");
+      if (!/\.tsx?$/.test(relative)) continue;
+      if (relative.includes(".test.") || relative.endsWith(".d.ts")) continue;
+      const text = readFileSync(new URL(relative, dirUrl), "utf8");
+      // 注释里复述那句旧话是允许的——本片正是靠注释记录它当初为什么错。
+      // `(?<!:)`：别把 https:// 后面的半行正文当注释剥掉，那会**藏起**违规。
+      const code = text
+        .replaceAll(/\/\*[\s\S]*?\*\//g, "")
+        .replaceAll(/(?<!:)\/\/[^\n]*/g, "");
+      out.push({ path: `${root}${relative}`, code });
+    }
+  }
+  return out;
+}
+
+/** 把 `fire_count` 说成「次数 / 命中」的那几种写法。
+ *
+ *  **不依赖引号。** 旧版本只认双引号包着的 `"次数"`，于是模板串、单引号、
+ *  JSX 正文里的同一个词全部绕过——评审把 AlertsPage 那句 caption 从
+ *  `${FIRE_COUNT_HEADER}与投递结果` 改回「次数与投递结果」，全量 2170 个用例
+ *  照样全绿，而那是真的会渲染出去的表格说明。 */
+const FIRE_COUNT_MISNOMERS: readonly { readonly re: RegExp; readonly why: string }[] = [
+  {
+    // 「次数」单独成词。仓库里合法的用法一律带前缀（最大重试次数 / 登录失败
+    // 次数 / 调用次数 / 往返次数），所以「前面不是汉字」正是这句旧话的指纹。
+    re: /(?<![一-鿿])次数/,
+    why: "「次数」单独出现",
+  },
+  { re: /命中次数/, why: "「命中次数」" },
+  { re: /重复命中/, why: "「重复命中」" },
+  {
+    // 「命中 N 次」「命中 ${x} 次」。合法的「命中」都是动词（规则命中后、
+    // 缓存命中、命中演示实例），后面不会紧跟一个数。
+    re: /命中\s*[\d$]/,
+    why: "「命中 N 次」",
+  },
+];
+
+/** 把 `fire_count` 直接拼进文案的地方。
+ *
+ *  措辞门禁挡不住 `` 触发 ${alert.fire_count} 次 `` ——那句话里既没有「次数」
+ *  也没有「命中」，而它恰恰是本片修掉的那句原话。所以另立一条：这个数只许经
+ *  `describeFireCount` 一处出场，别处只能拿它排序、比较，不能拼进字里。 */
+const RAW_FIRE_COUNT_RENDER: readonly { readonly re: RegExp; readonly why: string }[] = [
+  { re: /\$\{\s*[A-Za-z_$][\w$]*(?:\.[\w$]+)*\.fire_count\s*\}/, why: "直接把 fire_count 拼进文案" },
+];
+
+/** 措辞门禁的豁免清单。**今天是空的，而且只减不增。**
+ *
+ *  下面那条断言把它逐字钉死：要往里加一条，就必须改测试、留下痕迹、说清理由。 */
+const FIRE_COUNT_WORDING_EXEMPTIONS: readonly string[] = [];
+
+/** 「直接拼 fire_count」的豁免：只有措辞的唯一来源那一处。 */
+const RAW_FIRE_COUNT_EXEMPTIONS: readonly string[] = ["web/apps/admin-web/src/api/alerts.ts"];
+
+function scanUiSources(
+  files: readonly { path: string; code: string }[],
+  patterns: readonly { readonly re: RegExp; readonly why: string }[],
+  exemptions: readonly string[] = [],
+): string[] {
+  const hits: string[] = [];
+  for (const file of files) {
+    if (exemptions.includes(file.path)) continue;
+    for (const { re, why } of patterns) {
+      // 每次新建一个带 g 的正则：共用实例会把 lastIndex 带到下一个文件，
+      // 于是「第二个文件的违规」会被静默跳过。
+      for (const m of file.code.matchAll(new RegExp(re.source, "g"))) {
+        const line = file.code.slice(0, m.index).split("\n").length;
+        hits.push(`${file.path}:${line} ${why}`);
+      }
+    }
+  }
+  return hits;
+}
+
+describe("界面上不再有把 fire_count 说成「次数 / 命中」的地方", () => {
+  const files = uiSourceFiles();
+  const paths = files.map((f) => f.path);
+
+  it("扫描范围是走出来的，不是列出来的", () => {
+    // 抽空会让下面每一条恒真——这是这类门禁最典型的假绿，先证明真的走遍了。
+    expect(files.length).toBeGreaterThanOrEqual(180);
+    // 正向锚点：五个已知消费方都在里面
+    for (const p of [
+      "web/apps/admin-web/src/api/alerts.ts",
+      "web/apps/admin-web/src/lib/workbench.ts",
+      "web/apps/admin-web/src/lib/overview.ts",
+      "web/apps/admin-web/src/pages/AlertsPage.tsx",
+      "web/apps/admin-web/src/components/PlatformAlertsPanel.tsx",
+    ]) {
+      expect(paths).toContain(p);
+    }
+    // 评审种副本的那两个文件当初都不在名单上。它们现在必须在范围里，否则
+    // 这次修的只是正则，范围那半个洞还留着。
+    expect(paths).toContain("web/apps/admin-web/src/pages/OverviewPage.tsx");
+    expect(paths).toContain("web/apps/admin-web/src/components/AlertNotifyDeliveries.tsx");
+    // 组件包也在范围里：字最终是它渲染出去的
+    expect(paths.some((p) => p.startsWith("web/packages/ui-admin/src/"))).toBe(true);
+    // 测试文件不在范围里（判据反向验证要逐字写出那句旧话）
+    expect(paths.filter((p) => p.includes(".test."))).toEqual([]);
+  });
+
+  it("剥注释真的生效：注释里复述旧话不算违规，正文里算", () => {
+    // api/alerts.ts 的注释里逐字留着「被去重合并掉的命中次数（含首次）」——
+    // 那是本片记录「它当初为什么错」的地方。少了这一条，上面那条「一条都
+    // 没有」可能只是因为剥注释顺手把正文也剥没了。
+    const raw = readFileSync(new URL("web/apps/admin-web/src/api/alerts.ts", REPO_ROOT), "utf8");
+    expect(raw).toContain("命中次数");
+    expect(files.find((f) => f.path === "web/apps/admin-web/src/api/alerts.ts")?.code).not.toContain(
+      "命中次数",
+    );
+  });
+
+  it("扫出来一条都没有", () => {
+    expect(scanUiSources(files, FIRE_COUNT_MISNOMERS, FIRE_COUNT_WORDING_EXEMPTIONS)).toEqual([]);
+  });
+
+  it("fire_count 只经 describeFireCount 一处出场，别处不拼进文案", () => {
+    expect(scanUiSources(files, RAW_FIRE_COUNT_RENDER, RAW_FIRE_COUNT_EXEMPTIONS)).toEqual([]);
+  });
+
+  it("豁免清单只减不增，而且每一条今天都还需要", () => {
+    // 三条规矩缺一不可：清单逐字钉死（要加就得改这条断言），里面的路径今天
+    // 还在，**并且**去掉豁免后它真的仍会被扫出来。第三条最容易漏——一条已经
+    // 补齐的豁免留在清单里，就是一个永远不会红的洞。
+    // 第三条红了，通常说明那一处已经不再需要豁免：把清单里那一行删掉即可，
+    // 那正是这张清单唯一允许的方向。
+    expect(FIRE_COUNT_WORDING_EXEMPTIONS).toEqual([]);
+    expect(RAW_FIRE_COUNT_EXEMPTIONS).toEqual(["web/apps/admin-web/src/api/alerts.ts"]);
+    for (const exempt of RAW_FIRE_COUNT_EXEMPTIONS) {
+      expect(paths).toContain(exempt);
+      const file = files.find((f) => f.path === exempt);
+      expect(scanUiSources(file ? [file] : [], RAW_FIRE_COUNT_RENDER)).not.toEqual([]);
+    }
+  });
+
+  describe("判据反向验证：把旧话种回去，门禁必须红", () => {
+    // 合成文件走同一条流水线（同本文件既有的合成 Go 源码那一节）。路径都
+    // **不在**豁免清单上，其中前两个正是评审当初种副本的那两个文件。
+    const planted: readonly { readonly path: string; readonly code: string }[] = [
+      {
+        path: "web/apps/admin-web/src/pages/OverviewPage.tsx",
+        code: '<FormField label="次数" note="命中 3 次" />',
+      },
+      {
+        path: "web/apps/admin-web/src/components/AlertNotifyDeliveries.tsx",
+        code: '<li>{"次数"}：含首次及被去重合并的重复命中。</li>',
+      },
+      {
+        path: "web/apps/admin-web/src/pages/AlertsPage.tsx",
+        code: "caption={`告警列表：严重度、状态、首次与最近发现、次数与投递结果`}",
+      },
+      {
+        path: "web/apps/admin-web/src/components/PlatformAlertsPanel.tsx",
+        code: "caption={`${label} 告警：持续时长、次数及投递结果`}",
+      },
+      {
+        path: "web/packages/ui-admin/src/AlertCountBadge.tsx",
+        code: "<span title='含首次及被去重合并的重复命中'>{n}</span>",
+      },
+    ];
+    for (const file of planted) {
+      it(`${file.path} 里的副本会被扫出来`, () => {
+        expect(
+          scanUiSources([file], FIRE_COUNT_MISNOMERS, FIRE_COUNT_WORDING_EXEMPTIONS),
+        ).not.toEqual([]);
+      });
+    }
+
+    it("合法用法不会被误判——否则下一个人会把这条门禁调松", () => {
+      // 这一条与上面成对：只有「该红的红、不该红的不红」两半都在，门禁才
+      // 既有牙齿又留得住。四条都是仓库里今天真实存在的句子。
+      const legit = [
+        {
+          path: "web/apps/admin-web/src/pages/JobsPage.tsx",
+          code: 'note="已达最大重试次数并放弃，需要人工检查"',
+        },
+        {
+          path: "web/apps/admin-web/src/components/RequestsPanel.tsx",
+          code: 'headerTitle: "输入 Token / 输出 Token；缓存命中作为次级证据"',
+        },
+        {
+          path: "web/apps/admin-web/src/lib/alerts.ts",
+          code: 'hint: "此刻正在压着告警：命中的规则不会投递"',
+        },
+        {
+          path: "web/apps/admin-web/src/components/SMSQuotaPanel.tsx",
+          code: 'hint="按号数算，不是调用次数。0 = 一次都不许。"',
+        },
+      ];
+      expect(scanUiSources(legit, FIRE_COUNT_MISNOMERS)).toEqual([]);
+    });
+
+    it("把 fire_count 直接拼进文案会被扫出来", () => {
+      // 本片修掉的那句原话。措辞门禁挡不住它——它既没有「次数」也没有「命中」。
+      const revert = {
+        path: "web/apps/admin-web/src/lib/workbench.ts",
+        code: "due: `触发 ${alert.fire_count} 次`,",
+      };
+      expect(scanUiSources([revert], RAW_FIRE_COUNT_RENDER, RAW_FIRE_COUNT_EXEMPTIONS)).not.toEqual(
+        [],
+      );
+    });
+
+    it("拿它排序、比较不算「拼进文案」", () => {
+      const legit = [
+        {
+          path: "web/apps/admin-web/src/pages/AlertsPage.tsx",
+          code: "value: (alert) => alert.fire_count,",
+        },
+        {
+          path: "web/apps/admin-web/src/lib/overview.ts",
+          code: "detail: `${a.fire_count > 1 ? extra : ''}`,",
+        },
+      ];
+      expect(scanUiSources(legit, RAW_FIRE_COUNT_RENDER)).toEqual([]);
+    });
+  });
+});
+
 // --- 枚举清点：后端一共有多少个枚举，我盖到了几个 --------------------------
 
 /** 后端全部字符串枚举的清点。
@@ -677,7 +1178,7 @@ const ENUM_INVENTORY: Readonly<
   "sms.NumberState": { status: "labelled-elsewhere", note: "号码状态，SMSPanel 有映射与「未知状态」兜底" },
   "sms.OperationState": { status: "labelled-elsewhere", note: "接码操作状态，SMSPanel" },
   "sms.Capability": { status: "labelled-elsewhere", note: "上游能力位，SMSPanel" },
-  "ops.State": { status: "labelled-elsewhere", note: "数据新鲜度五档，ui-admin/freshness.ts 的 describeFreshness" },
+  "ops.State": { status: "reconciled", note: "数据新鲜度五档，前端四份副本都有差集断言：中文在 ui-admin/freshness.ts 的 describeFreshness，取最差的顺序在 lib/workbench.ts 的 FRESHNESS_PRIORITY，另有两份手写 TS 联合类型（api/ops.ts 的 OpsFreshnessState、ui-admin/freshness.ts 的 FreshnessState）用 tsUnionValues 抽出来对账" },
   "server.AssetStatus": { status: "labelled-elsewhere", note: "服务器资产状态，ServerAssetsPanel 的 ASSET_STATUS_OPTIONS" },
   "server.BillingCycle": { status: "labelled-elsewhere", note: "计费周期，lib/serverRegistryForm.ts" },
   "server.CertSource": { status: "labelled-elsewhere", note: "证书来源，ServerDomainsPanel" },

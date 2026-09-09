@@ -133,11 +133,28 @@ describe("需要处理的事", () => {
     expect(items[0]!.title).toBe("渠道令牌已失效");
   });
 
-  it("命中多次时把次数带出来——一次和一百次要采取的行动不一样", () => {
+  // 本片订正：fire_count 是每 60 秒重评一轮、条件仍成立就 +1 的**轮数**
+  // （TouchAlert 的 `fire_count = fire_count + 1` + DefaultAlertEvaluateInterval），
+  // 不是命中次数。这一栏原来说「命中 37 次」，是同一句错话的第五份副本。
+  it("持续多轮时把轮数带出来——响了一轮和响了三十七轮要采取的行动不一样", () => {
     const items = toWorkItems([alert({ fire_count: 37 })], "sub2api", platformOfMetricKey);
-    expect(items[0]!.detail).toContain("命中 37 次");
+    expect(items[0]!.detail).toContain("评估 37 轮");
     const once = toWorkItems([alert({ fire_count: 1 })], "sub2api", platformOfMetricKey);
-    expect(once[0]!.detail).not.toContain("命中");
+    expect(once[0]!.detail).not.toContain("评估");
+    // 旧措辞不能残留：同一个数在三个页面上有三种叫法，人会以为看的是三个量
+    expect(items[0]!.detail).not.toContain("命中");
+  });
+
+  // XM-WORKBENCH-TRUTH 评审回合三：只响了一轮时不说「评估 1 轮」是对的，但那个
+  // 守卫以前把 trigger_count 也一起吞了——「触发 5 次」与「评估 1 轮」是两个事实。
+  it("trigger_count 在场时哪怕只评估了一轮也要带出来，不被轮数守卫吞掉", () => {
+    const withTriggers = { ...alert({ fire_count: 1 }), trigger_count: 5 } as AlertItem;
+    const [item] = toWorkItems([withTriggers], "sub2api", platformOfMetricKey);
+    expect(item!.detail).toContain("触发 5 次");
+    expect(item!.detail).toContain("评估 1 轮");
+    // 对照：字段显式为 null 时仍走「只响一轮不啰嗦」那一支
+    const nulled = { ...alert({ fire_count: 1 }), trigger_count: null } as AlertItem;
+    expect(toWorkItems([nulled], "sub2api", platformOfMetricKey)[0]!.detail).not.toContain("评估");
   });
 });
 

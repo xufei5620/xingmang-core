@@ -37,11 +37,103 @@ export interface AlertItem {
   /** null 表示还没人确认 / 还没解决——不要用零值时间冒充（规格 §9.1 同一条纪律）。 */
   acknowledged_at: string | null;
   resolved_at: string | null;
-  /** 被去重合并掉的命中次数（含首次），最小为 1。 */
+  /** **评估轮数，不是发生次数。**
+   *
+   *  告警引擎每 `ALERT_EVALUATE_INTERVAL_SECONDS` 秒把所有规则重跑一轮
+   *  （internal/platform/jobs/alert_evaluate.go 的
+   *  `DefaultAlertEvaluateInterval = 60 * time.Second`），条件仍然成立就把这
+   *  条已有告警的计数 +1（db/queries/alerts.sql 的 TouchAlert：
+   *  `fire_count = fire_count + 1`）。所以它数的是「这个条件连续成立了多少
+   *  轮」，与上游到底出了几次事没有关系。
+   *
+   *  这条注释以前写着「被去重合并掉的命中次数（含首次）」——那是后端一句
+   *  同样误导的注释（internal/platform/alerts/alert.go）的副本，界面上三处
+   *  「触发 N 次 / 命中 N 次」全从它长出来。2026-09-08 生产上那条 669 正好
+   *  等于 668 分钟 + 1，一分不差。措辞统一由 `FIRE_COUNT_MEANING` 一份说。 */
   fire_count: number;
+  /** 真正的触发次数（XM-OPS-TRUTH 计划新增，**今天还不存在**）。
+   *
+   *  字段不在时一律只显示评估轮数，**不要 `?? 0`**：0 会被读成「一次都没
+   *  触发」，而事实是「我们不知道」。判据统一走 `describeFireCount`。 */
+  trigger_count?: number | null;
+  /** 第一次打开这条告警的时刻（XM-OPS-TRUTH 计划新增，**今天还不存在**）。
+   *
+   *  `opened_at` 不是它：告警恢复后再次触发走的是 InsertAlert 新开一行
+   *  （db/queries/alerts.sql 的 InsertAlert / GetLatestResolvedAlertByDedupKey），
+   *  `opened_at` 每次都归零，于是抖动型告警的「已持续」系统性偏小。 */
+  first_opened_at?: string | null;
   notify_status: AlertNotifyStatus;
   notify_error: string;
   notified_at: string | null;
+}
+
+/** 告警评估周期（秒）。与后端 `jobs.DefaultAlertEvaluateInterval` 同一个数，
+ *  由 labels.reconcile 的「评估轮次」一组从 Go 源码抽出来逐值对账——后端改了
+ *  周期而这里没跟，那一组会红。 */
+export const ALERT_EVALUATE_INTERVAL_SECONDS = 60;
+
+/** 表格里那一列的表头。**一份，两张表共用**（告警中心、平台告警面板）。 */
+export const FIRE_COUNT_HEADER = "评估轮次";
+
+/** `fire_count` 到底是什么。**一份，四处共用**（工作台待办、告警中心的列与
+ *  表格说明、平台告警面板的列与表格说明）。
+ *
+ *  这句话曾有四份措辞不同的副本（「被去重合并掉的命中次数（含首次）」「含首次
+ *  及被去重合并的重复命中」「命中 N 次」「触发 N 次」），于是同一个数在三个
+ *  页面上有三种叫法，人会以为看的是三个不同的量。 */
+export const FIRE_COUNT_MEANING =
+  `告警每 ${ALERT_EVALUATE_INTERVAL_SECONDS} 秒重新评估一轮，条件仍然成立就加 1——` +
+  "这是评估轮数，不是发生次数。";
+
+/** 「已持续」为什么可能偏小。`first_opened_at` 缺席时挂在待办行上说明白。 */
+export const ALERT_AGE_RESET_HINT =
+  "「已持续」从这条告警最近一次打开算起：恢复后重新触发会新开一条，计时归零，" +
+  "所以反复抖动的告警显示的时长比实际短。";
+
+/** 计数该怎么念。
+ *
+ *  **两个数是不同的事实，不是替换关系**：`trigger_count` 到位后仍要显示评估
+ *  轮数，否则「它已经这样多久了」这个信息就没了。字段缺席（含显式 null）时
+ *  只说评估轮数——不编一个 0 冒充「没触发过」。
+ *
+ *  - `rounds` / `triggers` / `combined` 是整句，给没有表头的位置（工作台待办的
+ *    右列、平台概览的副行）；
+ *  - `figure` 只有数字，给**有表头的数字列**：表头已经写着「评估轮次」、列是
+ *    右对齐 tabular-nums，格子里再写一遍「评估 N 轮」既重复又对不齐。
+ *    `trigger_count` 在场时写成「M / N」（触发 / 评估），整句退到悬停里。
+ *
+ *  这个数**只在这一处**拼进字符串（labels.reconcile 有「取值」扫描盯着）：别处
+ *  要显示它，就从这里多取一个字段，不要再开第二个出场点。 */
+export function describeFireCount(
+  alert: Pick<AlertItem, "fire_count" | "trigger_count">,
+): { rounds: string; triggers: string | null; combined: string; figure: string } {
+  const rounds = `评估 ${alert.fire_count} 轮`;
+  const count = alert.trigger_count;
+  if (count === undefined || count === null) {
+    return { rounds, triggers: null, combined: rounds, figure: `${alert.fire_count}` };
+  }
+  const triggers = `触发 ${count} 次`;
+  return {
+    rounds,
+    triggers,
+    combined: `${triggers} · ${rounds}`,
+    figure: `${count} / ${alert.fire_count}`,
+  };
+}
+
+/** 这条告警「已持续」该从哪个时刻算，以及要不要附一句说明。
+ *
+ *  `first_opened_at` 在就用它（那才是真正的首次打开）；不在就退回 `opened_at`
+ *  并挂 `ALERT_AGE_RESET_HINT`——把一个系统性偏小的数字不加说明地摆出来，
+ *  与摆一个错数字没有区别。 */
+export function alertAgeAnchor(
+  alert: Pick<AlertItem, "opened_at" | "first_opened_at">,
+): { since: string; hint: string | null } {
+  const first = alert.first_opened_at;
+  if (first === undefined || first === null || first === "") {
+    return { since: alert.opened_at, hint: ALERT_AGE_RESET_HINT };
+  }
+  return { since: first, hint: null };
 }
 
 interface ListResponse<T> {
