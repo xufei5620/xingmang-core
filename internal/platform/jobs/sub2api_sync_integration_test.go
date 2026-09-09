@@ -77,11 +77,17 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	client, err := NewClient(pool, Config{
 		Environment: environment,
 		// 心跳在本用例里只是噪音：不 RunOnStart、周期远大于用例时长。
-		HeartbeatInterval:     time.Minute,
-		HeartbeatRunOnStart:   false,
-		MaxWorkers:            1,
-		Sub2APISyncEnabled:    true,
-		Sub2APISyncInterval:   time.Second,
+		HeartbeatInterval:   time.Minute,
+		HeartbeatRunOnStart: false,
+		MaxWorkers:          1,
+		Sub2APISyncEnabled:  true,
+		// 周期必须严格大于本任务的作业期限（sub2apiSyncJobTimeout = 100s，
+		// 见 validateJobCadence），否则 NewClient 拒绝启动——这个用例原先配的
+		// 1 秒正是那条不变量禁止的形状：期限 100s 的任务每秒被排一次，
+		// River 的周期唯一性按周期分桶，拦不住它与自己重叠。
+		// 本用例要的只是 RunOnStart 触发的那**一次**执行，周期只需大到
+		// 用例结束前不会再来第二次。
+		Sub2APISyncInterval:   10 * time.Minute,
 		Sub2APISyncRunOnStart: true,
 		Sub2APISyncRunID:      source,
 		Sub2APIMode:           Sub2APIModeFake,
@@ -150,7 +156,6 @@ func TestSub2APISyncPostgresIntegration(t *testing.T) {
 	failing := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Environment: environment,
 		InstanceID:  source,
-		Mode:        Sub2APIModeReal,
 		Store:       store,
 		NewClient:   NewSub2APIClientFactory(Sub2APIModeReal, Sub2APIRealConfig{}),
 	})

@@ -535,3 +535,175 @@ func TestQueryStoreListRunsEnvironmentSoftFilterPostgresIntegration(t *testing.T
 		t.Fatal("a row with no environment field must show up regardless of caller environment")
 	}
 }
+
+// TestFailedRunSummaryGroupsByKind 是「我的待处理」那一格的取数。
+//
+// 2026-09-08 的现场：card_sync 在 24 小时里产生 288 条 discarded，而管理端
+// 只取最新 20 条失败作业、不分类型也不合并同类——于是这 288 条把那一格全
+// 占满，真正需要人处理的东西被挤出首屏。按 kind 合并之后，那 288 条是一行。
+//
+// 与本文件既有纪律一致：用本次运行唯一的假 kind，只对自己插入的行下结论，
+// 不 TRUNCATE（同一个 scratch 库上还有别的集成测试在跑）。
+func TestFailedRunSummaryGroupsByKind(t *testing.T) {
+	pool, closePool := mustQueryStorePool(t)
+	defer closePool()
+	ctx := context.Background()
+	store := NewQueryStore(pool)
+
+	stamp := time.Now().UnixNano()
+	kindA := fmt.Sprintf("card_sync_%d", stamp)
+	kindB := fmt.Sprintf("cost_sync_%d", stamp)
+	const env = "production"
+	now := time.Now().UTC().Truncate(time.Second)
+	since := now.Add(-FailedRunSummaryWindow)
+
+	attempt := func(at time.Time, msg string) rivertype.AttemptError {
+		return rivertype.AttemptError{At: at, Attempt: 1, Error: msg}
+	}
+
+	// kind A：五条 discarded，最后一条的文案与前四条不同，用来分辨首末。
+	var lastAID int64
+	for i := 0; i < 5; i++ {
+		at := now.Add(-time.Duration(50-10*i) * time.Minute)
+		msg := "rejected: infini POST /v2/cards/status/batch"
+		if i == 4 {
+			msg = "rejected: infini POST /v2/cards/status/batch（最后一次）"
+		}
+		lastAID = insertTestRunRow(t, ctx, pool, testRunRow{
+			Kind: kindA, State: RunStateDiscarded, Attempt: 3, CreatedAt: at,
+			Args:   map[string]any{"environment": env},
+			Errors: []rivertype.AttemptError{attempt(at, msg)},
+		})
+	}
+	firstA := now.Add(-50 * time.Minute)
+	lastA := now.Add(-10 * time.Minute)
+
+	// kind B：两条 discarded + 一条 completed（后者不该被算进失败摘要）。
+	for i := 0; i < 2; i++ {
+		at := now.Add(-time.Duration(30-5*i) * time.Minute)
+		insertTestRunRow(t, ctx, pool, testRunRow{
+			Kind: kindB, State: RunStateDiscarded, CreatedAt: at,
+			Args:   map[string]any{"environment": env},
+			Errors: []rivertype.AttemptError{attempt(at, "unavailable: GET /v2/cards/transactions")},
+		})
+	}
+	insertTestRunRow(t, ctx, pool, testRunRow{
+		Kind: kindB, State: RunStateCompleted, CreatedAt: now.Add(-time.Minute),
+		Args: map[string]any{"environment": env},
+	})
+
+	// 别的环境的一条 A：不该混进来。
+	insertTestRunRow(t, ctx, pool, testRunRow{
+		Kind: kindA, State: RunStateDiscarded, CreatedAt: now.Add(-time.Minute),
+		Args:   map[string]any{"environment": "staging"},
+		Errors: []rivertype.AttemptError{attempt(now, "staging noise")},
+	})
+	// 窗口之外的一条 A：同样不该混进来。
+	outside := now.Add(-FailedRunSummaryWindow - time.Hour)
+	insertTestRunRow(t, ctx, pool, testRunRow{
+		Kind: kindA, State: RunStateDiscarded, CreatedAt: outside,
+		Args:   map[string]any{"environment": env},
+		Errors: []rivertype.AttemptError{attempt(outside, "太老了")},
+	})
+
+	summaries, err := store.FailedRunSummaryByKind(ctx, env, since)
+	if err != nil {
+		t.Fatalf("FailedRunSummaryByKind: %v", err)
+	}
+	byKind := map[string]FailedRunSummary{}
+	order := map[string]int{}
+	for i, s := range summaries {
+		if _, dup := byKind[s.Kind]; dup {
+			t.Fatalf("kind %q 出现了不止一行——没有按 kind 合并", s.Kind)
+		}
+		byKind[s.Kind] = s
+		order[s.Kind] = i
+	}
+
+	a, ok := byKind[kindA]
+	if !ok {
+		t.Fatalf("结果里没有 %s: %+v", kindA, summaries)
+	}
+	if a.Count != 5 {
+		t.Fatalf("%s 失败次数 = %d, want 5（跨环境与窗口外的那两条不该算）", kindA, a.Count)
+	}
+	if !a.FirstAt.Equal(firstA) {
+		t.Fatalf("first_at = %s, want %s", a.FirstAt, firstA)
+	}
+	if !a.LastAt.Equal(lastA) {
+		t.Fatalf("last_at = %s, want %s", a.LastAt, lastA)
+	}
+	if a.FirstAt.Equal(a.LastAt) {
+		t.Fatal("first_at 与 last_at 相等说明取的是同一个聚合，答不出「坏了多久」")
+	}
+	if a.LastRunID != lastAID {
+		t.Fatalf("last_run_id = %d, want %d（最近那一条）", a.LastRunID, lastAID)
+	}
+	if a.LastError == nil {
+		t.Fatal("失败摘要必须带上游说了什么——三天查不出根因就是因为这句话被吞了")
+	}
+	// 取最近那条而不是最早那条：取错方向时人看到的是三天前那句话。
+	if !strings.Contains(a.LastError.Message, "最后一次") {
+		t.Fatalf("last_error 应取最近一次尝试的文案，实际 %q", a.LastError.Message)
+	}
+
+	b, ok := byKind[kindB]
+	if !ok {
+		t.Fatalf("结果里没有 %s: %+v", kindB, summaries)
+	}
+	if b.Count != 2 {
+		t.Fatalf("%s 失败次数 = %d, want 2（completed 不算失败）", kindB, b.Count)
+	}
+
+	// 失败最多的排在前面：待处理清单的首屏要先看到最多的那一类。
+	if order[kindA] > order[kindB] {
+		t.Fatalf("应按失败次数降序，%s(%d) 却排在 %s(%d) 后面",
+			kindA, a.Count, kindB, b.Count)
+	}
+}
+
+// TestFailedRunSummaryTruncatesLongErrorsWithoutCuttingRunes：错误文案走既有的
+// 截断路径，且绝不切碎一个多字节字符（本仓不少错误文案是中文）。
+func TestFailedRunSummaryTruncatesLongErrorsWithoutCuttingRunes(t *testing.T) {
+	pool, closePool := mustQueryStorePool(t)
+	defer closePool()
+	ctx := context.Background()
+	store := NewQueryStore(pool)
+
+	kind := fmt.Sprintf("long_error_%d", time.Now().UnixNano())
+	const env = "production"
+	now := time.Now().UTC().Truncate(time.Second)
+	long := strings.Repeat("上游拒绝了这个批次", 200)
+
+	insertTestRunRow(t, ctx, pool, testRunRow{
+		Kind: kind, State: RunStateDiscarded, CreatedAt: now.Add(-time.Minute),
+		Args:   map[string]any{"environment": env},
+		Errors: []rivertype.AttemptError{{At: now, Attempt: 1, Error: long}},
+	})
+
+	summaries, err := store.FailedRunSummaryByKind(ctx, env, now.Add(-FailedRunSummaryWindow))
+	if err != nil {
+		t.Fatalf("FailedRunSummaryByKind: %v", err)
+	}
+	var got *FailedRunSummary
+	for i := range summaries {
+		if summaries[i].Kind == kind {
+			got = &summaries[i]
+		}
+	}
+	if got == nil || got.LastError == nil {
+		t.Fatalf("没找到 %s 的摘要: %+v", kind, summaries)
+	}
+	if !got.LastError.Truncated {
+		t.Fatal("超长文案必须被标成已截断——否则读的人以为上游就说了这么多")
+	}
+	if len(got.LastError.Message) > maxRunErrorMessageBytes {
+		t.Fatalf("截断后仍有 %d 字节", len(got.LastError.Message))
+	}
+	if !utf8.ValidString(got.LastError.Message) {
+		t.Fatal("截断把一个多字节字符切碎了")
+	}
+	if got.LastError.OriginalLength != len(long) {
+		t.Fatalf("original_length = %d, want %d", got.LastError.OriginalLength, len(long))
+	}
+}

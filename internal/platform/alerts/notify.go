@@ -70,9 +70,10 @@ func FormatMessage(a Alert) string {
 	fmt.Fprintf(&b, "环境: %s\n", a.Environment)
 	fmt.Fprintf(&b, "规则: %s\n", a.RuleKey)
 	fmt.Fprintf(&b, "状态: %s\n", a.Status)
-	fmt.Fprintf(&b, "首次发现: %s\n", a.OpenedAt.UTC().Format(time.RFC3339))
-	fmt.Fprintf(&b, "最近发现: %s（累计 %d 次）\n",
+	fmt.Fprintf(&b, "首次发现: %s\n", describeFirstOpened(a))
+	fmt.Fprintf(&b, "最近发现: %s（已评估 %d 轮）\n",
 		a.LastSeenAt.UTC().Format(time.RFC3339), a.FireCount)
+	fmt.Fprintf(&b, "触发次数: %s\n", describeTriggerCount(a))
 	if a.SourceMetricKey != "" {
 		fmt.Fprintf(&b, "指标: %s\n", a.SourceMetricKey)
 	}
@@ -104,14 +105,51 @@ func FormatWeComMarkdown(a Alert) string {
 		Lines: []notify.Line{
 			{Label: "规则", Value: a.RuleKey},
 			{Label: "状态", Value: string(a.Status)},
-			{Label: "首次发现", Value: a.OpenedAt.UTC().Format(time.RFC3339)},
-			{Label: "最近发现", Value: fmt.Sprintf("%s（累计 %d 次）",
+			{Label: "首次发现", Value: describeFirstOpened(a)},
+			{Label: "最近发现", Value: fmt.Sprintf("%s（已评估 %d 轮）",
 				a.LastSeenAt.UTC().Format(time.RFC3339), a.FireCount)},
+			{Label: "触发次数", Value: describeTriggerCount(a)},
 			{Label: "指标", Value: a.SourceMetricKey},
 			{Label: "详情", Value: a.Detail},
 		},
 		Action: "管理后台 → 告警与故障",
 	})
+}
+
+// describeFirstOpened 渲染「这个问题从什么时候开始的，到现在多久了」。
+//
+// 2026-09-08 的教训在这里同样适用，而且更要紧：管理端那一路已经把
+// fire_count（评估轮数）与 trigger_count（触发次数）分开了，但半夜真正被人
+// 读到的是这条推送。它此前写的是「最近发现: …（累计 669 次）」——用的就是
+// FireCount，也就是把「持续了 668 分钟」念成「触发了 669 次」。
+//
+// 时刻取 EffectiveFirstOpenedAt 而不是 OpenedAt：复发链上 OpenedAt 只是
+// 「这一行」什么时候开的，而人想知道的是这件事什么时候开始的。兜底规则只写在
+// alerts.Alert 那一处，这里不复刻。
+func describeFirstOpened(a Alert) string {
+	first, estimated := a.EffectiveFirstOpenedAt()
+	line := first.Format(time.RFC3339)
+	if lasted := a.LastSeenAt.UTC().Sub(first); lasted > 0 {
+		line += fmt.Sprintf("（已持续 %s）", lasted.Round(time.Minute))
+	}
+	if estimated {
+		// 短一句，但不能没有：这条告警早于 first_opened_at 上线，上面那个
+		// 时刻是按本行的 opened_at 兜的底。完整口径在 API 的
+		// first_opened_at_estimated 字段与 docs/modules/alerts/README.md。
+		line += "（首开时刻为估计值）"
+	}
+	return line
+}
+
+// describeTriggerCount 渲染「真正触发过几次」。
+//
+// nil 写「—」而不是 0：一条正在响的告警触发过 0 次是不可能的，那是个看起来
+// 像真答案的假答案（宪法 12 条）。它与 API 的 trigger_count 空值口径一致。
+func describeTriggerCount(a Alert) string {
+	if a.TriggerCount == nil {
+		return "—（未记录）"
+	}
+	return fmt.Sprintf("%d 次", *a.TriggerCount)
 }
 
 // redact 把给定的敏感串从文本里抹掉。
@@ -451,7 +489,19 @@ type webhookPayload struct {
 	SourceMetricKey string `json:"source_metric_key"`
 	OpenedAt        string `json:"opened_at"`
 	LastSeenAt      string `json:"last_seen_at"`
-	FireCount       int32  `json:"fire_count"`
+	// FireCount 是**评估轮数**，不是发生次数。名字与语义都不改——接收端
+	// 已经在消费它，改名会让它当场炸。要「触发几次」用下一个字段。
+	FireCount int32 `json:"fire_count"`
+	// TriggerCount / FirstOpenedAt / FirstOpenedAtEstimated 与
+	// GET /api/v1/alerts 的同名字段**逐字同义**（含空值口径：trigger_count
+	// 可为 null，first_opened_at 恒非空）。
+	//
+	// 补上它们是因为上面那句「字段与 API 响应对齐」在子片 B 加完三个字段
+	// 之后就不成立了——一条说自己与别处对齐的注释，在别处变了之后不会报错，
+	// 只会安静地给接收端一个旧形状。
+	TriggerCount           *int32 `json:"trigger_count"`
+	FirstOpenedAt          string `json:"first_opened_at"`
+	FirstOpenedAtEstimated bool   `json:"first_opened_at_estimated"`
 }
 
 // Notify 投递一条告警。
@@ -461,19 +511,23 @@ type webhookPayload struct {
 // 因此这里连脱敏都不做——直接不把 net/http 的原始错误往外冒，
 // 只报分类与状态码。运维要查具体地址去看配置，不该从告警列表里读到它。
 func (w *WebhookNotifier) Notify(ctx context.Context, a Alert) error {
+	firstOpenedAt, firstOpenedEstimated := a.EffectiveFirstOpenedAt()
 	payload, err := json.Marshal(webhookPayload{
-		AlertID:         a.ID.String(),
-		RuleKey:         a.RuleKey,
-		DedupKey:        a.DedupKey,
-		Severity:        string(a.Severity),
-		Status:          string(a.Status),
-		Title:           a.Title,
-		Detail:          a.Detail,
-		Environment:     a.Environment,
-		SourceMetricKey: a.SourceMetricKey,
-		OpenedAt:        a.OpenedAt.UTC().Format(time.RFC3339),
-		LastSeenAt:      a.LastSeenAt.UTC().Format(time.RFC3339),
-		FireCount:       a.FireCount,
+		AlertID:                a.ID.String(),
+		RuleKey:                a.RuleKey,
+		DedupKey:               a.DedupKey,
+		Severity:               string(a.Severity),
+		Status:                 string(a.Status),
+		Title:                  a.Title,
+		Detail:                 a.Detail,
+		Environment:            a.Environment,
+		SourceMetricKey:        a.SourceMetricKey,
+		OpenedAt:               a.OpenedAt.UTC().Format(time.RFC3339),
+		LastSeenAt:             a.LastSeenAt.UTC().Format(time.RFC3339),
+		FireCount:              a.FireCount,
+		TriggerCount:           a.TriggerCount,
+		FirstOpenedAt:          firstOpenedAt.Format(time.RFC3339),
+		FirstOpenedAtEstimated: firstOpenedEstimated,
 	})
 	if err != nil {
 		return fmt.Errorf("webhook: 编码请求体失败: %w", err)

@@ -154,7 +154,8 @@ func TestApprovalPendingSkipsFailedObservation(t *testing.T) {
 	o := approvalObservation(now, 5, int64(DefaultApprovalPendingThreshold.Seconds())+3600)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "approval_queue_stats_failed"
-	src := &fakeMetricSource{observations: []ops.Observation{o}}
+	src := failedEnough(&fakeMetricSource{observations: []ops.Observation{o}},
+		DefaultApprovalQueueMetricKey, now)
 	findings := evaluate(t, src, now)
 
 	if _, ok := findingFor(findings, RuleApprovalPendingTooLong); ok {

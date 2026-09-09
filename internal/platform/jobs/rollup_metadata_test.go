@@ -49,7 +49,7 @@ func TestSub2APIWriterPersistsEffectiveCadence(t *testing.T) {
 	store := newMemoryStore()
 	worker := NewSub2APISyncWorker(Sub2APISyncOptions{
 		Logger: structuredDefaultLogger(), Environment: "staging", InstanceID: "sub2api-test",
-		Mode: Sub2APIModeFake, Store: store,
+		Store:     store,
 		NewClient: fakeFactory(sub2api.FakeOptions{Now: func() time.Time { return fixedNow }}),
 		Now:       func() time.Time { return fixedNow }, ExpectedInterval: 7 * time.Minute,
 	})
@@ -70,7 +70,7 @@ func TestNewAPIWriterPersistsEffectiveCadence(t *testing.T) {
 	store := newMemoryStore()
 	worker := NewNewAPISyncWorker(NewAPISyncOptions{
 		Logger: structuredDefaultLogger(), Environment: "staging", InstanceID: "newapi-test",
-		Mode: NewAPIModeFake, Store: store,
+		Store:     store,
 		NewClient: newapiFakeFactory(newapi.FakeOptions{Now: func() time.Time { return fixedNow }}),
 		Now:       func() time.Time { return fixedNow }, ExpectedInterval: 11 * time.Minute,
 	})

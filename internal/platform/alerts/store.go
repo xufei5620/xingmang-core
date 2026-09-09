@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,6 +77,8 @@ func alertFromRow(r gen.AlertsAlert) Alert {
 		ResolvedAt:      fromTSPtr(r.ResolvedAt),
 		LastSeenAt:      fromTS(r.LastSeenAt),
 		FireCount:       r.FireCount,
+		TriggerCount:    r.TriggerCount,
+		FirstOpenedAt:   fromTSPtr(r.FirstOpenedAt),
 		SourceMetricKey: r.SourceMetricKey,
 		NotifyStatus:    NotifyStatus(r.NotifyStatus),
 		NotifyError:     r.NotifyError,
@@ -245,17 +248,74 @@ func (s *Store) touch(ctx context.Context, existing Alert, in UpsertInput, now t
 }
 
 // insert 新开一条告警，并判定它该是 OPEN、REOPENED 还是 SILENCED。
+//
+// first_opened_at 与 trigger_count 在复发路径上**一起继承**上一次那条：
+// 前者取它的有效首开时刻（「已持续从首次开算，不因抖动归零」，子片 B 任务书
+// 第 1 条），后者取它的值 +1。继承范围天然就是 reopenLookback（24 小时）——
+// 超过那个窗口本来就不算同一件事，不必再发明第二个「多久算同一件事」的常量。
+//
+// 两个字段各有一条**同形状的例外**：上一条自己是 000054 之前的旧行时，
+// 它那一列本来就是 NULL（「不知道」），这一行也留 NULL，不把「不知道」
+// 换算成一个确定的数或时刻。两条例外的理由逐字相同，见下面各自的注释。
+//
+// **两个字段必须同进同退。** 只继承 first_opened_at 的话，一条开→关→开
+// 四轮的告警在界面上会是「已持续 4 小时，触发 1 次」——两个数各自都对，
+// 并排放在一行上给出的合成答案却是假的，而合成正是前端被告知要做的事
+// （见 docs/handoffs/slices/XM-OPS-TRUTH-B.md 的字段表）。它与本片要治的
+// 「触发 669 次」是同一类误读，只是方向相反：那个多报，这个少报。
 func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Alert, error) {
 	status := StatusOpen
+	// firstOpenedAtArg 与 triggerCountArg 同一条口径：**NULL 表示不知道**。
+	// 非复发路径下「第一次开」就是此刻，是一个确定的事实。
+	firstOpenedAtArg := ts(now)
+	// 新开一条告警**就是**一次真正的触发，所以非复发路径恒为 1。
+	triggerCount := int32(1)
+	triggerCountArg := &triggerCount
 	if in.Silenced {
 		status = StatusSilenced
 	} else {
-		reopened, err := s.recentlyResolved(ctx, in.DedupKey, now)
+		previous, reopened, err := s.recentlyResolved(ctx, in.DedupKey, now)
 		if err != nil {
 			return Alert{}, err
 		}
 		if reopened {
 			status = StatusReopened
+			// 上一条自己也可能是复发链上的一环，所以取它的**有效**首开时刻
+			// 而不是它的 opened_at：三次复发之后，「已持续」仍然从第一次算起。
+			//
+			// 第二个返回值必须接住。EffectiveFirstOpenedAt 为 true 时返回的是
+			// 用 opened_at **兜出来的估计值**（上一条是 000054 之前的旧行，
+			// 真实首开时刻没有人记下来过）。把估计值原样写进新行的
+			// first_opened_at，就等于把它洗成了一个确定值：库里再也分不出
+			// 「记下来过」与「兜的底」，读取侧的 estimated 从此恒为 false，
+			// 界面上那个「（估计值）」后缀永远不再出现——一个看起来像真答案的
+			// 假答案（宪法 12 条），与 triggerCount 那一支要治的是同一个病。
+			//
+			// 所以这一支留 NULL：读取侧继续按 EffectiveFirstOpenedAt 兜底，
+			// 并如实标 estimated。
+			//
+			// **取舍写在这里**：留 NULL 之后，读取侧兜的是**本行**的 opened_at，
+			// 而不是上一行的——「已持续」会短掉中间那一段（本例是复发间隔）。
+			// 这是有意的：口径只有「确定值」与「不知道」两档，没有第三档能
+			// 存住「这是个估计值，但它比本行的 opened_at 更早」。少报一段
+			// 时长、并明说它是估计值，好过报一个更准的数却谎称它是确定的。
+			// 真要两全，得给这一列配一个 estimated 标记列，那是另一片的事
+			// （见 handoff 的 follow_ups）。
+			if inherited, wasEstimated := previous.EffectiveFirstOpenedAt(); wasEstimated {
+				firstOpenedAtArg = pgtype.Timestamptz{}
+			} else if !inherited.IsZero() {
+				firstOpenedAtArg = ts(inherited)
+			}
+			// 上一条是本列上线前的旧行（TriggerCount 为 nil）时，链上真正
+			// 触发过几次没有人记下来过。这里传 NULL 而不是从 1 重新起算：
+			// 「不知道」在界面上显示成「—」是诚实的，显示成「触发 1 次」
+			// 则是一个看起来像真答案的假答案（宪法 12 条）。
+			if previous.TriggerCount == nil {
+				triggerCountArg = nil
+			} else {
+				inheritedCount := *previous.TriggerCount + 1
+				triggerCountArg = &inheritedCount
+			}
 		}
 	}
 
@@ -269,6 +329,8 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 		Detail:          in.Detail,
 		Environment:     in.Environment,
 		OpenedAt:        ts(now),
+		TriggerCount:    triggerCountArg,
+		FirstOpenedAt:   firstOpenedAtArg,
 		SourceMetricKey: in.SourceMetricKey,
 	})
 	if err != nil {
@@ -277,18 +339,23 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 	return alertFromRow(row), nil
 }
 
-func (s *Store) recentlyResolved(ctx context.Context, dedupKey string, now time.Time) (bool, error) {
-	_, err := s.q.GetLatestResolvedAlertByDedupKey(ctx, gen.GetLatestResolvedAlertByDedupKeyParams{
+// recentlyResolved 找复发窗口内最近解决的那一条。
+//
+// 返回整行而不是一个布尔：调用方要的不只是「是不是复发」，还要它的首开
+// 时刻。原先只返回布尔时，那一行的其它事实在这里被丢掉了，于是复发的新行
+// 只能从 now 重新起算——界面上「已持续」每复发一次就归零。
+func (s *Store) recentlyResolved(ctx context.Context, dedupKey string, now time.Time) (Alert, bool, error) {
+	row, err := s.q.GetLatestResolvedAlertByDedupKey(ctx, gen.GetLatestResolvedAlertByDedupKeyParams{
 		DedupKey:   dedupKey,
 		ResolvedAt: ts(now.Add(-reopenLookback)),
 	})
 	switch {
 	case err == nil:
-		return true, nil
+		return alertFromRow(row), true, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		return false, nil
+		return Alert{}, false, nil
 	default:
-		return false, fmt.Errorf("lookup resolved alert: %w", err)
+		return Alert{}, false, fmt.Errorf("lookup resolved alert: %w", err)
 	}
 }
 
@@ -537,4 +604,121 @@ func (s *Store) PruneResolved(ctx context.Context, cutoff time.Time, batchSize i
 		Cutoff:    ts(cutoff.UTC()),
 		BatchSize: batchSize,
 	})
+}
+
+func ackFromRow(r gen.AlertsUpstreamVersionAck) UpstreamVersionAck {
+	return UpstreamVersionAck{
+		Environment:    r.Environment,
+		MetricKey:      r.MetricKey,
+		Version:        r.Version,
+		Source:         r.Source,
+		AcknowledgedBy: r.AcknowledgedBy,
+		AcknowledgedAt: fromTS(r.AcknowledgedAt),
+		Note:           r.Note,
+	}
+}
+
+// SetUpstreamVersionAck 记下「这条上游的这个版本我核对过了」，覆盖同一条
+// 上游此前记着的版本。
+//
+// 校验（版本形态、指标键是否已注册、与当轮观测是否逐字相同）全部在 Action
+// Handler 里，不在这里：那些判据要读 ops 观测，而仓储层不该反向依赖 ops。
+// 这里只保证写进去的东西满足库层 CHECK。
+func (s *Store) SetUpstreamVersionAck(ctx context.Context, in UpstreamVersionAck) (UpstreamVersionAck, error) {
+	if in.Environment == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("environment: %w", ErrMissingField)
+	}
+	if !ruleKeyPattern.MatchString(in.MetricKey) {
+		return UpstreamVersionAck{}, fmt.Errorf("metric_key=%q 须匹配 ^[a-z0-9][a-z0-9_.-]{0,127}$: %w",
+			in.MetricKey, ErrInvalidFormat)
+	}
+	if strings.TrimSpace(in.Version) == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("version: %w", ErrMissingField)
+	}
+	if strings.TrimSpace(in.AcknowledgedBy) == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("acknowledged_by: %w", ErrMissingField)
+	}
+	at := in.AcknowledgedAt
+	if at.IsZero() {
+		return UpstreamVersionAck{}, fmt.Errorf("acknowledged_at: %w", ErrMissingField)
+	}
+	row, err := s.q.SetUpstreamVersionAck(ctx, gen.SetUpstreamVersionAckParams{
+		Environment:    in.Environment,
+		MetricKey:      in.MetricKey,
+		Version:        in.Version,
+		Source:         in.Source,
+		AcknowledgedBy: in.AcknowledgedBy,
+		AcknowledgedAt: ts(at),
+		Note:           in.Note,
+	})
+	if err != nil {
+		return UpstreamVersionAck{}, fmt.Errorf("set upstream version ack: %w", err)
+	}
+	return ackFromRow(row), nil
+}
+
+// GetUpstreamVersionAck 取一条已核对记录；不存在返回 ErrNotFound。
+func (s *Store) GetUpstreamVersionAck(ctx context.Context, environment, metricKey string) (UpstreamVersionAck, error) {
+	row, err := s.q.GetUpstreamVersionAck(ctx, gen.GetUpstreamVersionAckParams{
+		Environment: environment,
+		MetricKey:   metricKey,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UpstreamVersionAck{}, fmt.Errorf("upstream_version_ack %s/%s: %w", environment, metricKey, ErrNotFound)
+	}
+	if err != nil {
+		return UpstreamVersionAck{}, fmt.Errorf("get upstream version ack: %w", err)
+	}
+	return ackFromRow(row), nil
+}
+
+// DeleteUpstreamVersionAck 撤销一条已核对记录；不存在返回 ErrNotFound。
+//
+// 返回被删掉的那一行而不是一个布尔：调用方（Action Handler）要把它写进审计的
+// before 摘要——「撤销了什么」比「撤销成功了」有用得多。
+func (s *Store) DeleteUpstreamVersionAck(ctx context.Context, environment, metricKey string) (UpstreamVersionAck, error) {
+	row, err := s.q.DeleteUpstreamVersionAck(ctx, gen.DeleteUpstreamVersionAckParams{
+		Environment: environment,
+		MetricKey:   metricKey,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UpstreamVersionAck{}, fmt.Errorf("upstream_version_ack %s/%s: %w", environment, metricKey, ErrNotFound)
+	}
+	if err != nil {
+		return UpstreamVersionAck{}, fmt.Errorf("delete upstream version ack: %w", err)
+	}
+	return ackFromRow(row), nil
+}
+
+// ListUpstreamVersionAcksOrdered 返回某环境下的全部已核对记录（按 metric_key 升序）。
+//
+// 与 ListUpstreamVersionAcks 返回 map 的那个版本是两个用途：评估器要按
+// metric_key 随机取，只读端点要一个稳定顺序的列表。两者共用同一条查询。
+func (s *Store) ListUpstreamVersionAcksOrdered(ctx context.Context, environment string) ([]UpstreamVersionAck, error) {
+	rows, err := s.q.ListUpstreamVersionAcks(ctx, environment)
+	if err != nil {
+		return nil, fmt.Errorf("list upstream version acks: %w", err)
+	}
+	out := make([]UpstreamVersionAck, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ackFromRow(r))
+	}
+	return out, nil
+}
+
+// ListUpstreamVersionAcks 返回某环境下的全部已核对记录，键是 metric_key。
+//
+// 返回 map 而不是切片：调用方（评估器）逐条观测查的就是「这条指标核对过
+// 什么版本」，切片会让每条观测再线性扫一遍。
+func (s *Store) ListUpstreamVersionAcks(ctx context.Context, environment string) (map[string]UpstreamVersionAck, error) {
+	rows, err := s.q.ListUpstreamVersionAcks(ctx, environment)
+	if err != nil {
+		return nil, fmt.Errorf("list upstream version acks: %w", err)
+	}
+	out := make(map[string]UpstreamVersionAck, len(rows))
+	for _, r := range rows {
+		ack := ackFromRow(r)
+		out[ack.MetricKey] = ack
+	}
+	return out, nil
 }

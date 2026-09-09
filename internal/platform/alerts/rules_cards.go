@@ -8,6 +8,15 @@ package alerts
 // 「LINFENG 的批量查状态连着 12 轮被拒」与「同步这条指标偶尔抖一下」
 // 是两件事，混成一条会让前者永远被后者的沉默盖住。
 //
+// 阈值取 SyncFailedHysteresisRounds（集成合并 2026-09-09 的取舍）。
+// 本片原本借的是 ConsecutiveFailureThreshold，而 XM-OPS-TRUTH 把那个字段
+// **替换**掉了：R4 从「连续 K 轮」改成了「最近 W 轮里失败 ≥ K 轮」的滑动
+// 窗口，改名叫 ChronicFailureThreshold（默认 9）。本规则数的确实是**连续**
+// 串（见 cardSyncStreakOf），所以不能顺手接到 ChronicFailureThreshold 上——
+// 那会把判据从「连续 3 轮」悄悄变成「连续 9 轮」，量纲还对不上，编译不会
+// 报错，只是这条告警晚三倍才响。SyncFailedHysteresisRounds 是替换之后仍然
+// 表示「连续 N 轮失败」的那一个，默认值 3 也与旧默认相同。
+//
 // 本文件只放规则声明与命中判定；规则键常量 RuleCardSyncFailed 必须留在
 // rules.go——web/apps/admin-web/src/lib/labels.reconcile.test.ts 只读那一个
 // 文件抽 ^Rule[A-Z] 常量。把常量挪到这里会让那道门禁**看不见新规则从而恒绿**，
@@ -60,8 +69,8 @@ func cardSyncRules(cfg RuleConfig) []Rule {
 			Title:  "卡片同步连续失败",
 			Source: DefaultCardSyncMetricKey + " 的 value_json.accounts[].steps[]",
 			Condition: fmt.Sprintf("同一账号的同一步骤连续 %d 轮失败（被暂停的账号不计）",
-				cfg.ConsecutiveFailureThreshold),
-			For:      time.Duration(cfg.ConsecutiveFailureThreshold) * cfg.CollectionInterval,
+				cfg.SyncFailedHysteresisRounds),
+			For:      time.Duration(cfg.SyncFailedHysteresisRounds) * cfg.CollectionInterval,
 			Severity: SeverityCritical,
 			Recovery: fmt.Sprintf("同一账号同一步骤连续 %d 轮成功，或该账号被暂停同步",
 				cardSyncRecoverySamples),
@@ -134,7 +143,7 @@ func (e *Evaluator) cardSyncFindings(
 			continue
 		}
 		streak := cardSyncStreakOf(rounds, key)
-		if !streak.open(e.cfg.ConsecutiveFailureThreshold) {
+		if !streak.open(e.cfg.SyncFailedHysteresisRounds) {
 			continue
 		}
 		out = append(out, Finding{
@@ -142,7 +151,7 @@ func (e *Evaluator) cardSyncFindings(
 			DedupKey:        dedupKey(RuleCardSyncFailed, environment, key.account+"/"+key.step),
 			Severity:        SeverityCritical,
 			Title:           cardSyncTitle(key, streak),
-			Detail:          cardSyncDetail(key, streak, e.cfg.ConsecutiveFailureThreshold),
+			Detail:          cardSyncDetail(key, streak, e.cfg.SyncFailedHysteresisRounds),
 			SourceMetricKey: o.MetricKey,
 		})
 	}

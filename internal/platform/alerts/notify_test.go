@@ -104,7 +104,9 @@ func TestTelegramNotifierSendsMessage(t *testing.T) {
 		t.Fatalf("chat_id 未送达: %v", gotBody["chat_id"])
 	}
 	text, _ := gotBody["text"].(string)
-	for _, want := range []string{"CRITICAL", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次"} {
+	// 「已评估 4 轮」取代了此前的「累计 4 次」：FireCount 是评估轮数，
+	// 把它念成「次」正是 2026-09-08 那个「触发 669 次」的成因。
+	for _, want := range []string{"CRITICAL", revenueMetric, "production", RuleMetricSyncFailed, "已评估 4 轮"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("消息正文缺少 %q:\n%s", want, text)
 		}
@@ -363,6 +365,126 @@ func TestWebhookNotifierPostsAlertPayload(t *testing.T) {
 	}
 }
 
+// stormShapedAlert 造一条 2026-09-08 生产上那条版本告警的真实形态：
+// 评估了 669 轮（≈ 持续 668 分钟），真正触发过 1 次。
+//
+// 数字直接照抄现场，是为了让断言读起来就是那份报告里的句子
+// （docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md §二）。
+func stormShapedAlert() Alert {
+	a := testAlert()
+	first := time.Date(2026, 9, 8, 4, 12, 0, 0, time.UTC)
+	one := int32(1)
+	a.FireCount = 669
+	a.TriggerCount = &one
+	a.FirstOpenedAt = &first
+	a.OpenedAt = first
+	a.LastSeenAt = first.Add(668 * time.Minute)
+	return a
+}
+
+// TestNotificationSeparatesEvaluationRoundsFromTriggers：**推送本身**也必须
+// 把两个数分开。
+//
+// 管理端那一路在子片 B 里已经修好了（trigger_count / first_opened_at 进了
+// GET /api/v1/alerts），但半夜真正被人读到的是这条推送——它此前照旧写着
+// 「最近发现: …（累计 669 次）」，用的就是 FireCount。同一个根，两条路，
+// 只修了一条等于没修。
+//
+// 旧实现下这条测试是红的：正文里会出现「累计 669 次」，而「触发次数: 1 次」
+// 这一行根本不存在。
+func TestNotificationSeparatesEvaluationRoundsFromTriggers(t *testing.T) {
+	a := stormShapedAlert()
+
+	for name, text := range map[string]string{
+		"telegram": FormatMessage(a),
+		"wecom":    FormatWeComMarkdown(a),
+	} {
+		t.Run(name, func(t *testing.T) {
+			// 669 只能以「评估轮数」的身份出现，不能被念成次数。
+			if strings.Contains(text, "累计 669") || strings.Contains(text, "触发 669") {
+				t.Fatalf("评估轮数被念成了触发次数:\n%s", text)
+			}
+			for _, want := range []string{"已评估 669 轮", "触发次数", "1 次", "已持续 11h8m0s"} {
+				if !strings.Contains(text, want) {
+					t.Fatalf("缺少 %q:\n%s", want, text)
+				}
+			}
+			// 首次发现取的是 first_opened_at（跨复发继承的那个），不是本行的
+			// opened_at；这条告警两者相同，所以顺带断言它没被标成估计值。
+			if strings.Contains(text, "首开时刻为估计值") {
+				t.Fatalf("first_opened_at 是真值，不该标成估计值:\n%s", text)
+			}
+		})
+	}
+
+	// 旧行（两列都是 NULL）要诚实地说「不知道」，而不是显示成「触发 0 次」。
+	legacy := testAlert()
+	msg := FormatMessage(legacy)
+	if !strings.Contains(msg, "触发次数: —（未记录）") {
+		t.Fatalf("旧行的触发次数应是「—」而不是 0:\n%s", msg)
+	}
+	if !strings.Contains(msg, "首开时刻为估计值") {
+		t.Fatalf("旧行的首次发现是兜底值，必须说出来:\n%s", msg)
+	}
+}
+
+// TestWebhookPayloadCarriesTheSameThreeFieldsAsTheAPI：webhookPayload 上面
+// 那句「字段与 GET /api/v1/alerts 的响应对齐」必须是**真的**。
+//
+// 子片 B 给 API 加了三个字段却没动这里，那句注释当时就不成立了——一条说
+// 自己与别处对齐的注释，在别处变了之后不会报错，只会安静地给接收端一个
+// 旧形状。这条测试把那句话变成可执行的断言。
+func TestWebhookPayloadCarriesTheSameThreeFieldsAsTheAPI(t *testing.T) {
+	var raw map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	n, err := NewWebhookNotifier(srv.URL+"/hook", srv.Client())
+	if err != nil {
+		t.Fatalf("NewWebhookNotifier: %v", err)
+	}
+	if err := n.Notify(context.Background(), stormShapedAlert()); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+
+	// 三个新键都在，而且既有键一个不少——接收端已经在消费 fire_count。
+	for _, key := range []string{
+		"fire_count", "opened_at", "last_seen_at",
+		"trigger_count", "first_opened_at", "first_opened_at_estimated",
+	} {
+		if _, has := raw[key]; !has {
+			t.Fatalf("投递体缺少 %q: %v", key, raw)
+		}
+	}
+	if raw["fire_count"] != float64(669) || raw["trigger_count"] != float64(1) {
+		t.Fatalf("两个数必须分开: fire_count=%v trigger_count=%v",
+			raw["fire_count"], raw["trigger_count"])
+	}
+	if raw["first_opened_at"] != "2026-09-08T04:12:00Z" {
+		t.Fatalf("first_opened_at 必须是 UTC RFC3339: %v", raw["first_opened_at"])
+	}
+	if raw["first_opened_at_estimated"] != false {
+		t.Fatalf("这条有真值，不该标成估计: %v", raw["first_opened_at_estimated"])
+	}
+
+	// 旧行：trigger_count 必须是 JSON null（不是 0），first_opened_at 仍恒非空
+	// 且被标成估计值——与 API 的空值口径逐字一致。
+	raw = nil
+	if err := n.Notify(context.Background(), testAlert()); err != nil {
+		t.Fatalf("Notify: %v", err)
+	}
+	if v, has := raw["trigger_count"]; !has || v != nil {
+		t.Fatalf("旧行的 trigger_count 应是 null: %v", v)
+	}
+	if raw["first_opened_at"] != "2026-08-27T05:00:00Z" || raw["first_opened_at_estimated"] != true {
+		t.Fatalf("旧行应给出兜底值并标成估计: %v / %v",
+			raw["first_opened_at"], raw["first_opened_at_estimated"])
+	}
+}
+
 const weComTestRef = "secret://alerts/wecom-webhook"
 
 // weComWebhookProvider 返回一个只认识测试引用的 SecretProvider，解析结果是
@@ -426,7 +548,7 @@ func TestWeComNotifierSendsMessage(t *testing.T) {
 	// 正文字段一个不少。「严重」取代了此前的 "CRITICAL"——同一个 Severity，
 	// 面向的是群里的人，不是日志。
 	for _, want := range []string{
-		"【星芒·告警】", "严重", revenueMetric, "production", RuleMetricSyncFailed, "累计 4 次",
+		"【星芒·告警】", "严重", revenueMetric, "production", RuleMetricSyncFailed, "已评估 4 轮",
 		"XM-ALERT-" + RuleMetricSyncFailed, "管理后台 → 告警与故障",
 	} {
 		if !strings.Contains(content, want) {
@@ -661,7 +783,7 @@ func TestFormatWeComMarkdownIncludesAllRequiredFields(t *testing.T) {
 	content := FormatWeComMarkdown(testAlert())
 	for _, want := range []string{
 		"严重", "production", RuleMetricSyncFailed, revenueMetric,
-		"2026-08-27T05:00:00Z", "2026-08-27T05:03:00Z", "累计 4 次",
+		"2026-08-27T05:00:00Z", "2026-08-27T05:03:00Z", "已评估 4 轮", "触发次数",
 		"来源 sub2api-prod，错误码 timeout。",
 		"XM-ALERT-" + RuleMetricSyncFailed, "管理后台 → 告警与故障",
 	} {

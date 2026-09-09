@@ -45,6 +45,8 @@ type AlertsAlert struct {
 	NotifiedAt      pgtype.Timestamptz
 	CreatedAt       pgtype.Timestamptz
 	UpdatedAt       pgtype.Timestamptz
+	TriggerCount    *int32
+	FirstOpenedAt   pgtype.Timestamptz
 }
 
 type AlertsAlertSilence struct {
@@ -56,6 +58,16 @@ type AlertsAlertSilence struct {
 	EndsAt      pgtype.Timestamptz
 	CreatedBy   string
 	CreatedAt   pgtype.Timestamptz
+}
+
+type AlertsUpstreamVersionAck struct {
+	Environment    string
+	MetricKey      string
+	Version        string
+	Source         string
+	AcknowledgedBy string
+	AcknowledgedAt pgtype.Timestamptz
+	Note           string
 }
 
 type AuditArchiveOperationIntent struct {

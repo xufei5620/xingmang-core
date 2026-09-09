@@ -84,7 +84,7 @@ func cardSyncSource(current ops.Observation, samples ...ops.Observation) *fakeMe
 // 在生产上不成立（迟滞那条用例就是这么假绿了三天的）。
 func TestCardSyncFailedNeedsNConsecutiveRounds(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	round := func(back int) ops.Observation {
 		return cardSyncSample(now.Add(-time.Duration(back)*5*time.Minute), true,
@@ -126,7 +126,7 @@ func TestCardSyncFailedNeedsNConsecutiveRounds(t *testing.T) {
 // 两个账号同时坏 → 两条不同的 finding，不塌成一条。
 func TestCardSyncFailedSplitsByAccountAndStep(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	// 同一个账号的两种失败也必须分开：只带账号的去重键会让它们塌成一条，
 	// 于是静默批量查状态的同时把拉明文的失败也一起静默了。
@@ -159,7 +159,7 @@ func TestCardSyncFailedSplitsByAccountAndStep(t *testing.T) {
 // 步骤交替失败不算连续：判据是「同一账号同一步骤」，不是「失败了 N 次」。
 func TestCardSyncFailedRequiresSameStep(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	steps := []string{"batch_status", "fetch_secrets", "batch_status", "fetch_secrets"}
 	var samples []ops.Observation
@@ -184,7 +184,7 @@ func TestCardSyncFailedRequiresSameStep(t *testing.T) {
 // Reconciler 当轮把告警恢复掉。声明写着 2 轮，实际是 1 轮。
 func TestCardSyncFailedHasRecoveryHysteresis(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	// 失败 N 轮（最新的那轮在 now-2 个周期）。
 	var failed []ops.Observation
@@ -233,7 +233,7 @@ func TestCardSyncFailedHasRecoveryHysteresis(t *testing.T) {
 // 结果一定是把整条规则静默——那会连带丢掉其余账号的信号。
 func TestCardSyncFailedSuppressesPausedAccounts(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	var samples []ops.Observation
 	for i := 0; i < threshold; i++ {
@@ -267,7 +267,7 @@ func TestCardSyncFailedSuppressesPausedAccounts(t *testing.T) {
 // 在评估时打出十几次查询。
 func TestCardSyncFailedReadsSamplesOncePerRound(t *testing.T) {
 	now := time.Now().UTC()
-	threshold := DefaultConsecutiveFailureThreshold
+	threshold := DefaultSyncFailedHysteresisRounds
 
 	// 观测状态记 ok：三步失败但整轮不算失败，正是本片写观测的生产形状
 	// （writeObservation 只在整轮全砸时记 failed）。顺带让 R4 不去回看，

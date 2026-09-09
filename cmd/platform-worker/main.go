@@ -201,65 +201,14 @@ func main() {
 	}
 	// 启动时就把采集配置摊开：运维必须能一眼看出这个进程写进看板的数字
 	// 是 Fake 产的还是真实上游来的，而不是等发现数字不对再回来翻配置。
-	logger.InfoContext(ctx, "worker_started", "event", "worker_started", "module", "platform.worker",
-		"environment", config.Environment, "principal_id", "worker:platform",
-		// XM-CRED0：下面的 *_mode / endpoint 等只是环境变量给的**缺省**；
-		// 生效配置每轮从 core.connector_config 读，变化时另有
-		// connector_config_applied 日志。secret_root 只打路径，不打内容。
-		"connector_config_source", "database",
-		"secret_root", config.SecretRoot,
-		"sub2api_sync_enabled", config.Sub2APISyncEnabled,
-		"sub2api_mode", string(config.Sub2APIMode),
-		"sub2api_source", config.Sub2APIInstanceID,
-		"sub2api_sync_interval", config.Sub2APISyncInterval.String(),
-		// NewAPI 同理（XM-0035）：运维必须能一眼看出这批数字是 Fake 产的
-		// 还是真实上游来的，而不是等发现数字不对再回来翻配置。
-		"newapi_sync_enabled", config.NewAPISyncEnabled,
-		"newapi_mode", string(config.NewAPIMode),
-		"newapi_source", config.NewAPIInstanceID,
-		"newapi_sync_interval", config.NewAPISyncInterval.String(),
-		// 成本采集同理（XM-0037b）。多一条 secrets_configured：real 模式还需要
-		// 一个能解析**登记簿里那些引用**的 SecretProvider，而那些引用在进程
-		// 启动时还不知道（它们在库里，由 Action 维护），所以现阶段它必然是
-		// false——把这个事实打在启动日志里，比让人配完 real 再去猜为什么
-		// 每个账号都报 not_supported 强。
-		"finance_collect_enabled", config.FinanceCollectEnabled,
-		"finance_collect_mode", string(config.FinanceCollectMode),
-		"finance_collect_source", config.FinanceCollectInstanceID,
-		"finance_collect_interval", config.FinanceCollectInterval.String(),
-		"finance_collect_allowlist_size", len(config.FinanceCollectTargetAllowlist),
-		"finance_collect_secrets_configured", config.FinanceCollectSecrets != nil,
-		"finance_collect_secret_provider", config.FinanceCollectSecretProvider,
-		"finance_collect_secret_scopes", len(config.FinanceCollectSecretScopes),
-		// newapi 收入侧走的是只读 DSN（§3.2），与上面那条 HTTP 采集是两条通道。
-		// 打出来才看得出台账里 newapi 那几行的收入是「真读了」还是「写 NULL」。
-		"newapi_revenue_dsn_configured", config.FinanceNewAPIRevenue != nil,
-		// 告警同理：运维必须能一眼看出这个进程会不会评估告警、会不会投递、
-		// 往哪儿投。**只打渠道是否配置，不打 chat_id、不打 webhook 地址**——
-		// 后者常常本身就是凭据（宪法 7 条）。
-		"alert_evaluate_enabled", config.AlertEvaluateEnabled,
-		"alert_evaluate_interval", config.AlertEvaluateInterval.String(),
-		"alert_telegram_configured", config.AlertTelegramBotRef != "" && config.AlertTelegramChatID != "",
-		"alert_webhook_configured", config.AlertWebhookURL != "",
-		"alert_wecom_configured", config.AlertWeComWebhookRef != "",
-		"alert_balance_threshold_minor_units", config.AlertBalanceThresholdMinorUnits,
-		// AUD2 is intentionally manual-only until R2-10 and DB-role gates are
-		// merged. Log policy state without emitting endpoint or credential refs.
-		"audit_archive_enabled", config.AuditArchive.Enabled,
-		"audit_archive_mode", string(config.AuditArchive.Mode),
-		"audit_archive_scheduler_enabled", config.AuditArchive.SchedulerEnabled,
-		"audit_archive_periodic_registered", jobs.AuditArchivePeriodicRegistrationAllowed(),
-		// 请求量/成功率聚合（XM-REQLOG-METRICS）。mode=off 时这条任务根本不
-		// 注册（见 jobs.NewClient），运维要能从这一行看出是不是这个原因。
-		"reqlog_metrics_mode", string(config.ReqlogMetricsMode),
-		"reqlog_metrics_mode_recognized", config.ReqlogMetricsModeRecognized,
-		"reqlog_metrics_data_dir", config.ReqlogMetricsDataDir,
-		"reqlog_metrics_interval", config.ReqlogMetricsInterval.String(),
-		// XM-ASSURE1-core：检测任务的 Worker 永远注册（按需触发，不是周期
-		// 任务），这里只打 Kill Switch/预算这两个真正门控探测是否发生的值。
-		"assurance_probe_global_enabled", config.AssuranceProbeGlobalEnabled,
-		"assurance_probe_daily_budget", config.AssuranceProbeDailyBudget,
-		"assurance_probe_secrets_configured", config.AssuranceProbeSecrets != nil)
+	//
+	// 整条属性由 workerStartupAttrs 组装（XM-OPS-TRUTH），main() 只负责打出去。
+	// **不要在这里就地补字段**：缺席断言（不许再出现裸键 sub2api_mode /
+	// newapi_mode，它装的是 env 缺省，2026-09-08 就是这么读错的）钉的是那个
+	// 函数的返回值；字段留在 main() 里就等于绕过了闸——闸必须架在打出去的
+	// 那一行上，不是架在半成品上。要加字段请改
+	// cmd/platform-worker/startup_log.go。
+	logger.InfoContext(ctx, "worker_started", workerStartupAttrs(config)...)
 
 	<-ctx.Done()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

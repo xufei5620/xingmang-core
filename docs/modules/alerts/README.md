@@ -34,13 +34,23 @@
 
 | 规则键 | 名称 | 数据来源 | 条件 | 持续时间 | 严重度 | 恢复条件 | 去重键 |
 |---|---|---|---|---|---|---|---|
-| `metric.sync.failed` | 指标同步失败 | `ops.metric_observation` | 新鲜度状态为 `failed` | 0（立即） | **critical** | 恢复到非 `failed` | `metric.sync.failed:<env>:<metric_key>` |
+| `metric.sync.failed` | 指标同步失败 | `ops.metric_observation`（当前态）+ `ops.metric_observation_sample`（迟滞判据） | **连续 3 轮**采集失败（少于 3 轮的抖动不报） | 3 个采集周期（默认 900s） | **critical** | **连续 3 轮**不再失败（中间只成功一两轮不算恢复） | `metric.sync.failed:<env>:<metric_key>` |
 | `metric.data.stale` | 指标数据陈旧 | `ops.metric_observation` | 状态为 `stale` 且滞后 ≥ 阈值 + 2 个采集周期 | 2 个采集周期（默认 600s） | warning | `observed_at` 重回阈值内 | `metric.data.stale:<env>:<metric_key>` |
-| `metric.sync.consecutive_failed` | 同步连续失败 | `ops.metric_observation_sample` | 最近 3 条样本连续为 `failed` | 3 个采集周期 | **critical** | 出现任意一条成功样本 | `metric.sync.consecutive_failed:<env>:<metric_key>` |
+| `metric.sync.consecutive_failed` | 同步长期失败 | `ops.metric_observation_sample` | 当前正在失败，且**最近 12 条样本里失败 ≥ 9 次**（滑动窗口，不是连续串） | 12 个采集周期 | **critical** | 窗口内失败次数回落到 9 次以下（中途成功一两轮既不清零计数，**也不关闭告警**） | `metric.sync.consecutive_failed:<env>:<metric_key>` |
 | `channel.token.invalid` | 渠道 token 失效 | `sub2api.channels.balance` 的 `channels[].token_valid` | `token_valid` **明确为** `false` | 0 | warning | 恢复为 `true`，或该渠道从上游清单消失 | `channel.token.invalid:<env>:<channel_id>` |
 | `channel.balance.low` | 渠道余额不足 | `sub2api.channels.balance` 的 `channels[].balance_minor_units` | 余额 < 阈值（默认 500000 最小货币单位） | 0 | warning | 余额回到阈值之上，或该渠道消失 | `channel.balance.low:<env>:<channel_id>` |
 | `upstream.runway.low` | 上游可用天数不足 | `finance.balance_history` ÷ `finance.profit_daily`（近 7 个完整业务日的日均消耗，设计稿 §10.4） | 计量型上游的可用天数**算得出来**且 ≤ warning 档（默认 10 天） | 0 | warning（≤ critical 档 5 天升为 **critical**） | 天数回到告警档之上，或不再算得出天数 | `upstream.runway.low:<env>:<upstream_account_id>` |
-| `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致 | 0（立即） | warning | 下一轮不再变化（去重键带新版本，一次变化一条，不会因为版本稳定下来就假装没发生过） | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
+| `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致，且这个版本**没有被人核对过** | 0（立即） | warning | 有人执行 `alerts.upstream_version.acknowledge` 核对了这个版本，或下一轮不再变化 | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
+| `approval.pending.too_long` | 审批单挂太久 | `platform.approval.queue` 的 `oldest_pending_age_seconds`（XM-0030c） | 最久那张**未过期**的 `PENDING` 审批单已等待 ≥ 4 小时 | 0（观测本身就是一个持续量） | warning | 最久那张降回门槛以内（有人批了或驳了），或队列清空 | `approval.pending.too_long:<env>:queue` |
+| `cards.sync.failed` | 卡片同步连续失败 | `cards.sync.status` 的 `value_json.accounts[].steps[]`（XM-CARD-VISIBILITY） | 同一账号的**同一步骤**连续 3 轮失败（被暂停同步的账号一条都不报） | 3 个采集周期（默认 900s） | **critical** | 同一账号同一步骤**连续 2 轮**成功（1 轮走运不算），或该账号被暂停同步 | `cards.sync.failed:<env>:<account>/<step>` |
+
+> 上面两行都是 `TestEveryRuleHasARowInBothDocs` 补出来的。
+> `approval.pending.too_long` 从 XM-0030c 起就在 `Rules()` 里，却一直没写进
+> 这张表；`cards.sync.failed` 是 2026-09-09 集成合并时补的——它在
+> XM-CARD-VISIBILITY 分支上只写进了 CATALOG.md，而要求「两份文档都有行」的
+> 那条测试当时还在 XM-OPS-TRUTH 分支上，两条分支各自门禁全绿，
+> 合到一起才红。那条测试的覆盖范围从 `Rules()` **发现**而不是手列，
+> 所以漏一条就当场红。
 
 余下三项（通知渠道 / 静默策略 / 负责人）全部规则相同：
 渠道 = 已配置的 telegram + webhook；静默策略见下一节；负责人 = `platform-ops`。
@@ -111,12 +121,70 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 一列上，不带环境的话 staging 与生产的同一条指标会抢同一行——一个环境的
 评估轮次会改写另一个环境的告警（宪法 15 条）。
 
-**`R1-failed` 与 `R4-consecutive` 会同时活跃。** 一条指标连续失败 ≥3 轮时，
-两条告警都在。它们不是重复：前者说「现在失败」，后者说「已经连续失败三轮，
-不是一次抖动」——同一事实的两个不同持续时间断言，而后者正是决定要不要
-升级处置的信号。Foundation-A **不做抑制**：抑制的正确做法是把低阶告警标记成
-「被抑制」而不是「已恢复」，而 `SILENCED` 这个状态在本档已经被静默窗口占用了。
-补法留给 Foundation-B。
+**`R1-failed` 的迟滞：连续 N 轮才开，连续 N 轮才关（N=3，`rules.go` 的
+`DefaultSyncFailedHysteresisRounds` 是它唯一的定义处）。**
+
+在 2026-09-08 之前，这条规则**没有任何持续时间门槛**：一失败下一分钟就报，
+一成功下一分钟就撤。生产上那三条 NewAPI 指标因此每 5 分钟翻一次面，而界面上
+「已持续 7 分钟」每次恢复都归零，于是没人看得出它其实已经这样很久了
+（见 `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` §二）。
+
+开与关用**同一个 N**：不对称的迟滞会让人在事后无法用一个数解释这条告警的
+行为（「为什么 15 分钟才报、5 分钟就撤」）。
+
+**代价必须知道**：采集周期 300s 时，N=3 意味着**一次 10 分钟以内的上游读取
+失败从此不再产生告警**。这是有意的取舍——那段降级仍然看得见（运行保障页的
+新鲜度、后台任务页的运行记录都逐轮可见），数据真的停更时 `metric.data.stale`
+会接手。每一轮被迟滞压住或保持的条数都进 `alert_evaluate` 的结构化日志
+（`hysteresis_suppressed` / `hysteresis_held`）——一个不留痕的抑制器就是
+下一个「安静地给你一个旧答案」。
+
+判据是**纯函数**（`foldSyncFailure`），从历史样本折叠出来，不落任何新状态：
+worker 重启、多副本、River 换一个节点跑，答案都一样。
+
+**`R1-failed` 与 `R4-consecutive` 会同时活跃。** 一条链路长期失败时两条告警
+都在。它们不是重复：前者说「现在坏了，而且不是一次抖动」，后者说「这一小时
+里四分之三的采集都是失败的」——同一事实的两个不同时间尺度，而后者正是决定
+要不要升级处置的信号。Foundation-A **不做抑制**：抑制的正确做法是把低阶告警
+标记成「被抑制」而不是「已恢复」，而 `SILENCED` 这个状态在本档已经被静默窗口
+占用了。补法留给 Foundation-B。
+
+**R4 的计数是滑动窗口，不是连续串（K=9 / W=12）。** 旧实现从样本尾部往前数，
+遇到第一条成功就停——于是「多数轮失败、偶尔成功一轮」这种形态**从来没
+升级过**。2026-09-08 生产上那三条 NewAPI 指标（`newapi.channels.status` /
+`newapi.users.total` / `newapi.recharge.daily`）正是这样每 5 分钟翻一次面的。
+K 取 9 而不是照搬旧的 3 是有理由的：一串完全交替的失败/成功在 12 条窗口里
+恰好凑出 6 次失败，阈值取 3 或 6 的话，R1 的迟滞刚压住的那种翻面抖动会原样从
+R4 冒出来，而且同样是 critical。
+
+> ⚠️ **不要拿 `card_sync` 当这条规则的例子**（本片的第一版文档、`rules.go`
+> 注释与提交消息 `c9d4d9a` 都错在这里）。R4 读的是
+> `ops.metric_observation_sample`，而 card_sync 根本不产出指标观测——`ops` 的
+> 已注册指标白名单里没有任何 `card_*` 键（`internal/platform/ops/freshness.go`）。
+> 它的失败只存在于 `river_job`，而 `river_job` 不进告警引擎。card_sync 那 288
+> 条的合并展示在 `/ops/overview` 的 `failed_jobs_by_kind`，不在这条规则里。
+
+**R4 的开与关是两条不同的判据。** 开还要求「当前正在失败」，关**只看窗口
+计数**：已经开着的这条告警，在最新一轮采集成功、但窗口里还有 9 次失败时
+**继续挂着**（每轮进 `alert_evaluate` 的 `chronic_held` 计数）。
+
+这一条是审稿改出来的。在它之前，R4 只在当前失败时产出命中，而 Reconciler 对
+本轮没再命中的活跃告警一律 `Resolve`——于是**任何一轮采集成功都会把 R4 关掉**，
+窗口里还有 9 条失败也照关。声明里那句「一次成功不再清零计数」因此是假的
+（这份文档与 `docs/modules/notify/CATALOG.md` 各抄了一份给运营看），而且行为上
+`FFFSFFFSFFFS` 这种劣化形态会让 R4 每隔几轮 open→resolved→reopened 一次，
+每次都是新行、重新投递、critical——R1 的迟滞刚压住的抖动，换个 `rule_key` 从
+R4 原样冒出来。
+
+**代价（实测）：一次彻底的硬故障，R4 的 critical 升级从 15 分钟（旧的「连续
+3 轮」）推迟到 45 分钟（窗口 12 里凑够 9 次失败）。** 采集周期 300s。这不是
+「从零开始等 45 分钟」：R1 仍然在第 3 轮（15 分钟）给出 critical，R4 回答的是
+另一个问题（「这一小时里四分之三的采集是失败的」）。若这个代价不可接受，
+备选是 K=6 / W=8（30 分钟）——纯交替在 8 条窗口里只凑得出 4 次，仍压得住抖动。
+
+**`metric.sync.consecutive_failed` 这个键名保留不改**，尽管判据已经不是
+「连续」。rule_key 是静默窗口的匹配键与历史告警的分组键，改名等于让已存在的
+静默窗口和历史一起失配——名字略微名不副实是保留键名必须付的代价。
 
 **`R1-failed` 与 `R1-stale` 互斥，不会同时响。** `ops.Observation.Freshness`
 的状态优先级里 `failed` 高于 `stale`，一条记录只会落在其中一个状态上。
@@ -130,8 +198,25 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 是在用过期数据下现在的结论。这两种情况 `R1-failed` 已经以 critical 报出
 「你现在是瞎的」，那才是此刻真正需要处理的事。
 
-**R4 只在当前正在失败时才回看历史样本。** 语义上「连续失败」本就要求最新
-那条是失败的；成本上健康时一条样本查询都不发。
+**历史样本一轮一条指标只查一次，而且只在两种情况下查**：当前正在失败
+（可能要开），或者这条 R1 告警还开着（可能要关）。健康且没有告警的指标一条
+样本查询都不发——评估每 60 秒一轮，无条件给每条指标配一次历史查询是纯浪费。
+R1 的迟滞与 R4 的滑动窗口共用那一次查询的结果。
+
+**「这个上游版本我核对过了」是 R6 唯一正常的结束方式。**
+
+在它之前，`upstream.version.changed` 只能等旧探测样本被挤出回看窗口
+（200 条 ≈ 16h40m）后自己消失。2026-09-08 那条的真实结局是「今晚 20:52 前后
+自己消失，不是因为有人核对了，是因为证据过期了」。
+
+现在有了 `alerts.upstream_version.acknowledge`（L1）：它把
+`(environment, metric_key) → version` 记进 `alerts.upstream_version_ack`，
+规则命中时若观测版本等于已核对版本就不再命中，既有 OPEN 告警在下一轮被
+**通用恢复逻辑**转 `RESOLVED`（不长第二套语义）。
+
+比较是**逐字相等**：核对过 `0.2.2` 不等于核对过 `0.2.3`，核对过 `0.2` 更不等于
+核对过 `0.2.3`。一条上游只有一个**当前**已核对版本，新的核对覆盖旧的，
+历史留在审计链里。
 
 ---
 
@@ -190,7 +275,7 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 | 时长上限 | **7 天**。更长等于永久关掉这条规则，而且没有任何东西会提醒有人去解除它。更长的诉求应走「改规则」或「停用采集」（宪法 26 条的 Kill Switch），那两条路都有变更记录 |
 | `reason` | 非空是**库层 CHECK**。没有理由的静默在事后复盘时与「有人手滑」不可区分。它同时进审计事件的 `reason` 列 |
 | 对已响告警的作用 | 已经 `OPEN` 的告警命中新建的窗口会转 `SILENCED` —— 让正在响的告警闭嘴正是建窗口的目的 |
-| 静默期间 | `fire_count` **照常递增**：那是「这个问题持续了多久」的证据，不该因为没人想听就不记 |
+| 静默期间 | `fire_count` **照常递增**：那是「这个问题持续了多久」的证据（**评估轮数**，不是触发次数），不该因为没人想听就不记。`trigger_count` 在 `OPEN → SILENCED` 这一步**不**递增——让它闭嘴不是「又响了一次」 |
 
 **窗口过期后**：条件仍成立 → 转回 `OPEN`，`notify_status` 推回 `pending`
 重新排队投递。这条转换是 `Store.Upsert` 里唯一会重置投递状态的路径；
@@ -319,6 +404,8 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 | 读静默窗口（`GET /api/v1/alerts/silences`） | `ops.read` | — |
 | 确认告警（`alerts.alert.acknowledge@1`） | `alerts.alert.manage` | L0 |
 | 创建静默窗口（`alerts.silence.create@1`） | `alerts.silence.manage` | L1 |
+| 核对上游版本（`alerts.upstream_version.acknowledge@1`） | `alerts.alert.manage` | L1（永久锁定） |
+| 撤销已核对版本（`alerts.upstream_version.revoke@1`） | `alerts.alert.manage` | L1（永久锁定） |
 
 **读复用 `ops.read`**：告警内容就是运营指标的判读结果——「渠道甲余额只剩
 3000」这条告警泄漏的信息，与 `ops.read` 能直接读到的余额数字完全相同。
@@ -338,12 +425,106 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 所以 `acknowledgeHandler` 在读到资源之后显式比对 `alert.Environment`
 与 `Principal.Environment`（宪法 15 条）。
 
+**核对与撤销上游版本复用 `alerts.alert.manage`，且必须永久留在 L1。**
+
+复用而不新增 scope：核对上游版本与确认告警是同一类「我看过了」，爆炸半径远
+小于静默——它只让**这一条**上游的版本提醒停下来，不会让任何别的告警闭嘴。
+
+留在 L1 的理由不是「感觉不严重」，是硬的：L2 及以上会把整包 `params` 原样冻进
+`core.approval_request.params_json`，并由 `GET /api/v1/approvals` 回给每一个能
+看审批队列的人。而这两个 Action 各有一个**自由文本参数**——`acknowledge` 的
+`note`、`revoke` 的 `reason`，都是 ≤200 字节、除长度外没有任何形态校验，
+**形状上装得下凭据**。所以抬级会给它们开一条展示通道：这两个 Action 因此
+**必须**锁在 L1，在 `action.Schema` 支持形状校验（Pattern / Redacted 标记）
+之前不得抬级。`TestUpstreamVersionActionsArePinnedToL1BecauseFreeTextParamsExist`
+把这条钉住。
+
+> ⚠️ 这段话的第一版写的是「本 Action 的**两个**参数在形状上装不下凭据」
+> ——它把 `note` 数漏了，读起来像「所有参数都被约束过，抬级也安全」。
+> 一条把自己的理由说错了的注释，比没有注释更容易被拿去做相反的决定。
+
+另外两个参数确实收得住，但收法与第一版写的也不一样：`metric_key` 的判据是
+**「这个环境下这条指标此刻确实观测到了一个上游版本」**，不是 `ops.KnownMetricKey`
+那份手列白名单。改的理由见下一段；`version` 仍然必须与平台自己观测到的
+`value_json.version` **逐字相同**才会落库——「调用方给什么就存什么」这条路
+根本不存在。`source` 由服务端从观测里读出后写入，不来自参数。
+
+**结束一条告警的范围，必须与产生它的范围同源。** R6 的命中范围是**发现出来
+的**（判据是这条观测里有没有 `version`，不是它的键叫什么，将来多一个连接器
+探测就自动被覆盖），而 `ops.KnownMetricKey` 读的是一份手列的白名单
+（`ops/freshness.go` 的 `registeredMetrics`）；落库侧只校验 `ValidMetricKey`，
+所以一条未注册的指标观测完全可以存在。两个范围一旦漂开就会出现**「告警响得
+起来、但按钮点不动」**：R6 对某条带 `version` 的未注册指标命中，Action 直接
+拒绝，这条告警又回到本片要消灭的状态——只能等旧样本被挤出窗口后自己消失。
+今天不出事只是因为白名单**恰好**覆盖了现有连接器。已注册清单退到**提示文案**
+里：拼错照样能拿到有用的报错，但它不再是准入闸。
+
+它也确实不该是 L0：L0 的定位是「保存个人视图、低影响偏好」，而这个动作会让
+一条规则不再命中、让既有告警在下一轮被解决，与 `alerts.silence.create` 同一档。
+
+**「已核对」必须看得见、也必须撤得掉。** 一条建立起来就撤不掉的抑制器是
+任务书致命清单里点名的东西：点错一次，那条「去核对桥接契约与兼容矩阵」的
+提醒对该版本**永久**消失，而唯一的自动解除条件是上游再升一次版本——那是
+外部事件，不在操作者手里；`acknowledge` 又要求 `version` 与当轮观测逐字相同，
+连「用另一个值覆盖掉」这条路都走不通。所以本模块同时提供：
+
+- 读：`GET /api/v1/alerts/upstream-versions`（`ops.read`）——列出这个环境下
+  全部已核对记录：哪条上游、哪个版本、谁标的、什么时候标的，并在响应里带上
+  撤销用的 Action ID。**`note` 不在响应里**：上面那条「自由文本形状上装得下
+  凭据、所以不能进展示通道」的理由，对这个端点与对审批队列是同一条——本端点
+  只要 `ops.read`（`staff` 就有），而审计事件的读路径单独要 `audit.read`
+  （「审计事件带前后摘要，敏感度高于 `ops.read`」）。要看当时写了什么备注，
+  走 `GET /api/v1/audit/events`，那是它本来就该在的那一档；
+  `TestListUpstreamVersionAcksDoesNotEchoTheNote` 把这条缺席钉住；
+- 写：`alerts.upstream_version.revoke@1`（L1，`reason` 必填）——按
+  `(environment, metric_key)` 撤销，**不带 `version` 参数**（让调用方再报一次
+  版本号只会多出「上游已经又升级了所以你撤不掉」这种失败形态，而那恰恰是
+  最需要撤销的时刻）。下一轮评估这条提醒就回来了。
+
 ---
 
 ## 数据模型
 
-`db/migrations/000007_alerts.up.sql`。两张表：`alerts.alert` 与
-`alerts.alert_silence`。几处值得单独说的：
+`db/migrations/000007_alerts.up.sql` 建了 `alerts.alert` 与
+`alerts.alert_silence`；`db/migrations/000054_alerts_trigger_and_version_ack.up.sql`
+给前者加了两列，并新建 `alerts.upstream_version_ack`。几处值得单独说的：
+
+- **`fire_count` 与 `trigger_count` 是两个量。** 前者是**评估轮数**（每 60 秒
+  一轮，条件仍成立就 +1），后者是真正的**触发次数**（新开 +1、静默过期转回
+  `OPEN` 重新投递 +1；持续命中不加）。2026-09-08 界面上那个「触发 669 次」
+  其实是「持续了 668 分钟」——一个数被当成了另一个数在用。
+- **`first_opened_at` 与 `trigger_count` 跨 `RESOLVED → REOPENED` 一起继承**
+  （限 24 小时复发窗口内，与 `reopenLookback` 同一个窗口，不新增第二个
+  「多久算同一件事」的常量）：前者取上一条的**有效**首开时刻，后者取上一条的
+  值 +1。所以「已持续」不会因为中间恢复过一次就归零，「触发几次」也不会。
+  超过复发窗口的是一件新事，两个都重新起算。
+
+  **两个字段必须同进同退。** 前端被告知要把它们并排渲染成「已持续 X，
+  触发 N 次」；只继承时刻的话，一条开→关→开四轮的告警会显示成「已持续
+  4 小时，触发 1 次」——两个数各自都对，合成出来的那句话是假的。它与被它
+  替换掉的「触发 669 次」是同一类误读，只是方向相反：那个多报，这个少报。
+  例外只有一种，而它对两个字段**同时**成立：继承链的上一环本身是本列上线前的
+  旧行（两列皆 `NULL`）时，这一行的两列也都留 `NULL`——次数在界面上是「—」，
+  时刻由读取侧兜底并标成「（估计值）」。理由逐字相同：「不知道」是诚实的，
+  从 1 重新起算不是；同样地，上一环那个「有效首开时刻」本身就是用 `opened_at`
+  兜出来的估计值，把它写进这一行的 `first_opened_at` 就等于把估计值洗成确定值
+  ——库里从此分不出「记下来过」与「兜的底」，`first_opened_at_estimated`
+  恒为 `false`，那个后缀再也不会出现。
+
+  **代价明说**：留 `NULL` 之后「已持续」从**本行**的 `opened_at` 起算，比真实
+  时长短掉中间那一段复发间隔。库里只有「确定值」与「不知道」两档，没有第三档
+  能存住「这是估计值但它更早」。少报一段并明说是估计，好过报一个更准的数却
+  谎称它确定（宪法 12 条）。要两全得给这一列配一个 `estimated` 标记列。
+- **两列都可空、都不回填。** 本列上线前就存在的行不知道自己被触发过几次，
+  也不知道第一次是什么时候开的。填 0 或 `now()` 会造出一个看起来像真答案的
+  假答案（宪法 12 条）。读取侧的兜底规则只写在 `Alert.EffectiveFirstOpenedAt`
+  一处，HTTP 层调它，不各写一遍。
+- **`alerts.upstream_version_ack` 的主键是 `(environment, metric_key)`**，不含
+  `version`：一条上游只有一个**当前**已核对版本，新的核对覆盖旧的，历史留在
+  审计链里。不复用 `alert_silence`（它是限时窗口、按 `rule_key` 匹配、只挡投递
+  不挡命中——用它实现等于把一件做完的事做成一个 7 天后会复发的提醒），也不
+  挂在 `alerts.alert` 上（那会随保留期清理被删掉，而那个失效没有任何人做错
+  任何事、也不留痕迹）。
 
 - **部分唯一索引覆盖四个活跃状态**（含 `SILENCED`），而不只是
   `OPEN/ACKNOWLEDGED/REOPENED`。这是相对任务书原始描述的一处**有意收紧**：
@@ -410,9 +591,10 @@ worker 若注入 `RunwayThresholdProvider`，每轮评估只读取一次快照�
 | `internal/platform/alerts/reconcile.go` | 评估 → 落库 → 自动恢复 → 投递的编排 |
 | `internal/platform/alerts/notify.go` | Telegram / Webhook / 企业微信 / 扇出 |
 | `internal/platform/alerts/store.go` | 去重 Upsert 与状态转换 |
-| `internal/platform/alerts/actions.go` | 两个 Action 的声明与 Handler |
+| `internal/platform/alerts/actions.go` | 四个 Action 的声明与 Handler |
 | `internal/platform/jobs/alert_evaluate.go` | River 周期任务与渠道装配 |
 | `internal/platform/httpapi/alerts.go` | `GET /api/v1/alerts` |
+| `internal/platform/httpapi/alerts_upstream_versions.go` | `GET /api/v1/alerts/upstream-versions`（已核对版本清单） |
 | `db/migrations/000007_alerts.up.sql` | 表结构与索引 |
 | `web/apps/admin-web/src/pages/AlertsPage.tsx` | 告警中心页 |
 | `deploy/watchdog/README.md` | 外部看门狗（异故障域，独立通知链） |

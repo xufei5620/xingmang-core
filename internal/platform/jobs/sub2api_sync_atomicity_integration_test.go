@@ -142,7 +142,6 @@ func TestSub2APISyncRetryAfterSampleFailureIsCleanReplay(t *testing.T) {
 		return NewSub2APISyncWorker(Sub2APISyncOptions{
 			Environment: environment,
 			InstanceID:  source,
-			Mode:        Sub2APIModeFake,
 			Store:       store,
 			NewClient:   fakeFactory(sub2api.FakeOptions{Now: func() time.Time { return at }}),
 			Now:         func() time.Time { return at },

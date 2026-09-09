@@ -109,8 +109,12 @@ func main() {
 	// 告警的确认与静默是写操作，必须经 Action 内核（宪法 2 条 / ADR-003）。
 	// 注册失败即拒绝启动：一个「告警页有按钮但后端没注册动作」的进程，
 	// 会让运维在真出事的时候才发现确认键点不动。
+	//
+	// 第三个 Action（alerts.upstream_version.acknowledge）还要一个**只读**的
+	// 观测来源：它落库前必须确认「你要核对的版本」与平台自己此刻观测到的
+	// 上游自报版本逐字相同——version 不是「调用方给什么就存什么」。
 	alertStore := alerts.NewStore(pool)
-	if err := alerts.RegisterActions(actionRegistry, alertStore); err != nil {
+	if err := alerts.RegisterActions(actionRegistry, alertStore, ops.NewStore(pool)); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -568,7 +572,10 @@ func main() {
 		ActionRunAudit: auditStore,
 		Alerts:         alertStore,
 		// 静默窗口列表复用同一个 Store：读的是同一张表，不另开一条路径。
-		Silences:                alertStore,
+		Silences: alertStore,
+		// 已核对的上游版本同样复用它。这份清单必须有读路径：它是一个
+		// 抑制器，而看不见的抑制器与不留痕的抑制器是同一种病。
+		UpstreamVersionAcks:     alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,
 		// 内容发布的五个只读端点。仓储与 Action 用同一份实现，不另开一条

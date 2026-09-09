@@ -356,7 +356,7 @@ export function createSilence(
 export const ALERT_RULES: { key: string; label: string }[] = [
   { key: "metric.sync.failed", label: "指标同步失败" },
   { key: "metric.data.stale", label: "指标数据陈旧" },
-  { key: "metric.sync.consecutive_failed", label: "同步连续失败" },
+  { key: "metric.sync.consecutive_failed", label: "同步长期失败" },
   { key: "channel.token.invalid", label: "渠道 token 失效" },
   { key: "channel.balance.low", label: "渠道余额不足" },
   { key: "upstream.version.changed", label: "上游版本变化" },

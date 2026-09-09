@@ -3,6 +3,7 @@ package alerts
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -107,14 +108,63 @@ func okSample(key string, syncedAt time.Time) ops.Observation {
 	}
 }
 
+// fakeAckSource 是「已核对的上游版本」的内存来源。
+//
+// 零值就是「一条都没核对过」——绝大多数用例因此不必关心它，但**必须传一个**：
+// Evaluate 对 nil 来源报错，那是刻意的（漏接的后果是「点了核对但没生效」，
+// 而且不报错、不留痕）。
+type fakeAckSource struct {
+	acks map[string]UpstreamVersionAck
+	err  error
+	// calls 记下取快照的次数，用来钉住「每轮一次，不是每条观测一次」。
+	calls int
+}
+
+func (f *fakeAckSource) ListUpstreamVersionAcks(
+	_ context.Context, _ string,
+) (map[string]UpstreamVersionAck, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.acks, nil
+}
+
+// evaluate 是「没有任何活跃告警」这一支的快捷方式。
+//
+// 大多数用例问的是「这一轮该不该开」，活跃集合为空正是那个前提。要测
+// 「已经开着的告警什么时候关」必须用 evaluateWith 传入活跃集合，或者更好，
+// 从 Reconciler 打进来（见 hysteresis_rule_test.go 里的说明）。
 func evaluate(t *testing.T, src *fakeMetricSource, now time.Time) []Finding {
 	t.Helper()
-	findings, err := NewEvaluator(src, &fakeRunwaySource{}, RuleConfig{}).
-		Evaluate(context.Background(), testEnv, now)
+	return evaluateWith(t, src, &fakeAckSource{}, now, nil).Findings
+}
+
+func evaluateWith(
+	t *testing.T, src *fakeMetricSource, acks *fakeAckSource, now time.Time, active map[string]struct{},
+) EvaluateResult {
+	t.Helper()
+	res, err := NewEvaluator(src, &fakeRunwaySource{}, acks, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, now, active)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	return findings
+	return res
+}
+
+// failedEnough 给某条指标配上「已经连续失败够 N 轮」的历史样本，让 R1 的
+// 迟滞门槛成立。
+//
+// 加了迟滞之后，只有当前观测失败**不再**足以让 R1 命中——那正是这次改动的
+// 要点。凡是「顺带要求 R1 也报出来」的用例（渠道规则跳过、形状损坏不阻断
+// 整轮、审批观测失败……）问的都不是「几轮才算数」，所以这里直接把前提喂满，
+// 门槛本身由 hysteresis_rule_test.go 专门守。
+func failedEnough(src *fakeMetricSource, key string, now time.Time) *fakeMetricSource {
+	if src.samples == nil {
+		src.samples = map[string][]ops.Observation{}
+	}
+	src.samples[key] = failedRunSamples(key, now, DefaultRuleConfig().SyncFailedHysteresisRounds)
+	return src
 }
 
 func findingFor(findings []Finding, ruleKey string) (Finding, bool) {
@@ -159,7 +209,7 @@ func TestEvaluateR1FailedMetric(t *testing.T) {
 	o := freshObservation(revenueMetric, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "upstream_unavailable"
-	src := &fakeMetricSource{observations: []ops.Observation{o}}
+	src := failedEnough(&fakeMetricSource{observations: []ops.Observation{o}}, revenueMetric, now)
 
 	f, ok := findingFor(evaluate(t, src, now), RuleMetricSyncFailed)
 	if !ok {
@@ -212,7 +262,7 @@ func TestEvaluateFailedAndStaleAreMutuallyExclusive(t *testing.T) {
 	o.LastErrorCode = "timeout"
 	o.ObservedAt = at(now, -10*time.Hour) // 又旧又失败
 
-	got := evaluate(t, &fakeMetricSource{observations: []ops.Observation{o}}, now)
+	got := evaluate(t, failedEnough(&fakeMetricSource{observations: []ops.Observation{o}}, revenueMetric, now), now)
 	if countFor(got, RuleMetricDataStale) != 0 {
 		t.Fatalf("失败态不该同时报陈旧: %+v", got)
 	}
@@ -221,66 +271,173 @@ func TestEvaluateFailedAndStaleAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
-// TestEvaluateR4ConsecutiveFailures：连续 2 轮不报、3 轮报。
-func TestEvaluateR4ConsecutiveFailures(t *testing.T) {
-	now := time.Now().UTC()
-	key := revenueMetric
+// chronicSamples 按一串 F/S 字符造样本（升序，最后一条最新）。
+//
+// 用字符串描述序列而不是逐条 append：这些用例的全部内容就是「这一串长什么
+// 样」，写成 "FFSFFFFFFFFF" 一眼就读得出来，也让边界用例（差一条）不会因为
+// 手工 append 数错而变成一条恒真的断言。
+func chronicSamples(key string, now time.Time, pattern string) []ops.Observation {
+	out := make([]ops.Observation, 0, len(pattern))
+	for i, c := range pattern {
+		at := now.Add(-time.Duration(len(pattern)-i) * time.Minute)
+		if c == 'F' {
+			out = append(out, failedSample(key, at))
+			continue
+		}
+		out = append(out, okSample(key, at))
+	}
+	return out
+}
+
+func chronicSource(key string, now time.Time, pattern string) *fakeMetricSource {
 	o := freshObservation(key, now)
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "timeout"
-
-	// 样本按 synced_at 升序（与 ops.Store.ListSamples 的契约一致）。
-	twoInARow := []ops.Observation{
-		okSample(key, now.Add(-15*time.Minute)),
-		failedSample(key, now.Add(-10*time.Minute)),
-		failedSample(key, now.Add(-5*time.Minute)),
-	}
-	src := &fakeMetricSource{
+	return &fakeMetricSource{
 		observations: []ops.Observation{o},
-		samples:      map[string][]ops.Observation{key: twoInARow},
+		samples:      map[string][]ops.Observation{key: chronicSamples(key, now, pattern)},
 	}
-	if got := evaluate(t, src, now); countFor(got, RuleSyncConsecutiveFailed) != 0 {
-		t.Fatalf("连续 2 轮不该命中 R4: %+v", got)
-	}
-	if src.sampleCalls != 1 {
-		t.Fatalf("当前失败时应回看一次历史样本，实际 %d 次", src.sampleCalls)
-	}
+}
 
-	threeInARow := append(twoInARow, failedSample(key, now.Add(-time.Minute)))
-	src = &fakeMetricSource{
-		observations: []ops.Observation{o},
-		samples:      map[string][]ops.Observation{key: threeInARow},
+// TestChronicFailureCountsInAWindowNotAStreak：R4 的计数改成滑动窗口。
+//
+// **它替换（不是补充）了原来的 TestEvaluateR4StreakBrokenBySuccess。**
+// 那条用例断言的是相反的事——「任意一条成功样本打断连续串」——而那正是
+// 2026-09-08 报告 §二点名的病：card_sync 每 5 分钟失败一次、三天没停过，
+// 却因为偶尔成功一轮而**从来没升级过**。两条断言不可能同时绿，所以就地改写
+// 而不是留着旧的再加一条新的。
+func TestChronicFailureCountsInAWindowNotAStreak(t *testing.T) {
+	now := time.Now().UTC()
+	key := revenueMetric
+	cfg := DefaultRuleConfig()
+	w, k := cfg.ChronicWindowSamples, cfg.ChronicFailureThreshold
+
+	// 窗口内恰好 k 次失败，但中间夹着成功——旧实现（遇到成功即 break）
+	// 只会数出尾部那一小串，这一条在旧实现下是红的。
+	pattern := strings.Repeat("F", k-1) + "S" + "F"
+	pattern = strings.Repeat("S", w-len(pattern)) + pattern
+	if len(pattern) != w {
+		t.Fatalf("用例自身构造错了：pattern 长度 %d, want %d", len(pattern), w)
 	}
+	src := chronicSource(key, now, pattern)
 	f, ok := findingFor(evaluate(t, src, now), RuleSyncConsecutiveFailed)
 	if !ok {
-		t.Fatal("连续 3 轮应命中 R4")
+		t.Fatalf("窗口内 %d 次失败（中间夹一次成功）应命中 R4，序列 %s", k, pattern)
 	}
 	if f.Severity != SeverityCritical {
 		t.Fatalf("严重度 = %s, want critical", f.Severity)
 	}
+	// 文案必须说的是窗口口径，不能还写「连续」——规则声明与判定同步改了，
+	// 详情文案是人唯一读得到的那份解释。
+	if strings.Contains(f.Detail, "连续") {
+		t.Fatalf("R4 详情不该再说「连续」：%s", f.Detail)
+	}
+	if !strings.Contains(f.Detail, fmt.Sprintf("最近 %d 条样本里失败 %d 次", w, k)) {
+		t.Fatalf("R4 详情要写清窗口口径：%s", f.Detail)
+	}
+	// 与既有成本纪律：一轮一条指标只查一次历史样本（R1 迟滞与 R4 共用）。
+	if src.sampleCalls != 1 {
+		t.Fatalf("R1 与 R4 应共用一次历史样本查询，实际 %d 次", src.sampleCalls)
+	}
+
+	// 差一次：窗口内 k-1 次失败不命中。边界在 k 而不是 k-1。
+	// 最后一条必须是 F——当前观测失败是 R4 的前提，这里让样本与它一致。
+	below := strings.Repeat("F", k-2) + strings.Repeat("S", w-(k-1)) + "F"
+	if len(below) != w {
+		t.Fatalf("用例自身构造错了：below 长度 %d, want %d", len(below), w)
+	}
+	if n := strings.Count(below, "F"); n != k-1 {
+		t.Fatalf("用例自身构造错了：失败 %d 次, want %d（%s）", n, k-1, below)
+	}
+	if got := evaluate(t, chronicSource(key, now, below), now); countFor(got, RuleSyncConsecutiveFailed) != 0 {
+		t.Fatalf("窗口内只有 %d 次失败不该命中 R4，序列 %s: %+v", k-1, below, got)
+	}
 }
 
-// TestEvaluateR4StreakBrokenBySuccess：中间夹一条成功就不算连续。
-// 这是 R4 的「恢复条件」：任意一条成功样本打断连续串。
-func TestEvaluateR4StreakBrokenBySuccess(t *testing.T) {
+// TestChronicFailureIgnoresFailuresOutsideTheWindow：窗口是滑动的，不是
+// 「历史上失败过 K 次就报」。
+//
+// 没有这一条，把窗口放大到整段回看范围（等于「24 小时内失败过 9 次就报」）
+// 也能让上一条测试绿——那样一条早已恢复的链路会在第二天继续被报。
+func TestChronicFailureIgnoresFailuresOutsideTheWindow(t *testing.T) {
 	now := time.Now().UTC()
 	key := revenueMetric
-	o := freshObservation(key, now)
-	o.Status = ops.SyncFailed
-	o.LastErrorCode = "timeout"
+	cfg := DefaultRuleConfig()
+	w, k := cfg.ChronicWindowSamples, cfg.ChronicFailureThreshold
 
-	src := &fakeMetricSource{
-		observations: []ops.Observation{o},
-		samples: map[string][]ops.Observation{key: {
-			failedSample(key, now.Add(-20*time.Minute)),
-			failedSample(key, now.Add(-15*time.Minute)),
-			okSample(key, now.Add(-10*time.Minute)), // 打断
-			failedSample(key, now.Add(-5*time.Minute)),
-			failedSample(key, now.Add(-time.Minute)),
-		}},
-	}
+	// 窗口之外全是失败，窗口之内只有最后一条失败。
+	pattern := strings.Repeat("F", k) + strings.Repeat("S", w-1) + "F"
+	src := chronicSource(key, now, pattern)
 	if got := evaluate(t, src, now); countFor(got, RuleSyncConsecutiveFailed) != 0 {
-		t.Fatalf("成功样本应打断连续串: %+v", got)
+		t.Fatalf("窗口之外的失败不该被数进来，序列 %s: %+v", pattern, got)
+	}
+}
+
+// TestChronicFailureRuleDeclarationMatchesTheJudgement：规则声明与判定必须
+// 一起改。
+//
+// 只改判定不改 Rule.Recovery，文档与告警目录里说的就是**另一条规则**——
+// 那正是 2026-09-08 报告 §四点名的「安静地给你一个旧答案」。
+func TestChronicFailureRuleDeclarationMatchesTheJudgement(t *testing.T) {
+	cfg := DefaultRuleConfig()
+	var r Rule
+	for _, rule := range Rules(cfg) {
+		if rule.Key == RuleSyncConsecutiveFailed {
+			r = rule
+		}
+	}
+	if r.Key == "" {
+		t.Fatal("R4 不在规则清单里")
+	}
+	// rule_key **保持不变**：它是静默窗口的匹配键与历史分组键。
+	if r.Key != "metric.sync.consecutive_failed" {
+		t.Fatalf("R4 的 rule_key 不许改：%s", r.Key)
+	}
+	if strings.Contains(r.Recovery, "任意一条成功样本") {
+		t.Fatalf("R4 的恢复条件还写着旧语义：%s", r.Recovery)
+	}
+	if !strings.Contains(r.Condition, fmt.Sprintf("最近 %d 条样本里失败 ≥ %d 次",
+		cfg.ChronicWindowSamples, cfg.ChronicFailureThreshold)) {
+		t.Fatalf("R4 的条件没写窗口口径：%s", r.Condition)
+	}
+	// **正向断言**：恢复条件必须逐字写出那个阈值。
+	//
+	// 上面那条「不含旧短语」是缺席型断言，它在任何措辞下都容易恒真——
+	// 连「最新一轮成功就关闭」这种与判定完全相反的写法都能过。真正驱动一轮
+	// 恢复的是 chronic_recovery_test.go；这里只保证声明里的数字来自常量。
+	if !strings.Contains(r.Recovery, fmt.Sprintf("回落到 %d 次以下", cfg.ChronicFailureThreshold)) {
+		t.Fatalf("R4 的恢复条件没写出阈值：%s", r.Recovery)
+	}
+	// 恢复条件必须说清「中途成功不关闭」——那是它与开的判据不同的地方，
+	// 也是运营读这句话时唯一要拿走的信息。
+	if !strings.Contains(r.Recovery, "也不关闭告警") {
+		t.Fatalf("R4 的恢复条件没说清中途成功不关闭：%s", r.Recovery)
+	}
+}
+
+// TestChronicWindowResistsPureFlapping：一串完全交替的 F,S,F,S…… 不该命中 R4。
+//
+// 这是 K 为什么不是 3 的理由，也是这次改动最容易犯的错：R1 的迟滞刚把翻面
+// 抖动压住，如果 R4 的阈值取得太低，同一个抖动会原样从 R4 冒出来，
+// 而且同样是 critical——等于把病换个规则键再犯一次。
+func TestChronicWindowResistsPureFlapping(t *testing.T) {
+	now := time.Now().UTC()
+	key := revenueMetric
+	cfg := DefaultRuleConfig()
+	w := cfg.ChronicWindowSamples
+
+	pattern := strings.Repeat("SF", w) // 尾部是 F，当前观测失败的前提成立
+	pattern = pattern[len(pattern)-w:]
+	src := chronicSource(key, now, pattern)
+	got := evaluate(t, src, now)
+	if countFor(got, RuleSyncConsecutiveFailed) != 0 {
+		t.Fatalf("完全交替的抖动不该命中 R4（阈值 %d 取低了），序列 %s: %+v",
+			cfg.ChronicFailureThreshold, pattern, got)
+	}
+	// 同一串抖动也不该命中 R1——那是迟滞的职责，这里顺带钉一下两条规则
+	// 不会在同一个抖动上一前一后接力。
+	if countFor(got, RuleMetricSyncFailed) != 0 {
+		t.Fatalf("完全交替的抖动不该命中 R1: %+v", got)
 	}
 }
 
@@ -405,7 +562,8 @@ func TestEvaluateChannelRulesSkippedWhenSyncFailed(t *testing.T) {
 	o.Status = ops.SyncFailed
 	o.LastErrorCode = "timeout"
 
-	got := evaluate(t, &fakeMetricSource{observations: []ops.Observation{o}}, now)
+	got := evaluate(t, failedEnough(
+		&fakeMetricSource{observations: []ops.Observation{o}}, DefaultChannelBalanceMetricKey, now), now)
 	if countFor(got, RuleChannelBalanceLow) != 0 || countFor(got, RuleChannelTokenInvalid) != 0 {
 		t.Fatalf("同步失败时不该用旧值判渠道规则: %+v", got)
 	}
@@ -444,7 +602,8 @@ func TestEvaluateMalformedChannelsDoesNotFailRound(t *testing.T) {
 	failing.Status = ops.SyncFailed
 	failing.LastErrorCode = "timeout"
 
-	got := evaluate(t, &fakeMetricSource{observations: []ops.Observation{broken, failing}}, now)
+	got := evaluate(t, failedEnough(
+		&fakeMetricSource{observations: []ops.Observation{broken, failing}}, "sub2api.users.total", now), now)
 	if countFor(got, RuleMetricSyncFailed) != 1 {
 		t.Fatalf("形状损坏的指标不该阻断其它规则: %+v", got)
 	}
@@ -578,18 +737,20 @@ func TestRuleConfigNormalizationRejectsDisablingThresholds(t *testing.T) {
 	// 正是最常见的调用方式，只挡负数会让「忘了填阈值」变成一条永不触发
 	// 的规则。这条断言是那个 bug 的回归。
 	for _, threshold := range []int64{0, -1} {
-		e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{},
+		e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{},
 			RuleConfig{BalanceThresholdMinorUnits: threshold})
 		if got := e.Config().BalanceThresholdMinorUnits; got != DefaultBalanceThresholdMinorUnits {
 			t.Fatalf("阈值 %d 应回落到默认值，实际 %d", threshold, got)
 		}
 	}
 
-	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{
-		CollectionInterval:          -time.Hour,
-		BalanceThresholdMinorUnits:  -1,
-		ConsecutiveFailureThreshold: 0,
-		ChannelBalanceMetricKey:     "   ",
+	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, RuleConfig{
+		CollectionInterval:         -time.Hour,
+		BalanceThresholdMinorUnits: -1,
+		SyncFailedHysteresisRounds: 0,
+		ChronicWindowSamples:       0,
+		ChronicFailureThreshold:    0,
+		ChannelBalanceMetricKey:    "   ",
 	})
 	got := e.Config()
 	if got.CollectionInterval != DefaultCollectionInterval {
@@ -598,11 +759,27 @@ func TestRuleConfigNormalizationRejectsDisablingThresholds(t *testing.T) {
 	if got.BalanceThresholdMinorUnits != DefaultBalanceThresholdMinorUnits {
 		t.Fatalf("余额阈值 = %d, want %d", got.BalanceThresholdMinorUnits, DefaultBalanceThresholdMinorUnits)
 	}
-	if got.ConsecutiveFailureThreshold != DefaultConsecutiveFailureThreshold {
-		t.Fatalf("连续失败阈值 = %d", got.ConsecutiveFailureThreshold)
+	// 迟滞轮数为 0 等于「立刻开、立刻关」——恰好把 2026-09-08 那格每 5 分钟
+	// 翻一次面的病原样退回来，而且不报错。零必须与负数一样被挡住。
+	if got.SyncFailedHysteresisRounds != DefaultSyncFailedHysteresisRounds {
+		t.Fatalf("迟滞轮数 = %d, want %d", got.SyncFailedHysteresisRounds, DefaultSyncFailedHysteresisRounds)
+	}
+	if got.ChronicWindowSamples != DefaultChronicWindowSamples {
+		t.Fatalf("滑动窗口 = %d, want %d", got.ChronicWindowSamples, DefaultChronicWindowSamples)
+	}
+	if got.ChronicFailureThreshold != DefaultChronicFailureThreshold {
+		t.Fatalf("窗口内失败阈值 = %d, want %d", got.ChronicFailureThreshold, DefaultChronicFailureThreshold)
 	}
 	if got.ChannelBalanceMetricKey != DefaultChannelBalanceMetricKey {
 		t.Fatalf("渠道指标键 = %q", got.ChannelBalanceMetricKey)
+	}
+
+	// K > W 等于「永不触发」，但看起来像配了一个阈值。回落到窗口长度。
+	clamped := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, RuleConfig{
+		ChronicWindowSamples: 4, ChronicFailureThreshold: 99,
+	}).Config()
+	if clamped.ChronicFailureThreshold != 4 {
+		t.Fatalf("K > W 应钳到窗口长度，实际 %d", clamped.ChronicFailureThreshold)
 	}
 }
 

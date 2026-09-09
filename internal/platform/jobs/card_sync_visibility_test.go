@@ -115,21 +115,10 @@ func cardSyncWorkerAgainst(t *testing.T, h http.HandlerFunc) (*CardSyncWorker, *
 	return w, &buf, obs
 }
 
-func logLines(t *testing.T, buf *bytes.Buffer) []map[string]any {
-	t.Helper()
-	var out []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			t.Fatalf("日志不是 JSON: %q", line)
-		}
-		out = append(out, m)
-	}
-	return out
-}
+// 本片原本在这里也放了一个同名 logLines（入参是 *bytes.Buffer）。
+// XM-OPS-TRUTH 在 effective_mode_test.go 里加了一个同名、同语义、入参是
+// string 的版本，同包内重名编译不过。集成合并 2026-09-09 保留那一个
+// （入参更通用，且 logEvents 建在它上面），这里的调用点改传 buf.String()。
 
 // 上游的业务码与脱敏后的 message 必须进作业日志。
 //
@@ -143,7 +132,7 @@ func TestCardSyncWorkerLogsUpstreamReason(t *testing.T) {
 
 	_ = w.Work(context.Background(), &river.Job[CardSyncArgs]{})
 
-	lines := logLines(t, buf)
+	lines := logLines(t, buf.String())
 	if len(lines) == 0 {
 		t.Fatal("同步失败必须留下日志")
 	}
@@ -297,7 +286,7 @@ func TestCardSyncWorkerPartialSuccessIsNotAJobFailure(t *testing.T) {
 	}
 
 	var sawWarn bool
-	for _, m := range logLines(t, buf) {
+	for _, m := range logLines(t, buf.String()) {
 		if m["msg"] == "卡片同步部分成功" {
 			sawWarn = true
 		}

@@ -33,8 +33,14 @@ func catalog(t *testing.T) string {
 	return string(body)
 }
 
-// 七条告警规则的规则键必须逐个出现在目录里。规则键就是消息里「规则：」
+// 告警规则的规则键必须逐个出现在目录里。规则键就是消息里「规则：」
 // 那一行的取值，也就是收件人用来分类的东西。
+//
+// 除了逐条对账，还要对**条数**：目录那一节的标题写着「N 条规则」，正文
+// 又说「取值只有这 N 个」。这两个数此前是手写的，于是它们悄悄漂了——
+// 合并 XM-CARD-VISIBILITY 与 XM-OPS-TRUTH 时发现基线上写的是「七条」，
+// 而 alerts.Rules() 当时已经有八条。逐条对账拦不住这种漂：漏写的那条
+// 不在表里才会红，而条数写错时每一条都在表里，测试照样全绿。
 func TestCatalogListsEveryAlertRule(t *testing.T) {
 	doc := catalog(t)
 	rules := alerts.Rules(alerts.RuleConfig{})
@@ -47,6 +53,34 @@ func TestCatalogListsEveryAlertRule(t *testing.T) {
 				"新增规则必须同时告诉运营收到它代表什么", rule.Key)
 		}
 	}
+
+	count := chineseNumeral(t, len(rules))
+	for _, want := range []string{
+		"### " + count + "条规则",
+		"「规则」那一行的取值只有这" + count + "个。",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("目录里找不到 %q——alerts.Rules() 现在有 %d 条规则，"+
+				"CATALOG.md 里那一节的条数没跟着改", want, len(rules))
+		}
+	}
+}
+
+// chineseNumeral 把规则条数翻成目录里用的中文数字。
+//
+// 只覆盖到十二：超出这个范围时目录那一节的写法（标题一个数、正文一个数）
+// 本身就该重新想，与其让测试猜一个词形，不如当场失败让人来定。
+func chineseNumeral(t *testing.T, n int) string {
+	t.Helper()
+	words := []string{
+		"零", "一", "二", "三", "四", "五", "六",
+		"七", "八", "九", "十", "十一", "十二",
+	}
+	if n < 0 || n >= len(words) {
+		t.Fatalf("规则条数 %d 超出本测试认识的中文数字范围，"+
+			"请同时更新 CATALOG.md 的写法与这里的对照表", n)
+	}
+	return words[n]
 }
 
 // 卡片与接码的消息种类同理。这些字符串会进消息的「编号：」那一行。
@@ -90,12 +124,18 @@ func TestCatalogSamplesAreRealRenderings(t *testing.T) {
 	doc := catalog(t)
 	now := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
 
+	firstOpened := time.Date(2026, 9, 6, 7, 55, 0, 0, time.UTC)
+	triggers := int32(1)
 	alertSample := alerts.FormatWeComMarkdown(alerts.Alert{
 		RuleKey: "metric.sync.failed", Title: "指标 " + sampleMetricKey + " 同步失败",
 		Severity: alerts.SeverityCritical, Status: alerts.StatusOpen, Environment: "production",
 		SourceMetricKey: sampleMetricKey, Detail: "来源 sub2api-prod，错误码 timeout。",
-		OpenedAt:   time.Date(2026, 9, 6, 7, 55, 0, 0, time.UTC),
+		OpenedAt:   firstOpened,
 		LastSeenAt: now, FireCount: 4,
+		// 示例要照 000054 之后的真实形态渲染：评估轮数与触发次数是两个数。
+		// 用旧行（两列都是 NULL）当示例的话，目录里会永远挂着一行
+		// 「触发次数：—（未记录）」，而那是过渡期形态，不是稳态。
+		TriggerCount: &triggers, FirstOpenedAt: &firstOpened,
 	})
 	if !strings.Contains(doc, alertSample) {
 		t.Errorf("目录里的告警示例与真实渲染结果不一致，实际渲染是：\n%s", alertSample)
