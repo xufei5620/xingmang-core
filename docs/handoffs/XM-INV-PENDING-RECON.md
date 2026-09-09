@@ -14,6 +14,12 @@
 | 追加 | 交接单补门禁实测时间 | `62b280f` |
 | 追加 | 被拒绝 apply 的横幅 | `1e08a76` |
 | 追加 | **第一轮复审修复**（重评窗口、报告同源、STOP 表同源、手册 SQL 与路径） | `41e65d8` |
+| 追加 | 兄弟 kind 片段改 docker run 形状；补 §8#4 与去重 follow_up | `c5b8ea3` |
+| 追加 | 交接单补交付前最后一次门禁实测时间 | `38d5e1e` |
+| 追加 | **终审 major 1**：报告补上派生自己的连击闸 | `eeb7775` |
+| 追加 | **终审 major 2 + 3 minor**：未评估计数补锚前下界并与评估器同源 | `7e95f42` |
+| 追加 | **RC108 影子 not_ready 根因一**：softfail 回滚只删本事务写下的额度 | `fa36478` |
+| 追加 | **外部复审四条**：合成三态结局 + 冲突审计；§4.1 拆成 A/B 两次跑；§9.2 补生产事实；三个指标口径改正 | `PENDING-HASH` |
 
 ---
 
@@ -130,6 +136,7 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M36 | 加一个既不进清单也不进手册的 blocker | 发现式同源用例 | 红 |
 | M37 | softfail 回滚去掉 `inserted` 守卫（删不属于自己的额度） | FK 复现用例 | 红，**报出与影子评估一模一样的错误串**（SQLSTATE 23001） |
 | M38 | 派生候选查询去掉窗口上界 | 零宽窗口用例 | 红（零宽也派生了） |
+| M39 | 同键冲突行当成 identical（不写冲突审计） | 同键冲突用例 | 红 |
 
 M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
 漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
@@ -176,6 +183,9 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **RC108 影子复盘修复后** `go vet ./...` | 14:08:42 | 14:08:43 | 1s |
 | **RC108 影子复盘修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **14:08:43** | **14:17:37** | **8m54s，exit 0，30 包全 ok** |
 | **RC108 影子复盘修复后** `check-no-secrets.ps1` | 14:17:37 | 14:17:38 | exit 0 |
+| **外部复审四条修复后** `go vet ./...` | 14:28:05 | 14:28:06 | 1s |
+| **外部复审四条修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **14:28:06** | **14:36:16** | **8m10s，exit 0，30 包全 ok** |
+| **外部复审四条修复后** `check-no-secrets.ps1` | 14:38:54 | 14:38:55 | 1s，exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
@@ -192,71 +202,77 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 - **影子评估**：C5 属于评估器改动，发布前必做；本切片没有跑（需要生产备份与 age 身份，
   不在实现范围内）。**怎么跑、怎么判见 §4.1，照那节执行。**
 
-### 4.1 RC108 影子评估：命令、预期 diff、判据
+### 4.1 影子评估：拆成两次跑（RC108 复盘后重写）
 
-第一轮复审指出的三件事都成立，先摆出来，因为它们决定了这一节为什么是这个样子：
+**一条命令验不完。** `--reevaluate-evidence` 会清掉锚后的全部评估行，而 B1 的闸要求「评估器
+不欠任何真实检查点的判定」才允许闲置派生——清完之后用户 12 有 658 张欠判的真实检查点，闸必然
+先拦住派生；等这一轮把它们判完，同一个作业不会回头再派生，冻结副本上也没有新周期让它重新排队
+（`rounds_run=1` 就结束）。所以验 C5 的那次跑，结构上不可能同时验到 C1/C2。
 
-1. `--reproject-all` 单独对 C5 是空转。评估器只挑 `NOT EXISTS(evaluation)` 的证据，生产快照
-   里每条检查点都已经有评估行，所以只重放投影不会让新分类器判任何东西。
-2. `--reevaluate-evidence` 才会清掉评估行让新分类器重判，但手册对它的既有判据是「重做出来的
-   状态必须与生产一致」，而 C5 的全部目的就是改变其中一部分状态。照那条判据判，本次必然
-   「不一致」。所以**本次的判据不是「一致」，是「变化恰好等于下面的清单」**。
-3. C1/C2 的闲置派生需要窗口。冻结副本上没有任何东西发布水位，`--reproject-all` 只按各账号
-   自己的 `finalized_through` 排作业（窗口宽度为零），派生不了。要 `--finalization-window`
-   才会按「一次 finalize 会请求的窗口」排队。
+**先说清 `--finalization-window` 到底做什么**（我上一版写错了）：它**不保证**给出非零窗口。
+它按副本已有的水位算 `GREATEST(finalized_through, cutover_at, min(水位) − 延迟 − lag)`，再用
+`--finalization-window-provable` 把上界砍到「窗口内每条事实都已被看见」的那个已发布天花板；
+**找不到 finalized_through 之后的合格周期就回落到 finalized_through 本身**
+（`eligibility_shadow_report.go:471` 附近）。RC108 就是这样得到零宽窗口的。
 
-命令（服务器上，镜像 load 之后、`roll-forward.sh` 之前）：
+**还要知道它不覆盖什么**：`--finalization-window` 直接给账号写作业行，**绕过了 C1 的排队
+谓词**。所以影子评估**验不到 C1**（「哪些账号该被排队」那一半），只验到 C2（「排上了之后会
+不会派生、判成什么」）。C1 只有单测与集成测试覆盖（`TestIdlePendingAccountExits…`、
+`TestIdlePendingAccountWithNoStreak…`、`TestFinalizeDoesNotWaitOnAHeldJobRow…`），这一点要在
+发布记录里写明，不要把影子 ready 读成 C1 也验过了。
+
+#### 跑法 A —— 验 C1/C2 的派生与用户 12 退出
 
 ```bash
 BACKUP_DIR=/root/invoice-system/backups \
 BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
 AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
-  bash deploy/rehearsal/shadow-eval.sh --image-tag 0.1.0-rc108 \
+  bash deploy/rehearsal/shadow-eval.sh --image-tag <本次 tag> \
     --reproject-all \
-    --reevaluate-evidence \
     --finalization-window --finalization-window-provable
 ```
 
-> **不要加 `--finalization-window-lag 1h`。** 上一版本节推荐过它，RC108 的影子评估就是
-> 因此判 not_ready 的——这是我写错的，改正见 §8.7。lag 是给「落后好几天」的追赶窗口用的；
-> 12 与 34 的 finalized_through 只落后水位约 20 分钟，减去 15 分钟延迟再减 1 小时就落到
-> finalized_through 之下，`GREATEST` 把窗口压成零宽，什么也派生不了。
+**不带** `--reevaluate-evidence`（保留评估行，B1 的闸才不会拦），**不带**
+`--finalization-window-lag`：RC108 用了 `1h`，而 12 与 34 的 `finalized_through` 只落后水位
+约 20 分钟，再减 15 分钟延迟、再减 1 小时就落到 `finalized_through` 之下，窗口被压成零宽
+（§9.2）。lag 只对落后天级的追赶窗口有意义，取值必须小于「水位 − 延迟 − finalized_through」。
+判据，按顺序看：
 
-每个参数为什么在这里：
+1. **先看窗口**：`pending_accounts[].requested_through` 必须**严格大于**该账号的
+   `finalized_through`。相等就是零宽窗口，这份报告对 C1/C2 没有任何信息量，重跑之前不要往下读。
+2. 用户 12：出现一条 `idle_reevaluation:true` 的结转证明 → 其评估 `matched` → 连击 1→2 →
+   状态 `active`。
+3. 其余账号状态不变，不新增 open 冻结。
+4. `verdict=ready`、无投影错误。
 
-| 参数 | 理由 |
-| --- | --- |
-| `--reproject-all` | 另外两个开关都要求它；也是「这次真的跑过账号」的前提（`AccountsProjected==0` 直接判 not_ready） |
-| `--reevaluate-evidence` | 唯一能让 C5 的新分类器重判既有检查点的开关；不给它，C5 在影子上根本没被执行 |
-| `--finalization-window` | 给 C1/C2 一个非零窗口；不给它，闲置派生一次都不会发生 |
-| ~~`--finalization-window-lag 1h`~~ | **删掉**。见 §8.7：对落后仅 20 分钟的账号，1h 的 lag 直接把窗口压成零宽。只有当账号落后天级（追赶窗口）时才考虑它，且取值必须小于「水位 − 延迟 − finalized_through」 |
-| `--finalization-window-provable` | 把每个窗口砍到「窗口内每条事实都已被看见」的那个已发布 balances 天花板，正是 `ensureBalanceCarryForwardProofTx` 需要的 |
+#### 跑法 B —— 验 C5 与用户 34
 
-**判据一（自动，必要不充分）**：`verdict=ready`、退出码 0。但要知道它只检查三件事
-（`eligibility-shadow/report.go` 的 `EvaluateReadiness`）：跑过账号、没有**新出现的冻结原因
-类别**、没有投影错误。它**不**比较 `eligibility_status`，所以 pending→active 不会让它变红；
-它也**不**会发现「SOURCE_GAP 落到了一个原本没有 SOURCE_GAP 的账号上」，只要这个类别在基线里
-已经存在。自动判据是必要条件，不是充分条件。
+同一条命令再加 `--reevaluate-evidence`。判据：
 
-**判据二（人工，逐账号 diff —— 这才是通过判据）**：verdict 只比较冻结原因类别，评估状态的
-变化它根本看不见，所以通过与否由这一步决定。对 `shadow-eval.json` 逐账号列出 before/after 的
-`eligibility_status`、连击、证明数，每一处差异都要能由 `signedExpectedUnits` 或闲置派生解释
-并被评审。生产共 12 个账号，基线 active 9、frozen 1（2222）、
-`not_invoiceable_pending_reconciliation` 2（用户 12、34）。看 `after.accounts[]`，
-**必须恰好只有下面这些变化**：
+1. **无投影错误**（这是 RC108 判 not_ready 的那一条；根因见 §9.1，已修）。
+2. 用户 34 的作业跑完（不再 `PROJECTION_FAILED`），其评估差异可由有符号口径解释。
+3. **用户 12 在 B 里不退出，属预期**——清完评估后它有几百张欠判检查点，B1 的闸按设计拦住派生。
+   不要把这一条读成回归。
+4. 已知伪象：`--reevaluate-evidence` 只清评估行，**不清旧的合成额度与其分配**，所以 34 的
+   `UNKNOWN_POSITIVE` 条数在影子上与生产不可比。跑前跑后各数一次
+   `source_credit_events WHERE credit_kind='UNKNOWN_POSITIVE'`，差值对不上就是这个伪象。
+   （彻底修它要动 `eligibility-shadow` 的 rehearsal 步骤，不在本片范围，见 §9.1(c)。）
 
-| 账号 | 预期 | 依据 |
+#### 报告里三个容易误读的指标
+
+| 字段 | 它**不是**什么 | 它是什么 |
 | --- | --- | --- |
-| 用户 12 `acdcdce9-c7f4-4cb4-9a02-ce527849a440` | 出现一条 `idle_reevaluation:true` 的结转证明，其评估 `matched`，连击 1→2，状态 → `active` | C1+C2；它 09-06 11:29:30Z 之后无检查点，连击停在 1 |
-| 用户 34 `40bd883d-26fa-4938-b8c8-0f51c8b88686` | 正向检查点在有符号口径下改判：合成一条 `UNKNOWN_POSITIVE`（量级 ≈ 09-06 17:18 那笔加款 + 当时 deficit），随后 `matched`；状态 → `active`，或至少连击 ≥1 | C5 |
-| 其余 9 个 active | 状态仍 `active`，不新增 open 冻结 | C5 对 `UnallocatedUnits=0` 的账号逐字节不变；有欠账的账号只会被判得更宽松，不会更严 |
-| 2222（frozen） | 仍 `frozen`，冻结原因不变 | 本切片不碰冻结路径 |
+| `accounts_released` | **不是**退出 pending 的账号数 | `--release-catchup` 清掉 `catchup_key_hmac` 的账号数；没给那个参数时恒为 0 |
+| `projection_version` 增量 | **不是**跑了几轮 | 一次作业内 reproject/评估/进出 pending 各自都会 +1，8 个增量可能只是一轮 |
+| `queue_drained` | **不是**「所有账号都处理成功」 | 只表示当下没有可立即领取的作业；失败后按退避重排的作业也不算「可领取」 |
 
-预期会变的账号要在跑之前先列出来，不要跑完再补。用户 12、34 已点名；此外任何
-`UnallocatedUnits>0` 且上游最新余额为正的账号都可能被 C5 改判，清单从副本上取：
+#### 预期会变的账号，跑前先列出来
+
+用户 12、34 已点名。此外任何未分配用量 > 0 且上游最新余额为正的账号都可能被 C5 改判，清单从
+副本上取：
 
 ```bash
-# 在影子副本上跑（不是生产）：非现金/现金池余额、未分配用量、最新一张检查点的余额
+# 在影子副本上跑（不是生产）
 docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' -c \
 "SELECT eas.external_account_id, eas.eligibility_status, eas.non_invoiceable_overage_units,
         c.balance_service_units, c.balance_negative, c.as_of
@@ -270,22 +286,15 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
  ORDER BY eas.external_account_id"
 ```
 
-`non_invoiceable_overage_units` 是账号行上记着的未分配用量（`recordUsageOverageTx` 写的），它
-大于 0 且最新检查点余额为正的账号，就是 C5 会改判的那一批。跑之前把这个清单贴进发布记录，
-跑完逐个对照。
+**清单之外的任何变化都是 not ready**：某个 active 账号进了 pending 或 frozen、某个账号多出
+`SOURCE_GAP`、`eligibility.balance_blip.rebaselined` 或
+`eligibility.balance_blip.synthesis_conflict` 出现在预期之外的账号上——停下来查。
 
-**判据三**：清单之外的任何变化都是 not ready——某个 active 账号进了 pending 或 frozen、某个
-账号多出 `SOURCE_GAP`、`eligibility.balance_blip.rebaselined` 出现在用户 34 以外的账号上、
-合成额度出现在预期之外的账号上——停下来查，不要发布。
-
-两个已知的影子专有伪象，看到不要当回归：
-
-- `--reevaluate-evidence` 是否同时删除副本上已合成的 `UNKNOWN_POSITIVE` 额度，我没有证实
-  （设计 §8 第 8 条）。若不删，用户 34 在影子上会出现「旧合成 + 新合成」两条，生产不会。
-  跑之前先在副本上数一次 `source_credit_events WHERE credit_kind='UNKNOWN_POSITIVE'`，跑完
-  再数，差值对不上就是这个伪象。
-- 快照不带 `pending_reconciliation_consecutive_matches`（`eligibility_shadow_report.go`），
-  连击要另外用 psql 在副本上读。
+**关于 `verdict`**：它只检查三件事（`eligibility-shadow/report.go` 的 `EvaluateReadiness`）：
+跑过账号、没有**新出现的冻结原因类别**、没有投影错误。它**不**比较 `eligibility_status`，
+也发现不了 SOURCE_GAP 落到一个原本没有它的账号上。`ready` 是必要条件，不是充分条件；通过与否
+由上面的逐账号 diff 决定。快照不带 `pending_reconciliation_consecutive_matches`，连击要另外用
+psql 在副本上读。
 
 顺带一条实现现场的坑：`gofmt -w internal/postgresstore/` 会把整包文件的 CRLF 改成 LF，
 `git status` 于是显示 78 个文件被改。仓库 `core.autocrlf=true`，所以 `git diff` 对这些文件是
@@ -683,6 +692,15 @@ C5 没有引入新的撞键面，但它把更多账号推进正向确认路径�
 **是影子专有还是生产也会？影子专有。** 生产的 finalize 用
 `GREATEST(cutover_at, min(水位) − 延迟)`，没有 lag、没有 provable 裁剪；水位每分钟随周期发布
 前移，所以窗口对活着的源恒为正宽。12 在生产上的路径仍是 §7 写的那条。
+
+**外部复核（GPT）用生产只读补上的最后一环**：恰等于 `F=07:46:06.055` 的已发布 balances 周期
+**有 0 个**（前一个 07:45:43.6，后一个 07:46:46.6）。所以候选列表是空的，
+`deriveIdlePendingCarryForwardProofTx` 在开头的空候选处就返回了——**五道闸一道都没跑到**。
+这也纠正了我上面「窗口里没有周期」的说法在精度上的不足：不是「闸拦住了」，是根本没有候选。
+
+顺带纠正 `--finalization-window` 的作用：它**不保证**给出非零窗口，找不到 F 之后的合格周期就
+回落到 F 本身；而且它直接给账号写作业行、绕过 C1 的排队谓词，所以影子评估**不覆盖 C1**，
+只覆盖 C2。已写进 §4.1。
 
 **重跑的判据**：按 §4.1 改正后的命令（去掉 lag）跑，然后确认
 `pending_accounts[].requested_through` **严格大于**对应账号的 `finalized_through`——这一条要

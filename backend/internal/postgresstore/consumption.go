@@ -4443,6 +4443,25 @@ const balanceEvidenceBoundaryTolerance = time.Second
 // forward progress instead of looping.
 const balanceBlipRebaselineCap = 3
 
+// synthesisOutcome distinguishes the three things an UNKNOWN_POSITIVE
+// synthesis can do. Only synthesisInserted may be rolled back: the other two
+// found a row that was already there, and an older synthesis has consumption
+// allocated against it.
+type synthesisOutcome int
+
+const (
+	synthesisFailed synthesisOutcome = iota
+	synthesisInserted
+	// synthesisExistingIdentical: the same amount, instant and account are
+	// already on that synthetic event id. This synthesis is a no-op because it
+	// was already done.
+	synthesisExistingIdentical
+	// synthesisExistingConflicting: a row is on that id carrying different
+	// values. The ledger and this pass disagree about what that item's
+	// synthesis is, which is worth an audit rather than silence.
+	synthesisExistingConflicting
+)
+
 // signedExpectedUnits (XM-INV-PENDING-RECON C5, acceptance ruling 2026-09-09
 // on design section 7 D4(a)) is the one balance the evaluator compares an
 // upstream report against: what the ledger expects the account to hold, minus
@@ -4581,16 +4600,25 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		// an account not currently in that state.
 		return advancePendingReconciliationMatchTx(ctx, tx, accountID, actor)
 	}
-	// synthesizeUnknownPositive reports whether it actually inserted. The
-	// blip-confirmation path below needs to know: its rollback deletes the
-	// tentative credit, and "the tentative credit" means the row this
-	// transaction just wrote -- never a pre-existing row that happens to sit
-	// on the same synthetic event id. ON CONFLICT DO NOTHING makes those two
-	// things different, and an older row is not tentative at all: projections
-	// since have allocated consumption against it, and deleting it is refused
-	// by consumption_allocations' own FK RESTRICT -- which fails the whole
+	// synthesizeUnknownPositive reports which of three things happened, not
+	// just success. The blip-confirmation path below rolls the tentative
+	// credit back, and "the tentative credit" means the row this transaction
+	// wrote -- never a pre-existing row that happens to sit on the same
+	// synthetic event id. ON CONFLICT DO NOTHING makes those different, and an
+	// older row is not tentative at all: projections since have allocated
+	// consumption against it, and deleting it is refused by
+	// consumption_allocations' own FK RESTRICT -- which fails the whole
 	// account's projection job, on every retry, until it goes dead.
-	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) (bool, error) {
+	//
+	// The two no-op cases are also not the same as each other. A row carrying
+	// the identical amount, instant and account is this synthesis already
+	// done: idempotent, nothing to say. A row carrying different values is a
+	// real disagreement -- the ledger holds one amount on that id and this
+	// pass computed another -- and reporting it as "the synthesis did not
+	// happen" would file a genuine inconsistency under a routine outcome.
+	// Neither case deletes anything; the conflicting one gets its own audit.
+	synthesizeUnknownPositive := func(item proof, intervalStart time.Time, amount *big.Int) (synthesisOutcome, error) {
+		eventID := "unknown-positive:" + item.externalEventID
 		command, execErr := tx.Exec(ctx, `
 			INSERT INTO source_credit_events(
 				id,source_instance_id,external_account_id,external_event_id,external_credit_id,
@@ -4600,14 +4628,38 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			VALUES($1,$2,$3,$4,$5,$6,$7::numeric,$8,$9,$10,
 				'UNKNOWN_POSITIVE',$11,$12,$13,$14,$15)
 			ON CONFLICT(source_instance_id,external_event_id) DO NOTHING`, randomUUID(),
-			account.SourceInstanceID, accountID, "unknown-positive:"+item.externalEventID,
+			account.SourceInstanceID, accountID, eventID,
 			"unknown-positive:"+item.id, intervalStart.UTC(), amount.String(),
 			account.UnitCode, account.ManifestHash, account.ConfigurationHash,
 			item.sequence, item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC())
 		if execErr != nil {
-			return false, execErr
+			return synthesisFailed, execErr
 		}
-		return command.RowsAffected() == 1, nil
+		if command.RowsAffected() == 1 {
+			return synthesisInserted, nil
+		}
+		var sameAccount, sameUnits, sameInstant bool
+		if err := tx.QueryRow(ctx, `
+			SELECT existing.external_account_id=$3,existing.service_units=$4::numeric,
+				existing.event_time=$5
+			FROM source_credit_events existing
+			WHERE existing.source_instance_id=$1 AND existing.external_event_id=$2`,
+			account.SourceInstanceID, eventID, accountID, amount.String(),
+			intervalStart.UTC()).Scan(&sameAccount, &sameUnits, &sameInstant); err != nil {
+			return synthesisFailed, err
+		}
+		if sameAccount && sameUnits && sameInstant {
+			return synthesisExistingIdentical, nil
+		}
+		if err := writeAudit(ctx, tx, actor, "eligibility.balance_blip.synthesis_conflict",
+			objectTypeOf(item), item.id, nil, map[string]any{
+				"external_event_id": eventID, "computed_units": amount.String(),
+				"computed_event_time": intervalStart.UTC(), "same_account": sameAccount,
+				"same_units": sameUnits, "same_event_time": sameInstant,
+			}); err != nil {
+			return synthesisFailed, err
+		}
+		return synthesisExistingConflicting, nil
 	}
 
 	// pending holds a checkpoint/proof whose positive difference was not
@@ -4646,7 +4698,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// so recomputing its trust interval now would give the
 				// identical answer anyway), then rebuild -- not trust
 				// algebra -- to actually verify it.
-				inserted, synthErr := synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference)
+				outcome, synthErr := synthesizeUnknownPositive(pending.item, pending.intervalStart, pending.difference)
 				if synthErr != nil {
 					return synthErr
 				}
@@ -4704,7 +4756,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				// proved the ledger does not reconcile with that credit in
 				// place, which is why this branch is running, and the deferred
 				// item is recorded ignored either way.
-				if inserted {
+				if outcome == synthesisInserted {
 					if _, err = tx.Exec(ctx, `SELECT set_config('invoice.balance_blip_repair_delete','on',true)`); err != nil {
 						return err
 					}
@@ -4723,7 +4775,8 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 					"confirming_item_key":       item.key,
 					"confirming_raw_difference": difference.String(),
 					"reconciliation_residual":   confirmDifference.String(),
-					"tentative_credit_written":  inserted,
+					"tentative_credit_written":  outcome == synthesisInserted,
+					"synthesis_conflict":        outcome == synthesisExistingConflicting,
 				}); err != nil {
 					return err
 				}

@@ -566,3 +566,98 @@ func f0Evaluation(t *testing.T, store *Store, ctx context.Context, checkpointID 
 	}
 	return status, expected, difference
 }
+
+// TestBlipSynthesisConflictIsAuditedNotSilent is the external review's first
+// point. A synthesis that finds a row already on its synthetic event id has
+// two very different reasons for doing nothing: the row says the same thing
+// (idempotent, this work was already done), or it says something else -- a
+// different amount, instant or account. The second is a real disagreement
+// between what the ledger holds and what this pass computed, and reporting it
+// as "the synthesis did not happen" files it under a routine outcome where
+// nobody will look.
+//
+// The account is not released either way and the older row is never touched;
+// what this pins is that the conflicting case is visible.
+func TestBlipSynthesisConflictIsAuditedNotSilent(t *testing.T) {
+	store, ctx, sourceID, accountID, manifestHash, configHash, anchorAt, _ := newBalanceBlipFixture(t)
+
+	usageAt := anchorAt.Add(time.Minute)
+	insertUsageEventDirect(t, store, ctx, sourceID, accountID, "conflict-usage-a",
+		usageAt, "1200", 1, manifestHash, configHash)
+	// A pre-existing synthesis on cp2's own id carrying a different, non-zero
+	// amount: the confirmation would compute 500, the ledger holds 77.
+	insertCreditEventDirect(t, store, ctx, sourceID, accountID,
+		"unknown-positive:conflict-cp2-event", anchorAt, "77", "UNKNOWN_POSITIVE",
+		11, manifestHash, configHash)
+
+	cp2At := anchorAt.Add(10 * time.Minute)
+	cp2ID := insertReconciliationCheckpoint(t, store, ctx, sourceID, accountID, "conflict-cp2",
+		cp2At, "377", 2, manifestHash, configHash)
+	cp3At := anchorAt.Add(20 * time.Minute)
+	insertReconciliationCheckpoint(t, store, ctx, sourceID, accountID, "conflict-cp3",
+		cp3At, "377", 3, manifestHash, configHash)
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err = evaluatePendingBalanceEvidenceTx(ctx, tx, accountID, cp3At.Add(time.Minute),
+		AuditActor{Type: "system", ID: "test-worker"}); err != nil {
+		t.Fatalf("a conflicting synthesis must not fail the job: %v", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var conflicts int
+	if err := store.pool.QueryRow(ctx, `SELECT count(*) FROM audit_events
+		WHERE action='eligibility.balance_blip.synthesis_conflict' AND object_id=$1`, cp2ID).Scan(&conflicts); err != nil {
+		t.Fatal(err)
+	}
+	if conflicts != 1 {
+		t.Fatalf("synthesis_conflict audits=%d, want 1: a row carrying different values is a disagreement, "+
+			"not a routine no-op", conflicts)
+	}
+	// The older row and its amount are untouched.
+	var units string
+	if err := store.pool.QueryRow(ctx, `SELECT service_units::text FROM source_credit_events
+		WHERE external_account_id=$1 AND external_event_id=$2`,
+		accountID, "unknown-positive:conflict-cp2-event").Scan(&units); err != nil {
+		t.Fatalf("the pre-existing credit must survive: %v", err)
+	}
+	if units != "77" {
+		t.Fatalf("pre-existing credit units=%s, want 77 (never rewritten, never removed)", units)
+	}
+	if status, _, _ := f0Evaluation(t, store, ctx, cp2ID); status != "positive_blip_ignored" {
+		t.Fatalf("cp2 status=%q, want positive_blip_ignored", status)
+	}
+
+	// The audit says which fields disagreed, so an operator can tell an amount
+	// disagreement from an account or instant one without going to the table.
+	var afterHash string
+	if err := store.pool.QueryRow(ctx, `SELECT COALESCE(after_hash,'') FROM audit_events
+		WHERE action='eligibility.balance_blip.synthesis_conflict' AND object_id=$1`, cp2ID).Scan(&afterHash); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := stateHash(map[string]any{
+		"external_event_id":   "unknown-positive:conflict-cp2-event",
+		"computed_units":      "500",
+		"computed_event_time": anchorAt.UTC(),
+		"same_account":        true, "same_units": false, "same_event_time": true,
+	})
+	if afterHash != wantHash {
+		t.Fatalf("conflict audit payload hash=%s, want %s -- it must name which fields disagreed",
+			afterHash, wantHash)
+	}
+}
+
+// Note on the identical-row branch: it cannot be reached through the
+// evaluator with a natural fixture, and pretending otherwise would be a
+// control that proves nothing. A pre-existing credit carrying exactly the
+// amount this pass would compute is, by construction, already in the
+// projection -- so the item's difference is zero, it evaluates matched, and
+// it is never deferred, so no synthesis is attempted at all. The branch
+// exists so that a row which agrees is not reported as a disagreement; the
+// comparison itself is pinned by the mutation that treats conflicting rows as
+// identical, which turns the test above red.
