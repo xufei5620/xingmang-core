@@ -7,7 +7,7 @@
 | `platform/` | 星芒统一控制平台（Go + React 管理端 + PostgreSQL + River） | 验收线 `release/v0.1-launch`，2026-09-09 部署 `3800a8b` | 原仓库 `xingmang-platform` |
 | `invoice/` | 开票系统（Go 后端 + 采集代理 + React 用户端/管理端） | `v0.1.0-rc110-signed` = `277063c`，2026-09-09 部署 | 原仓库 `invoice-system` |
 
-各子系统的工作入口、红线与常用命令见各自目录下的 `CLAUDE.md`；跨子系统的接口变更走 `platform/docs/change-requests/`。
+各子系统的工作入口、红线与常用命令见 `platform/CLAUDE.md` 与 `invoice/README.md` / `invoice/RELEASE-READINESS.md`；跨子系统的接口变更走 `platform/docs/change-requests/`。
 
 ## 与两个原工作仓库的关系（过渡期）
 
