@@ -2240,14 +2240,95 @@ dead job never revives on its own (a new fact for that account advances its
 pending work but leaves it dead); recover it with:
 
 ```bash
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+invoice_eligibility_repair --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
 
 See `docs/ELIGIBILITY-OPERATIONS.md` for the full grading/dead/requeue
-contract.
+contract, and the next section for what `invoice_eligibility_repair` expands
+to.
+
+### Running `invoice-eligibility-repair` in production
+
+RC104 and RC105 both recorded repair runs without ever writing down the
+command, so every run since has been reconstructed from the compose file.
+Written down once, here. There is **no compose service** for this binary --
+it lives only in the tools image -- so it is a `docker run`, and the three
+things easiest to get wrong are the network (the database network is
+`internal: true`, so a container outside it cannot reach `postgres` at all),
+the owner DSN (these repairs write tables `invoice_app` has no grants on),
+and `--pull=never` (production never pulls).
+
+```bash
+export INVOICE_IMAGE_TAG='<exact tag from the verified release manifest>'
+export SECRETS_DIR=/root/invoice-system/secrets
+invoice_eligibility_repair() {
+  docker run --rm --pull=never --user 10001:10001 \
+    --network invoice-system-prod_invoice_db \
+    --read-only --security-opt no-new-privileges:true --cap-drop ALL \
+    -v "$SECRETS_DIR/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro" \
+    -v "$SECRETS_DIR/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro" \
+    --entrypoint /usr/local/bin/invoice-eligibility-repair \
+    "invoice-system-tools:$INVOICE_IMAGE_TAG" \
+    --database-url-file=/run/secrets/invoice_owner_database_url \
+    --field-keyring-file=/run/secrets/invoice_field_keyring \
+    --migrations-dir=/app/migrations \
+    "$@"
+}
+```
+
+Both secret files are mounted read-only and are the same host files compose
+uses (`0400`, owned `10001:10001`, per the secret permission matrix above) --
+do not copy them anywhere else. The keyring path is required by the flag
+parser for every kind, but only the freeze-resolving kinds decrypt with it;
+`projection-requeue-dead`, `ingest-requeue-dead`,
+`ingest-acknowledge-unreplayable`, `policy-start-reanchor` and
+`pending-reevaluate` resolve no freeze and never use the key material.
+
+Dry run is the default for every kind and writes nothing. `--apply` requires
+`--operator-id=<admin UUID>`, and the tool records that id on every row and
+audit event it writes.
+
+**Re-evaluating one parked account (XM-INV-PENDING-RECON, 2026-09-09).** An
+account in `not_invoiceable_pending_reconciliation` clears itself once two
+consecutive real balance evaluations come back matched, and since this slice
+an idle account gets that second evaluation on its own from the next
+published balances cycle. `--kind=pending-reevaluate` is for when it has not:
+it asks the projection worker to look at that one account again, now.
+
+```bash
+invoice_eligibility_repair --kind=pending-reevaluate --account=<external-account-uuid>
+```
+
+`--account` is required and names exactly one account; the tool is never run
+unnarrowed. The dry run is the diagnosis and is usually the whole answer --
+it prints the account's state and streak, open freezes, its projection job
+row, evidence already waiting for the evaluator, which published cycle the
+evidence would be derived from, and what this run's own arithmetic says the
+evaluator would decide about it. Checks marked `STOP` refuse `--apply`:
+
+| `STOP` | What to do instead |
+| --- | --- |
+| the account is not `not_invoiceable_pending_reconciliation` | nothing -- this tool has no work on it |
+| open eligibility freezes > 0 | resolve the freeze first; the exit is blocked by the freeze guard regardless of evidence |
+| the projection job is `processing` | wait; a worker is holding the account right now |
+| the projection job is `dead` | run `--kind=projection-requeue-dead --account=<id>` first; this tool never revives a dead job |
+| the target cycle already has a real checkpoint or a proof | nothing to derive there; wait for the next published cycle |
+| the target cycle carries a stranded (dead or failed) balance checkpoint | deal with that dead event first (`--kind=ingest-requeue-dead`); a proof written over it would lose the fact permanently |
+| the checkpoint to be restated reports a negative balance with no magnitude | the re-evaluation could only produce `negative_frozen(unknown)`; nothing to gain |
+| `--operator-id` is the account's own invoice user | someone else runs it |
+
+Read the "target cycle" line before applying even when nothing says `STOP`.
+The requeue asks for `requested_through = finalized_through`, so it can only
+reach a cycle whose ceiling is **at or below** `finalized_through`; the report
+prints `in requeue window: false` when the newest cycle is above it, which
+means the automatic path (the next finalization pass) is what will pick it
+up and applying now changes nothing. `--apply` writes exactly one row -- the
+account's `eligibility_projection_jobs` entry, set to `queued` and due now --
+plus one `eligibility.pending_reconciliation.reevaluation_requested` audit
+event. It writes no evidence, no evaluation and no `eligibility_status`, so
+it cannot make an account exit: the worker re-derives and re-evaluates
+through the ordinary path, and the two-consecutive-matches rule decides as
+always.
 
 ```bash
 docker compose --env-file deploy/.env.production \

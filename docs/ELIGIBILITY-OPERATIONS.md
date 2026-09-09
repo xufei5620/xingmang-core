@@ -282,12 +282,97 @@ administrator queue above and neither is affected by "safe resolution":
   remains a valid `freeze_reason` value (for historical rows), but no code
   path opens a new freeze for it any more.
 
-Both states are invisible to `/readyz` and to
-`EligibilityProjectionHealth` by construction: entering or exiting either one
-happens inside the same eligibility-projection job that, on success,
-unconditionally deletes its own `eligibility_projection_jobs` row regardless
-of which status the account ends up in -- there is no separate queue entry
-for either state to get stuck in.
+Neither state can get *stuck* in `/readyz` or `EligibilityProjectionHealth`:
+entering or exiting either one happens inside the same eligibility-projection
+job that, on success, unconditionally deletes its own
+`eligibility_projection_jobs` row regardless of which status the account ends
+up in -- there is no separate queue entry for either state to sit in.
+
+Since XM-INV-PENDING-RECON (2026-09-09) they are no longer entirely invisible
+there, and the difference matters when reading a health snapshot. A
+`not_invoiceable_pending_reconciliation` account that is one matched
+evaluation short of auto-exit gets a projection job enqueued by each
+finalization pass that publishes a balances cycle it could still derive
+evidence from, and `invoice-eligibility-repair --kind=pending-reevaluate`
+enqueues one on demand. So `Queued`/`OldestPending` can show 1 or 2 for a few
+seconds. The worker takes 25 jobs every two seconds and
+`eligibility_projection_stuck` only fires after 15 minutes, so a healthy
+system clears these long before readiness notices. A pending-reconciliation
+account sitting in `Queued` for minutes is a real signal, not the expected
+state.
+
+### Idle re-evaluation (XM-INV-PENDING-RECON, 2026-09-09)
+
+Auto-exit needs two consecutive matched evaluations of real balance evidence,
+and an account with nothing happening to it produces neither kind: the source
+agent emits a checkpoint only when the balance, negative flag or deficit
+changes, and a carry-forward proof is derived only at the visibility instant
+of a real fact. A production account sat one match short for days while every
+finalization pass advanced `finalized_through` past the published balances
+cycles a proof could still have come from.
+
+Now, when such an account is one match short and the window carries no facts
+at all, the projection job derives one carry-forward proof from the newest
+published balances cycle that can still take one, and the ordinary evaluator
+judges it. Nothing about the exit rule changes: the proof restates the latest
+real checkpoint verbatim (migration 0026's trigger enforces that, deficit
+included), it is one evidence item, and it counts as one. The acceptance line
+accepted on 2026-09-09 that for an idle account the second of the two matches
+is a restatement of the first.
+
+Two things suppress the derivation entirely, and both are deliberate: an open
+`eligibility_freezes` row (the exit would be blocked by the freeze guard
+anyway, and a proof is immutable once written), and a `balance_checkpoint`
+event that is dead or failed in that same cycle (XM-INV-DEAD-CONTAINMENT --
+writing a proof there would make migration 0014 refuse the real checkpoint
+forever). The audit row for an idle derivation carries
+`idle_reevaluation: true`.
+
+**`invoice-eligibility-repair --kind=pending-reevaluate`** is the on-demand
+form, for when an account has not cleared on its own. It asks the projection
+worker to look at that one account again, now, by enqueueing its projection
+job -- and that is all it writes. No proof, no evaluation, no
+`eligibility_status`: the worker re-derives and re-evaluates through the
+ordinary path, so the two-consecutive-matches exit rule is untouched by it.
+Its `--apply` writes exactly one job row and one
+`eligibility.pending_reconciliation.reevaluation_requested` audit event.
+
+`--account` is required and names exactly one account. The dry run is the
+diagnosis and is usually the whole answer: the account's state and streak,
+open freezes, its job row, evidence already waiting for the evaluator, which
+published cycle an idle derivation would take, and this run's own recomputed
+verdict for the evidence it would produce -- computed from the ledger, never
+read back from a stored evaluation row. Checks printed as `STOP` refuse the
+apply: the account is not pending, an open freeze would block the exit
+anyway, the job is `processing` or `dead` (`dead` is
+`--kind=projection-requeue-dead`'s decision, and this tool never revives
+one), the target cycle already carries a real checkpoint or a proof, the
+target cycle carries a stranded checkpoint, the checkpoint to be restated has
+no magnitude, or the operator is the account's own invoice user.
+
+```
+# dry run (default) -- the diagnosis, writes nothing
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=pending-reevaluate --account=<external-account-uuid>
+
+# apply -- requires an approving operator id, and refuses if any check says STOP
+/app/bin/invoice-eligibility-repair \
+  --database-url-file=/run/secrets/invoice-db-url \
+  --field-keyring-file=/run/secrets/field-keyring.json \
+  --kind=pending-reevaluate --account=<external-account-uuid> \
+  --apply --operator-id=<admin-uuid>
+```
+
+See `docs/PRODUCTION-RUNBOOK.md` for the full `docker run` form these
+snippets abbreviate.
+
+Read the report's `in requeue window` line before applying even when nothing
+says `STOP`. The requeue asks for `requested_through = finalized_through`, so
+it can only reach a scan cycle whose ceiling is at or below
+`finalized_through`; when the newest cycle is above it the automatic path is
+what will pick it up, and applying now changes nothing.
 
 ## Manual queue narrowing (XM-INV-ELIG-QUEUE-NARROW, 2026-09-03)
 

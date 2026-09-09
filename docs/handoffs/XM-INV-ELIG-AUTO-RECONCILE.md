@@ -165,6 +165,12 @@ on the account row instead, cleared automatically the next time reprojection fin
   unconditionally deletes its own `eligibility_projection_jobs` row on success regardless of which
   `eligibility_status` the account ends up in, so this state can never leave a row for
   `EligibilityProjectionHealth` (which only reads that table) to see.
+  - **Superseded in part by XM-INV-PENDING-RECON (2026-09-09).** The row is still always deleted on
+    success, so the state still cannot get *stuck* there -- but it is no longer true that it never
+    puts a row in that table at all. An account one matched evaluation short of auto-exit is now
+    enqueued by each finalization pass that publishes a balances cycle it could derive idle evidence
+    from, and by `invoice-eligibility-repair --kind=pending-reevaluate` on demand, so
+    `Queued`/`OldestPending` briefly counts it. See `docs/ELIGIBILITY-OPERATIONS.md`.
 
 ### (B) `USAGE_EXCEEDS_LEDGER` downgrade
 

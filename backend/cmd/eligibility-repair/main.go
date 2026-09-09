@@ -47,6 +47,18 @@
 //     rows); optional --account narrows via the event's own open freezes;
 //     --include-blocked-cycles overrides the skip. See
 //     docs/handoffs/XM-INV-DEAD-REQUEUE.md.
+//   - --kind=pending-reevaluate: XM-INV-PENDING-RECON -- asks the projection
+//     worker to look at one not_invoiceable_pending_reconciliation account
+//     again, now, by enqueueing that account's own projection job. It writes
+//     no evidence, no evaluation and no eligibility_status; the worker
+//     re-derives and re-evaluates through the ordinary path, so the
+//     acceptance line's two-consecutive-matches exit rule is untouched. The
+//     dry run is also the diagnosis: six checks (state, open freezes, job
+//     row, evidence already waiting, which cycle the evidence would come
+//     from, and what the evaluator would say about it) plus the self-dealing
+//     guard, each of which refuses the apply when the requeue could not
+//     help. --account is required and names exactly one account. See
+//     docs/handoffs/XM-INV-PENDING-RECON.md.
 //
 // Defaults to --dry-run; --apply requires an operator id and actually
 // mutates the database. Omitting --kind reproduces this tool's original
@@ -89,6 +101,15 @@ const (
 	// can never be recovered, which is a different decision from retrying.
 	kindIngestAcknowledgeUnreplayable = "ingest-acknowledge-unreplayable"
 
+	// kindPendingReevaluate (XM-INV-PENDING-RECON) asks the projection worker
+	// to look at one not_invoiceable_pending_reconciliation account again,
+	// now. It writes no evidence, no evaluation and no eligibility_status of
+	// its own -- the worker re-derives and re-evaluates through the ordinary
+	// path -- so the acceptance line's two-consecutive-matches exit rule is
+	// untouched by it. Its dry run is also the diagnosis: six checks that
+	// each refuse the apply when the requeue could not help.
+	kindPendingReevaluate = "pending-reevaluate"
+
 	preAnchorUsageFixedResolutionNote = "pre-anchor usage fact skipped by XM-INV-PREANCHOR-USAGE repair"
 	balanceAnchorFixedResolutionNote  = "POLICY_ANCHOR balance evidence self-healed by XM-INV-ANCHOR-BALANCE repair"
 	balanceBlipFixedResolutionNote    = "balance blip credit reversed by XM-INV-BALANCE-BLIP repair"
@@ -103,8 +124,8 @@ func main() {
 	migrationsDir := flag.String("migrations-dir", "/app/migrations", "bundled migration directory")
 	apply := flag.Bool("apply", false, "actually resolve freezes (and, for pre-anchor-usage, requeue events; default is a dry run that changes nothing)")
 	operatorID := flag.String("operator-id", "", "the approving operator's admin UUID (required with --apply)")
-	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING), or ingest-requeue-dead (XM-INV-DEAD-REQUEUE)")
-	accountID := flag.String("account", "", "optional external account id filter (projection-requeue-dead and ingest-requeue-dead only; empty means every dead row)")
+	kind := flag.String("kind", kindPreAnchorUsage, "which repair to run: pre-anchor-usage (default, design XM-INV-PREANCHOR-USAGE), balance-anchor (design XM-INV-ANCHOR-BALANCE), balance-blip (design XM-INV-BALANCE-BLIP), queue-narrow (design XM-INV-ELIG-SIMPLIFY section 3(C)), policy-start-reanchor (design XM-INV-ELIG-SIMPLIFY section 3(D)), projection-requeue-dead (XM-INV-PROJECTION-FAILURE-GRADING), ingest-requeue-dead (XM-INV-DEAD-REQUEUE), ingest-acknowledge-unreplayable (XM-INV-DEAD-REQUEUE), or pending-reevaluate (XM-INV-PENDING-RECON)")
+	accountID := flag.String("account", "", "external account id: an optional filter for projection-requeue-dead and ingest-requeue-dead (empty means every dead row); required, and exactly one account, for pending-reevaluate")
 	eventID := flag.String("event", "", "optional source_ingest_events event id filter (ingest-requeue-dead only; empty means every dead ingest event)")
 	includeBlockedCycles := flag.Bool("include-blocked-cycles", false, "ingest-requeue-dead only: also requeue events whose replay the runtime would refuse -- an unusable scan-cycle binding, or a binding whose scan_ceiling_at runs past the event's observed_at (skipped by default -- such a requeue can only burn eight attempts and die again)")
 	flag.Parse()
@@ -141,10 +162,10 @@ type repairFilters struct {
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, filters repairFilters, out io.Writer) error {
 	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow &&
 		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead &&
-		kind != kindIngestAcknowledgeUnreplayable {
-		return fmt.Errorf("unknown --kind %q, want one of %q, %q, %q, %q, %q, %q, %q, %q", kind, kindPreAnchorUsage,
+		kind != kindIngestAcknowledgeUnreplayable && kind != kindPendingReevaluate {
+		return fmt.Errorf("unknown --kind %q, want one of %q, %q, %q, %q, %q, %q, %q, %q, %q", kind, kindPreAnchorUsage,
 			kindBalanceAnchor, kindBalanceBlip, kindQueueNarrow, kindPolicyStartReanchor, kindProjectionRequeueDead,
-			kindIngestRequeueDead, kindIngestAcknowledgeUnreplayable)
+			kindIngestRequeueDead, kindIngestAcknowledgeUnreplayable, kindPendingReevaluate)
 	}
 	// A narrowing or override flag that the chosen --kind ignores is rejected
 	// rather than silently dropped: an operator who meant to touch three
@@ -163,8 +184,15 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	if filters.includeBlockedCycles && kind != kindIngestRequeueDead {
 		return fmt.Errorf("--include-blocked-cycles is only valid with --kind=%s", kindIngestRequeueDead)
 	}
-	if filters.accountID != "" && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead {
-		return fmt.Errorf("--account is only valid with --kind=%s or --kind=%s", kindProjectionRequeueDead, kindIngestRequeueDead)
+	if filters.accountID != "" && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead &&
+		kind != kindPendingReevaluate {
+		return fmt.Errorf("--account is only valid with --kind=%s, --kind=%s or --kind=%s",
+			kindProjectionRequeueDead, kindIngestRequeueDead, kindPendingReevaluate)
+	}
+	// Re-evaluating is never done in bulk: it is one reviewed account at a
+	// time, the same rule ingest-acknowledge-unreplayable follows for events.
+	if kind == kindPendingReevaluate && filters.accountID == "" {
+		return fmt.Errorf("--account is required with --kind=%s: this repair is run one reviewed account at a time", kindPendingReevaluate)
 	}
 	databaseURL, err := readOneLineSecret(databaseURLFile)
 	if err != nil {
@@ -210,6 +238,9 @@ func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string
 	}
 	if kind == kindIngestAcknowledgeUnreplayable {
 		return runIngestAcknowledgeUnreplayable(ctx, store, apply, operatorID, filters.eventID, out)
+	}
+	if kind == kindPendingReevaluate {
+		return runPendingReevaluate(ctx, store, apply, operatorID, filters.accountID, out)
 	}
 	return runPreAnchorUsage(ctx, store, apply, operatorID, keyring, out)
 }
@@ -348,6 +379,22 @@ func runIngestAcknowledgeUnreplayable(ctx context.Context, store *postgresstore.
 		return fmt.Errorf("acknowledge unreplayable ingest event: %w", err)
 	}
 	printIngestAcknowledgeUnreplayableSummary(out, result)
+	return nil
+}
+
+func runPendingReevaluate(ctx context.Context, store *postgresstore.Store, apply bool,
+	operatorID, accountID string, out io.Writer) error {
+	// Like projection-requeue-dead, this repair resolves no eligibility_freezes
+	// row -- it only enqueues a projection job -- so there is no encrypted
+	// resolution note or evidence to prepare, and the field keyring is not
+	// needed at all.
+	in := postgresstore.PendingReevaluateRepairInput{Apply: apply, OperatorID: operatorID, AccountID: accountID}
+	result, err := store.RepairPendingReevaluate(ctx, in, postgresstore.AuditActor{
+		Type: "admin", ID: operatorID, Reason: "XM-INV-PENDING-RECON repair tool " + modeLabel(apply)})
+	if err != nil {
+		return fmt.Errorf("repair pending reevaluate: %w", err)
+	}
+	printPendingReevaluateSummary(out, result)
 	return nil
 }
 
@@ -513,6 +560,57 @@ func printProjectionRequeueDeadSummary(out io.Writer, result postgresstore.Proje
 			fmt.Fprintf(out, "%-38s %s\n", accountErr.ExternalAccountID, accountErr.Message)
 		}
 	}
+}
+
+// printPendingReevaluateSummary prints the XM-INV-PENDING-RECON report:
+// the sibling repairs' banner and fixed-width table, plus the six checks,
+// whose explanations are Chinese because the operator on call reads them.
+// "accounts affected" counts what actually changed -- zero for a dry run, and
+// zero for an apply any check refused.
+func printPendingReevaluateSummary(out io.Writer, result postgresstore.PendingReevaluateRepairResult) {
+	mode := "DRY RUN (nothing was changed)"
+	if result.Applied {
+		mode = "APPLIED"
+	}
+	fmt.Fprintf(out, "eligibility-repair XM-INV-PENDING-RECON: %s\n\n", mode)
+	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", "ACCOUNT", "STATUS", "MATCHES", "JOB")
+	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", result.AccountID, orNone(result.Status),
+		fmt.Sprintf("%d/%d", result.ConsecutiveMatches, result.ExitMatches), orNone(result.JobStatus))
+	fmt.Fprintf(out, "\nfinalized_through: %s\n", orNone(formatRepairTime(result.FinalizedThrough)))
+	fmt.Fprintf(out, "target cycle:      %s (ceiling %s, in requeue window: %t)\n",
+		orNone(result.TargetCycleID), orNone(formatRepairTime(result.TargetCycleAt)), result.TargetInRequeueWindow)
+	fmt.Fprintf(out, "prior checkpoint:  %s (as_of %s)\n",
+		orNone(result.PriorCheckpointID), orNone(formatRepairTime(result.PriorAsOf)))
+	fmt.Fprintf(out, "recomputed:        expected=%s difference=%s -> %s\n",
+		orNone(result.RecomputedExpected), orNone(result.RecomputedDifference), orNone(result.RecomputedStatus))
+
+	fmt.Fprintf(out, "\nCHECKS\n")
+	for _, check := range result.Checks {
+		verdict := "OK  "
+		if check.Blocker {
+			verdict = "STOP"
+		} else if !check.Passed {
+			verdict = "NOTE"
+		}
+		fmt.Fprintf(out, "  [%s] %-12s %s\n", verdict, check.Name, check.Detail)
+	}
+	if result.Blocked() {
+		fmt.Fprintf(out, "\n以上 STOP 项未通过，apply 已被拒绝。\n")
+	}
+	affected := 0
+	if result.Queued {
+		affected = 1
+	}
+	fmt.Fprintf(out, "\naccounts affected: %d\n", affected)
+}
+
+// orNone renders an empty string as a dash, so a missing value in the report
+// above reads as "there is none" rather than as a gap in the line.
+func orNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func printIngestRequeueDeadSummary(out io.Writer, result postgresstore.IngestRequeueDeadRepairResult) {
