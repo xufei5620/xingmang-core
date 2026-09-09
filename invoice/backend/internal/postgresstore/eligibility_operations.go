@@ -1,0 +1,535 @@
+package postgresstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"invoice-system/backend/internal/domain"
+)
+
+var eligibilityUUIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+// eligibilityFreezeBlockingEventStatuses is the set of source_ingest_events
+// processing_status values that hold an eligibility freeze open
+// (XM-INV-DEAD-CONTAINMENT). One element today, and that is the whole point
+// of it being a named list rather than a literal inside the guard's SQL: L3
+// (XM-INV-CYCLE-WAIT) widens it to the not-yet-processed set once a waiting
+// state exists to give those events an exit, and it must widen in exactly
+// one place.
+var eligibilityFreezeBlockingEventStatuses = []string{"dead"}
+
+var eligibilityFreezeBlockingEventStatusSQL = renderEligibilityFreezeBlockingEventStatusSQL(eligibilityFreezeBlockingEventStatuses)
+
+// eligibilityFreezeDeadEventGuardQuery asks whether the freeze named by $1 is
+// still the only thing containing a blocking source event on source $2. It is
+// a package-level string rather than an inline literal so the EXPLAIN test can
+// plan this exact text: a test that retyped the query would be checking a copy,
+// and a copy of a query stops testing the original the moment either moves.
+// See assertNoBlockingDeadEventForFreezeTx for what the predicate is for and
+// why it is narrowed by source.
+//
+// The containment core is rendered from sourceEventContainedByOpenFreezeSQL
+// rather than retyped, with ef.id=$1 as its narrowing: this guard and the
+// health surfaces have to be answering literally the same question, because
+// the guard exists only to stop a resolution from changing that answer. The
+// query drives from source_ingest_events on purpose -- source_instance_id
+// plus the blocking status set is exactly the leading column and the partial
+// predicate of source_ingest_events_readiness_active_idx.
+var eligibilityFreezeDeadEventGuardQuery = `
+	SELECT EXISTS(
+		SELECT 1
+		FROM source_ingest_events sie
+		WHERE sie.source_instance_id=$2
+		  AND sie.processing_status=ANY(` + eligibilityFreezeBlockingEventStatusSQL + `)
+		  AND ` + sourceEventContainedByOpenFreezeSQL("sie", "ef.id=$1") + `
+	)`
+
+// assertNoBlockingDeadEventForFreezeTx refuses to let a freeze that is still
+// the only thing containing a dead source event be resolved
+// (XM-INV-DEAD-CONTAINMENT). Every code path that writes
+// eligibility_freezes.status='resolved' calls it -- the admin resolution
+// endpoint and all four repair tools -- and
+// TestEveryFreezeResolutionPassesTheDeadEventGuard is the discovery guard that
+// keeps a sixth door from being added without one.
+//
+// Why it has to be stated at all: until this slice the ordering held by
+// accident, because a dead event made every stream not-ready and
+// assertSourceFreshTx rejected the resolution with ErrEligibilitySourceStale
+// long before any of this ran. Containment removes that accident on purpose.
+// Without the rule, one "tidy up the freeze queue" run re-opens the exact
+// blast radius the slice closes: the event goes back to being uncontained and
+// the whole source instance becomes unavailable to every account again. Worse
+// for a balance_checkpoint: the same resolution also releases
+// ensureBalanceCarryForwardProofTx's wait, and the projection worker (every
+// two seconds) then writes an immutable "the balance did not change in this
+// cycle" proof over a still-replayable fact, after which migration 0014's
+// reject_real_checkpoint_after_carry_forward refuses the real checkpoint
+// forever.
+//
+// Scope, and a deliberate deviation from the dispatch note (which said "until
+// the event is processed"): this blocks on dead only. Its job is to stop a
+// resolution turning a contained dead event into an uncontained one, and only
+// 'dead' can do that. Blocking on queued/failed/processing as well would
+// create freezes with no exit -- a requeued event that lands in
+// waiting_dependency or parked_identity never becomes processed, and the
+// freeze could never be resolved again. A dead event has two keys instead:
+// requeue it successfully, or acknowledge it as unreplayable; both write
+// processing_status. L3 (XM-INV-CYCLE-WAIT) is where the wider "not yet
+// processed" set belongs, together with the waiting state that gives it an
+// exit, and eligibilityFreezeBlockingEventStatuses is the one place it widens.
+//
+// Narrowed by source_instance_id, which every caller has already resolved.
+// That is what puts the lookup on source_ingest_events_readiness_active_idx:
+// without it the predicate has no leading index column, and a sequential scan
+// here would take a relation-level SIREAD predicate lock (all five callers run
+// SERIALIZABLE) against the repair tools that write the same table.
+func assertNoBlockingDeadEventForFreezeTx(ctx context.Context, tx pgx.Tx, freezeID, sourceInstanceID string) error {
+	var blocked bool
+	if err := tx.QueryRow(ctx, eligibilityFreezeDeadEventGuardQuery, freezeID, sourceInstanceID).
+		Scan(&blocked); err != nil {
+		return err
+	}
+	if blocked {
+		return domain.ErrEligibilityDeadEventUnrepaired
+	}
+	return nil
+}
+
+var eligibilityFreezeBlockingEventStatusPattern = regexp.MustCompile(`^[a-z][a-z_]{0,30}$`)
+
+func renderEligibilityFreezeBlockingEventStatusSQL(statuses []string) string {
+	if len(statuses) == 0 {
+		panic("eligibility freeze blocking event status list must not be empty")
+	}
+	quoted := make([]string, len(statuses))
+	for i, status := range statuses {
+		if !eligibilityFreezeBlockingEventStatusPattern.MatchString(status) {
+			panic("eligibility freeze blocking event status must match ^[a-z][a-z_]*$: " + status)
+		}
+		quoted[i] = "'" + status + "'"
+	}
+	return "ARRAY[" + strings.Join(quoted, ",") + "]"
+}
+
+var eligibilityFreezeReasons = map[string]struct{}{
+	"UNKNOWN_NEGATIVE_BALANCE": {}, "LATE_FINALIZED_EVENT": {},
+	"AMBIGUOUS_EVENT_ORDER": {}, "EVENT_PAYLOAD_DRIFT": {},
+	"UNIT_MISMATCH": {}, "USAGE_EXCEEDS_LEDGER": {},
+	"STREAM_WATERMARK_REGRESSION": {}, "SOURCE_GAP": {}, "SOURCE_REFUND": {},
+}
+
+type EligibilityFreeze struct {
+	ID                string `json:"id"`
+	PrincipalID       string `json:"-"`
+	ExternalAccountID string `json:"-"`
+	// ExternalUserID is the upstream platform's own (digital) user ID for
+	// this account, plain and unmasked (CR-0007 problem one). It is exposed
+	// deliberately -- see eligibilityFreezeDTO's comment in httpapi for why
+	// this is not the same redaction posture as ExternalAccountID above.
+	ExternalUserID string `json:"-"`
+	// AccountEmail is the account's latest verified email address, filled in
+	// by the application layer and empty when there is none on file. Same
+	// display-only role as the ledger's own field of this name
+	// (XM-INV-LEDGER-ACCOUNT-EMAIL).
+	AccountEmail     string            `json:"-"`
+	SourceInstanceID string            `json:"source_instance_id"`
+	SourceType       domain.SourceType `json:"source_type"`
+	SourceName       string            `json:"source_name"`
+	FundingLotID     string            `json:"funding_lot_id,omitempty"`
+	FreezeReason     string            `json:"freeze_reason"`
+	// TriggerObjectType/TriggerObjectID name the specific piece of evidence
+	// that opened this freeze (XM-INV-FREEZE-TRIGGER-VISIBLE). Without them
+	// the queue renders several freezes on one account as identical rows --
+	// production had four SOURCE_GAP rows on account 2092, same reason, same
+	// scope, same second, differing only in which balance checkpoint tripped
+	// each one, and an operator could not tell them apart or know whether
+	// handling one handled all four.
+	TriggerObjectType string    `json:"trigger_object_type"`
+	TriggerObjectID   string    `json:"trigger_object_id"`
+	Status            string    `json:"status"`
+	EligibilityStatus string    `json:"eligibility_status"`
+	OpenedAt          time.Time `json:"opened_at"`
+	ResolvedAt        time.Time `json:"resolved_at,omitempty"`
+	ResolutionVersion int64     `json:"version"`
+	EvidenceHash      string    `json:"-"`
+	NoteHash          string    `json:"-"`
+}
+
+type EligibilityFreezePageQuery struct {
+	Limit            int
+	Status           string
+	FreezeReason     string
+	SourceInstanceID string
+	// ExternalUserID filters to an exact match on external_accounts.
+	// external_user_id (CR-0007 problem one), the upstream platform's own
+	// user ID. It may be combined with SourceInstanceID to disambiguate
+	// across platforms that could otherwise reuse the same external ID.
+	ExternalUserID string
+	BeforeOpenedAt time.Time
+	BeforeID       string
+}
+
+type EligibilityFreezePage struct {
+	Items              []EligibilityFreeze
+	HasMore            bool
+	NextBeforeOpenedAt time.Time
+	NextBeforeID       string
+}
+
+type ResolveEligibilityFreezeInput struct {
+	FreezeID           string
+	ExpectedVersion    int64
+	EvidenceHash       string
+	EvidenceCiphertext []byte
+	NoteHash           string
+	NoteCiphertext     []byte
+	FreshnessPolicy    SourceFreshnessPolicy
+	Actor              AuditActor
+}
+
+type EligibilitySummary struct {
+	SourceInstanceID    string
+	SourceType          domain.SourceType
+	SourceName          string
+	BindingStatus       string
+	EligibilityStatus   string
+	UnitCode            string
+	AvailableMinor      int64
+	ConsumedMinor       int64
+	UnconsumedMinor     int64
+	ReservedMinor       int64
+	IssuedMinor         int64
+	LegacyServiceUnits  string
+	NonCashServiceUnits string
+	HasOpenFreeze       bool
+	ProjectionPending   bool
+}
+
+func scanEligibilityFreeze(row pgxRow) (EligibilityFreeze, error) {
+	var item EligibilityFreeze
+	err := row.Scan(&item.ID, &item.PrincipalID, &item.ExternalAccountID, &item.SourceInstanceID, &item.SourceType,
+		&item.SourceName, &item.FundingLotID, &item.FreezeReason, &item.Status, &item.EligibilityStatus,
+		&item.OpenedAt, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash,
+		&item.ExternalUserID, &item.TriggerObjectType, &item.TriggerObjectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return item, domain.ErrNotFound
+	}
+	if err != nil {
+		return item, err
+	}
+	if item.ResolvedAt.Equal(time.Unix(0, 0).UTC()) {
+		item.ResolvedAt = time.Time{}
+	}
+	return item, nil
+}
+
+const eligibilityFreezeSelect = `
+	SELECT ef.id,ea.invoice_user_id::text,ef.external_account_id::text,eas.source_instance_id::text,
+		si.source_type,si.name,COALESCE(ef.funding_lot_id::text,''),ef.freeze_reason,ef.status,
+		eas.eligibility_status,ef.opened_at,COALESCE(ef.resolved_at,'epoch'::timestamptz),
+		ef.resolution_version,COALESCE(ef.resolution_evidence_hash,''),COALESCE(ef.resolution_note_hash,''),
+		ea.external_user_id,COALESCE(ef.trigger_object_type,''),COALESCE(ef.trigger_object_id,'')
+	FROM eligibility_freezes ef
+	JOIN external_accounts ea ON ea.id=ef.external_account_id
+	JOIN source_account_eligibility_state eas ON eas.external_account_id=ef.external_account_id
+	JOIN source_instances si ON si.id=eas.source_instance_id`
+
+func (s *Store) ListEligibilityFreezesPage(ctx context.Context, in EligibilityFreezePageQuery) (EligibilityFreezePage, error) {
+	if in.Limit <= 0 {
+		in.Limit = 50
+	}
+	if in.Limit > 100 {
+		in.Limit = 100
+	}
+	if in.Status == "" {
+		in.Status = "open"
+	}
+	if in.Status != "open" && in.Status != "resolved" && in.Status != "all" {
+		return EligibilityFreezePage{}, errors.New("invalid eligibility freeze status")
+	}
+	if in.FreezeReason != "" {
+		if _, ok := eligibilityFreezeReasons[in.FreezeReason]; !ok {
+			return EligibilityFreezePage{}, errors.New("invalid eligibility freeze reason")
+		}
+	}
+	if in.SourceInstanceID != "" && !eligibilityUUIDPattern.MatchString(in.SourceInstanceID) {
+		return EligibilityFreezePage{}, errors.New("invalid source instance filter")
+	}
+	if in.ExternalUserID != "" && (len(in.ExternalUserID) > 512 || strings.ContainsAny(in.ExternalUserID, "\r\n\x00")) {
+		return EligibilityFreezePage{}, errors.New("invalid external user id filter")
+	}
+	if in.BeforeOpenedAt.IsZero() != (strings.TrimSpace(in.BeforeID) == "") || in.BeforeID != "" && !eligibilityUUIDPattern.MatchString(in.BeforeID) {
+		return EligibilityFreezePage{}, errors.New("both valid eligibility freeze cursor fields are required")
+	}
+	query := eligibilityFreezeSelect + ` WHERE 1=1`
+	args := []any{}
+	add := func(clause string, value any) { args = append(args, value); query += fmt.Sprintf(clause, len(args)) }
+	if in.Status != "all" {
+		add(` AND ef.status=$%d`, in.Status)
+	}
+	if in.FreezeReason != "" {
+		add(` AND ef.freeze_reason=$%d`, in.FreezeReason)
+	}
+	if in.SourceInstanceID != "" {
+		add(` AND eas.source_instance_id=$%d::uuid`, in.SourceInstanceID)
+	}
+	if in.ExternalUserID != "" {
+		add(` AND ea.external_user_id=$%d`, in.ExternalUserID)
+	}
+	if !in.BeforeOpenedAt.IsZero() {
+		args = append(args, in.BeforeOpenedAt, in.BeforeID)
+		query += fmt.Sprintf(` AND (ef.opened_at,ef.id)<($%d,$%d::uuid)`, len(args)-1, len(args))
+	}
+	args = append(args, in.Limit+1)
+	query += fmt.Sprintf(` ORDER BY ef.opened_at DESC,ef.id DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return EligibilityFreezePage{}, err
+	}
+	defer rows.Close()
+	items := make([]EligibilityFreeze, 0, in.Limit+1)
+	for rows.Next() {
+		item, scanErr := scanEligibilityFreeze(rows)
+		if scanErr != nil {
+			return EligibilityFreezePage{}, scanErr
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return EligibilityFreezePage{}, err
+	}
+	page := EligibilityFreezePage{HasMore: len(items) > in.Limit}
+	if page.HasMore {
+		items = items[:in.Limit]
+	}
+	page.Items = items
+	if page.HasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		page.NextBeforeOpenedAt = last.OpenedAt
+		page.NextBeforeID = last.ID
+	}
+	return page, nil
+}
+
+func (s *Store) ResolveEligibilityFreeze(ctx context.Context, in ResolveEligibilityFreezeInput) (EligibilityFreeze, error) {
+	if !eligibilityUUIDPattern.MatchString(strings.TrimSpace(in.FreezeID)) || in.ExpectedVersion <= 0 ||
+		!hexHashPattern.MatchString(in.EvidenceHash) || !hexHashPattern.MatchString(in.NoteHash) ||
+		len(in.EvidenceCiphertext) < 16 || len(in.EvidenceCiphertext) > 8192 || len(in.NoteCiphertext) < 16 || len(in.NoteCiphertext) > 8192 || !in.FreshnessPolicy.enabled() {
+		return EligibilityFreeze{}, errors.New("complete encrypted eligibility resolution evidence and freshness policy are required")
+	}
+	actor := in.Actor.normalized()
+	if actor.Type != "admin" || strings.TrimSpace(actor.ID) == "" {
+		return EligibilityFreeze{}, domain.ErrForbidden
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return EligibilityFreeze{}, err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var accountID, sourceID string
+	if err = tx.QueryRow(ctx, `SELECT ef.external_account_id::text,eas.source_instance_id::text FROM eligibility_freezes ef JOIN source_account_eligibility_state eas ON eas.external_account_id=ef.external_account_id WHERE ef.id=$1`, in.FreezeID).Scan(&accountID, &sourceID); errors.Is(err, pgx.ErrNoRows) {
+		return EligibilityFreeze{}, domain.ErrNotFound
+	} else if err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if err = assertSourceFreshTx(ctx, tx, sourceID, in.FreshnessPolicy); err != nil {
+		// CR-0007 problem three: report the specific sentinel only for this
+		// one call site (ResolveEligibilityFreeze's own admin-facing failure
+		// surface). assertSourceFreshTx is also called from the unrelated
+		// invoice-submission paths (requests.go, store.go), which must keep
+		// seeing the generic domain.ErrSourceUnavailable -- so the remap
+		// happens here, not inside assertSourceFreshTx itself.
+		if errors.Is(err, domain.ErrSourceUnavailable) {
+			return EligibilityFreeze{}, domain.ErrEligibilitySourceStale
+		}
+		return EligibilityFreeze{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,47))`, accountID); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	item, err := scanEligibilityFreeze(tx.QueryRow(ctx, eligibilityFreezeSelect+` WHERE ef.id=$1 FOR UPDATE OF ef,eas`, in.FreezeID))
+	if err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if item.ExternalAccountID != accountID || item.SourceInstanceID != sourceID {
+		return EligibilityFreeze{}, domain.ErrConflict
+	}
+	if item.PrincipalID == actor.ID {
+		return EligibilityFreeze{}, domain.ErrForbidden
+	}
+	if item.Status == "resolved" {
+		if item.EvidenceHash == in.EvidenceHash && item.NoteHash == in.NoteHash {
+			if err = tx.Commit(ctx); err != nil {
+				return EligibilityFreeze{}, err
+			}
+			return item, nil
+		}
+		return EligibilityFreeze{}, domain.ErrVersionConflict
+	}
+	if item.Status != "open" || item.ResolutionVersion != in.ExpectedVersion {
+		return EligibilityFreeze{}, domain.ErrVersionConflict
+	}
+	if item.FreezeReason == "SOURCE_REFUND" {
+		// This is the same refund-exposure family the unsafeRefund query
+		// below also detects (its first EXISTS clause matches this exact
+		// row), just short-circuited before running that heavier query.
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
+	}
+	// The guard is placed here, after the idempotent-replay short circuit
+	// above, so a replayed resolution of an already-resolved freeze still
+	// returns the same freeze rather than a 409.
+	if err = assertNoBlockingDeadEventForFreezeTx(ctx, tx, in.FreezeID, sourceID); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	var unsafeRefund, projectionJob bool
+	if err = tx.QueryRow(ctx, `
+		SELECT
+			EXISTS(SELECT 1 FROM eligibility_freezes f WHERE f.external_account_id=$1 AND f.status='open' AND f.freeze_reason='SOURCE_REFUND')
+			OR EXISTS(SELECT 1 FROM funding_lots fl WHERE fl.external_account_id=$1 AND fl.refund_frozen)
+			OR EXISTS(SELECT 1 FROM refund_cases rc JOIN funding_lots fl ON fl.id=rc.funding_lot_id WHERE fl.external_account_id=$1 AND rc.status='open')
+			OR EXISTS(SELECT 1 FROM invoice_allocations ia JOIN funding_lots fl ON fl.id=ia.funding_lot_id JOIN invoice_requests ir ON ir.id=ia.invoice_request_id WHERE fl.external_account_id=$1 AND ir.status='refund_attention'),
+			EXISTS(SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=$1)`, accountID).Scan(&unsafeRefund, &projectionJob); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	// CR-0007 problem three: unsafeRefund folds four refund-exposure
+	// sub-cases into one boolean (operator remediation is identical for all
+	// four, per the change request), so it maps to one code distinct from
+	// projectionJob's -- unchanged from today, this if/else only changes
+	// which sentinel each branch reports, not whether either one fires.
+	if unsafeRefund {
+		return EligibilityFreeze{}, domain.ErrEligibilityRefundExposed
+	}
+	if projectionJob {
+		return EligibilityFreeze{}, domain.ErrEligibilityProjectionPending
+	}
+	var evaluation string
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(latest.evaluation_status,'') FROM (
+			SELECT checkpoint.as_of,checkpoint.source_sequence,checkpoint.id,
+				(SELECT evaluation.evaluation_status FROM balance_checkpoint_evaluations evaluation
+				 WHERE evaluation.checkpoint_id=checkpoint.id
+				 ORDER BY evaluation.projection_version DESC LIMIT 1) AS evaluation_status
+			FROM balance_reconciliation_checkpoints checkpoint
+			JOIN source_account_eligibility_state state
+			  ON state.external_account_id=checkpoint.external_account_id
+			WHERE checkpoint.external_account_id=$1
+			  AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<=state.finalized_through
+			UNION ALL
+			SELECT proof.as_of,proof.source_sequence,proof.id,
+				(SELECT evaluation.evaluation_status FROM balance_carry_forward_evaluations evaluation
+				 WHERE evaluation.proof_id=proof.id
+				 ORDER BY evaluation.projection_version DESC LIMIT 1)
+			FROM balance_carry_forward_proofs proof
+			JOIN source_account_eligibility_state state
+			  ON state.external_account_id=proof.external_account_id
+			WHERE proof.external_account_id=$1 AND proof.as_of<=state.finalized_through
+		) latest
+		ORDER BY latest.as_of DESC,latest.source_sequence DESC,latest.id DESC LIMIT 1`, accountID).Scan(&evaluation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
+	}
+	if err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if evaluation != "matched" && evaluation != "positive_classified_non_cash" {
+		return EligibilityFreeze{}, domain.ErrEligibilityEvaluationUnmatched
+	}
+	before := item
+	now := time.Now().UTC()
+	err = tx.QueryRow(ctx, `
+		UPDATE eligibility_freezes SET status='resolved',resolved_at=$1,resolved_by=$2,
+			resolution_evidence_hash=$3,resolution_evidence_ciphertext=$4,
+			resolution_note_hash=$5,resolution_note_ciphertext=$6,
+			resolution_version=resolution_version+1,updated_at=$1
+		WHERE id=$7 AND status='open' AND resolution_version=$8
+		RETURNING status,resolved_at,resolution_version,resolution_evidence_hash,resolution_note_hash`, now, actor.ID,
+		in.EvidenceHash, in.EvidenceCiphertext, in.NoteHash, in.NoteCiphertext, in.FreezeID, in.ExpectedVersion).Scan(&item.Status, &item.ResolvedAt, &item.ResolutionVersion, &item.EvidenceHash, &item.NoteHash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EligibilityFreeze{}, domain.ErrVersionConflict
+	}
+	if err != nil {
+		return EligibilityFreeze{}, err
+	}
+	var remaining int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM eligibility_freezes WHERE external_account_id=$1 AND status='open'`, accountID).Scan(&remaining); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if remaining == 0 {
+		if _, err = tx.Exec(ctx, `INSERT INTO eligibility_projection_jobs(external_account_id,requested_through,status,next_attempt_at) SELECT external_account_id,finalized_through,'queued',now() FROM source_account_eligibility_state WHERE external_account_id=$1 ON CONFLICT(external_account_id) DO NOTHING`, accountID); err != nil {
+			return EligibilityFreeze{}, err
+		}
+		command, updateErr := tx.Exec(ctx, `UPDATE source_account_eligibility_state SET eligibility_status='active',projection_version=projection_version+1,updated_at=now() WHERE external_account_id=$1 AND eligibility_status='frozen'`, accountID)
+		if updateErr != nil {
+			return EligibilityFreeze{}, updateErr
+		}
+		if command.RowsAffected() != 1 {
+			return EligibilityFreeze{}, domain.ErrVersionConflict
+		}
+		item.EligibilityStatus = "active"
+	}
+	actor.Reason = "eligibility freeze resolution evidence sha256:" + in.EvidenceHash
+	if err = writeAudit(ctx, tx, actor, "eligibility.freeze.resolved", "eligibility_freeze", item.ID, before, map[string]any{"status": item.Status, "version": item.ResolutionVersion, "remaining_open": remaining, "account_status": item.EligibilityStatus}); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return EligibilityFreeze{}, err
+	}
+	return item, nil
+}
+
+// ListEligibilitySummaries: platform (XM-INV-PLATFORM-SCOPE) narrows the
+// result to one source instance type when set; empty means unscoped.
+func (s *Store) ListEligibilitySummaries(ctx context.Context, principalID string, platform domain.SourceType) ([]EligibilitySummary, error) {
+	if !eligibilityUUIDPattern.MatchString(strings.TrimSpace(principalID)) {
+		return nil, domain.ErrForbidden
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT si.id::text,si.source_type,si.name,ea.binding_status,
+			COALESCE(eas.eligibility_status,'syncing'),COALESCE(eas.unit_code,''),
+			COALESCE(l.available,0)::bigint,COALESCE(l.consumed,0)::bigint,
+			COALESCE(l.unconsumed,0)::bigint,COALESCE(l.reserved,0)::bigint,COALESCE(l.issued,0)::bigint,
+			COALESCE(c.legacy,eas.cutover_balance_units,0)::text,
+			COALESCE(c.noncash,0)::text,
+			EXISTS(SELECT 1 FROM eligibility_freezes f WHERE f.external_account_id=ea.id AND f.status='open'),
+			EXISTS(SELECT 1 FROM eligibility_projection_jobs j WHERE j.external_account_id=ea.id)
+		FROM external_accounts ea JOIN source_instances si ON si.id=ea.source_instance_id
+		LEFT JOIN source_account_eligibility_state eas ON eas.external_account_id=ea.id
+		LEFT JOIN LATERAL (
+			SELECT sum(CASE WHEN fl.refund_frozen=FALSE THEN GREATEST(fl.consumed_cash_minor-fl.reserved_minor-fl.issued_minor,0) ELSE 0 END) available,
+				sum(fl.consumed_cash_minor) consumed,
+				sum(GREATEST(fl.verified_cash_minor-fl.consumed_cash_minor,0)) unconsumed,
+				sum(fl.reserved_minor) reserved,sum(fl.issued_minor) issued
+			FROM funding_lots fl WHERE fl.external_account_id=ea.id AND fl.currency='CNY'
+				AND fl.eligibility_kind IN ('WALLET_CASH','SUBSCRIPTION_CASH') AND fl.verification_state='verified'
+		) l ON true
+		LEFT JOIN LATERAL (
+			SELECT sum(service_units) FILTER (WHERE credit_kind IN ('LEGACY_NON_INVOICEABLE','PRE_POLICY_NON_INVOICEABLE')) legacy,
+				sum(service_units) FILTER (WHERE credit_kind NOT IN ('LEGACY_NON_INVOICEABLE','PRE_POLICY_NON_INVOICEABLE')) noncash
+			FROM source_credit_events ce WHERE ce.external_account_id=ea.id
+		) c ON true
+		WHERE ea.invoice_user_id=$1 AND ($2='' OR si.source_type=$2)
+		ORDER BY si.source_type,si.name,si.id`, principalID, string(platform))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []EligibilitySummary{}
+	for rows.Next() {
+		var item EligibilitySummary
+		if err = rows.Scan(&item.SourceInstanceID, &item.SourceType, &item.SourceName, &item.BindingStatus, &item.EligibilityStatus, &item.UnitCode, &item.AvailableMinor, &item.ConsumedMinor, &item.UnconsumedMinor, &item.ReservedMinor, &item.IssuedMinor, &item.LegacyServiceUnits, &item.NonCashServiceUnits, &item.HasOpenFreeze, &item.ProjectionPending); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

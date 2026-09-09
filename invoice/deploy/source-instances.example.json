@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "id": "10000000-0000-4000-8000-000000000001",
+      "type": "sub2api",
+      "name": "SoloV Sub2API",
+      "runtime_version": "0.1.179",
+      "streams": ["payments", "identities", "usage", "credits", "balances"]
+    },
+    {
+      "id": "10000000-0000-4000-8000-000000000002",
+      "type": "newapi",
+      "name": "SoloV New API",
+      "runtime_version": "v1.0.0-rc.25",
+      "streams": ["payments", "identities", "usage", "credits", "balances"]
+    }
+  ]
+}

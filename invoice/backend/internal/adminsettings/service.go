@@ -1,0 +1,308 @@
+package adminsettings
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"net"
+	"net/mail"
+	"sort"
+	"strings"
+	"unicode/utf8"
+
+	"invoice-system/backend/internal/notify"
+)
+
+type Service struct {
+	repo Repository
+	box  SecretBox
+}
+
+func NewService(repo Repository, box SecretBox) *Service { return &Service{repo: repo, box: box} }
+
+func (s *Service) Get(ctx context.Context) (Settings, error) { return s.repo.Get(ctx) }
+
+// Bootstrap creates the singleton configuration with either a real issuer or
+// the one reserved issuer placeholder. The repository's revision-zero CAS
+// makes this create-only; an existing configuration can only be changed
+// through authenticated Update.
+func (s *Service) Bootstrap(ctx context.Context, in UpdateInput, actor Actor) (Settings, error) {
+	normalized, err := normalizeBootstrap(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.Update(ctx, normalized, 0, actor)
+}
+
+func (s *Service) Update(ctx context.Context, in UpdateInput, expectedRevision int64, actor Actor) (Settings, error) {
+	normalized, err := normalize(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if expectedRevision < 0 || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: revision, actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.Update(ctx, normalized, expectedRevision, actor)
+}
+
+// UpdateInvoice changes invoice policy fields and therefore requires a real
+// issuer. Metadata-only SMTP and admin-access updates use Update/UpdateSMTP so
+// they can preserve an existing legacy placeholder until this step is done.
+func (s *Service) UpdateInvoice(ctx context.Context, in UpdateInput, expectedRevision int64, actor Actor) (Settings, error) {
+	normalized, err := normalizeInvoice(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if expectedRevision < 0 || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: revision, actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.Update(ctx, normalized, expectedRevision, actor)
+}
+
+// UpdateSMTP atomically updates SMTP metadata and its optional credential. Any
+// credential encryption is completed before the repository opens a transaction.
+func (s *Service) UpdateSMTP(ctx context.Context, in UpdateInput, change SMTPSecretChange, authorizationCode string, expectedRevision int64, actor Actor) (Settings, error) {
+	normalized, err := normalize(in)
+	if err != nil {
+		return Settings{}, err
+	}
+	if expectedRevision < 0 || strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: revision, actor and request ID are required", ErrInvalidSettings)
+	}
+	var envelope SecretEnvelope
+	switch change {
+	case SMTPSecretUnchanged:
+		if authorizationCode != "" {
+			return Settings{}, fmt.Errorf("%w: unchanged secret cannot include an authorization code", ErrInvalidSettings)
+		}
+	case SMTPSecretSet:
+		if s.box == nil || strings.TrimSpace(authorizationCode) == "" {
+			return Settings{}, fmt.Errorf("%w: SMTP authorization code is required", ErrInvalidSettings)
+		}
+		envelope, err = s.box.Seal(ctx, []byte(authorizationCode))
+		if err != nil {
+			return Settings{}, fmt.Errorf("encrypt SMTP secret: %w", err)
+		}
+		if len(envelope.Ciphertext) == 0 || strings.TrimSpace(envelope.KeyVersion) == "" {
+			return Settings{}, errorsInvalidEnvelope()
+		}
+	case SMTPSecretClear:
+		if authorizationCode != "" {
+			return Settings{}, fmt.Errorf("%w: clear secret cannot include an authorization code", ErrInvalidSettings)
+		}
+	default:
+		return Settings{}, fmt.Errorf("%w: unsupported SMTP secret change", ErrInvalidSettings)
+	}
+	return s.repo.UpdateSMTP(ctx, normalized, change, envelope, expectedRevision, actor)
+}
+
+func (s *Service) SetSMTPSecret(ctx context.Context, authorizationCode string, expectedRevision int64, actor Actor) (Settings, error) {
+	if s.box == nil || strings.TrimSpace(authorizationCode) == "" {
+		return Settings{}, fmt.Errorf("%w: SMTP authorization code is required", ErrInvalidSettings)
+	}
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	envelope, err := s.box.Seal(ctx, []byte(authorizationCode))
+	if err != nil {
+		return Settings{}, fmt.Errorf("encrypt SMTP secret: %w", err)
+	}
+	if len(envelope.Ciphertext) == 0 || strings.TrimSpace(envelope.KeyVersion) == "" {
+		return Settings{}, errorsInvalidEnvelope()
+	}
+	return s.repo.StoreSMTPSecret(ctx, envelope, expectedRevision, actor)
+}
+
+func (s *Service) ClearSMTPSecret(ctx context.Context, expectedRevision int64, actor Actor) (Settings, error) {
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return Settings{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.ClearSMTPSecret(ctx, expectedRevision, actor)
+}
+
+// SMTPSecretForDelivery is intentionally separate from Get. Only the mail
+// delivery worker should call it; ordinary settings responses never contain it.
+func (s *Service) SMTPSecretForDelivery(ctx context.Context) (string, error) {
+	if s.box == nil {
+		return "", ErrSecretMissing
+	}
+	envelope, err := s.repo.LoadSMTPSecret(ctx)
+	if err != nil {
+		return "", err
+	}
+	plain, err := s.box.Open(ctx, envelope)
+	if err != nil {
+		return "", fmt.Errorf("decrypt SMTP secret: %w", err)
+	}
+	return string(plain), nil
+}
+
+func errorsInvalidEnvelope() error {
+	return fmt.Errorf("%w: secret box returned an empty envelope", ErrInvalidSettings)
+}
+
+func normalize(in UpdateInput) (UpdateInput, error) {
+	return normalizeInput(in)
+}
+
+func normalizeBootstrap(in UpdateInput) (UpdateInput, error) {
+	normalized, err := normalizeInput(in)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	if !IsIssuerConfigured(normalized.IssuerName) && normalized.IssuerName != UnconfiguredIssuerName {
+		return UpdateInput{}, ErrInvalidSettings
+	}
+	return normalized, nil
+}
+
+func normalizeInvoice(in UpdateInput) (UpdateInput, error) {
+	normalized, err := normalizeInput(in)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	if !IsIssuerConfigured(normalized.IssuerName) {
+		return UpdateInput{}, ErrInvalidSettings
+	}
+	return normalized, nil
+}
+
+func normalizeInput(in UpdateInput) (UpdateInput, error) {
+	in.IssuerName = strings.TrimSpace(in.IssuerName)
+	in.SMTPHost = strings.ToLower(strings.TrimSpace(in.SMTPHost))
+	in.SMTPFrom = strings.TrimSpace(in.SMTPFrom)
+	in.SMTPFromName = strings.TrimSpace(in.SMTPFromName)
+	testRecipient, err := NormalizeTestRecipient(in.SMTPTestRecipient)
+	if err != nil {
+		return UpdateInput{}, err
+	}
+	in.SMTPTestRecipient = testRecipient
+	if in.IssuerName == "" || utf8.RuneCountInString(in.IssuerName) > 200 || in.MinimumRequestMinor < MinimumMinor ||
+		in.EligibilityStartAt.IsZero() || !in.EligibilityStartAt.UTC().Equal(RequiredEligibilityStartAt) ||
+		in.SMTPPort != 587 || in.SMTPFromName == "" || utf8.RuneCountInString(in.SMTPFromName) > 128 || !in.SMTPStartTLS {
+		return UpdateInput{}, ErrInvalidSettings
+	}
+	if in.SMTPHost != "smtp.qq.com" && in.SMTPHost != "smtp.exmail.qq.com" && in.SMTPHost != "smtp.gmail.com" {
+		return UpdateInput{}, fmt.Errorf("%w: unsupported SMTP host", ErrInvalidSettings)
+	}
+	address, err := mail.ParseAddress(in.SMTPFrom)
+	if err != nil || !strings.EqualFold(address.Address, in.SMTPFrom) {
+		return UpdateInput{}, fmt.Errorf("%w: invalid SMTP from address", ErrInvalidSettings)
+	}
+	// 测试收件人不得与发件人相同：一封「自己发给自己」的测试邮件既证明不了
+	// 投递，也可能被服务商当成回环丢弃。库里另有同名 CHECK 兜底（迁移 0030），
+	// 这里先报出可读的错误码。
+	if in.SMTPTestRecipient != "" && strings.EqualFold(in.SMTPTestRecipient, in.SMTPFrom) {
+		return UpdateInput{}, ErrTestRecipientConflict
+	}
+	if len(in.AdminCIDRs) == 0 {
+		return UpdateInput{}, fmt.Errorf("%w: at least one admin CIDR is required", ErrInvalidSettings)
+	}
+	if len(in.AdminCIDRs) > 16 {
+		return UpdateInput{}, fmt.Errorf("%w: at most 16 admin CIDRs are allowed", ErrInvalidSettings)
+	}
+	seen := map[string]struct{}{}
+	normalized := make([]string, 0, len(in.AdminCIDRs))
+	for _, raw := range in.AdminCIDRs {
+		raw = strings.TrimSpace(raw)
+		if !strings.Contains(raw, "/") {
+			if ip := net.ParseIP(raw); ip != nil {
+				if ip.To4() != nil {
+					raw += "/32"
+				} else {
+					raw += "/128"
+				}
+			}
+		}
+		_, network, parseErr := net.ParseCIDR(raw)
+		if parseErr != nil {
+			return UpdateInput{}, fmt.Errorf("%w: invalid admin CIDR %q", ErrInvalidSettings, raw)
+		}
+		ones, bits := network.Mask.Size()
+		if network.IP.IsUnspecified() || network.IP.IsMulticast() || network.IP.IsLinkLocalUnicast() || network.IP.IsLinkLocalMulticast() ||
+			(bits == 32 && ones < 24) || (bits == 128 && ones < 64) {
+			return UpdateInput{}, fmt.Errorf("%w: unsafe or overly broad admin CIDR %q", ErrInvalidSettings, raw)
+		}
+		canonical := network.String()
+		if _, ok := seen[canonical]; !ok {
+			seen[canonical] = struct{}{}
+			normalized = append(normalized, canonical)
+		}
+	}
+	sort.Strings(normalized)
+	in.AdminCIDRs = normalized
+	return in, nil
+}
+
+// --- 企业微信通知地址（XM-INV-NOTICE-WEBHOOK-SETTING）---------------------
+
+// NoticeWebhook 返回管理端能显示的那部分：配没配、指纹、谁在什么时候改的。
+// **不含地址**，也没有任何能反推地址的东西。
+func (s *Service) NoticeWebhook(ctx context.Context) (NoticeWebhookInfo, error) {
+	return s.repo.GetNoticeWebhook(ctx)
+}
+
+// SetNoticeWebhook 保存（或覆盖）通知地址。
+//
+// 形状校验放在**这里**——保存那一刻人就在页面前，比等 api 重启才在日志里
+// 报错强得多（这也是把地址从宿主机文件搬进库的一半理由）。
+// 校验函数刻意不回显地址：错误会一路回到页面上。
+func (s *Service) SetNoticeWebhook(ctx context.Context, address string, actor Actor) (NoticeWebhookInfo, error) {
+	if s.box == nil {
+		return NoticeWebhookInfo{}, ErrSecretMissing
+	}
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	address = strings.TrimSpace(address)
+	if err := notify.ValidateWebhookAddress(address); err != nil {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: %s", ErrInvalidSettings, err.Error())
+	}
+	envelope, err := s.box.Seal(ctx, []byte(address))
+	if err != nil {
+		// 不带 err：Seal 的错误理论上不含明文，但这条路径上不值得赌。
+		return NoticeWebhookInfo{}, errors.New("encrypt notice webhook failed")
+	}
+	if len(envelope.Ciphertext) == 0 || strings.TrimSpace(envelope.KeyVersion) == "" {
+		return NoticeWebhookInfo{}, errorsInvalidEnvelope()
+	}
+	return s.repo.StoreNoticeWebhook(ctx, envelope, NoticeWebhookFingerprint(address), actor)
+}
+
+func (s *Service) ClearNoticeWebhook(ctx context.Context, actor Actor) (NoticeWebhookInfo, error) {
+	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.RequestID) == "" {
+		return NoticeWebhookInfo{}, fmt.Errorf("%w: actor and request ID are required", ErrInvalidSettings)
+	}
+	return s.repo.ClearNoticeWebhook(ctx, actor)
+}
+
+// NoticeWebhookForDelivery 与 SMTPSecretForDelivery 同一条纪律：**只有投递
+// 循环该调它**，普通设置响应里永远没有这个值。
+func (s *Service) NoticeWebhookForDelivery(ctx context.Context) (string, error) {
+	if s.box == nil {
+		return "", ErrSecretMissing
+	}
+	envelope, err := s.repo.LoadNoticeWebhook(ctx)
+	if err != nil {
+		return "", err
+	}
+	plain, err := s.box.Open(ctx, envelope)
+	if err != nil {
+		return "", errors.New("decrypt notice webhook failed")
+	}
+	return string(plain), nil
+}
+
+// NoticeWebhookFingerprint 是地址的可核对标识：sha256 的十六进制前 16 位。
+//
+// 为什么是指纹而不是地址前缀：整个 URL 都是凭据，露出 key 的前几位就是露出
+// 凭据的前几位。指纹可以拿去和"我刚才粘的那个"比对，却反推不出地址。
+func NoticeWebhookFingerprint(address string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(address)))
+	return "sha256:" + hex.EncodeToString(sum[:])[:16]
+}

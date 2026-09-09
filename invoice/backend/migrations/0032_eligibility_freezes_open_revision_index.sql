@@ -1,0 +1,40 @@
+-- XM-INV-DEAD-CONTAINMENT: a dead source ingest event no longer makes its
+-- whole stream unavailable to every account on the source when an open
+-- eligibility freeze already answers for it. Deciding that means asking, for
+-- each dead event, whether any open freeze carries the same
+-- source_revision_hash as the event's payload_hash -- five queries now do it:
+-- the four source-health surfaces in
+-- backend/internal/postgresstore/source_sync.go and the scan-cycle
+-- completeness check in consumption.go, all rendered from one definition
+-- (sourceEventContainedByOpenFreezeSQL). Two of those run on hot paths:
+-- assertSourceFreshTx executes inside every invoice submission, once per
+-- stream, and the readiness query answers a container healthcheck every ten
+-- seconds.
+--
+-- eligibility_freezes has no index leading with source_revision_hash today
+-- (0009's eligibility_freezes_one_open_trigger leads with
+-- external_account_id/trigger_object_type, and
+-- eligibility_freezes_open_account_idx with external_account_id), so the
+-- lookup would fall back to a scan. The table is small enough that a scan is
+-- correct today; this index is what keeps it correct as the freeze history
+-- grows.
+--
+-- The partial predicate mirrors the rendered SQL exactly, IS NOT NULL
+-- included. That clause is not redundant decoration: a query that omits it
+-- cannot match this index.
+--
+-- Deliberately on eligibility_freezes and not on source_ingest_events:
+-- migration 0013 installs a hard guard refusing to build an index on
+-- source_ingest_events in-migration once that table is non-empty (it must be
+-- prebuilt with CREATE INDEX CONCURRENTLY), and this slice has no business
+-- reopening that decision. The unfreeze guard added in the same slice is
+-- narrowed by source_instance_id precisely so it rides
+-- source_ingest_events_readiness_active_idx, which 0013 already provides.
+--
+-- Read-only addition: no table, column, constraint or data change. Safe to
+-- apply before the binary that uses it, and safe to leave in place if that
+-- binary is rolled back. It creates no new table, so the invoice_app grant
+-- replay that new tables require does not apply here.
+CREATE INDEX IF NOT EXISTS eligibility_freezes_open_revision_idx
+    ON eligibility_freezes(source_revision_hash)
+    WHERE status = 'open' AND source_revision_hash IS NOT NULL;

@@ -1,0 +1,5 @@
+# RC52 failed-candidate local evidence integrity anchor
+# Captured 2026-09-01 after v0.1.0-rc52-signed was fixed at adf1527.
+# exact1 stopped in source verification because the isolated PostgreSQL 15 host
+# port could not become reachable through the local host NAT. Treat as read-only.
+a0c11098308f4d07b057ddf21adecea76abe2a99d5f7754fbd539b0124fb017c  release/0.1.0-rc52-exact1/logs/source-verification.log

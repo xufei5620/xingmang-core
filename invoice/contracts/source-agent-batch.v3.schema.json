@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://invoice.solov.cc/contracts/source-agent-batch.v3.schema.json",
+  "title": "Invoice Source Agent Economic Batch v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "source_instance_id", "stream_id", "source_type",
+    "source_runtime_version", "agent_version", "batch_id", "sequence",
+    "previous_batch_hash", "captured_at", "mode", "projection_status",
+    "stream_watermark_at", "source_cursor", "scan_ceiling_at",
+    "scan_ceiling_cursor", "scan_cycle_id", "scan_complete", "records"
+  ],
+  "properties": {
+    "schema_version": { "const": "3.0" },
+    "source_instance_id": { "$ref": "#/$defs/uuid" },
+    "stream_id": { "enum": ["payments", "usage", "credits", "balances"] },
+    "source_type": { "enum": ["sub2api", "newapi"] },
+    "source_runtime_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "agent_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "batch_id": { "$ref": "#/$defs/uuid" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "previous_batch_hash": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/hash" }] },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "mode": { "const": "db_projection" },
+    "projection_status": { "enum": ["healthy", "blocked"] },
+    "stream_watermark_at": { "type": "string", "format": "date-time" },
+    "source_cursor": { "$ref": "#/$defs/cursor" },
+    "scan_ceiling_at": { "type": "string", "format": "date-time" },
+    "scan_ceiling_cursor": { "$ref": "#/$defs/cursor" },
+    "scan_cycle_id": { "$ref": "#/$defs/uuid" },
+    "scan_complete": { "type": "boolean" },
+    "scan_snapshot_id": { "$ref": "#/$defs/hash" },
+    "scan_snapshot_row_count": { "type": "integer", "minimum": 0, "maximum": 2000000 },
+    "records": { "type": "array", "maxItems": 500 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "stream_id": { "const": "usage" } } },
+      "then": { "properties": { "records": { "items": { "$ref": "#/$defs/usageRecord" } } } }
+    },
+    {
+      "if": { "properties": { "stream_id": { "const": "credits" } } },
+      "then": { "properties": { "records": { "items": { "$ref": "#/$defs/creditRecord" } } } }
+    },
+    {
+      "if": { "properties": { "stream_id": { "const": "balances" } } },
+      "then": { "required": ["scan_snapshot_id", "scan_snapshot_row_count"], "properties": { "records": { "items": { "oneOf": [
+        { "$ref": "#/$defs/cutoverManifestRecord" },
+        { "$ref": "#/$defs/balanceRecord" }
+      ] } } } }
+    },
+    {
+      "if": { "not": { "properties": { "stream_id": { "const": "balances" } } } },
+      "then": { "not": { "anyOf": [
+        { "required": ["scan_snapshot_id"] },
+        { "required": ["scan_snapshot_row_count"] }
+      ] } }
+    },
+    {
+      "if": { "properties": { "stream_id": { "const": "payments" } } },
+      "then": { "properties": { "records": { "items": { "oneOf": [
+        { "$ref": "#/$defs/paymentOrderRecord" },
+        { "$ref": "#/$defs/paymentCandidateRecord" },
+        { "$ref": "#/$defs/paymentAdjustmentRecord" },
+        { "$ref": "#/$defs/subscriptionRecord" }
+      ] } } } }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "externalId": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "units": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,77})$" },
+    "positiveUnits": { "type": "string", "pattern": "^[1-9][0-9]{0,77}$" },
+    "decimal": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,17})(\\.[0-9]{1,8})?$" },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "unitCode": { "enum": ["SUB2_BALANCE_1E8", "NEWAPI_QUOTA"] },
+    "cursor": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000\\r\\n]+$" },
+    "factCursor": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}:[0-9]{1,20}$" },
+    "factMeta": {
+      "type": "object",
+      "required": ["source_cursor", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "source_cursor": { "$ref": "#/$defs/factCursor" },
+        "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "causal_order": { "$ref": "#/$defs/units" },
+        "cutover_manifest_hash": { "$ref": "#/$defs/hash" },
+        "configuration_hash": { "$ref": "#/$defs/hash" }
+      },
+      "dependentRequired": {
+        "causal_domain": ["causal_order"],
+        "causal_order": ["causal_domain"]
+      }
+    },
+    "recordBase": {
+      "type": "object",
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" },
+        "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "payload_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "usageRecord": {
+      "allOf": [
+        { "$ref": "#/$defs/recordBase" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+          "properties": {
+            "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+            "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+            "entity_type": { "const": "usage_event" }, "payload": { "$ref": "#/$defs/usagePayload" }
+          }
+        }
+      ]
+    },
+    "usagePayload": {
+      "allOf": [
+        { "$ref": "#/$defs/factMeta" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["external_user_id", "external_usage_id", "occurred_at", "service_units", "unit_code", "billing_scope", "source_cursor", "cutover_manifest_hash", "configuration_hash"],
+          "properties": {
+            "external_user_id": { "$ref": "#/$defs/externalId" },
+            "external_usage_id": { "$ref": "#/$defs/factCursor" },
+            "occurred_at": { "type": "string", "format": "date-time" },
+            "service_units": { "$ref": "#/$defs/positiveUnits" }, "unit_code": { "$ref": "#/$defs/unitCode" },
+            "billing_scope": { "const": "wallet" }, "source_cursor": { "$ref": "#/$defs/factCursor" },
+            "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 }, "causal_order": { "$ref": "#/$defs/units" },
+            "cutover_manifest_hash": { "$ref": "#/$defs/hash" }, "configuration_hash": { "$ref": "#/$defs/hash" }
+          },
+          "dependentRequired": { "causal_domain": ["causal_order"], "causal_order": ["causal_domain"] }
+        }
+      ]
+    },
+    "creditRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "credit_event" }, "payload": { "$ref": "#/$defs/creditPayload" }
+      }
+    },
+    "creditPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_user_id", "external_credit_id", "occurred_at", "service_units", "unit_code", "credit_kind", "source_cursor", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" }, "external_credit_id": { "$ref": "#/$defs/factCursor" },
+        "occurred_at": { "type": "string", "format": "date-time" }, "service_units": { "$ref": "#/$defs/positiveUnits" },
+        "unit_code": { "$ref": "#/$defs/unitCode" }, "credit_kind": { "enum": ["bonus", "rebate", "admin", "unknown_positive"] },
+        "source_cursor": { "$ref": "#/$defs/factCursor" }, "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "causal_order": { "$ref": "#/$defs/units" }, "cutover_manifest_hash": { "$ref": "#/$defs/hash" },
+        "configuration_hash": { "$ref": "#/$defs/hash" }
+      },
+      "dependentRequired": { "causal_domain": ["causal_order"], "causal_order": ["causal_domain"] }
+    },
+    "balanceRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "balance_checkpoint" }, "payload": { "$ref": "#/$defs/balancePayload" }
+      }
+    },
+    "balancePayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_user_id", "checkpoint_id", "checkpoint_kind", "as_of", "balance_service_units", "unit_code", "source_snapshot_id", "snapshot_row_count", "balance_negative", "baseline_member", "source_cursor", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" }, "checkpoint_id": { "type": "string", "pattern": "^[0-9a-f]{64}:[1-9][0-9]{0,19}$" },
+        "checkpoint_kind": { "enum": ["cutover", "reconciliation"] }, "as_of": { "type": "string", "format": "date-time" },
+        "balance_service_units": { "$ref": "#/$defs/units" }, "unit_code": { "$ref": "#/$defs/unitCode" },
+        "source_snapshot_id": { "$ref": "#/$defs/hash" }, "snapshot_row_count": { "$ref": "#/$defs/units" },
+        "balance_negative": { "type": "boolean" },
+        "deficit_service_units": { "$ref": "#/$defs/units", "description": "XM-INV-NEGATIVE-DEFICIT: magnitude of a negative balance, \"0\" otherwise; absent only in evidence sealed before the bridge reported it (stored as unknown, never zero)" },
+        "baseline_member": { "type": "boolean" },
+        "source_cursor": { "$ref": "#/$defs/factCursor" }, "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "causal_order": { "$ref": "#/$defs/units" }, "cutover_manifest_hash": { "$ref": "#/$defs/hash" },
+        "configuration_hash": { "$ref": "#/$defs/hash" }
+      },
+      "dependentRequired": { "causal_domain": ["causal_order"], "causal_order": ["causal_domain"] }
+    },
+    "cutoverManifestRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "cutover_manifest" }, "payload": { "$ref": "#/$defs/cutoverManifestPayload" }
+      }
+    },
+    "cutoverManifestPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_instance_id", "manifest_hash", "cutover_at", "database_clock", "source_runtime_version", "configuration_hash", "projection_contract", "unit_code", "payments_ceiling", "usage_ceiling", "credits_ceiling", "balances_ceiling", "baseline_snapshot_hash", "baseline_row_count", "signing_key_id"],
+      "properties": {
+        "source_instance_id": { "$ref": "#/$defs/uuid" }, "manifest_hash": { "$ref": "#/$defs/hash" },
+        "cutover_at": { "type": "string", "format": "date-time" }, "database_clock": { "type": "string", "format": "date-time" },
+        "source_runtime_version": { "type": "string", "minLength": 1, "maxLength": 64 }, "configuration_hash": { "$ref": "#/$defs/hash" },
+        "projection_contract": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "unit_code": { "$ref": "#/$defs/unitCode" }, "payments_ceiling": { "$ref": "#/$defs/cursor" },
+        "usage_ceiling": { "$ref": "#/$defs/cursor" }, "credits_ceiling": { "$ref": "#/$defs/cursor" },
+        "balances_ceiling": { "$ref": "#/$defs/cursor" }, "baseline_snapshot_hash": { "$ref": "#/$defs/hash" },
+        "baseline_row_count": { "$ref": "#/$defs/units" },
+        "signing_key_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$" }
+      }
+    },
+    "paymentOrderRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "payment_order" }, "payload": { "$ref": "#/$defs/paymentOrderPayload" }
+      }
+    },
+    "paymentOrderPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_order_id", "external_user_id", "status", "order_type", "amount", "pay_amount", "currency", "refund_amount", "gateway_refund_amount", "completed_at", "created_at", "updated_at", "wallet_cash_service_units", "wallet_unit_code", "source_cursor", "causal_domain", "causal_order", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" }, "external_user_id": { "$ref": "#/$defs/externalId" },
+        "status": { "type": "string", "minLength": 1, "maxLength": 64 }, "order_type": { "const": "balance" },
+        "amount": { "$ref": "#/$defs/decimal" }, "pay_amount": { "$ref": "#/$defs/decimal" }, "currency": { "const": "CNY" },
+        "refund_amount": { "$ref": "#/$defs/decimal" }, "gateway_refund_amount": { "$ref": "#/$defs/decimal" },
+        "completed_at": { "type": "string", "format": "date-time" },
+        "refund_at": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
+        "created_at": { "type": "string", "format": "date-time" }, "updated_at": { "type": "string", "format": "date-time" },
+        "payment_type": { "type": "string", "maxLength": 50 }, "provider_key": { "type": "string", "maxLength": 50 },
+        "external_trade_ref_hmac": { "$ref": "#/$defs/hash" },
+        "wallet_cash_service_units": { "$ref": "#/$defs/positiveUnits" }, "wallet_unit_code": { "$ref": "#/$defs/unitCode" },
+        "source_cursor": { "$ref": "#/$defs/factCursor" }, "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "causal_order": { "$ref": "#/$defs/units" }, "cutover_manifest_hash": { "$ref": "#/$defs/hash" }, "configuration_hash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "paymentCandidateRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "payment_candidate" }, "payload": { "$ref": "#/$defs/paymentCandidatePayload" }
+      }
+    },
+    "paymentCandidatePayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_order_id", "external_user_id", "source_status", "order_type", "quoted_amount", "observed_pay_amount", "currency", "verification_state", "verification_reason", "completed_at", "created_at", "observed_at", "source_cursor", "causal_domain", "causal_order", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" }, "external_user_id": { "$ref": "#/$defs/externalId" },
+        "source_status": { "type": "string", "minLength": 1, "maxLength": 64 }, "order_type": { "const": "topup" },
+        "quoted_amount": { "$ref": "#/$defs/decimal" }, "observed_pay_amount": { "$ref": "#/$defs/decimal" }, "currency": { "const": "CNY" },
+        "verification_state": { "const": "pending_manual" }, "verification_reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "completed_at": { "type": "string", "format": "date-time" }, "created_at": { "type": "string", "format": "date-time" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payment_type": { "type": "string", "maxLength": 50 },
+        "provider_key": { "type": "string", "maxLength": 50 }, "wallet_cash_service_units": { "$ref": "#/$defs/positiveUnits" },
+        "wallet_unit_code": { "$ref": "#/$defs/unitCode" }, "source_cursor": { "$ref": "#/$defs/factCursor" },
+        "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 }, "causal_order": { "$ref": "#/$defs/units" },
+        "cutover_manifest_hash": { "$ref": "#/$defs/hash" }, "configuration_hash": { "$ref": "#/$defs/hash" }
+      },
+      "dependentRequired": { "wallet_cash_service_units": ["wallet_unit_code"], "wallet_unit_code": ["wallet_cash_service_units"] }
+    },
+    "paymentAdjustmentRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "payment_adjustment" }, "payload": { "$ref": "#/$defs/paymentAdjustmentPayload" }
+      }
+    },
+    "paymentAdjustmentPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_order_id", "external_user_id", "adjustment_type", "amount", "currency", "source_status", "source_updated_at", "basis", "source_cursor", "causal_domain", "causal_order", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_order_id": { "$ref": "#/$defs/externalId" }, "external_user_id": { "$ref": "#/$defs/externalId" },
+        "adjustment_type": { "const": "refund" }, "amount": { "allOf": [{ "$ref": "#/$defs/decimal" }, { "not": { "const": "0" } }] }, "currency": { "const": "CNY" },
+        "effective_at": { "oneOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
+        "source_status": { "type": "string", "minLength": 1, "maxLength": 64 }, "source_updated_at": { "type": "string", "format": "date-time" },
+        "basis": { "const": "absolute_cumulative_gateway_refund" }, "source_cursor": { "$ref": "#/$defs/factCursor" },
+        "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 }, "causal_order": { "$ref": "#/$defs/units" },
+        "cutover_manifest_hash": { "$ref": "#/$defs/hash" }, "configuration_hash": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "subscriptionRecord": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event_id", "operation", "observed_at", "payload_sha256", "entity_type", "payload"],
+      "properties": {
+        "event_id": { "$ref": "#/$defs/uuid" }, "operation": { "const": "upsert" },
+        "observed_at": { "type": "string", "format": "date-time" }, "payload_sha256": { "$ref": "#/$defs/hash" },
+        "entity_type": { "const": "subscription_purchase" }, "payload": { "$ref": "#/$defs/subscriptionPayload" }
+      }
+    },
+    "subscriptionPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["external_user_id", "external_order_id", "completed_at", "paid_minor", "currency", "verification_state", "refunded", "source_cursor", "cutover_manifest_hash", "configuration_hash"],
+      "properties": {
+        "external_user_id": { "$ref": "#/$defs/externalId" }, "external_order_id": { "$ref": "#/$defs/externalId" },
+        "completed_at": { "type": "string", "format": "date-time" }, "paid_minor": { "$ref": "#/$defs/positiveUnits" },
+        "currency": { "const": "CNY" }, "verification_state": { "enum": ["verified", "pending", "frozen"] }, "refunded": { "type": "boolean" },
+        "source_cursor": { "$ref": "#/$defs/factCursor" }, "causal_domain": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "causal_order": { "$ref": "#/$defs/units" }, "cutover_manifest_hash": { "$ref": "#/$defs/hash" },
+        "configuration_hash": { "$ref": "#/$defs/hash" }
+      },
+      "dependentRequired": { "causal_domain": ["causal_order"], "causal_order": ["causal_domain"] }
+    }
+  }
+}

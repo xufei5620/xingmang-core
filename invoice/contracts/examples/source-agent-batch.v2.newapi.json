@@ -1,0 +1,35 @@
+{
+  "schema_version": "2.0",
+  "source_instance_id": "10000000-0000-4000-8000-000000000002",
+  "stream_id": "payments",
+  "source_type": "newapi",
+  "source_runtime_version": "v1.0.0-rc.25",
+  "agent_version": "0.2.0",
+  "batch_id": "018f4ec7-08d0-7b72-a2d4-1df742eec6d0",
+  "sequence": 1,
+  "previous_batch_hash": null,
+  "captured_at": "2026-08-21T00:00:00Z",
+  "mode": "db_projection",
+  "projection_status": "healthy",
+  "records": [
+    {
+      "event_id": "daa4072a-7b25-8506-94ea-2c52e6dd522d",
+      "operation": "upsert",
+      "observed_at": "2026-08-20T12:00:00Z",
+      "payload_sha256": "6a5d3c219b91e45a2b718a53ebc612872097ada3ecdc76fc56490732d5e97733",
+      "entity_type": "payment_candidate",
+      "payload": {
+        "external_order_id": "41",
+        "external_user_id": "7",
+        "source_status": "success",
+        "order_type": "topup",
+        "quoted_amount": "10",
+        "observed_pay_amount": "9.9",
+        "verification_state": "pending_manual",
+        "verification_reason": "source contract does not prove settlement",
+        "created_at": "2026-08-20T11:00:00Z",
+        "observed_at": "2026-08-20T11:01:00Z"
+      }
+    }
+  ]
+}

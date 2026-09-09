@@ -1,0 +1,199 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "充值且已消费开票口径：数据质量与调整报告",
+    "description": "评估 Sub2API 与 New API 是否能在零源码改动下，为真实支付资金的已消费部分提供可审计证据。",
+    "generatedAt": "2026-08-20T22:04:26Z",
+    "cards": [
+      {
+        "id": "sub2_allocation_gap",
+        "description": "保留的 Sub2API 消费记录中，没有任何记录带有资金来源分摊。",
+        "dataset": "gap_rates",
+        "sourceId": "sub2_coverage",
+        "filter": { "check_id": "sub2_usage_no_allocation" },
+        "metrics": [
+          { "label": "消费记录缺少资金分摊", "field": "gap_rate", "format": "percent" }
+        ]
+      },
+      {
+        "id": "sub2_history_gap",
+        "description": "已完成充值中，发生在当前最早保留消费日志之前的比例。",
+        "dataset": "gap_rates",
+        "sourceId": "sub2_coverage",
+        "filter": { "check_id": "sub2_completed_payment_pre_usage" },
+        "metrics": [
+          { "label": "充值早于消费留存窗口", "field": "gap_rate", "format": "percent" }
+        ]
+      },
+      {
+        "id": "newapi_history_gap",
+        "description": "New API 消费日志中，发生在第一笔 top-up 之前的比例。",
+        "dataset": "gap_rates",
+        "sourceId": "newapi_coverage",
+        "filter": { "check_id": "newapi_consumption_pre_topup" },
+        "metrics": [
+          { "label": "消费早于充值订单窗口", "field": "gap_rate", "format": "percent" }
+        ]
+      }
+    ],
+    "charts": [
+      {
+        "id": "usage_retention_chart",
+        "title": "Sub2API 保留消费日志每日行数",
+        "subtitle": "最早保留日为2026年7月26日；排除当前未完成日。",
+        "type": "line",
+        "layout": "full",
+        "dataset": "sub2_usage_daily",
+        "sourceId": "sub2_usage_daily",
+        "valueFormat": "number",
+        "encodings": {
+          "x": { "field": "usage_day", "type": "temporal", "label": "日期" },
+          "y": { "field": "retained_rows", "type": "quantitative", "label": "保留日志行数" },
+          "tooltip": [
+            { "field": "retained_rows", "type": "quantitative", "label": "保留日志行数" }
+          ]
+        }
+      }
+    ],
+    "sources": [
+      { "id": "sub2_coverage", "label": "Sub2API 资金与消费覆盖聚合", "path": "queries/sub2-coverage.sql" },
+      { "id": "sub2_usage_daily", "label": "Sub2API 每日保留消费日志", "path": "queries/sub2-usage-daily.sql" },
+      { "id": "newapi_coverage", "label": "New API 资金与消费覆盖聚合", "path": "queries/newapi-coverage.sql" },
+      { "id": "coverage_combined", "label": "两套现网的聚合覆盖审计", "path": "queries/" }
+    ],
+    "blocks": [
+      { "id": "title", "type": "markdown", "body": "# 充值且已消费开票口径：数据质量与调整报告" },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## 技术结论：新口径正确，但历史数据不能自动重建\n\n- **应当调整。** 可开票金额必须改为真实支付资金中已经实际消费、尚未预占或开票、且未退款的累计现金金额。\n- **当前历史数据不具备自动核算资格。** Sub2API 没有任何消费到资金来源的分摊记录，且大部分已完成充值早于现存消费日志；New API 也只记录总 quota 消费，不记录它来自现金、赠送、返利还是管理员加款。\n- **生产部署保持暂停。** 安全做法是设置切点，把切点前全部余额视为不可开票旧余额；只对切点后可完整观测、可对账的真实支付与消费建立新账本。"
+      },
+      { "id": "headline_metrics", "type": "metric-strip", "cardIds": ["sub2_allocation_gap", "sub2_history_gap", "newapi_history_gap"] },
+      {
+        "id": "key_finding",
+        "type": "markdown",
+        "body": "## 三项关键检查均否定历史自动分摊\n\n上方三个指标的分母分别是 Sub2API 消费记录、Sub2API 已完成支付和 New API 消费日志。下图只展示可诚实比较的同粒度日数据，用来证明当前保留窗口从7月26日开始；它不是实际业务从该日才开始的证据。任一项缺口都可能把赠送余额误判成现金消费，因此不能用推测的 FIFO 结果直接生成税务额度。"
+      },
+      { "id": "coverage_chart", "type": "chart", "chartId": "usage_retention_chart", "layout": "full" },
+      {
+        "id": "chart_interpretation",
+        "type": "markdown",
+        "body": "### 图表与指标解释\n\n折线仅显示每天仍保留多少条日志；7月26日之前的空白是数据不可用，不是零消费。Sub2API 的 100% 表示 `billing_usage_entries` 为零，不代表没有消费；它表示 779,561 条保留消费都没有指向现金或赠送资金批次。73.1% 表示 2,002 笔已完成/退款申请支付中有 1,463 笔发生在最早保留消费日志之前。New API 的 26.4% 表示 20,022 条消费中有 5,282 条早于第一笔本地 top-up。"
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "body": "## 口径与账本粒度必须分开定义\n\n- **现金资金批次**：一笔经过外部证据核验的真实支付，金额使用人民币分；同时记录它产生的服务额度单位。\n- **非现金资金批次**：切点旧余额、赠送、返利、兑换码、签到和管理员加款，永远不产生可开票现金。\n- **消费事件**：一次稳定 ID、时间和服务额度扣减；订阅消费与余额消费必须分开。\n- **累计现金消费**：按赠送优先、现金批次 FIFO 分摊后，以累计比例计算并做精确货币舍入，不能逐请求独立四舍五入。\n- **可申请金额**：累计现金消费减去已开票、待审预占和退款冻结金额。"
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "body": "## 审查方法：只读聚合、结构核对与交叉一致性\n\n检查覆盖完整性、主键唯一性、必填字段、时间窗口、消费与分摊关联率，以及 New API 三个累计消费口径之间的一致性。查询只返回计数、最早/最晚时间和总量，不读取或输出用户、邮箱、订单或日志正文。另以 v0.1.179/rc.25 源码核对：两套上游都只维护一个混合余额，消费写入不携带原始充值批次 ID；消费日志还可以被关闭或清理。"
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## 不确定性与稳健性边界\n\n历史缺口无法通过更复杂的算法消除。Sub2API 管理员调账通常会写兑换记录，但余额更新与记录写入不是同一事务，记录失败时余额仍会变化；New API 的管理员额度变更和活动额度也没有不可变资金流水。New API 的 `users.used_quota`、消费日志合计和 `quota_data` 合计彼此不相等，说明不能任选一个总量作为税务依据。\n\n因此历史自动开票应标记为 **blocked**，而不是给出一个低置信度估算。"
+      },
+      {
+        "id": "recommended_adjustment",
+        "type": "markdown",
+        "body": "## 推荐调整：切点后建立可证明的双账本\n\n1. 设生产切点，将每个用户切点时的全部上游余额导入 `LEGACY_NON_INVOICEABLE` 批次。\n2. 新增 `usage_events`、`credit_events`、`consumption_allocations` 和累计舍入状态；支付批次同时保存现金分与服务额度单位。\n3. 同步每次余额消费，并按“非现金优先、现金 FIFO”分摊；只增加已经消费的现金上限。\n4. 每轮同步用上游余额做守恒对账。无法由已知事件解释的正增量一律视为非现金；无法解释的负增量冻结该用户的新增开票额度。\n5. 支付、消费、非现金信用和余额四条流的共同水位越过安全延迟后，金额才进入可申请状态；迟到降额事件触发冻结，不能静默改写已开票结果。\n6. 消费日志被关闭、清理、出现游标断层、同时间戳因果顺序无法证明或来源版本漂移时，系统 fail-closed。\n7. 当前 `invoice_allocations` 继续负责并发预占和防重复，但分配对象从支付上限改为“已消费现金份额”。\n8. 切点前历史不提供自动或人工补开入口，不能按当前余额倒推。"
+      },
+      {
+        "id": "frozen_decisions",
+        "type": "markdown",
+        "body": "## 已冻结的业务决定\n\n- **历史全部不开放。** 切点前充值、消费和余额不产生自动或人工补开入口。\n- **严格事件时间。** 仅消费发生前已经到账的非现金余额优先抵扣；后来到账的赠送不追溯改写更早消费。\n- **未知增量永远非现金。** 无法解释的正余额增量不得产生开票额度；无法解释的负增量冻结新增额度。\n- **新账号独立钱包切点。** 不在全站基线中的新账号，以首次签名余额快照作为钱包切点，当时余额全部不可开。\n- **订阅单独处理。** 全站切点后的订阅按外部证据核验的实际固定支付金额一次性形成可开票额度，不受稍后的个人钱包切点影响，也不等待套餐消耗。"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-20T22:04:26Z",
+    "status": "ready",
+    "datasets": {
+      "gap_rates": [
+        { "check_id": "sub2_usage_no_allocation", "check_short": "A", "check": "Sub2无资金分摊", "source": "Sub2API", "gap_rate": 1.0, "failing_count": 779561, "denominator_count": 779561 },
+        { "check_id": "sub2_completed_payment_pre_usage", "check_short": "B", "check": "Sub2支付早于日志", "source": "Sub2API", "gap_rate": 0.7307692308, "failing_count": 1463, "denominator_count": 2002 },
+        { "check_id": "newapi_consumption_pre_topup", "check_short": "C", "check": "NewAPI消费早于充值", "source": "New API", "gap_rate": 0.2638098092, "failing_count": 5282, "denominator_count": 20022 }
+      ],
+      "sub2_usage_daily": [
+        { "usage_day": "2026-07-26", "retained_rows": 20663 },
+        { "usage_day": "2026-07-27", "retained_rows": 23091 },
+        { "usage_day": "2026-07-28", "retained_rows": 24830 },
+        { "usage_day": "2026-07-29", "retained_rows": 24084 },
+        { "usage_day": "2026-07-30", "retained_rows": 41859 },
+        { "usage_day": "2026-07-31", "retained_rows": 62041 },
+        { "usage_day": "2026-08-01", "retained_rows": 14993 },
+        { "usage_day": "2026-08-02", "retained_rows": 18405 },
+        { "usage_day": "2026-08-03", "retained_rows": 23754 },
+        { "usage_day": "2026-08-04", "retained_rows": 38395 },
+        { "usage_day": "2026-08-05", "retained_rows": 25524 },
+        { "usage_day": "2026-08-06", "retained_rows": 23269 },
+        { "usage_day": "2026-08-07", "retained_rows": 37379 },
+        { "usage_day": "2026-08-08", "retained_rows": 32311 },
+        { "usage_day": "2026-08-09", "retained_rows": 32403 },
+        { "usage_day": "2026-08-10", "retained_rows": 54583 },
+        { "usage_day": "2026-08-11", "retained_rows": 48445 },
+        { "usage_day": "2026-08-12", "retained_rows": 29328 },
+        { "usage_day": "2026-08-13", "retained_rows": 28014 },
+        { "usage_day": "2026-08-14", "retained_rows": 26631 },
+        { "usage_day": "2026-08-15", "retained_rows": 14892 },
+        { "usage_day": "2026-08-16", "retained_rows": 9763 },
+        { "usage_day": "2026-08-17", "retained_rows": 15733 },
+        { "usage_day": "2026-08-18", "retained_rows": 35492 },
+        { "usage_day": "2026-08-19", "retained_rows": 39023 },
+        { "usage_day": "2026-08-20", "retained_rows": 32718 }
+      ],
+      "coverage_evidence": [
+        { "evidence_order": 1, "source": "Sub2API", "evidence": "时间覆盖", "observed": "04-01 → 07-26", "risk": "早期消费缺失" },
+        { "evidence_order": 2, "source": "Sub2API", "evidence": "支付早于日志", "observed": "1,463 / 2,002", "risk": "历史现金消费不明" },
+        { "evidence_order": 3, "source": "Sub2API", "evidence": "资金分摊", "observed": "0 / 779,561", "risk": "现金/赠送不可区分" },
+        { "evidence_order": 4, "source": "New API", "evidence": "消费早于充值", "observed": "5,282 / 20,022", "risk": "早期额度来源不明" },
+        { "evidence_order": 5, "source": "New API", "evidence": "成功充值", "observed": "4 / 25", "risk": "仍缺消费批次关联" },
+        { "evidence_order": 6, "source": "New API", "evidence": "累计一致性", "observed": "三口径不相等", "risk": "无唯一税务事实" },
+        { "evidence_order": 7, "source": "两者", "evidence": "资金外键", "observed": "不存在", "risk": "历史FIFO只是推定" }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "sub2_coverage",
+      "query": {
+        "engine": "postgresql",
+        "sql": "SELECT (SELECT count(*) FROM users) AS users, (SELECT count(*) FROM payment_orders WHERE status IN ('COMPLETED','REFUND_REQUESTED')) AS completed_payments, (SELECT count(*) FROM usage_logs) AS retained_usage_logs, (SELECT count(*) FROM billing_usage_entries) AS allocation_entries, (SELECT count(*) FROM payment_orders WHERE status IN ('COMPLETED','REFUND_REQUESTED') AND completed_at < (SELECT min(created_at) FROM usage_logs)) AS completed_payments_before_usage_retention;",
+        "description": "Sub2API现网的支付、消费与分摊覆盖聚合。",
+        "executed_at": "2026-08-20T22:04:26Z"
+      }
+    },
+    {
+      "id": "newapi_coverage",
+      "query": {
+        "engine": "postgresql",
+        "sql": "SELECT (SELECT count(*) FROM users) AS users, (SELECT count(*) FROM top_ups) AS top_ups, (SELECT count(*) FROM logs WHERE type=2) AS consumption_logs, (SELECT count(*) FROM logs WHERE type=2 AND created_at < (SELECT min(create_time) FROM top_ups)) AS consumption_logs_before_first_topup, (SELECT coalesce(sum(used_quota),0) FROM users) AS users_used_quota, (SELECT coalesce(sum(quota),0) FROM logs WHERE type=2) AS consumption_log_quota, (SELECT coalesce(sum(quota),0) FROM quota_data) AS quota_rollup_total;",
+        "description": "New API现网的充值、消费和累计口径覆盖聚合。",
+        "executed_at": "2026-08-20T22:04:26Z"
+      }
+    },
+    {
+      "id": "sub2_usage_daily",
+      "query": {
+        "engine": "postgresql",
+        "sql": "SELECT date_trunc('day',created_at)::date AS usage_day, count(*)::bigint AS retained_rows FROM usage_logs WHERE created_at < date_trunc('day',now()) GROUP BY date_trunc('day',created_at)::date ORDER BY usage_day;",
+        "description": "按日统计仍保留的Sub2API消费日志行数，排除当前未完成日。",
+        "executed_at": "2026-08-20T22:04:26Z"
+      }
+    },
+    {
+      "id": "coverage_combined",
+      "query": {
+        "engine": "postgresql",
+        "sql": "SELECT 'Sub2API' AS source, 779561 AS usage_rows, 0 AS allocation_rows UNION ALL SELECT 'New API', 20022, 0;",
+        "description": "将两套只读聚合检查整理为报告快照；没有跨库行级连接。",
+        "executed_at": "2026-08-20T22:04:26Z"
+      }
+    }
+  ]
+}

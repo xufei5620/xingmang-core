@@ -1,0 +1,487 @@
+# Production source-agent runbook
+
+This runbook deploys the outbound-only PostgreSQL projection agent without
+changing Sub2API or New API source code, containers, application tables or
+application files. Bridge V4 creates five fixed dynamic SECURITY DEFINER
+functions per source, ten least-privilege active LOGIN roles, two
+credential-free NOLOGIN compatibility holders and two NOLOGIN function owners.
+LOGIN callers receive only exact function EXECUTE. Applying those reviewed
+contracts is a separate cluster-superuser/DB-owner action; the agent never runs
+an install or rollback contract.
+
+## 1. One container per stream
+
+| Source | Stream | Connector | Required schedule | Extra configuration |
+| --- | --- | --- | --- | --- |
+| Sub2API | `identities` | `Sub2APIIdentityDBConnector` | incremental + reconciliation | central OIDC provider key + canonical issuer |
+| Sub2API | `payments` V3 | `PaymentV3DBConnector` | updated-at scan + complete reconciliation | exact CNY/config/unit evidence |
+| Sub2API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | wallet billing only, scale 1e8 |
+| Sub2API | `credits` V3 | `EconomicDBConnector` | full scan every cycle | bonus/rebate domains; payment codes excluded |
+| Sub2API | `balances` V3 | `BalanceDBConnector` | atomic full capture, change-snapshot pages | encrypted cutover/baseline required |
+| New API | `identities` | `NewAPIIdentityDBConnector` | incremental + forced full scan <= 24h | central OIDC provider slug + canonical issuer |
+| New API | `payments` V3 | `PaymentV3DBConnector` | full post-cutover scan every cycle | all candidates manual; failed/pending excluded |
+| New API | `usage` V3 | `EconomicDBConnector` | ID scan + full rescan | consume logging must remain enabled |
+| New API | `credits` V3 | `EconomicDBConnector` | full scan every cycle | check-in/redemption domains |
+| New API | `balances` V3 | `BalanceDBConnector` | atomic full capture, change-snapshot pages | encrypted cutover/baseline required |
+
+Each row is an independent non-root container with a distinct writable 0700
+state directory, `state.json`, encrypted `pending.enc`, 32-byte spool key, mTLS
+client identity and Ed25519 signing key. A balances row additionally owns
+`balance-current.enc` and its balance-snapshot/state AES key. Never share a
+writable state volume between rows. The invoice API/web containers receive none
+of these mounts or variables. Only V2 identity streams have a reconcile
+inventory: V3 immutable facts never emit deletion tombstones.
+
+For each balances stream, `state.json`, `balance-current.enc`, `pending.enc`
+when present, the matching balance-snapshot/state key, matching spool key, exact
+approved source-agent image ID/digest and SHA-256 hashes are one indivisible
+recovery generation. The ten state directories, their matching key material
+inside the approved encrypted/offline secret backup, exact image evidence and
+the encrypted cutover files form the complete backup/restore unit.
+
+## 2. Receiver prerequisites
+
+Before starting a sender:
+
+1. Create the `source_instances` row and record its UUID. `SOURCE_ID` is this
+   UUID, not a display slug.
+2. Map the stream's mTLS certificate to the same UUID.
+3. Register its raw public Ed25519 key under the exact
+   `(source UUID, stream ID, key ID)` tuple.
+4. Verify identities accept V2 and economic streams accept strict V3; require
+   body/header `stream_id`, the exact entity/stream matrix, scan-cycle fields,
+   and manifest registration before baseline facts.
+5. Verify receiver sequence, batch and event uniqueness are scoped to
+   `(source UUID, stream ID)` and its ACK echoes both fields.
+
+Do not start a sender against a receiver that infers a stream, resolves signing
+keys only by source, or accepts a missing `X-Stream-ID`.
+
+## 3. Source database prerequisites
+
+Bridge V4 replaces all source-dependent views. For each source, pre-create six
+reader roles, then have the cluster superuser that owns the current database
+apply both contracts through the reviewed maintenance wrapper:
+
+- `contracts/sub2api-source-projection-grants.postgresql.sql`
+- `contracts/newapi-source-projection-grants.postgresql.sql`
+- `contracts/sub2api-economic-projection-grants.postgresql.sql`
+- `contracts/newapi-economic-projection-grants.postgresql.sql`
+
+On the production migration, preserve the existing six source reader roles
+before legacy reconcile by using `scripts/preserve-source-reader-roles.sh
+--mode export` with a new root-only mode-0600 file. After reconcile removes the
+legacy roles, restore that file, install both Bridge contracts and run all five
+`check-db-static` commands. The file contains SCRAM verifiers: never display
+it, and encrypt/archive or securely delete it immediately after the five
+static checks pass. Once the new create-only cutover pair exists, run the full
+`check-db` for all five streams before starting them.
+
+Put each complete approved PostgreSQL connection string in its matching 0600
+regular, non-symlink `SOURCE_DB_DSN_FILE`. Never reuse a payments DSN for an
+identities stream or the reverse. The production process rejects ambient `PG*`
+configuration, sets `default_transaction_read_only=on`, and proves
+`SHOW transaction_read_only = on` before reading. It also forces a 15-second
+statement timeout, UTC and at most two connections. LOGIN callers receive only
+`invoice_bridge` schema USAGE and their exact function EXECUTE; all raw source
+columns belong to the NOLOGIN bridge owner. Pre-cutover `check-db-static`
+inventories effective privileges and refuses raw SELECT, role membership,
+schema-create, mutation, sequence, unexpected function execution or a
+dependency-bearing/unsafe function. Full `check-db` repeats that boundary and,
+for V3 economic streams, requires the encrypted manifest plus live semantic
+contract/hash equality. It also compares `sha256(pg_proc.prosrc)` of the
+stream's bridge routine with the constant pinned in the agent binary
+(`expectedBridgeRoutineHash`): a bridge body edited in `contracts/` must be
+repinned in the same change (the agent's
+`TestExpectedBridgeRoutineHashesMatchTheReviewedContracts` recomputes every
+constant from the reviewed SQL), and the new body must be installed with the
+maintenance wrapper before agents built against it start -- since
+XM-INV-NEGATIVE-DEFICIT both `balances_v4` `rows` outputs carry
+`deficit_service_units`, and a capture that finds it NULL fails closed.
+
+For New API, `top_ups.id` is the `source_order_id` display reference. Do not
+grant/read `trade_no`, and do not put `top_ups.id` into a provider-trade-number
+field.
+
+For New API identities, the caller executes only
+`invoice_bridge.newapi_identities_v4(text,jsonb)`. It must fail on both raw
+OAuth tables and all client secret/policy/mapping columns. The production slug
+is exactly `solov-sso`; all well-known, authorization, token and user-info
+endpoints must validate against the same configured HTTPS issuer.
+
+For Sub2API payments, the caller executes only
+`invoice_bridge.sub2api_payments_v4(text,jsonb)` and cannot read
+`payment_orders` or `provider_snapshot`. Its `legacy_health` operation exposes
+only four aggregate values. At launch,
+`blocked_unknown_currency_rows` must be zero. Known non-CNY rows are counted and
+excluded from the CNY-only ledger without blocking reconciliation. In
+operation, any blocked-unknown row raises an alert and blocks missing/tombstone
+reconciliation while exposed CNY rows continue.
+Never widen the fixed-CNY allowlist (`easypay`, `alipay`, `wxpay`) without a new
+source review, and never restore the removed `SUB2API_PROJECTION_CURRENCY`
+setting.
+
+### V3 cutover order (mandatory)
+
+1. Disable invoice submission and stop all five source streams for the source.
+   Verify the approved runtime and exact Bridge V4 contract hashes.
+2. Verify backup/restore evidence. As cluster superuser and current database
+   owner, use maintenance wrapper modes `install-source` then
+   `install-economic`; bare psql is forbidden. Run the `bridge-v4` upgrade gate
+   after installation. Extra grants, RLS, unexpected ownership/function body
+   or schema CREATE are hard failures.
+3. Create 0700 `$SOURCE_STATE_ROOT/{source}-{stream}` directories and
+   `$SOURCE_CUTOVER_ROOT/{source}`. Generate distinct spool/signing keys per
+   stream, one source cutover AES key and one balance-snapshot AES key. Run
+   `check-db-static` separately with all five DSNs; it must pass before the
+   manifest exists and must not be substituted with the full `check-db`.
+4. Stop the matching New API/Sub2API application container while keeping its
+   PostgreSQL container running. Keep it stopped, acknowledge that operator
+   action, and run maintenance mode `cutover-quiescence-preflight`. It must see
+   zero other client backends and zero prepared transactions. The SQL gate
+   cannot prove the container stays stopped.
+5. Without restarting the upstream application, run the Compose `cutover`
+   profile exactly once:
+
+   ```text
+   docker compose -f deploy/docker-compose.sources.yml --profile cutover \
+     run --rm sub2api-cutover-init
+   docker compose -f deploy/docker-compose.sources.yml --profile cutover \
+     run --rm newapi-cutover-init
+   ```
+
+   The command is read-only to the source DB. It must create `manifest.enc` and
+   `baseline.enc`; a second run must fail. Immediately run `check-cutover` (the
+   same profile with command override) and archive their hashes offline.
+   Both commands require `ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00`,
+   reject either cutover/database clock at or after that instant, and require
+   the exact source contract (`sub2api-economic-v4` or
+   `newapi-economic-rc25-v4`). Run these checks before applying invoice
+   migration 0011, then bind the verified hashes into the signed rollback
+   package; never discover an invalid pair only after the one-way migration.
+   Later balance snapshots must retain this encrypted baseline: it is the only
+   authority for signed `baseline_member` (`true` for original users, `false`
+   for post-cutover users). Loss/corruption is fail-closed, never recaptured.
+   After the pair verifies, run the full `check-db` for all five source streams;
+   every V3 stream must bind the live contract/hash to the new manifest. Only
+   after all five full checks pass may the upstream application restart.
+6. Register all five stream certificate/key tuples and source runtime in the
+   receiver. The balances key ID must equal the key declared by the manifest;
+   other streams keep their independent keys.
+7. Run `init-state` for all ten streams. Run `init-reconcile` only for the two
+   V2 identity streams; V3 must reject that command.
+8. Start balances first. Its first acknowledged batch must contain only the
+   cutover manifest with `scan_complete=false`; let the baseline and its empty
+   final page finish. Start payments, credits and usage, then identity. Keep
+   public invoice submission disabled until all four economic watermarks and
+   balance reconciliation are healthy.
+
+Rollback before public enablement means stop the four V3 streams and preserve
+their state/cutover files intact; do not delete and recapture a later cutover.
+After any accepted fact, rollback never means removing invoice facts or
+reusing sequence zero.
+
+## 4. Generate and mount keys
+
+Build the disposable keygen target, generate ten independent stream key pairs, then
+delete the tools image. The key IDs must exactly match the compose/trust tuple:
+
+```text
+docker build --target keygen -f agents/Dockerfile.production \
+  -t invoice-source-keygen:one-time agents
+install -d -m 0700 -o 65532 -g 65532 /absolute/source-keygen-work
+
+# Repeat with the four IDs/filenames below. Do not mount or relax the parent
+# secrets directory; only the disposable work directory is writable by 65532.
+docker run --rm --user 65532:65532 \
+  -v /absolute/source-keygen-work:/work \
+  invoice-source-keygen:one-time \
+  -key-id 2026-08-payments \
+  -private-out /work/sub2api_payments_signing_key.pem \
+  -public-out /work/sub2api_payments_signing_key.pub.b64
+
+# sub2api identities: key ID 2026-08-identities
+# newapi payments:     key ID 2026-08-payments
+# newapi identities:   key ID 2026-08-identities
+# Use distinct private/public files even where the display key ID is equal;
+# trust resolution is scoped by (source UUID, stream ID, key ID).
+install -m 0400 -o 65532 -g 65532 /absolute/source-keygen-work/*_signing_key.pem /absolute/secure/
+install -m 0444 -o root -g root /absolute/source-keygen-work/*.pub.b64 /absolute/trust/
+rm -rf /absolute/source-keygen-work
+docker image rm invoice-source-keygen:one-time
+
+openssl rand -base64 32 > /absolute/secure/source-spool.key
+chmod 0600 /absolute/secure/source-spool.key
+```
+
+The keygen refuses overwrite and prints paths/key ID only. Back up the spool key
+in the approved secret store: losing it while a pending spool exists makes exact
+recovery impossible and intentionally stops the stream. Issue the mTLS
+certificate separately from the approved source-agent CA.
+
+## 5. Build and pin
+
+Run the Go release gates, then build with digest-pinned base-image arguments:
+
+```text
+go test -race ./...
+go vet ./...
+govulncheck ./...
+
+docker build -f agents/Dockerfile.production \
+  --build-arg GO_IMAGE=golang:1.25.13-alpine@sha256:<approved> \
+  --build-arg ALPINE_IMAGE=alpine:3.23@sha256:<approved> \
+  --build-arg SOURCE_AGENT_VERSION=0.3.0 \
+  -t "invoice-source-agent:$INVOICE_IMAGE_TAG" agents
+```
+
+Record and deploy the resulting image digest, not only its tag. The final image
+is scratch-based, runs UID/GID 65532 and contains only CA certificates and
+`source-agent-prod`; it contains no shell or key generator. The shared
+`INVOICE_IMAGE_TAG` comes from the verified release manifest; the independent
+`SOURCE_AGENT_VERSION` build argument is the binary/protocol version.
+
+## 6. Initialize and start
+
+Populate the complete variable contract from `CONFIGURATION.md` section 5.
+Create each state directory as UID/GID 65532 mode 0700. Run exactly once with
+the final state mount:
+
+```text
+# Before the first cutover manifest exists:
+source-agent-prod check-db-static
+# After the create-only manifest/baseline pair passes check-cutover:
+source-agent-prod check-db
+source-agent-prod init-state
+# V2 identities only:
+source-agent-prod init-reconcile
+```
+
+`check-db-static` opens the configured source DSN and exits only after the
+effective database grants, role attributes, relation boundary and function
+body SHA match the exact source/stream projection contract. Full `check-db`
+repeats those static checks. For every V3 economic stream it also decrypts the
+create-only manifest, validates the policy boundary, invokes that reader's
+live `health` operation (or balances `contract`) and requires a healthy
+contract plus exact configuration-hash equality; balances also compares the
+projection-contract name. Therefore the static command is the only valid
+pre-cutover check, while a static-only success can no longer defer semantic
+drift detection until `run`. Init
+commands refuse overwrite. `SOURCE_RECONCILE_FILE` and threshold 3 are required
+only by V2 identities; V3 uses complete rescans and stable invoice-side facts.
+Then run normally:
+
+```text
+source-agent-prod run
+```
+
+There is no mock/Admin-API fallback. Missing state, wrong source/stream,
+insecure files, bad key material, unsafe DNS/CIDR, non-mTLS HTTPS, non-read-only
+PostgreSQL or an undecryptable spool prevents startup.
+
+## 7. Canary and monitoring
+
+For each stream, prove in order:
+
+1. startup log reports the expected UUID, stream, source type, schema 2.0 for
+   identities or 3.0 for economics, and
+   agent version without a connection string or key;
+2. first run is Sub2API reconciliation or New API full scan;
+3. receiver ACK matches source, stream, batch, sequence and record count;
+4. local state sequence/cursor advances and pending spool disappears;
+5. a forced ACK-loss test leaves an encrypted spool and restart retries the
+   exact batch ID/body;
+6. New API candidates remain manual and show only `source_order_id`; an amount
+   above signed `money` is rejected, one reviewer only creates a proposal, a
+   distinct reviewer approves the identical tuple, and both are barred from
+   issuing the resulting invoice;
+7. an empty/static source still emits a signed `projection_status=healthy`
+   heartbeat and advances sequence only after the exact ACK;
+8. for each balances stream, a second identical full capture has zero records
+   but `scan_complete=true`, while a new account, a real balance change and an
+   `A -> B -> A` transition each produce exactly one new checkpoint; kill once
+   before `pending.enc` creation and once after it, then prove both restarts
+   retain the exact prepared event IDs and body;
+9. in an approved disposable projection fixture, remove a previously
+   acknowledged balances row whose canonical service-unit balance is exactly
+   `"0"` and `balance_negative=false`; the cycle succeeds, emits no synthetic
+   checkpoint for that ID, and after the exact ACK `balance-current.enc` retains
+   the ID in the durable retirement set across the next cycle;
+10. repeat separately with a positive row and with a row whose
+   `balance_negative=true`; each cycle fails before replacing the prior
+   decryptable state, creating a new pending batch or publishing a complete
+   watermark;
+11. reintroduce the retired ID in the disposable projection fixture; zero,
+   positive, negative-marked, baseline and non-baseline forms must all fail
+   before state, batch, watermark or receiver publication;
+12. the configured reconciliation/full-scan deadline is alerted if missed;
+13. `/source-agent-prod healthcheck` remains healthy and the invoice admin
+   `/api/v1/admin/source-health` shows both identity streams and all eight economic streams fresh, processed,
+   version-matched and projection-healthy.
+
+The production rollout is not complete until all ten source agents run the one
+exact approved image ID bound to the signed release manifest, no ingest event is
+queued/failed/dead, the New API and Sub2API test identities are merged into one
+invoice user, both eligibility states are active, no historical or pre-policy
+amount is claimable, and public `/readyz` returns HTTP 200.
+
+Transient failures back off with jitter. Authentication, contract, oversize and
+sequence conflicts stop immediately. Other repeated failures open the circuit
+after `SOURCE_MAX_CONSECUTIVE_FAILURES`; the container supervisor may restart,
+but alerts must not rely on restart alone.
+
+## 8. Stop, rollback and recovery
+
+- Stop the affected stream container only. Do not modify either upstream app.
+- Preserve state, pending spool and its key together; never reset sequence to
+  zero and never copy another stream's state.
+- After stopping all ten agents, reject any residual `*.lock`. For each stream
+  run `source-agent-prod check-state`; it is strictly offline/read-only, loads
+  cursor/sequence/reconcile inventory and decrypts `pending.enc` using the
+  mounted spool key. A restore is invalid unless all ten checks and both
+  encrypted cutover/baseline pairs pass.
+- Roll back the agent image by digest while keeping the same compatible v2
+  state/spool. Run the v2 signature vector before restart.
+- If a spool is present, restore the matching spool key and let the agent finish
+  exact replay. Do not delete it while receiver commit status is unknown.
+- Before the first retired-zero/v2 balance-state rollout, stop the affected
+  balances stream. Prove that production still runs the prior fail-closed image
+  and that no binary which accepted a missing zero account has ever prepared or
+  acknowledged its state. Empty-retirement migration is allowed only when the
+  last failing cycle created no `pending.enc` and did not replace
+  `balance-current.enc`; otherwise keep the rollout blocked.
+- Archive one immutable recovery generation containing `state.json`,
+  `balance-current.enc`, `pending.enc` when present, the matching
+  balance-snapshot/state AES key, matching spool key, the exact approved current
+  image ID/digest, receiver sequence/commit evidence and SHA-256 hashes. Keep
+  key material in the approved encrypted/offline secret backup, not in the
+  ordinary incident-evidence directory. Do not mix files, keys, image evidence
+  or hashes from different capture times.
+- Startup replays any existing `pending.enc` before entering
+  `BalanceDBConnector`. A valid `balance_delta_v1` value and a legacy full
+  snapshot are normalized in memory with an empty retirement set only when the
+  cursor/snapshot IDs match exactly; load-only validation does not rewrite the
+  encrypted current file. The next newly prepared cycle atomically writes the
+  full `balance_delta_v2` value. Any mismatch fails closed and requires
+  receiver/cursor evidence; never delete or recapture around it.
+- Balance crash boundaries are explicit: before `balance-current.enc` replace,
+  the old acknowledged base remains authoritative; after replace but before
+  `pending.enc`, the new encrypted state carries the old cursor snapshot ID and
+  is reused byte-for-byte without another source read; after pending creation,
+  normal exact pending replay/ACK/CAS cleanup applies. A retry may not remove or
+  reset retired IDs, and only the exact ACK makes the prepared retirement set
+  the acknowledged base.
+- The first successful `balance_delta_v2` write, or any receiver ACK committed
+  after the v2 rollout begins, is a one-way rollback boundary. The old image
+  may be restored only while neither event has occurred. After either boundary,
+  retain the accepted cursor/state generation and deploy a forward-compatible
+  fix; never restore an older cursor or `balance-current.enc` over accepted
+  receiver sequences.
+- A 409 requires receiver/source+stream reconciliation by an operator; blind
+  retries or state-file edits are prohibited.
+- Key rotation: register the new source+stream public key first, rotate the
+  sender private file/key ID, retain the previous receiver key through the retry
+  window, then revoke it. Rotate a spool key only when no spool exists.
+
+### 8.1 Controlled pending inspection before an incident migration
+
+`inspect-pending` is evidence collection, not permission to reset or migrate a
+stream. Before this incident-only procedure, the operator must have an approved
+maintenance ticket and an immutable recovery generation: the exact currently
+bound source-agent image ID/digest, `state.json`, `balance-current.enc` for a
+balances stream, `pending.enc`, the matching spool and balance-snapshot/state
+keys, SHA-256 hashes, and a separate receiver-side sequence/commit check. Keep
+the keys in the approved encrypted/offline secret backup rather than copying
+them into the incident-evidence directory. Never modify Sub2API/New API or
+their databases for this inspection.
+
+The affected stream container must be stopped first. Prove that Compose reports
+no running container and that the dedicated state directory contains no lock.
+Do not stop an upstream application or another source stream merely to inspect
+one spool. Use `--no-deps`; never use `up`, and do not combine stderr with the
+JSON evidence file.
+
+```bash
+set -euo pipefail
+umask 077
+: "${TICKET_ID:?set the approved incident ticket id}"
+: "${SOURCE_STATE_ROOT:?export the exact reviewed source state root}"
+: "${SOURCE_SERVICE:?set the one approved affected Compose service}"
+source_service="$SOURCE_SERVICE"
+case "$source_service" in
+  sub2api-payments|sub2api-identities|sub2api-usage|sub2api-credits|sub2api-balances|\
+  newapi-payments|newapi-identities|newapi-usage|newapi-credits|newapi-balances) ;;
+  *) echo 'SOURCE_SERVICE is not an exact production source-agent service' >&2; exit 1 ;;
+esac
+state_dir="$SOURCE_STATE_ROOT/$source_service"
+evidence_dir="/root/invoice-system/incident-evidence/$TICKET_ID"
+compose=(docker compose --env-file deploy/.env.production \
+  -f deploy/docker-compose.sources.yml)
+
+install -d -m 0700 "$evidence_dir"
+"${compose[@]}" stop -t 30 "$source_service"
+test -z "$("${compose[@]}" ps --status running -q "$source_service")"
+test -z "$(find "$state_dir" -maxdepth 1 -type f -name '*.lock' -print -quit)"
+test -s "$state_dir/state.json"
+test -s "$state_dir/pending.enc"
+evidence_files=("$state_dir/state.json" "$state_dir/pending.enc")
+for optional_state in reconcile.json balance-current.enc; do
+  test ! -e "$state_dir/$optional_state" || evidence_files+=("$state_dir/$optional_state")
+done
+sha256sum "${evidence_files[@]}" >"$evidence_dir/files-before.sha256"
+
+"${compose[@]}" run --rm --no-deps --pull never -T "$source_service" inspect-pending \
+  >"$evidence_dir/pending.json.part"
+jq -e '
+  .inspection_schema_version == 1 and .pending == true and
+  (.batch.body_hash | test("^[0-9a-f]{64}$")) and
+  (.cursor_before.sha256 | test("^[0-9a-f]{64}$")) and
+  (.cursor_after.sha256 | test("^[0-9a-f]{64}$")) and
+  .consistency.source_stream == true and
+  .consistency.schema_runtime == true and
+  .consistency.body_hash == true and
+  .consistency.hash_chain == true and
+  .consistency.sequence == true and
+  .consistency.publish_revision == true and
+  .consistency.cursor == true and
+  .consistency.cursor_revision == true and
+  .consistency.batch_cursor_scan_metadata == true
+' "$evidence_dir/pending.json.part" >/dev/null
+mv "$evidence_dir/pending.json.part" "$evidence_dir/pending.json"
+(cd / && sha256sum -c "$evidence_dir/files-before.sha256")
+test -z "$(find "$state_dir" -maxdepth 1 -type f -name '*.lock' -print -quit)"
+```
+
+The JSON deliberately contains only identifiers, counts, SHA-256 values and
+consistency results. It contains no event records, raw cursor values, DSN,
+certificate/key bytes or tokens. Preserve it as mode 0600 incident evidence.
+If it reports `pending=true`, preserve `state.json`, `pending.enc`,
+`balance-current.enc` when applicable, both matching encryption keys, exact
+image ID/digest, hashes and receiver evidence as one recovery generation. Do
+not delete the spool, initialize a replacement state, rotate either key or
+claim sequence zero. Any inspection error, missing generation member or
+ciphertext hash drift keeps the migration blocked. The one-time
+unused-candidate replacement procedure remains forbidden when any pending spool
+exists.
+
+## 9. Reconciliation, dependency waits and version approval
+
+- Only a completed `full`/`reconcile` scan increments a missing-row counter.
+  Pagination, query failure, process restart and incremental scans do not.
+  Three consecutive complete misses are required before a signed tombstone.
+- A Sub2API row whose currency is unknown makes the signed projection status
+  `blocked`; visible CNY rows may refresh, but the entire scan is forbidden from
+  incrementing misses or emitting tombstones. Readiness and irreversible issue
+  confirmation fail closed until the projection returns `healthy`.
+- Source rows may arrive before an invoice user first logs in. These events wait
+  on a source-scoped HMAC dependency without consuming the eight-attempt dead
+  budget or failing unrelated users/readiness. OIDC login wakes identity waits;
+  a verified binding wakes that source user's payment waits.
+- Funding and identity projections compare signed source time plus batch
+  sequence. Older upserts are audit-only no-ops, so a late completed payment or
+  binding cannot revive a refund/tombstone.
+- `source_runtime_version` must equal the approved `source_instances` value on
+  every batch. Stop/drain the stream (including any pending spool), update the
+  source config with `expected_previous_runtime_version`, run the audited
+  `bootstrap-sources` CAS, then restart. An unapproved version is rejected and
+  cannot refresh heartbeat freshness.

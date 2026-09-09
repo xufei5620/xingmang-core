@@ -1,0 +1,6 @@
+# Replace both TEST-NET addresses before installation. Keep only exact host
+# routes: the normal finance-admin egress IP and an independent break-glass
+# VPN/bastion egress IP. Never use a subnet, Cloudflare range, or 0.0.0.0/0.
+allow 192.0.2.10/32;
+allow 198.51.100.20/32;
+deny all;

@@ -1,0 +1,198 @@
+# Replace only the two certificate paths if the panel uses a different layout.
+# The upstream ports remain loopback-only Docker publications.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name invoice.solov.cc;
+    # A mistaken HTTP embed request can still contain an upstream bearer
+    # query. Never log the redirect request or forward its query string.
+    access_log off;
+    return 301 https://invoice.solov.cc$uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name invoice.solov.cc;
+    server_tokens off;
+
+    ssl_certificate     /www/server/panel/vhost/cert/invoice.solov.cc/fullchain.pem;
+    ssl_certificate_key /www/server/panel/vhost/cert/invoice.solov.cc/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:INVOICE_TLS:10m;
+    ssl_session_timeout 1d;
+
+    include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+
+    access_log /www/wwwlogs/invoice.solov.cc.log;
+    error_log  /www/wwwlogs/invoice.solov.cc.error.log warn;
+
+    # Sub2API appends a bearer token to custom-page URLs. Never log or forward
+    # those arguments; the invoice system authenticates with its own OIDC
+    # session. New API uses the same clean embedded entry shape.
+    location = /embed/sub2api {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/?ui_mode=embedded&source=sub2api;
+    }
+
+    location = /embed/newapi {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/?ui_mode=embedded&source=newapi;
+    }
+
+    # CR-0005 (XM-INV-ADMIN-EMBED): the xingmang platform console embeds the
+    # *administrator* console per platform (Sub2API/New API) and once for the
+    # cross-platform governance tab, mirroring the two user-embed entries
+    # above. Unlike those, the target carries no bearer token -- admin
+    # authentication is the existing invoice-side OIDC/MFA session, opened in
+    # a top-level popup from inside the embed -- but query strings are still
+    # excluded from logs here on the same principle.
+    location = /embed/admin/sub2api {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&platform=sub2api;
+    }
+
+    location = /embed/admin/newapi {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&platform=newapi;
+    }
+
+    location = /embed/admin/global {
+        access_log off;
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+        return 303 https://invoice.solov.cc/admin?ui_mode=embedded_admin&scope=global;
+    }
+
+    # Source ingestion is private mTLS traffic and must never be reachable
+    # through the public virtual host.
+    location ^~ /internal/ {
+        return 404;
+    }
+
+    location = /api/v1/auth/backchannel-logout {
+        access_log off;
+        limit_req zone=invoice_backchannel burst=100 nodelay;
+        client_max_body_size 256k;
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    location ^~ /api/v1/auth/ {
+        # OIDC callbacks carry one-time code/state query values. Application
+        # audit logs record only hashes and outcomes; raw query strings are not
+        # written by the edge.
+        access_log off;
+        limit_req zone=invoice_auth burst=10 nodelay;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    # PDF plaintext must not spill into the host Nginx client-body temp path.
+    # Stream only this authenticated admin upload to the API's bounded tmpfs
+    # quarantine; the application still enforces size, ClamAV and qpdf policy.
+    location ~ ^/api/v1/admin/invoice-requests/[^/]+/documents/upload$ {
+        limit_req zone=invoice_public_api burst=10 nodelay;
+        client_max_body_size 21m;
+        client_body_timeout 30s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering off;
+    }
+
+    # Decrypted invoice bytes must likewise stream to the authorized browser;
+    # never let proxy response buffering spill them into a host temp file.
+    location ~ ^/api/v1/user/invoice-requests/[^/]+/document$ {
+        limit_req zone=invoice_public_api burst=20 nodelay;
+        proxy_read_timeout 60s;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_request_buffering on;
+        proxy_buffering off;
+    }
+
+    location ^~ /api/ {
+        limit_req zone=invoice_public_api burst=60 nodelay;
+        client_max_body_size 21m;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    location = /healthz {
+        access_log off;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    # Readiness is deliberately distinct from liveness.  Keep this exact route
+    # ahead of the SPA fallback so an unhealthy source stream cannot be masked
+    # by a successful index.html response.
+    location = /readyz {
+        access_log off;
+        proxy_pass http://127.0.0.1:58088;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    location = /metrics {
+        return 404;
+    }
+
+    # Administrator authentication (OIDC login, MFA step-up) is top-level
+    # only -- Keycloak refuses to be framed, and sensitive authentication
+    # must complete outside any iframe regardless. The administrator page
+    # itself may now be framed by the sole approved first-party console
+    # origin (CR-0005, XM-INV-ADMIN-EMBED); menu visibility is not
+    # authorization, and RBAC/MFA/source-IP policy are still enforced by the
+    # API unchanged. Rolling back to 'none' here (and in web/nginx.conf,
+    # which must not disagree -- see the comment there) is the rollback path
+    # if the console embed is ever withdrawn.
+    location = /admin {
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Content-Security-Policy "frame-ancestors https://console.solov.cc" always;
+        proxy_pass http://127.0.0.1:58090;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    location ^~ /admin/ {
+        include /www/server/panel/vhost/nginx/proxy/invoice-security-headers.conf;
+        add_header Content-Security-Policy "frame-ancestors https://console.solov.cc" always;
+        proxy_pass http://127.0.0.1:58090;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:58090;
+        include /www/server/panel/vhost/nginx/proxy/invoice-common-headers.conf;
+        proxy_buffering on;
+        proxy_request_buffering on;
+    }
+}

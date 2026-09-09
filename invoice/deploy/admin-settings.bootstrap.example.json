@@ -1,0 +1,13 @@
+{
+  "issuer_name": "待配置开票主体",
+  "minimum_request_minor": 20000,
+  "eligibility_start_at": "2026-09-01T00:00:00+08:00",
+  "smtp_host": "smtp.qq.com",
+  "smtp_port": 587,
+  "smtp_from": "replace-with-dedicated-account@qq.com",
+  "smtp_from_name": "SoloV 发票中心",
+  "smtp_starttls": true,
+  "admin_cidrs": [
+    "203.0.113.10/32"
+  ]
+}

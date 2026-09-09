@@ -1,0 +1,23 @@
+# RC49 failed-candidate local evidence integrity anchor
+# Captured 2026-08-31 before RC50 source signing.
+# These ignored directories are not made physically read-only by this file.
+# They must be treated as read-only historical evidence. Any file-set or hash
+# drift fails the dedicated RC50 recovery evidence verifier.
+463b5e6650c47271804e244b08dc5c3f6bddcc3bfdd25a45a51c23c506a3d858  release/0.1.0-rc49-exact1/logs/source-verification.log
+64a17ea0ce053387e668e2b75ff4eb87e8d9d5ba8d4a4507f9cb906242a42218  release/0.1.0-rc49-exact2/logs/source-verification.log
+658a655f7ee1df2d2b286414e7454b4f6e44b84284defb08e9eaafc0552aca6b  release/0.1.0-rc49-exact2/logs/trivy-cache.log
+e14acd6cb120a1a97da75907de7eff98f2ca11ebb2e7769c743c2d9d771c548a  release/0.1.0-rc49-exact2/logs/trivy-db-update.log
+5e51411ce1d92f2c5e11a8218662a83926cf3a6b763f85beaf80910a0481cea2  release/0.1.0-rc49-exact2/logs/trivy-tool-pull.log
+19fdc7f206293d3b616710e7feb75dee9349670b01930c78263b481c4ee85775  release/0.1.0-rc49-exact3/build/invoice-postgres.log
+1b10c49b25b49d1264e904c6fbbef62d828ff9d961623371a3684b594b646cc1  release/0.1.0-rc49-exact3/build/invoice-source-agent.log
+b222cb2cbade54a94b0d8e628d6601d2d0b1b1335d98efb8404e6d79fdf1f29a  release/0.1.0-rc49-exact3/build/invoice-system-api.log
+498f169bcf6c4e4e1d0571c555e66ffe10e81306bdc3c4e4bb53fb467c036bf0  release/0.1.0-rc49-exact3/build/invoice-system-pdf-scanner.log
+6f62b69bf027a7be93ae4f041bf267c429c2cf87b43a6c83381d4631a00f07ab  release/0.1.0-rc49-exact3/build/invoice-system-tools.log
+8cd20ac1f3922b1d64f405f9a9147ab03245ced8a901a2b355694fc174a1e07c  release/0.1.0-rc49-exact3/build/invoice-system-web.log
+5f898a0c3266a88ad7e581be764ef1aafa1af1efd9a0e45e192052f5b9131ed3  release/0.1.0-rc49-exact3/logs/source-verification.log
+5e4dd110f762e7a81c40be4093fffba5d564bfac2ad6d5ed8e3d8f59ae4fef4f  release/0.1.0-rc49-exact3/logs/trivy-cache.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  release/0.1.0-rc49-exact3/logs/trivy-db-update.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  release/0.1.0-rc49-exact3/logs/trivy-java-db-update.log
+5e51411ce1d92f2c5e11a8218662a83926cf3a6b763f85beaf80910a0481cea2  release/0.1.0-rc49-exact3/logs/trivy-tool-pull.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  release/0.1.0-rc49-exact3/logs/trivy-version.log
+b887aa0fe4710a5ddbe2b9b4db201c5544998287f62345645ad2f98ca4f2e0f7  release/0.1.0-rc49-exact3/proof/trivy-version.txt

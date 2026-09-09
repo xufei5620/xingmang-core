@@ -1,0 +1,132 @@
+import {
+  serviceUnitDefinitions,
+  type ServiceUnitCodeWire,
+} from "./eligibility-wire.generated";
+
+// XM-INV-UNIT-DISPLAY. 用户端「按平台计算的开票资格」卡片里，切点前旧余额与
+// 非现金额度以前直接渲染后端记账用的原始刻度，长成
+// `30,179,629,498 SUB2_BALANCE_1E8`。那是给账本对账用的数，不是上游用户在自己
+// 账号页上看到的余额。这里按契约把它换算成 `301.80`。
+//
+// XM-INV-UNIT-DISPLAY-USERONLY（09-09）。负责人：「原始单位不应该给用户看，这个
+// 我们后端自己知道就行。」原始数字与单位码因此连 title 都不再放：用户可达的 DOM
+// 里（正文、title、aria-label、data-*）一律不出现它们。这个视图随之只产出用户能
+// 看的东西——换算数与来源口径，结构上不再有承载原始值的字段，也就没有把它漏出去
+// 的路。原始值仍在管理端账本详情、后端日志与 API 响应里，排查照旧。
+//
+// 三条纪律：
+//   1. 只换刻度，不换口径。换算后仍是「非现金 / 切点前」的源侧余额，不是人民币，
+//      所以调用方不加 ¥ 也不加 $，并且必须把 note（来源口径）一起显示出来。
+//   2. 不碰浮点。service_units 最长 78 位，Number 在 2^53 以上就开始丢位，而这里
+//      是「不许丢位」的地方，所以全程 BigInt 整数运算。
+//   3. 认不出来的照实说，不抛错。后端比这份 bundle 新一个版本是常态（RC106 的降级
+//      原则）。但「照实说」不等于「把原始值摆出来」：降级分支显示「暂无法换算」
+//      加一句原因，页面照样出，原始值仍只有后端和管理端看得到。
+
+export interface ServiceUnitValue {
+  serviceUnits: string;
+  // 宽化成 string：契约里的两个码是已知集，但运行时可能收到这份 bundle 还不认识的
+  // 码。窄联合会让「未识别」这条路在类型上不可达，也就等于没有这条路。
+  unitCode: string | null;
+}
+
+export interface ServiceUnitDefinition {
+  readonly code: ServiceUnitCodeWire;
+  readonly divisor: string;
+  readonly decimals: number;
+  readonly displayLabel: string;
+}
+
+export interface ServiceUnitView {
+  /** 主显示。换算成功时是 `301.80`，否则是「暂无法换算」，不回落到原始数字。 */
+  amount: string;
+  /** 副标签：换算成功时是来源口径，否则是说明为什么没换算的中文。 */
+  note: string;
+  /** 是否真的按契约换算过。调用方据此决定要不要显示「折合」提示。 */
+  converted: boolean;
+  // 这里**故意**没有 title / raw 之类承载原始值的字段。少一个字段就少一条把原始
+  // 刻度漏进用户端 DOM 的路——这比在调用处写一句「别放进 title」可靠，因为后者
+  // 要靠每个改这段的人都记得。管理端要原始值时直接读 API 响应（App.tsx 账本详情
+  // 就是这么做的），不经过这个视图。
+}
+
+// 现状文案，逐字保留：unitCode 为 null 说明这个来源还没有建立单位合同，
+// 那与「换算不出来」是两件事，不能合并成一句。
+export const unitContractPendingNote = "（单位合同待建立）";
+export const unrecognisedUnitNote = "（未识别单位）";
+export const unconvertibleAmountNote = "（数值异常，未换算）";
+
+// 换算不出来时用户端主显示的文案。旧版这里回落到原始数字（未识别时还带上单位码），
+// 那正是负责人要求不给用户看的东西；note 里的原因保留，因为它不含任何原始值。
+export const unconvertibleDisplayText = "暂无法换算";
+
+const wholeNumberPattern = /^[0-9]+$/;
+
+export function serviceUnitDefinition(
+  code: string | null,
+): ServiceUnitDefinition | undefined {
+  if (!code) return undefined;
+  return serviceUnitDefinitions.find((unit) => unit.code === code);
+}
+
+function groupThousands(digits: string) {
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * 把原始服务单位按契约除数换算成上游显示的余额数，全程 BigInt。
+ *
+ * 小数取舍用「四舍五入」（remainder*2 >= divisor 进一位），不是截断。派工单里
+ * 建议截断以免显示得比账本多，但同一份派工单给出的两个已核实数据点都是四舍五入
+ * 的结果：99,948,771,408 / 1e8 = 999.48771408，上游显示 999.49（截断会得 999.48）；
+ * 30,179,629,498 / 1e8 = 301.79629498，派工单自己写的期望是 301.80（截断会得 301.79）。
+ * 这两格的目的就是「让用户看到跟上游一样的数」，差一分钱会重新制造它要消除的困惑。
+ * 而「显示得比账本多」在这里没有风险：这两格都标着**不可开票**，谁也支不走，
+ * 它是对账信息不是可用额度。真正的可开票金额走 money()，那条路不经过这里。
+ *
+ * 换不出来时返回 null，绝不返回一个「差不多」的数。
+ */
+export function convertServiceUnits(
+  serviceUnits: string,
+  unit: ServiceUnitDefinition,
+): string | null {
+  if (!wholeNumberPattern.test(serviceUnits)) return null;
+  if (!wholeNumberPattern.test(unit.divisor)) return null;
+  if (!Number.isInteger(unit.decimals) || unit.decimals < 0 || unit.decimals > 8) {
+    return null;
+  }
+  const divisor = BigInt(unit.divisor);
+  if (divisor <= 0n) return null;
+  const scale = 10n ** BigInt(unit.decimals);
+  const numerator = BigInt(serviceUnits) * scale;
+  const quotient = numerator / divisor;
+  const remainder = numerator % divisor;
+  const rounded = remainder * 2n >= divisor ? quotient + 1n : quotient;
+  if (unit.decimals === 0) return groupThousands(rounded.toString());
+  // padStart 处理进位后仍不足一位整数的情况（1 单位 / 1e8 -> 0.00）。
+  const digits = rounded.toString().padStart(unit.decimals + 1, "0");
+  const whole = digits.slice(0, digits.length - unit.decimals);
+  const fraction = digits.slice(digits.length - unit.decimals);
+  return `${groupThousands(whole)}.${fraction}`;
+}
+
+export function serviceUnitView(value: ServiceUnitValue): ServiceUnitView {
+  // 三条降级分支的主显示是同一句「暂无法换算」，差别只在 note 说的原因。原因是
+  // 给人看的分类，不含原始数字也不含单位码；要知道具体是哪个数、哪个码，去管理端
+  // 或后端日志。
+  const degraded = (note: string): ServiceUnitView => ({
+    amount: unconvertibleDisplayText,
+    note,
+    converted: false,
+  });
+  if (!value.unitCode) return degraded(unitContractPendingNote);
+  const unit = serviceUnitDefinition(value.unitCode);
+  if (!unit) return degraded(unrecognisedUnitNote);
+  const converted = convertServiceUnits(value.serviceUnits, unit);
+  if (converted === null) {
+    // 单位码认得，数字本身不合法。跟「未识别单位」分开说，否则排查的人会去查
+    // 契约，而问题其实在这一行数据上。
+    return degraded(unconvertibleAmountNote);
+  }
+  return { amount: converted, note: unit.displayLabel, converted: true };
+}
