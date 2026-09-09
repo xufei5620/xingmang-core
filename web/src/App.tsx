@@ -72,6 +72,7 @@ import {
   eligibilityReasonLabel,
   eligibilityStatusLabel,
 } from "./lib/eligibility-labels";
+import { serviceUnitView, type ServiceUnitValue } from "./lib/service-units";
 import {
   applyUserDataPlan,
   loadUserInvoiceData,
@@ -1055,11 +1056,35 @@ export function SourceAccountStatus() {
 // lib/eligibility-labels.ts (XM-INV-LOT-REASON-CONTRACT) so the Chinese copy
 // can be asserted directly by tests rather than only through rendering.
 
-function formatServiceUnits(value: UserEligibilitySummary["noncash"]) {
-  const grouped = value.serviceUnits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  return value.unitCode
-    ? `${grouped} ${value.unitCode}`
-    : `${grouped}（单位合同待建立）`;
+// XM-INV-UNIT-DISPLAY. 换算逻辑本身在 lib/service-units.ts，这里只负责摆位置：
+// 换算后的数放 <strong>，来源口径放它下面，原始数字与单位码进 title——出问题时
+// 鼠标停一下就能拿到跟上游对账用的原始值，不用叫用户去复现。
+// 这两格是**不可开票**额度，所以数字前后都不带 ¥ / $。
+function ServiceUnitCell({ value }: { value: ServiceUnitValue }) {
+  const view = serviceUnitView(value);
+  return (
+    <>
+      <strong title={view.title}>{view.amount}</strong>
+      <span className="service-unit-origin">{view.note}</span>
+    </>
+  );
+}
+
+// 管理端保留原始单位（那是对账口径），后面补一句折合值。换算不出来时整句不出现，
+// 而不是出现一句写着「—」的折合——后者会被当成「折合后是零」。
+//
+// 导出是为了能直接测：它用在 AccountLedgerDetailDrawer 里，而那个抽屉在
+// useEffect 里自己取数，react-dom/server 不跑 effect，整段渲染只到 loading 态。
+// 所以这里测的是「这个组件渲染出什么」，「抽屉里确实用了它」没有渲染测覆盖，
+// 已写进交接文档。
+export function ServiceUnitConversionHint({ value }: { value: ServiceUnitValue }) {
+  const view = serviceUnitView(value);
+  if (!view.converted) return null;
+  return (
+    <span className="service-unit-converted">
+      （折合 {view.amount} {view.note}）
+    </span>
+  );
 }
 
 function eligibilitySummaryReady(summary?: UserEligibilitySummary) {
@@ -1142,11 +1167,11 @@ export function EligibilitySummaryPanel({
               <div className="eligibility-unit-grid">
                 <div>
                   <span>切点前旧余额 · 不可开票</span>
-                  <strong>{formatServiceUnits(item.legacyNoninvoiceable)}</strong>
+                  <ServiceUnitCell value={item.legacyNoninvoiceable} />
                 </div>
                 <div>
                   <span>赠送 / 返利 / 管理员额度 · 不可开票</span>
-                  <strong>{formatServiceUnits(item.noncash)}</strong>
+                  <ServiceUnitCell value={item.noncash} />
                 </div>
               </div>
               <div className="eligibility-reasons" aria-label="资格状态原因">
@@ -4011,7 +4036,8 @@ function AccountLedgerDetailDrawer({
                     <dt>期初余额（非现金）</dt>
                     <dd>
                       {detail.openingBalance.serviceUnits}{" "}
-                      {detail.openingBalance.unitCode}
+                      {detail.openingBalance.unitCode}{" "}
+                      <ServiceUnitConversionHint value={detail.openingBalance} />
                     </dd>
                   </div>
                   {/* 与期初余额放在一起，因为它们讲的是同一件事：系统从哪一刻起

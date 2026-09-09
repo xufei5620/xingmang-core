@@ -220,6 +220,9 @@ func TestContractRejectsMalformedGroups(t *testing.T) {
 		SummaryStatus:         []string{"active"},
 		SummaryReason:         []string{"READY"},
 		SummaryReasonMaxCount: 5,
+		ServiceUnits: []ServiceUnit{
+			{Code: "ZZ_UNIT", Divisor: "100", Decimals: 2, DisplayLabel: "测试单位"},
+		},
 	}
 	if err := base.validate(); err != nil {
 		t.Fatalf("the well-formed fixture must validate: %v", err)

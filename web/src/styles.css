@@ -2016,11 +2016,23 @@ td small {
   background: #f7f8fa;
   border-radius: 8px;
 }
+/* XM-INV-UNIT-DISPLAY：这一格显示的从「30,179,629,498 SUB2_BALANCE_1E8」变成了
+   「301.80」，短得多，也是用户真正要读的东西，所以字号从 9px 提到 12px；
+   来源口径压在下面一行，格子仍是两行结构。 */
 .eligibility-unit-grid strong {
   color: #5f6d83;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
+  font-size: 12px;
   overflow-wrap: anywhere;
+}
+.eligibility-unit-grid .service-unit-origin {
+  color: #8a93a3;
+  font-size: 8px;
+  line-height: 1.4;
+}
+.service-unit-converted {
+  color: #7f899a;
+  white-space: nowrap;
 }
 .eligibility-reasons {
   display: flex;

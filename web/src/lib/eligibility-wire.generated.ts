@@ -48,7 +48,26 @@ export const summaryReasons = [
 
 export const summaryReasonMaxCount = 5;
 
+// divisor 是字符串：前端用 BigInt(divisor) 精确整除，不走 Number。
+// 换算后的数仍是源侧非现金余额，不是人民币——渲染时不加 ¥ / $，
+// 且必须与 displayLabel 一起出现。
+export const serviceUnitDefinitions = [
+  {
+    code: "SUB2_BALANCE_1E8",
+    divisor: "100000000",
+    decimals: 2,
+    displayLabel: "SoloV API 余额",
+  },
+  {
+    code: "NEWAPI_QUOTA",
+    divisor: "500000",
+    decimals: 2,
+    displayLabel: "New API 额度",
+  },
+] as const;
+
 export type LotEligibilityStatusWire = (typeof lotEligibilityStatuses)[number];
 export type LotReasonCodeWire = (typeof lotReasonCodes)[number];
 export type SummaryStatusWire = (typeof summaryStatuses)[number];
 export type SummaryReasonWire = (typeof summaryReasons)[number];
+export type ServiceUnitCodeWire = (typeof serviceUnitDefinitions)[number]["code"];

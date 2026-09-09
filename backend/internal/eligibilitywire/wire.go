@@ -22,11 +22,13 @@ package eligibilitywire
 import (
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Contract mirrors contracts/invoice-eligibility-wire.v1.json. The *_description
@@ -41,6 +43,38 @@ type Contract struct {
 	SummaryStatus         []string            `json:"summary_status"`
 	SummaryReason         []string            `json:"summary_reason"`
 	SummaryReasonMaxCount int                 `json:"summary_reason_max_count"`
+	ServiceUnits          []ServiceUnit       `json:"service_units"`
+}
+
+// ServiceUnit is one source-side accounting unit and how to turn a raw
+// service_units integer into the number the upstream's own user sees.
+//
+// XM-INV-UNIT-DISPLAY. Divisor is a STRING, not a number: service_units is a
+// decimal of up to 78 digits and encoding/json would hand a float64 to anything
+// that decoded this as a number -- in the one place in the response whose whole
+// job is not to lose a digit. It is parsed with math/big here and with BigInt in
+// the browser; neither side touches a float.
+//
+// The conversion changes the SCALE, never the KIND: the converted number is
+// still a non-cash / pre-cutover source balance, not CNY, so it renders with no
+// currency sign and always beside DisplayLabel. See service_units_description in
+// the contract, and accounts_ledger.go's comment on why this system refuses to
+// invent a CNY exchange rate for these units.
+type ServiceUnit struct {
+	Code         string `json:"code"`
+	Divisor      string `json:"divisor"`
+	Decimals     int    `json:"decimals"`
+	DisplayLabel string `json:"display_label"`
+	Description  string `json:"description"`
+}
+
+// ServiceUnitCodes is the contract's unit-code vocabulary, in contract order.
+func (c Contract) ServiceUnitCodes() []string {
+	out := make([]string, 0, len(c.ServiceUnits))
+	for _, unit := range c.ServiceUnits {
+		out = append(out, unit.Code)
+	}
+	return out
 }
 
 // repoRoot resolves the repository root from this source file's own path rather
@@ -140,7 +174,61 @@ func (c Contract) validate() error {
 	if len(c.LotStatusReasonPairs) == 0 {
 		return fmt.Errorf("eligibilitywire: lot_status_reason_pairs is empty")
 	}
+	return c.validateServiceUnits()
+}
+
+// validateServiceUnits checks the shape of every unit definition. Each rule
+// exists because breaking it produces a WRONG NUMBER on the user's page rather
+// than a crash: a zero or unparseable divisor divides by nothing, a negative or
+// oversized decimals makes the rendered scale disagree with the label, and an
+// empty display_label leaves a bare figure with no statement of what it counts
+// -- which is the exact ambiguity this slice exists to remove.
+func (c Contract) validateServiceUnits() error {
+	if len(c.ServiceUnits) == 0 {
+		return fmt.Errorf("eligibilitywire: service_units is empty")
+	}
+	seen := map[string]bool{}
+	for i, unit := range c.ServiceUnits {
+		if unit.Code == "" {
+			return fmt.Errorf("eligibilitywire: service_units[%d] has an empty code", i)
+		}
+		if seen[unit.Code] {
+			return fmt.Errorf("eligibilitywire: service_units repeats code %q", unit.Code)
+		}
+		seen[unit.Code] = true
+		divisor, ok := new(big.Int).SetString(unit.Divisor, 10)
+		if !ok || divisor.Sign() <= 0 {
+			return fmt.Errorf(
+				"eligibilitywire: service_units[%q].divisor must be a positive base-10 integer written as a string, got %q",
+				unit.Code, unit.Divisor)
+		}
+		if unit.Decimals < 0 || unit.Decimals > 8 {
+			return fmt.Errorf(
+				"eligibilitywire: service_units[%q].decimals must be between 0 and 8, got %d",
+				unit.Code, unit.Decimals)
+		}
+		if strings.TrimSpace(unit.DisplayLabel) == "" {
+			return fmt.Errorf("eligibilitywire: service_units[%q].display_label is empty", unit.Code)
+		}
+		// The label is read by the product owner and by users, neither of whom
+		// reads English. A label with no Han character at all is how an
+		// English placeholder ("Sub2API balance") reaches the page.
+		if !containsHan(unit.DisplayLabel) {
+			return fmt.Errorf(
+				"eligibilitywire: service_units[%q].display_label %q has no Chinese in it; the label is user-visible copy",
+				unit.Code, unit.DisplayLabel)
+		}
+	}
 	return nil
+}
+
+func containsHan(value string) bool {
+	for _, char := range value {
+		if unicode.Is(unicode.Han, char) {
+			return true
+		}
+	}
+	return false
 }
 
 // generatedHeader is prefixed to the rendered TypeScript. It names the command
@@ -178,11 +266,34 @@ func RenderTypeScript(c Contract) string {
 	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("export const summaryReasonMaxCount = %d;\n", c.SummaryReasonMaxCount))
 	b.WriteString("\n")
+	writeServiceUnits(&b, c.ServiceUnits)
+	b.WriteString("\n")
 	writeType(&b, "LotEligibilityStatusWire", "lotEligibilityStatuses")
 	writeType(&b, "LotReasonCodeWire", "lotReasonCodes")
 	writeType(&b, "SummaryStatusWire", "summaryStatuses")
 	writeType(&b, "SummaryReasonWire", "summaryReasons")
+	b.WriteString("export type ServiceUnitCodeWire = (typeof serviceUnitDefinitions)[number][\"code\"];\n")
 	return strings.ReplaceAll(b.String(), "\n", "\r\n")
+}
+
+// writeServiceUnits renders the unit table. `divisor` stays a string in the
+// generated module for the same reason it is one in the contract: the frontend
+// feeds it straight to BigInt, and a TypeScript number literal here would be
+// the one place a 78-digit-capable pipeline quietly became float64.
+func writeServiceUnits(b *strings.Builder, units []ServiceUnit) {
+	b.WriteString("// divisor 是字符串：前端用 BigInt(divisor) 精确整除，不走 Number。\n")
+	b.WriteString("// 换算后的数仍是源侧非现金余额，不是人民币——渲染时不加 ¥ / $，\n")
+	b.WriteString("// 且必须与 displayLabel 一起出现。\n")
+	b.WriteString("export const serviceUnitDefinitions = [\n")
+	for _, unit := range units {
+		b.WriteString("  {\n")
+		b.WriteString(fmt.Sprintf("    code: %q,\n", unit.Code))
+		b.WriteString(fmt.Sprintf("    divisor: %q,\n", unit.Divisor))
+		b.WriteString(fmt.Sprintf("    decimals: %d,\n", unit.Decimals))
+		b.WriteString(fmt.Sprintf("    displayLabel: %q,\n", unit.DisplayLabel))
+		b.WriteString("  },\n")
+	}
+	b.WriteString("] as const;\n")
 }
 
 func writeConst(b *strings.Builder, name string, values []string) {

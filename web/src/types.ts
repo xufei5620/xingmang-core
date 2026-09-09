@@ -1,6 +1,7 @@
 import type {
   LotEligibilityStatusWire,
   LotReasonCodeWire as GeneratedLotReasonCode,
+  ServiceUnitCodeWire,
   SummaryReasonWire,
 } from "./lib/eligibility-wire.generated";
 
@@ -175,9 +176,14 @@ export interface SourceAccount {
 // network, never on the set we promise to have Chinese labels for.
 export type EligibilitySummaryReason = SummaryReasonWire;
 
+// XM-INV-UNIT-DISPLAY. unitCode 以前是手抄在这里的两个字面量。它现在有真身了：
+// 契约的 service_units 组不只列出单位码，还给出每个码的换算除数，前端据此把原始
+// 刻度显示成上游用户看得懂的余额数——手抄一份等于给「显示出来的那个数」留了第二
+// 个说法。窄联合（不是 EligibilityStatusWire 那种宽化形式）是故意的：这个字段由
+// mapServiceUnitSummary 逐条校验过才进来，网络上的宽化在那一层，不在这里。
 export interface ServiceUnitSummary {
   serviceUnits: string;
-  unitCode: "SUB2_BALANCE_1E8" | "NEWAPI_QUOTA" | null;
+  unitCode: ServiceUnitCodeWire | null;
 }
 
 export interface UserEligibilitySummary {

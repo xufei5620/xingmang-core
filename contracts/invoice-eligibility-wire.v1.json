@@ -131,5 +131,42 @@
     "前端 mapEligibilitySummary 的长度上限用它，而不是用「已知清单长度」——",
     "后者会随清单增长而漂移，等于没有上限。"
   ],
-  "summary_reason_max_count": 5
+  "summary_reason_max_count": 5,
+  "service_units_description": [
+    "非现金额度与切点前旧余额在响应里是「源服务单位」：一个大整数 service_units 加一个",
+    "unit_code。用户端以前把它原样渲染成 30,179,629,498 SUB2_BALANCE_1E8——那是后端记账",
+    "用的内部刻度，不是上游用户在自己账号页上看到的余额数。本段给每个单位码一条换算定义，",
+    "前端据此显示 301.80，原始数字与单位码退到 title 提示里供核对。",
+    "",
+    "divisor 用字符串而不是数字：service_units 最长 78 位，JSON 数字在任何 float64 解析器",
+    "里都会失真，而这里恰恰是「不许失真」的地方。前端用 BigInt 精确整数运算，后端用",
+    "math/big 校验，两侧都不碰浮点。",
+    "",
+    "换算只改变刻度，不改变口径：换算后的数仍然是非现金/切点前的源侧余额，不是人民币，",
+    "所以它在页面上不带 ¥ 也不带 $，只跟一个来源口径标签（display_label）一起出现。",
+    "把它当成钱去加总、去参与开票金额计算，是本段明确不授权的用法——见",
+    "backend/internal/httpapi/accounts_ledger.go 里对同一件事的说明。",
+    "",
+    "这一组的「不多不少」由 Go 侧的发现闸钉住：它扫 backend/internal 与 agents 下所有非测试",
+    "Go 源码里落在单位码位置上的常量字符串（赋值、复合字面量键、与 *UnitCode 的比较、",
+    "名字里带 unit 的函数的常量返回），再加一张独立的形状网（任何 [A-Z]..._1E<数字> 形状的",
+    "常量字符串），与本组双向比对。两张网互不同源，是为了避开「校验器的覆盖名单与被校验",
+    "对象同源就永远绿」那个老毛病。"
+  ],
+  "service_units": [
+    {
+      "code": "SUB2_BALANCE_1E8",
+      "divisor": "100000000",
+      "decimals": 2,
+      "display_label": "SoloV API 余额",
+      "description": "Sub2API 的钱包余额按 1e-8 为最小刻度记账（users.balance numeric(20,8)，见 docs/SOURCE-SYNC-PROTOCOL.md），上游显示的余额 = service_units / 1e8。生产已核实：99,948,771,408 单位对应上游显示的 999.49。"
+    },
+    {
+      "code": "NEWAPI_QUOTA",
+      "divisor": "500000",
+      "decimals": 2,
+      "display_label": "New API 额度",
+      "description": "除数 = New API 的 QuotaPerUnit。两处独立证据：本仓库 contracts/newapi-source-projection-grants.postgresql.sql 的投影契约在 QuotaPerUnit≠500000 时直接拒绝出数，所以只要线上还在出数它就是 500000；上游 common/constants.go 把 QuotaPerUnit 定义为 500*1000，其前端也按 quota/quotaPerUnit 显示。注意上游可再按 USDExchangeRate 把显示折算成别的币种，本平台只显示这个基准数，不折算、不带货币符号。"
+    }
+  ]
 }
