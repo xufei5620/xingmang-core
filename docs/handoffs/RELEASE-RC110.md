@@ -29,8 +29,8 @@ RC108 的对账中自锁片在影子评估上 not_ready（见 `RELEASE-RC108.md`
 | 源码门禁第一次（树 `c0e4be5`；`rc110-gate`） | 15:00:37 | 15:10:16 | 9m39s | PASS（exit 0） |
 | 源码门禁第二次（并入影子绑定文档尾巴 `312f647`/`16d7ce0` 后，树 `3fcb3a5`；`rc110-gate2`） | 15:11:19 | 15:19:40 | 8m21s | PASS（exit 0） |
 | 源码门禁第三次（并入 `9bb88f6` 收尾文档后，最终树 `9bcf083`；`rc110-gate3`） | 15:22:11 | 15:30:30 | 8m19s | **PASS**（exit 0）—— tag 打在本行之后的记录提交上 |
-| 签名 tag `v0.1.0-rc110-signed` | 待打 | | | |
-| 镜像门禁 + 两次产物验证 | 待跑 | | | 预期 exit 42 |
+| 签名 tag `v0.1.0-rc110-signed` → `277063c`（`git verify-tag` Good） | 15:31 | 15:31 | | OK |
+| 镜像门禁（`wt-XM-INV-AUTOLOGIN` detached 到 `277063c`，`run-rc110-image-gate.ps1`，`rc110-imagegate`）+ 两次产物验证 | 15:31:52 | 15:43:44 | 11m52s | exit 42（唯一预期值）；两次验证 exit 0；`release/0.1.0-rc110-exact1` |
 | `ssh-keygen -Y sign` 签 `SHA256SUMS` | 待签 | | | |
 | 传输 + stage2 | 待做 | | | |
 | **影子评估 A**：`--reproject-all --finalization-window --finalization-window-provable`（不带 reevaluate、不带 lag） | 待跑 | | | 先核 `pending_accounts[].requested_through > finalized_through`；12 出现 `idle_reevaluation:true` 结转证明、matched、→ active；其余不变 |
