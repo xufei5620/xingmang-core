@@ -5970,6 +5970,84 @@ function EligibilityProjectionCard({
   );
 }
 
+// SourceStreamHealthRow is one stream's row in the source-health table.
+// It is its own exported component so that it can be rendered on its own:
+// SourceHealthPage sits inside PortalLayout and loads its report from an
+// effect, so a test of the page would render the loading state and assert
+// nothing. XM-INV-DEAD-CONTAINMENT's two visible changes both live in this
+// row -- the contained-dead count, and the diagnosis line now showing for a
+// stream that is ready but has a contained dead event -- and neither had any
+// coverage at all until this was pulled out.
+export function SourceStreamHealthRow({ item }: { item: SourceStreamHealth }) {
+  return (
+    <tr>
+      <td>
+        <strong>{item.sourceName}</strong>
+        <small>
+          {sourceStreamLabels[item.streamId]} · seq {item.sequence}
+        </small>
+      </td>
+      <td>
+        <strong>{item.lastAcceptedAt ? dateTime(item.lastAcceptedAt) : "从未接收"}</strong>
+        <small>最大 {item.maximumAgeSeconds}s</small>
+        {item.streamId !== "identities" && (
+          <small>
+            账本水位 {item.economicWatermarkAt ? dateTime(item.economicWatermarkAt) : "尚未发布"}
+            {item.economicWatermarkMaximumAgeSeconds
+              ? ` · 最大 ${item.economicWatermarkMaximumAgeSeconds}s`
+              : ""}
+          </small>
+        )}
+      </td>
+      <td>
+        <strong>代理声明 {item.observedRuntimeVersion || "未观测"}</strong>
+        <small>
+          契约审计 {item.approvedRuntimeVersion || "未配置"} · 切换时{" "}
+          {item.cutoverRuntimeVersion || "未登记"} · 投影
+          {item.projectionStatus === "healthy"
+            ? "健康"
+            : item.projectionStatus === "blocked"
+              ? "阻断"
+              : "未知"}
+        </small>
+        <small>Agent {item.observedAgentVersion || "未观测"}</small>
+      </td>
+      <td>
+        <strong>
+          待处理 {item.pendingEvents} / 死信 {item.deadEvents}
+          {item.containedDeadEvents > 0
+            ? `（已兜住 ${item.containedDeadEvents}）`
+            : ""}
+        </strong>
+        <small>依赖等待 {item.waitingDependencies}（不阻断其他用户）</small>
+      </td>
+      <td>
+        <span className={`badge ${item.ready ? "badge-green" : "badge-red"}`}>
+          {item.ready ? "正常" : "已阻断"}
+        </span>
+        {/* XM-INV-DEAD-CONTAINMENT: a contained dead event
+            leaves the stream ready, so the old `!item.ready`
+            condition would have hidden EVENTS_DEAD_CONTAINED
+            entirely -- the label would exist and never render,
+            and any assertion about it would pass vacuously.
+            Making the freeze visible is part of the deal for
+            no longer taking the deployment out of rotation. */}
+        {!item.ready || item.containedDeadEvents > 0 ? (
+          <small>
+            {item.reasons
+              .map(
+                (reason) =>
+                  sourceReasonLabels[reason] ??
+                  "未识别的安全阻断原因",
+              )
+              .join("；") || "接口降级或完整性门禁未通过"}
+          </small>
+        ) : null}
+      </td>
+    </tr>
+  );
+}
+
 function SourceHealthPage() {
   const [report, setReport] = useState<SourceHealthReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -6102,71 +6180,10 @@ function SourceHealthPage() {
               </thead>
               <tbody>
                 {visibleItems.map((item) => (
-                  <tr key={`${item.sourceInstanceId}:${item.streamId}`}>
-                    <td>
-                      <strong>{item.sourceName}</strong>
-                      <small>
-                        {sourceStreamLabels[item.streamId]} · seq {item.sequence}
-                      </small>
-                    </td>
-                    <td>
-                      <strong>{item.lastAcceptedAt ? dateTime(item.lastAcceptedAt) : "从未接收"}</strong>
-                      <small>最大 {item.maximumAgeSeconds}s</small>
-                      {item.streamId !== "identities" && (
-                        <small>
-                          账本水位 {item.economicWatermarkAt ? dateTime(item.economicWatermarkAt) : "尚未发布"}
-                          {item.economicWatermarkMaximumAgeSeconds
-                            ? ` · 最大 ${item.economicWatermarkMaximumAgeSeconds}s`
-                            : ""}
-                        </small>
-                      )}
-                    </td>
-                    <td>
-                      <strong>代理声明 {item.observedRuntimeVersion || "未观测"}</strong>
-                      <small>
-                        契约审计 {item.approvedRuntimeVersion || "未配置"} · 切换时{" "}
-                        {item.cutoverRuntimeVersion || "未登记"} · 投影
-                        {item.projectionStatus === "healthy"
-                          ? "健康"
-                          : item.projectionStatus === "blocked"
-                            ? "阻断"
-                            : "未知"}
-                      </small>
-                      <small>Agent {item.observedAgentVersion || "未观测"}</small>
-                    </td>
-                    <td>
-                      <strong>
-                        待处理 {item.pendingEvents} / 死信 {item.deadEvents}
-                        {item.containedDeadEvents > 0
-                          ? `（已兜住 ${item.containedDeadEvents}）`
-                          : ""}
-                      </strong>
-                      <small>依赖等待 {item.waitingDependencies}（不阻断其他用户）</small>
-                    </td>
-                    <td>
-                      <span className={`badge ${item.ready ? "badge-green" : "badge-red"}`}>
-                        {item.ready ? "正常" : "已阻断"}
-                      </span>
-                      {/* XM-INV-DEAD-CONTAINMENT: a contained dead event
-                          leaves the stream ready, so the old `!item.ready`
-                          condition would have hidden EVENTS_DEAD_CONTAINED
-                          entirely -- the label would exist and never render,
-                          and any assertion about it would pass vacuously.
-                          Making the freeze visible is part of the deal for
-                          no longer taking the deployment out of rotation. */}
-                      {!item.ready || item.containedDeadEvents > 0 ? (
-                        <small>
-                          {item.reasons
-                            .map(
-                              (reason) =>
-                                sourceReasonLabels[reason] ??
-                                "未识别的安全阻断原因",
-                            )
-                            .join("；") || "接口降级或完整性门禁未通过"}
-                        </small>
-                      ) : null}
-                    </td>
-                  </tr>
+                  <SourceStreamHealthRow
+                    key={`${item.sourceInstanceId}:${item.streamId}`}
+                    item={item}
+                  />
                 ))}
               </tbody>
             </table>

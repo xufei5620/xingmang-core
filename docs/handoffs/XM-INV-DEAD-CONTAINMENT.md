@@ -555,6 +555,155 @@ git 全部自动合上。** 文本无冲突不等于语义正确，所以逐个�
   的一侧——问得太远会**报错**而不是被忽略——但如果将来有人写了一个很长的 `FILTER`、
   containment 调用落在 240 字符之外，他会看到一条需要重排而不是需要修 bug 的红。
 
+## 终审轮（第四刀，一个提交）
+
+### 为什么这一轮不是「再补几种写法」
+
+前三刀的发现型闸都是**按形状**写的——先是 `='dead'`、再是 `FILTER (WHERE`、
+再加上 `CASE WHEN`。每一刀都把复审上次用的写法钉住，然后复审换一种新写法再走一次。
+这一轮复审用的是相关标量子查询和 `sum((...)::int)`。**这个来回不会自己停下来**，
+因为「哪些 SQL 形状会聚合一个状态」是个开集，而闸的覆盖范围是手列的。
+
+所以这一轮把性质倒过来写（见记忆条目「闸的范围要发现不要手列」）。
+
+**dead 判据（原 major 2）**。触发条件不再是任何形状，而是
+`strings.Contains(sql, "processing_status") && strings.Contains(sql, "'dead'")`
+——backend 下**任何字符串字面量**只要同时出现这两者，就必须来自渲染函数、
+或与渲染函数在同一条拼接链上、或在显式豁免名单里。没有能逃掉的写法，
+因为里面根本没有写法。代价是行级修复路径需要豁免，这个代价是自觉付的：
+豁免是 4 条声明、写清理由、并且钉死字面量条数。
+
+**豁免走语法树（原 major 1）**。「240 字符窗口内出现渲染函数名」换成
+「命中的字面量所在的 `*ast.BinaryExpr` 拼接链里有一个指向渲染函数的
+`*ast.CallExpr`」。240 这个常数删掉了——它当初就是猜的，还得单独写一段话辩护。
+新判据堵掉复审点名的两条：把函数名写进 raw string 里的 SQL 注释；
+以及让一条**相邻的无关查询**恰好落在窗口内。两者都不是调用，语法树都不认。
+
+**解冻关卡（原 major 3）**。命中条件从「赋了 `'resolved'`」改成
+「写了 `eligibility_freezes` 的 status 列」，安全与否**改在捕获到的值上判**：
+只有字面量 `'open'` 安全（重新打开冻结不会解开兜住），其余一律要过关卡——
+`'resolved'`、绑定参数 `$2`、`CASE` 表达式、函数调用都算。
+`[^;]{0,160}?` 放开成 `[^;]*?`，SET 列表多长都不再影响能不能看见。
+**参数化那条是这里面最要紧的**：`SET resolved_at=now(), status=$2` 的 SQL 里
+压根没有 `'resolved'` 这个词，而这恰恰是新写一扇门最顺手的写法。
+
+**相关性判据（原 minor 5）**：补 `IS (NOT) DISTINCT FROM` 与两侧 `::text` 强转，
+并进自测数组。`IS NOT DISTINCT FROM` 不只是「另一种写法」——它正是有人开始担心
+NULL 情况时会去写的那个，而渲染函数已经用 `source_revision_hash IS NOT NULL`
+处理过这件事了。
+
+### 前端零覆盖（原 major 4）
+
+复审实测：`App.tsx` 的渲染条件、文案、以及 `http-api.ts` 的 `?? 0` 三处
+各自删掉，typecheck 与 330 条用例照样全绿。本轮补了 9 条用例（330 → 339）。
+
+为了能测，把同步流健康表的那一行抽成了 `SourceStreamHealthRow`（App.tsx 导出）。
+**这是必要的重构而不是顺手改**：`SourceHealthPage` 外面套着 `PortalLayout`
+（要 `useData` / `useAuth` / `useLocation` / ToastContext），里面靠 `useEffect`
+拉数据，而本仓库没有 jsdom、用 `react-dom/server` 渲染静态标记——effect 不会跑，
+渲染整页只会得到加载态，任何断言都恒真。抽出来之后这一行可以脱离 provider 单独渲染。
+搬运用的是**按行号切片的字节级移动**（先断言四个 marker 还在原位），不是重打一遍，
+所以每一行中文都是原字节；diff 里只有胶水行有增删。
+
+三条按复审要求：`contained_dead_events` 缺省/非缺省的映射、已兜住计数的渲染、
+以及 `ready=true` 且 `containedDeadEvents>0` 时 `EVENTS_DEAD_CONTAINED` 文案出现。
+第三条是承重的那条：兜住的死信让流**保持 ready**，而旧条件正是 `!item.ready`，
+所以那条文案在页面上一次都不会出现——`App.tsx` 的注释自己就写了这一点。
+它做了变异验证（N16）。
+
+### 变异表（20 条：N1–N20）
+
+后端 12 条在 `backend/internal/postgresstore/` 下种第六扇门或手写健康面（非测试
+`.go`，跑完删掉），并在**修复前后各跑一次**；前端 5 条改被测实现本身。
+
+| # | 变异 | 修前 | 修后 | 变红的测试 |
+| --- | --- | --- | --- | --- |
+| N1 | dead 聚合 + 渲染函数名只写在 raw string 的 SQL 注释里 | 绿 | 红 | `EveryDeadStatusQueryReachesContainment` |
+| N2 | dead 聚合 + 一条**相邻的无关查询**调了渲染函数（落在旧的 240 窗口内） | 绿 | 红 | 同上 |
+| N3 | 相关标量子查询 `(SELECT count(*) ... WHERE d.processing_status='dead')` | 绿 | 红 | 同上 |
+| N4 | `sum((sie.processing_status='dead')::int)` | 绿 | 红 | 同上 |
+| N5 | 对照：dead 聚合与渲染函数在同一条拼接链上 | 绿 | 绿 | —— |
+| N6 | 第六扇门 `SET resolved_at=now(), status=$2`（参数化） | 绿 | 红 | `EveryFreezeResolutionPassesTheDeadEventGuard` |
+| N7 | 第六扇门 SET 列表超过旧的 160 字符上限 | 绿 | 红 | 同上 |
+| N8 | 对照：只 `SET status='open'` 且不调关卡 | 绿 | 绿 | —— |
+| N9 | 对照：参数化解冻但真的调了关卡 | 绿 | 绿 | —— |
+| N10 | 手抄相关性用 `IS NOT DISTINCT FROM` | 绿 | 红 | `ContainmentCorrelationIsWrittenInOnePlace` |
+| N11 | 手抄相关性两侧加 `::text` | 绿 | 红 | 同上 |
+| N12 | 对照：不种任何东西 | 绿 | 绿 | —— |
+| N13 | 把某条豁免的 `literals` 从 1 改成 2 | —— | 红 | 豁免条数对不上 |
+| N14 | 往豁免名单里加一条不再命中的条目 | —— | 红 | 「这条豁免已经不豁免任何东西」 |
+| N15 | 删掉 `MarkSourceEventFailed` 那条豁免 | —— | 红 | 该声明被报出来（证明豁免真的被走到） |
+| N16 | 渲染条件改回 `!item.ready` | —— | 红 | 1 失败 / 338 通过：「ready 流上的兜住诊断」 |
+| N17 | 已兜住计数不再渲染（条件短路） | —— | 红 | 1 失败 / 338 通过：「显示已兜住多少」 |
+| N18 | `contained_dead_events ?? 0` 去掉兜底 | —— | 红 | 1 失败 / 338 通过：「缺省字段读成 0」 |
+| N19 | 对照：后端不改 | —— | 绿 | —— |
+| N20 | 对照：前端不改 | —— | 绿 | —— |
+
+N13–N15 只有「修后」一列：豁免名单是这一轮新引入的，修前不存在。
+
+**三条前端变异各自只让一条用例变红、另外 338 条全绿**，所以它们钉的是具体那一条
+断言，不是「整个文件炸了」。
+
+### 一次差点被当成证据的假红
+
+前端三条变异第一次跑出来全是红，看着很漂亮。**是对照组把它戳穿的**：
+`N20 不改任何东西` 也红了。原因是变异脚本里写的是
+`npx vitest run --reporter=basic`，而 vitest 4 没有 `basic` 这个 reporter——
+命令在跑第一条用例之前就失败了，红的是加载 reporter，不是断言。改用真门禁命令
+`npm test -- --run` 重跑之后才是上表里那三条精确的红。
+记忆条目「变异要配一个不该变红的对照组，并确认它真的没红」这次直接救场。
+
+### 门禁（全部实测，UTC）
+
+| 门禁 | 命令 | 开始 | 结束 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 后端静态 | `go vet ./...` | 06:23:28 | 06:23:29 | 1s | exit 0 |
+| 后端全量 | `env -u <八个代理变量> INVOICE_TEST_DATABASE_URL=...invoice_test_l1merge go test -p 1 -count=1 ./...` | 06:23:36 | 06:31:04 | 7m28s | exit 0，30 包 ok，零 FAIL |
+| 前端类型 | `npm run typecheck` | 06:31:16 | 06:31:19 | 3s | exit 0 |
+| 前端用例 | `npm test -- --run` | 06:31:19 | 06:31:20 | 1s | 22 文件 / 339 例全绿（上一轮 20 / 330） |
+| 密钥扫描 | `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 06:31:20 | 06:31:21 | 1s | exit 0 |
+
+后端全量耗时靠前的包（秒）：`internal/postgresstore` 324.027、`internal/testdb`
+32.807、`internal/application` 28.218、`cmd/eligibility-repair` 15.795、
+`internal/auth` 10.544、`internal/migrate` 7.928、`internal/oidcretention` 4.218、
+`internal/adminsettings` 3.802、`cmd/identity-migrate` 1.940、
+`internal/backupverify` 1.071。
+
+跑发现型闸时包列表一律写在所有 flag **之前**（`go test -count=1 ./pkg/ -run X`）。
+写成 `go test -run X ./pkg/` 时 `-run` 后面的包会被当成测试二进制的参数，
+**静默漏跑**且退出码 0。
+
+### 新增与更新的 risks / follow_ups
+
+- **【新增，建议单开切片】就绪原因词表两侧漂移，而且没有任何闸。** 实测：
+  后端 `evaluateSourceStreamHealth` 产出 11 个值（`SOURCE_DISABLED`、
+  `STREAM_NEVER_ACCEPTED`、`STREAM_STALE`、`RUNTIME_VERSION_UNAPPROVED`、
+  `PROJECTION_BLOCKED`、`ECONOMIC_WATERMARK_NEVER_PUBLISHED`、
+  `ECONOMIC_RESCAN_ACTIVE`、`ECONOMIC_WATERMARK_STALE`、`EVENTS_PENDING`、
+  `EVENTS_DEAD`、`EVENTS_DEAD_CONTAINED`），前端 `sourceReasonLabels` 有 12 个键。
+  两边对不上的三个：
+  1. `ECONOMIC_RESCAN_ACTIVE` **后端会产出、前端没有文案**——运维今天在来源健康页
+     上看到的是「未识别的安全阻断原因」。这是一条真实的、现在就存在的可见缺陷，
+     本轮按派工要求不修。
+  2. `SCAN_CYCLE_INCOMPLETE` 与 `CONFIGURATION_DRIFT` 前端有文案、后端已经不产出
+     （全仓 Go 源码里除注释外没有这两个字面量），是两条死文案。
+
+  建议的做法与本片这三条规则同构：**后端枚举由发现得来**（扫
+  `evaluateSourceStreamHealth` 里 append 到 `Reasons` 的字面量），
+  **前端文案齐备性对拍**，两侧都不许手列名单。注意别写成「比对两份手写清单」
+  ——那样两份清单会一起漂，闸永远绿。
+- **`EVENTS_DEAD_CONTAINED` 的前端覆盖已闭环**（上一轮 follow_ups 第 4 条的后半段）。
+  三条断言都做了变异验证，见上表 N16–N18。
+- **豁免名单的纪律写在类型注释里，别绕过它。** `deadStatusExemptions` 的每条都
+  必须命中且条数精确；给一条已豁免的声明**新增**一条 dead 查询会变红（N13 证明），
+  这是有意的——新查询不该继承为别的东西写的豁免。名单只减不增。
+- **本轮引入的边界**：dead 判据现在只看**字符串字面量**。若将来有人用
+  `fmt.Sprintf` 把状态值拼进查询（`WHERE processing_status=%s`），字面量里就不会
+  同时出现两者，这条规则看不见它。今天全仓没有这种写法（探针扫过），
+  写在这里而不是假装它覆盖一切。
+- **`SourceStreamHealthRow` 现在是 App.tsx 的导出**。它没有自己的样式或状态，
+  就是原来那一行；但它现在是个可以被别处引用的名字，改它要想到表格之外可能有调用方。
+
 ## 提交
 
 提交消息与 trailer 见 `git log`。本片未推送 GitHub、未部署、未连接生产库。

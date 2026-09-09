@@ -1,6 +1,7 @@
 package postgresstore
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -204,96 +206,286 @@ func scanBackendDecls(t *testing.T) []goDecl {
 	return decls
 }
 
-// deadStatusTestSource matches "this row's processing_status is dead" without
-// depending on how it is spelled: either side of the comparison may come
-// first, the column may carry a cast, and the value may arrive through `=`,
-// `IN (...)` or `= ANY (ARRAY[...])`. The previous version of the rule below
-// was locked to `processing_status =/IN 'dead'` with the column on the left,
-// and a review walked through it with a `::text` cast, a reversed comparison
-// and an `ANY(ARRAY['dead'])`.
-const deadStatusTestSource = `(?:` +
-	`(?:\w+\.)?\bprocessing_status(?:::\w+)? ?= ?(?:ANY ?)?\(? ?(?:ARRAY ?\[ ?)?'dead'` +
-	`|(?:\w+\.)?\bprocessing_status(?:::\w+)? ?IN ?\([^)]{0,160}?'dead'` +
-	`|'dead' ?= ?(?:\w+\.)?\bprocessing_status(?:::\w+)?` +
-	`)`
-
-// handWrittenDeadFilterPattern matches a hand-written aggregate over dead
-// events. "Aggregate" is the part that makes this rule narrower than "mentions
-// dead anywhere": a plain `WHERE processing_status='dead'` is an ordinary
-// row-level predicate that many repair paths legitimately write, while a dead
-// count folded into a health surface is the thing that must come from
-// sourceDeadEventCountColumnsSQL so that containment is asked about at the
-// same time. Both aggregate shapes count: a FILTER clause, and the
-// `sum(CASE WHEN ... THEN 1 ELSE 0 END)` spelling of the same total, which the
-// FILTER-only version of this rule did not see at all.
-var handWrittenDeadFilterPattern = regexp.MustCompile(
-	`(?i)(?:FILTER ?\( ?WHERE|CASE WHEN)[^;]{0,240}?` + deadStatusTestSource)
-
-// containmentRenderCall is how a query asks the containment question. The
-// correlation rule below is what makes this the only spelling there is: a
-// hand-written correlation is an error there, so requiring this literal here
-// is not a spelling lock, it is the one spelling that rule permits.
-const containmentRenderCall = "sourceEventContainedByOpenFreezeSQL("
-
-// deadAggregateContainmentWindow is how far past a dead aggregate's own text
-// the containment call is still counted as belonging to it. The normalised
-// declaration text interleaves SQL with Go concatenation, so "in the same
-// FILTER" cannot be read off it exactly; this is a deliberately short leash,
-// and the direction of the error is the safe one -- a dead aggregate that asks
-// containment further away than this is reported, not ignored.
-const deadAggregateContainmentWindow = 240
-
-// deadAggregatesWithoutContainment returns each dead-status aggregate in a
-// normalised declaration whose own text does not consult containment.
-//
-// This, not "may only appear in the renderer", is the property the rule is
-// actually about. sourceDeadEventCountColumnsSQL is the standard way to get it
-// right and covers every health surface, but it renders one specific shape
-// (two count columns), and a query that needs a different shape -- the cycle
-// publisher counts unfinished events, and excludes contained dead ones from
-// that count -- is not made safer by being forced through it. What must never
-// happen is an aggregate that judges an event dead without asking whether the
-// dead event is contained.
-func deadAggregatesWithoutContainment(normalized string) []string {
-	var bare []string
-	for _, span := range handWrittenDeadFilterPattern.FindAllStringIndex(normalized, -1) {
-		end := span[1] + deadAggregateContainmentWindow
-		if end > len(normalized) {
-			end = len(normalized)
-		}
-		if strings.Contains(normalized[span[0]:end], containmentRenderCall) {
-			continue
-		}
-		bare = append(bare, normalized[span[0]:span[1]])
-	}
-	return bare
+// containmentRenderers are the three functions that render containment-aware
+// SQL. A dead-status test that arrives through one of them has asked the
+// containment question by construction, because that is what they render.
+var containmentRenderers = []string{
+	"sourceEventContainedByOpenFreezeSQL",
+	"sourceDeadEventCountColumnsSQL",
+	"sourceDeadEventFlagColumnsSQL",
 }
 
-// freezeCorrelationPattern matches the containment correlation itself: an
-// eligibility freeze's source_revision_hash equated to an ingest row's
-// payload_hash, in either order and under any alias. This is the pairing that
-// was retyped three times in the first cut of this slice.
-var freezeCorrelationPattern = regexp.MustCompile(
-	`(?:\w+\.)?source_revision_hash ?= ?(?:\w+\.)?payload_hash|(?:\w+\.)?payload_hash ?= ?(?:\w+\.)?source_revision_hash`)
+// mentionsDeadIngestStatus reports whether one SQL string literal contains a
+// dead processing_status judgment.
+//
+// This is the whole test, and it is deliberately not a pattern over how the
+// judgment is spelled. Three rounds of review walked through three successive
+// spelling-locked matchers: first `='dead'` on its own line, then a FILTER
+// with the column on the left, then an aggregate wrapper written as `FILTER (`
+// or `CASE WHEN`. Each fix taught the matcher one more spelling and left the
+// next one open -- a correlated scalar subquery, `sum((... ='dead')::int)`,
+// a `::text` cast, `'dead' = ANY(ARRAY[...])`. The escapes were never running
+// out, because "which SQL shapes aggregate a status" is an open set.
+//
+// So the property is inverted. Any SQL that mentions both the column and the
+// value is a dead-status judgment, whatever it does with it, and it has to
+// come from a renderer, share a concatenation with one, or be on the
+// exemption list below with a written reason. There is no spelling that
+// escapes this, because there is no spelling in it.
+//
+// 'dead' carries its closing quote, so `'deadline'` is not a match, and the
+// column name is required, so a `status='dead'` on some other table is not
+// one either.
+func mentionsDeadIngestStatus(sql string) bool {
+	return strings.Contains(sql, "processing_status") && strings.Contains(sql, "'dead'")
+}
 
-// freezeResolutionPattern matches a write that resolves an eligibility freeze.
-// Every part of it below the table name is a spelling that a review actually
-// used to walk a sixth, unguarded door past the previous version of this rule:
+// nodeParents maps every node under root to its parent, which go/ast does not
+// record. Walking upwards is what turns "this literal" into "the expression
+// this literal is part of".
+func nodeParents(root ast.Node) map[ast.Node]ast.Node {
+	parents := make(map[ast.Node]ast.Node, 256)
+	var stack []ast.Node
+	ast.Inspect(root, func(node ast.Node) bool {
+		if node == nil {
+			stack = stack[:len(stack)-1]
+			return false
+		}
+		if len(stack) > 0 {
+			parents[node] = stack[len(stack)-1]
+		}
+		stack = append(stack, node)
+		return true
+	})
+	return parents
+}
+
+// concatChainRoot walks up from a node through enclosing `+` expressions and
+// parentheses to the outermost one: the expression that builds the whole
+// query string this literal is a fragment of.
+func concatChainRoot(node ast.Node, parents map[ast.Node]ast.Node) ast.Node {
+	for {
+		parent, ok := parents[node]
+		if !ok {
+			return node
+		}
+		switch typed := parent.(type) {
+		case *ast.ParenExpr:
+		case *ast.BinaryExpr:
+			if typed.Op != token.ADD {
+				return node
+			}
+		default:
+			return node
+		}
+		node = parent
+	}
+}
+
+// concatChainLeaves flattens a `a + b + c` tree into its operands.
+func concatChainLeaves(expr ast.Expr) []ast.Expr {
+	switch typed := expr.(type) {
+	case *ast.ParenExpr:
+		return concatChainLeaves(typed.X)
+	case *ast.BinaryExpr:
+		if typed.Op == token.ADD {
+			return append(concatChainLeaves(typed.X), concatChainLeaves(typed.Y)...)
+		}
+	}
+	return []ast.Expr{expr}
+}
+
+// chainCallsAnyOf reports whether the concatenation that node belongs to has
+// an operand that is a call to one of names.
 //
-//   - (?i): `update eligibility_freezes set status='resolved'`. SQL keywords
-//     are case-insensitive and this package is not consistent about them.
-//   - `(?:AS )?`: `UPDATE eligibility_freezes AS ef SET ...`. The old
-//     `(?: \w+)?` ate exactly one word, so an explicit AS slipped through.
-//   - `(?:[^;]{0,160}?, ?)?`: `SET resolved_at=now(), status='resolved'`.
-//     status is not required to be the first assignment after SET; [^;] keeps
-//     the run inside one statement.
-//   - ` ?= ?`: spaces around the equals sign.
+// This replaces a character window over the declaration's normalised text.
+// The window had two ways out that cost one line each: write the renderer's
+// name into a SQL comment inside the raw string, or put an unrelated query
+// that happens to call the renderer within the window. Neither is a call, and
+// neither survives being asked of the syntax tree. It also removes the
+// arbitrary constant -- "the same concatenated string" is a real boundary,
+// where "240 characters" was a guess that had to be defended.
+func chainCallsAnyOf(node ast.Node, parents map[ast.Node]ast.Node, names []string) bool {
+	root, ok := concatChainRoot(node, parents).(ast.Expr)
+	if !ok {
+		return false
+	}
+	for _, leaf := range concatChainLeaves(root) {
+		call, isCall := leaf.(*ast.CallExpr)
+		if !isCall {
+			continue
+		}
+		var called string
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			called = fun.Name
+		case *ast.SelectorExpr:
+			called = fun.Sel.Name
+		}
+		for _, name := range names {
+			if called == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// stringLiteralsIn returns every string literal under a node, with its
+// unquoted value. Comments are not literals, so nothing here can be spoofed
+// by prose.
+func stringLiteralsIn(node ast.Node) map[*ast.BasicLit]string {
+	found := map[*ast.BasicLit]string{}
+	ast.Inspect(node, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		value, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			value = lit.Value
+		}
+		found[lit] = value
+		return true
+	})
+	return found
+}
+
+// deadStatusExemption is one declaration that writes a dead processing_status
+// test by hand and is allowed to. Every field is load-bearing:
 //
-// \b in front of status is what keeps `prior_status='resolved'` from counting
-// as a resolution -- an underscore is a word character, so there is no
-// boundary there, while `ef.status` has one.
-var freezeResolutionPattern = regexp.MustCompile(
-	`(?i)UPDATE eligibility_freezes(?: (?:AS )?\w+)? SET (?:[^;]{0,160}?, ?)?\bstatus ?= ?'resolved'`)
+//   - file and decl pin it to one place, so an exemption cannot drift onto
+//     some other declaration that happens to be renamed into the same slot.
+//   - literals is how many such SQL strings that declaration holds. The scan
+//     asserts the count exactly, so adding a dead-status query to an already
+//     exempt declaration turns this red instead of inheriting its exemption.
+//   - reason has to say why the site is row-level, because that is the whole
+//     basis of the exemption.
+//
+// The list may only shrink. A stale entry -- one whose declaration no longer
+// writes a dead-status test, or writes a different number of them -- fails
+// the test, so an exemption cannot outlive the thing it excuses. That is the
+// rule the list would otherwise quietly break: an exemption list that keeps
+// entries after the code changed is a second, hand-written scope list, and a
+// hand-written scope list is a mirror.
+type deadStatusExemption struct {
+	file     string
+	decl     string
+	literals int
+	reason   string
+}
+
+// deadStatusExemptions is the complete set of hand-written dead-status SQL in
+// the tree that does not go through a renderer. Every one of them acts on
+// named rows -- a specific (source_instance_id, stream_id, event_id), or the
+// row a lease token already claimed -- rather than summarising a source's
+// health, so there is no aggregate for containment to change the meaning of.
+// A repair tool that requeues one named dead event is not answering "is this
+// source healthy"; it is doing what an operator asked, to a row they named.
+var deadStatusExemptions = []deadStatusExemption{
+	{
+		file: "internal/postgresstore/eligibility_repair.go", decl: "RepairPreAnchorUsageEligibility", literals: 2,
+		reason: "selects, then requeues, dead/failed usage_event and credit_event rows by " +
+			"(source_instance_id, stream_id, event_id) under FOR UPDATE. Row-level repair, no aggregate.",
+	},
+	{
+		file: "internal/postgresstore/ingest_requeue_dead_repair.go", decl: "repairIngestRequeueDeadEvent", literals: 2,
+		reason: "reads and requeues exactly one named dead event. The candidate list that decides " +
+			"which events are offered does go through the renderer (ingestRequeueDeadCandidates).",
+	},
+	{
+		file: "internal/postgresstore/ingest_unreplayable_acknowledge.go", decl: "AcknowledgeUnreplayableIngestEvent", literals: 2,
+		reason: "reads and closes exactly one named dead event as unreplayable. Same shape as the " +
+			"requeue repair and the same reasoning.",
+	},
+	{
+		file: "internal/postgresstore/source_sync.go", decl: "MarkSourceEventFailed", literals: 1,
+		reason: "this is the write that *produces* dead status, on the row its own lease token holds. " +
+			"It is upstream of containment rather than a reader of it.",
+	},
+}
+
+// sqlColumnRefSource matches a column reference with an optional table alias
+// and an optional cast, so that `ef.source_revision_hash::text` reads the same
+// as `source_revision_hash`.
+const sqlColumnRefSource = `(?:\w+\.)?\b%s(?:::\w+)?`
+
+// sqlEqualityOperatorSource matches the ways two columns are compared for
+// equality in this codebase's SQL. `IS NOT DISTINCT FROM` is the NULL-safe
+// spelling of `=`; a review used it to write the containment correlation by
+// hand without tripping the rule below. `IS DISTINCT FROM` is included because
+// the negation of the correlation is still the correlation being retyped.
+const sqlEqualityOperatorSource = `(?: ?= ?| IS (?:NOT )?DISTINCT FROM )`
+
+// freezeCorrelationPattern matches the containment correlation itself: an
+// eligibility freeze's source_revision_hash compared to an ingest row's
+// payload_hash, in either order, under any alias, through either equality
+// spelling, with or without casts. This is the pairing that was retyped three
+// times in the first cut of this slice.
+var freezeCorrelationPattern = regexp.MustCompile(
+	`(?i)(?:` +
+		fmt.Sprintf(sqlColumnRefSource, "source_revision_hash") + sqlEqualityOperatorSource +
+		fmt.Sprintf(sqlColumnRefSource, "payload_hash") +
+		`|` +
+		fmt.Sprintf(sqlColumnRefSource, "payload_hash") + sqlEqualityOperatorSource +
+		fmt.Sprintf(sqlColumnRefSource, "source_revision_hash") +
+		`)`)
+
+// freezeStatusWritePattern matches any write that assigns eligibility_freezes'
+// status column, and captures what it assigns.
+//
+// The rule used to look for the assigned value `'resolved'` directly, and each
+// review round found another way to assign a resolution without writing that
+// literal next to that column:
+//
+//   - `SET resolved_at=now(), status=$2`. The value is a bind parameter, so
+//     no literal appears in the SQL at all. This is the one that matters most:
+//     a parameterised resolution is the most likely way a new door gets
+//     written, and it was completely invisible.
+//   - `SET a=..., b=..., c=..., status='resolved'` with more than 160
+//     characters of other assignments first, which overran the old bounded
+//     run.
+//
+// So the match no longer asks what is being assigned. It asks whether the
+// status column of this table is being written at all, and the decision about
+// safety is made afterwards, on the captured value: only the literal 'open' is
+// safe, because re-opening a freeze cannot un-contain a dead event. Everything
+// else -- 'resolved', a bind parameter, a CASE expression, a function call --
+// is treated as a resolution and has to pass the guard. A door that writes
+// something genuinely harmless in a shape this cannot read gets a red it can
+// answer by calling the guard, which is the safe direction to be wrong in.
+//
+// `[^;]*?` is bounded by the statement separator rather than by a character
+// count, so the length of the SET list no longer decides whether the rule can
+// see the assignment.
+//
+// \b in front of status is what keeps `prior_status=...` from counting -- an
+// underscore is a word character, so there is no boundary there, while
+// `ef.status` has one.
+var freezeStatusWritePattern = regexp.MustCompile(
+	`(?i)UPDATE eligibility_freezes(?: (?:AS )?\w+)? SET (?:[^;]*?, ?)?\bstatus ?= ?([^,;]+)`)
+
+// freezeStatusReopenValue is the only assigned value that does not need the
+// dead-event guard. It is matched as a whole captured token so that a CASE
+// expression which merely mentions 'open' somewhere is not mistaken for one.
+const freezeStatusReopenValue = `'open'`
+
+// freezeResolutionsIn returns the assigned values, one per status write in the
+// declaration, that are not the safe re-open literal.
+func freezeResolutionsIn(normalized string) []string {
+	var resolutions []string
+	for _, match := range freezeStatusWritePattern.FindAllStringSubmatch(normalized, -1) {
+		assigned := strings.TrimSpace(match[1])
+		if index := strings.IndexAny(assigned, " \t"); index >= 0 {
+			assigned = assigned[:index]
+		}
+		if assigned == freezeStatusReopenValue {
+			continue
+		}
+		resolutions = append(resolutions, assigned)
+	}
+	return resolutions
+}
 
 // parseDeclForSelfTest parses a single top-level declaration out of a source
 // snippet and builds the same goDecl the tree scan would build for it, so the
@@ -372,118 +564,148 @@ func TestDeclCallsFunctionIgnoresCommentsAndStrings(t *testing.T) {
 	}
 	// And the blanking must reach the text the SQL rules match on.
 	commented := parseDeclForSelfTest(t, "func door() {\n\t// UPDATE eligibility_freezes SET status='resolved'\n\t_ = 1\n}")
-	if freezeResolutionPattern.MatchString(commented.normalized) {
+	if len(freezeResolutionsIn(commented.normalized)) != 0 {
 		t.Error("a freeze resolution written in a Go comment counts as a door, which inflates " +
 			"the door floor and lets the matcher rot behind it")
 	}
 }
 
-// TestEveryDeadEventAggregateConsultsContainment holds the rule that an
-// aggregate over dead events may not be written without asking, in the same
-// expression, whether those dead events are contained. Rendering it from
-// sourceDeadEventCountColumnsSQL is how every health surface satisfies this
-// and is what a fifth surface should do; the cycle publisher, which needs a
-// different column shape, satisfies it by calling the containment renderer
-// inline instead.
+// TestEveryDeadStatusQueryReachesContainment holds the rule that no SQL in the
+// backend may judge an ingest event dead without that judgment either coming
+// from a containment renderer, sharing a concatenated query with one, or being
+// on the exemption list above with a written reason.
 //
-// This is a wider net than the first cut of the rule, which asked only whether
-// a dead FILTER appeared outside sourceDeadEventCountColumnsSQL. That question
-// was answered "no" partly by accident: the publisher's aggregate spells its
-// dead test as IN ('failed','dead'), which the old matcher did not see at all.
-// Widening the matcher to see it and then narrowing the rule to what actually
-// matters leaves the publisher passing for a reason instead of by oversight.
-func TestEveryDeadEventAggregateConsultsContainment(t *testing.T) {
-	// sourceDeadEventCountColumnsSQL is the renderer the health surfaces use.
-	// sourceDeadEventFlagColumnsSQL renders the same judgment as boolean
-	// columns rather than a FILTER, so it is covered by the correlation rule
-	// below instead.
-	const renderer = "sourceDeadEventCountColumnsSQL"
-	// The strongest control available: the matcher must recognise what the
-	// definition actually produces. A matcher that no longer matches the real
-	// thing would let every hand-written copy through while still reading as
-	// coverage.
-	if !handWrittenDeadFilterPattern.MatchString(normalizeSource(sourceDeadEventCountColumnsSQL("count(*)", "sie"))) {
-		t.Fatal("the dead-FILTER matcher does not recognise the output of " + renderer +
-			", so it cannot recognise a hand-written copy of it either")
-	}
-	// Self-test. If these do not trip the matcher, everything below is a green
-	// light for nothing at all.
+// The rule is stated over string literals rather than over shapes because the
+// three previous versions of it were stated over shapes, and each one was
+// walked through by a review inventing a shape it did not list -- a FILTER
+// split over lines, a `::text` cast, `= ANY(ARRAY[...])`, a `CASE WHEN` sum, a
+// correlated scalar subquery, `sum((...)::int)`. There is no end to that list.
+// There is an end to "does this SQL mention the column and the value", so that
+// is the question now.
+//
+// What it costs: row-level repair paths that legitimately name dead rows now
+// need an exemption. That is the trade, and it is the right way round -- the
+// exemptions are four declarations, written down, each with a reason and an
+// exact literal count, and the list can only shrink.
+func TestEveryDeadStatusQueryReachesContainment(t *testing.T) {
+	// Self-test on the trigger. Every spelling a review has used to walk
+	// through a previous version of this rule has to be recognised, including
+	// the two from the latest round that no shape-based matcher saw.
 	for _, planted := range []string{
 		`count(*) FILTER (WHERE processing_status='dead')`,
 		"count(*) FILTER (\n\t\tWHERE sie.processing_status='dead')",
 		`count(sie.event_id) FILTER (WHERE sie.processing_status = 'dead')`,
 		`count(*) FILTER (WHERE sie.processing_status IN ('dead'))`,
-		`count(*) FILTER (WHERE sie.processing_status IN ('dead','failed'))`,
-		`count(*) FILTER (WHERE sie.stream_id='usage' AND sie.processing_status='dead')`,
-		// The four a review walked through the previous version of this rule.
 		`count(*) FILTER (WHERE sie.processing_status IN ('failed','dead'))`,
 		`count(*) FILTER (WHERE sie.processing_status::text='dead')`,
 		`count(*) FILTER (WHERE 'dead'=sie.processing_status)`,
 		`count(*) FILTER (WHERE sie.processing_status = ANY(ARRAY['dead']))`,
 		`sum(CASE WHEN sie.processing_status='dead' THEN 1 ELSE 0 END)`,
-		// ... and the lower-case spelling of the same, since SQL keywords are
-		// case-insensitive and this package writes them both ways.
 		`count(*) filter (where sie.processing_status='dead')`,
+		// The two from the latest review round. Neither is a FILTER and
+		// neither is a CASE WHEN, so the shape-based version of this rule was
+		// blind to both.
+		`(SELECT count(*) FROM source_ingest_events d WHERE d.source_instance_id=s.id AND d.processing_status='dead')`,
+		`sum((sie.processing_status='dead')::int)`,
+		// And two more that no shape list would have thought of, to make the
+		// point that the trigger does not care.
+		`count(*) FILTER (WHERE sie.processing_status SIMILAR TO 'dead')`,
+		`array_agg(sie.event_id) FILTER (WHERE sie.processing_status='dead')`,
 	} {
-		if !handWrittenDeadFilterPattern.MatchString(normalizeSource(planted)) {
-			t.Fatalf("the dead-FILTER matcher does not catch a spelling a maintainer would write, "+
-				"so this guard proves nothing:\n\t%s", planted)
-		}
-		if len(deadAggregatesWithoutContainment(normalizeSource(planted))) != 1 {
-			t.Fatalf("a dead aggregate that never asks containment is not reported, so the rule "+
-				"below would pass over it:\n\t%s", planted)
+		if !mentionsDeadIngestStatus(planted) {
+			t.Fatalf("the dead-status trigger does not recognise SQL that judges an event dead, "+
+				"so this rule proves nothing:\n\t%s", planted)
 		}
 	}
-	// The containment allowance and its leash. Both directions have to be
-	// staked: an allowance nobody can fail is an exemption list with extra
-	// steps, and one nobody can satisfy gets deleted the first time it fires.
-	withContainment := normalizeSource(
-		`count(*) FILTER (WHERE sie.processing_status='dead' AND ` + containmentRenderCall + `"sie") )`)
-	if len(deadAggregatesWithoutContainment(withContainment)) != 0 {
-		t.Fatal("a dead aggregate that asks containment in the same FILTER is reported anyway, " +
-			"which leaves no way to write one that is not the two-column renderer")
-	}
-	farAway := normalizeSource(`count(*) FILTER (WHERE sie.processing_status='dead')` +
-		strings.Repeat(" AND sie.stream_id<>'x'", 20) + containmentRenderCall + `"sie")`)
-	if len(deadAggregatesWithoutContainment(farAway)) != 1 {
-		t.Fatal("a containment call far away from the dead aggregate still excuses it, so any " +
-			"declaration that asks containment once is excused everywhere in its body")
-	}
+	// The trigger must still say no to SQL that is not about this judgment,
+	// or the exemption list becomes the whole codebase and gets deleted.
 	for _, allowed := range []string{
 		`count(*) FILTER (WHERE processing_status='queued')`,
-		// A row-level predicate is not a health aggregate. Several repair
-		// paths legitimately select the dead rows they are about to act on,
-		// and a rule that fired on those would be turned off within a week.
-		`WHERE sie.processing_status='dead' AND sie.source_instance_id=$1`,
-		// Counting what is *not* dead says nothing about containment.
-		`count(*) FILTER (WHERE sie.processing_status <> 'dead')`,
-		// A different column that merely ends in the same word.
 		`count(*) FILTER (WHERE sie.prior_processing_status_note='deadline')`,
+		`UPDATE eligibility_freezes SET status='dead_letter_pending'`,
+		`SELECT status FROM jobs WHERE status='dead'`,
 	} {
-		if handWrittenDeadFilterPattern.MatchString(normalizeSource(allowed)) {
-			t.Fatalf("the dead-FILTER matcher fires on something that is not an aggregate "+
-				"dead FILTER, so it will be weakened to shut it up:\n\t%s", allowed)
+		if mentionsDeadIngestStatus(allowed) {
+			t.Fatalf("the dead-status trigger fires on SQL that does not judge an ingest event "+
+				"dead, so it will be weakened to shut it up:\n\t%s", allowed)
+		}
+	}
+	// The renderers must actually produce SQL the trigger recognises. A
+	// renderer the trigger cannot see would let every hand-written copy of it
+	// through while this whole file still read as coverage.
+	for name, rendered := range map[string]string{
+		"sourceDeadEventCountColumnsSQL": sourceDeadEventCountColumnsSQL("count(*)", "sie"),
+		"sourceDeadEventFlagColumnsSQL":  sourceDeadEventFlagColumnsSQL("sie"),
+	} {
+		if !mentionsDeadIngestStatus(rendered) {
+			t.Fatalf("the dead-status trigger does not recognise what %s produces:\n\t%s", name, rendered)
 		}
 	}
 
-	found := false
+	// Which exemptions were actually used, so a stale one can be reported.
+	used := map[string]int{}
+	exemptionKey := func(file, decl string) string { return file + "::" + decl }
+	exempt := map[string]deadStatusExemption{}
+	for _, exemption := range deadStatusExemptions {
+		exempt[exemptionKey(exemption.file, exemption.decl)] = exemption
+	}
+
+	rendered := 0
 	for _, decl := range scanBackendDecls(t) {
-		if decl.name == renderer && handWrittenDeadFilterPattern.MatchString(decl.normalized) {
-			found = true
+		if decl.node == nil {
+			continue
 		}
-		for _, bare := range deadAggregatesWithoutContainment(decl.normalized) {
-			t.Errorf("%s: %s aggregates dead events without asking containment in the same "+
-				"expression. Render it from sourceDeadEventCountColumnsSQL, or ask "+
-				"%s inline the way the cycle publisher does -- a dead count that cannot see "+
-				"containment reports a contained, single-account outage as a source-wide one:\n\t%s",
-				decl.file, decl.name, containmentRenderCall, bare)
+		parents := nodeParents(decl.node)
+		for lit, value := range stringLiteralsIn(decl.node) {
+			if !mentionsDeadIngestStatus(value) {
+				continue
+			}
+			if chainCallsAnyOf(lit, parents, containmentRenderers) {
+				rendered++
+				continue
+			}
+			key := exemptionKey(decl.file, decl.name)
+			if _, ok := exempt[key]; ok {
+				used[key]++
+				continue
+			}
+			t.Errorf("%s: %s builds SQL that judges an ingest event dead without reaching "+
+				"containment. Render it from sourceDeadEventCountColumnsSQL, concatenate "+
+				"sourceEventContainedByOpenFreezeSQL into the same query, or -- if it acts on "+
+				"named rows rather than summarising a source -- add it to deadStatusExemptions "+
+				"with a reason. A dead judgment that cannot see containment reports a contained, "+
+				"single-account outage as a source-wide one:\n\t%s",
+				decl.file, decl.name, strings.TrimSpace(normalizeSource(value)))
 		}
 	}
-	// Positive control: a rule pointing at a definition the scan can no longer
-	// find is a rule about nothing.
-	if !found {
-		t.Errorf("%s was not found in the scanned tree; if it was renamed or inlined, this rule "+
-			"stopped covering anything", renderer)
+
+	// The exemption list may only shrink. An entry whose declaration no longer
+	// writes the SQL it excuses, or writes a different number of such queries,
+	// is reported here -- otherwise the list turns into a second hand-written
+	// scope list that nobody ever prunes, and a hand-written scope list is a
+	// mirror.
+	for _, exemption := range deadStatusExemptions {
+		key := exemptionKey(exemption.file, exemption.decl)
+		switch count := used[key]; {
+		case count == 0:
+			t.Errorf("the exemption for %s no longer excuses anything: that declaration builds no "+
+				"un-rendered dead-status SQL any more. Delete the entry -- an exemption that "+
+				"outlives its reason is how this list stops being reviewable", key)
+		case count != exemption.literals:
+			t.Errorf("the exemption for %s covers %d dead-status queries but is written for %d. "+
+				"If a query was added, it inherited an exemption written for something else; "+
+				"look at it and then update the count. Reason on file: %s",
+				key, count, exemption.literals, exemption.reason)
+		}
+	}
+
+	// Vacuity from the other side. If nothing in the tree reaches containment
+	// through a renderer any more, "everything reaches containment" is true of
+	// an empty set, and the health surfaces have quietly stopped asking.
+	if rendered < 6 {
+		t.Fatalf("only %d dead-status queries reach containment through a renderer; the four "+
+			"health surfaces, the cycle publisher, the carry-forward wait and the requeue "+
+			"candidate list all do, so this rule has lost sight of them", rendered)
 	}
 }
 
@@ -524,6 +746,20 @@ func TestContainmentCorrelationIsWrittenInOnePlace(t *testing.T) {
 		`sie.payload_hash=ef.source_revision_hash`,
 		"JOIN eligibility_freezes f\n\t\t\t  ON f.source_revision_hash = e.payload_hash",
 		`WHERE source_revision_hash=payload_hash`,
+		// The NULL-safe spelling of the same comparison. A review retyped the
+		// correlation this way and the rule did not see it -- and this one is
+		// not merely an alternative, it is the spelling someone reaches for
+		// precisely when they start worrying about the NULL case the renderer
+		// already handles with `source_revision_hash IS NOT NULL`.
+		`ef.source_revision_hash IS NOT DISTINCT FROM sie.payload_hash`,
+		`sie.payload_hash IS NOT DISTINCT FROM ef.source_revision_hash`,
+		`ef.source_revision_hash is not distinct from sie.payload_hash`,
+		`ef.source_revision_hash IS DISTINCT FROM sie.payload_hash`,
+		// Casts on either side or both.
+		`ef.source_revision_hash::text=sie.payload_hash`,
+		`ef.source_revision_hash=sie.payload_hash::text`,
+		`ef.source_revision_hash::text = sie.payload_hash::text`,
+		`sie.payload_hash::text IS NOT DISTINCT FROM ef.source_revision_hash::text`,
 	} {
 		if !freezeCorrelationPattern.MatchString(normalizeSource(planted)) {
 			t.Fatalf("the containment-correlation matcher misses a spelling a maintainer would "+
@@ -593,29 +829,51 @@ func TestEveryFreezeResolutionPassesTheDeadEventGuard(t *testing.T) {
 		// Both at once, plus an alias, which is what the combination looks
 		// like in practice.
 		`update eligibility_freezes as zz set resolved_at = now(), status = 'resolved'`,
+		// The two from the latest review round. The first is the important
+		// one: nothing about a parameterised resolution says 'resolved'
+		// anywhere in the SQL, so every version of this rule that looked for
+		// that literal was blind to the most ordinary way to write a new door.
+		`UPDATE eligibility_freezes SET resolved_at=now(), status=$2`,
+		`UPDATE eligibility_freezes SET status=$1 WHERE id=$2`,
+		// A SET list longer than the old 160-character bound, with status at
+		// the end of it.
+		`UPDATE eligibility_freezes SET resolved_at=now(),resolved_by=$1::uuid,` +
+			`resolution_note=$2,resolution_kind=$3,superseded_by=NULL,reopened_at=NULL,` +
+			`reopen_reason=NULL,updated_at=now(),revision=revision+1,status='resolved'`,
+		// A value this rule cannot read is treated as a resolution, because
+		// the safe direction is to demand the guard.
+		`UPDATE eligibility_freezes SET status=CASE WHEN $1 THEN 'resolved' ELSE 'open' END`,
 	} {
-		if !freezeResolutionPattern.MatchString(normalizeSource(planted)) {
+		if len(freezeResolutionsIn(normalizeSource(planted))) == 0 {
 			t.Fatalf("the freeze-resolution matcher misses a spelling a maintainer would write, "+
 				"so this guard proves nothing:\n\t%s", planted)
 		}
 	}
 	for _, allowed := range []string{
+		// Re-opening a freeze cannot un-contain a dead event, and it is the
+		// only assigned value that is safe. It stays out by being recognised
+		// and excluded, not by being unmatched -- which is why it is checked
+		// here rather than left to the matcher's blind spots.
 		`UPDATE eligibility_freezes SET status='open'`,
-		// Recording what the status used to be is not resolving anything.
+		`UPDATE eligibility_freezes SET reopened_at=now(), status = 'open'`,
+		`update eligibility_freezes as zz set status='open'`,
+		// Recording what the status used to be is not writing the status.
 		// \b in the matcher is what draws this line.
 		`UPDATE eligibility_freezes SET prior_status='resolved'`,
 		// A different table whose name starts with this one's.
 		`UPDATE eligibility_freezes_archive SET status='resolved'`,
+		// Reading is not writing.
+		`SELECT status FROM eligibility_freezes WHERE status='resolved'`,
 	} {
-		if freezeResolutionPattern.MatchString(normalizeSource(allowed)) {
+		if resolutions := freezeResolutionsIn(normalizeSource(allowed)); len(resolutions) != 0 {
 			t.Fatalf("the freeze-resolution matcher fires on a write that does not resolve a "+
-				"freeze, so it will be weakened to shut it up:\n\t%s", allowed)
+				"freeze (it read %v), so it will be weakened to shut it up:\n\t%s", resolutions, allowed)
 		}
 	}
 
 	doors := 0
 	for _, decl := range scanBackendDecls(t) {
-		if !freezeResolutionPattern.MatchString(decl.normalized) {
+		if len(freezeResolutionsIn(decl.normalized)) == 0 {
 			continue
 		}
 		doors++
