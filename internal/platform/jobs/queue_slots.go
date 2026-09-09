@@ -39,6 +39,77 @@ const (
 	riverDefaultJobTimeout = time.Minute
 )
 
+// configuredJobTimeout 返回这个 kind 在**这份配置下**的执行期限。
+//
+// 它与 jobTimeouts 是同一个事实的两个取法，用在两个不同的时刻：jobTimeouts
+// 在 Worker 注册点收集真值（NewClient 里），而这里要在**建 Worker 之前**、
+// 在 Config.validate() 里就回答同一个问题——配置校验不能依赖一个还没构造出来
+// 的对象。两者必须覆盖同一批任务，这一点由
+// TestConfiguredJobTimeoutCoversEverySlowJob 从真实注册点反查钉住，不靠人记得。
+//
+// ok 为 false 表示这个任务没有覆写 Timeout()，用 River 的默认 1 分钟；
+// 那种任务不参与下面的周期校验（它已经被 River 那条 1 秒下限之外的常识管住：
+// 1 分钟的期限配上任何 ≥1 分钟的周期都不重叠，而更快的周期本来就不该给它配）。
+func configuredJobTimeout(c Config, kind string) (time.Duration, bool) {
+	switch kind {
+	case Sub2APISyncJobKind:
+		return sub2apiSyncJobTimeout(c.Sub2APIRequestTimeout), true
+	case NewAPISyncJobKind:
+		return newapiSyncJobTimeout(c.NewAPIRequestTimeout), true
+	case FinanceCollectJobKind:
+		return financeCollectJobTimeout, true
+	}
+	return 0, false
+}
+
+// validateJobCadence 守住一条不变量：**一个任务不可能与自己重叠**。
+//
+// 为什么它必须是一条启动闸，而不是一句注释：
+//
+//   - River 的周期唯一性用的是 UniqueOpts.ByPeriod = **本次配置的周期**
+//     （newManifestPeriodicJob），也就是按周期分桶。作业期限跨过桶边界时，
+//     下一个桶的插入是**另一条**唯一性记录，River 拦不住它——上一轮还在跑，
+//     下一轮已经排上了。
+//   - maintenance 队列从 1 槽抬到「慢任务数 + 1」之后这件事变重了：单槽时
+//     重叠的那一轮至少还在排队等着，多槽时它会真的并发跑起来，同一条上游被
+//     两份读取同时打，写观测的两个事务互相覆盖，而看板上什么都看不出来。
+//   - 「期限 < 周期」这条不变量原先只在**默认配置**下被测过（300s 周期 vs
+//     120s 期限）。把 XM_NEWAPI_SYNC_INTERVAL 配成 90s 就能让它不成立，而
+//     那之前没有任何一道门禁会红：唯一的下限是 River 的 1 秒。
+//
+// 判据的范围是**发现**出来的，不是手列的：任务清单来自 JobManifest 注册表，
+// 启用状态与周期来自 effectiveJobConfig（与 /ops 那张部署态时刻表、与
+// maintenanceQueueSlots 同一段代码），期限来自 configuredJobTimeout。
+func validateJobCadence(c Config) error {
+	for _, spec := range RegisteredPeriodicJobSpecs() {
+		if spec.Queue != QueueMaintenance {
+			continue
+		}
+		timeout, ok := configuredJobTimeout(c, spec.Kind)
+		if !ok {
+			continue
+		}
+		enabled, _, interval, scheduleEnv, err := effectiveJobConfig(c, spec.ID)
+		if err != nil {
+			return fmt.Errorf("job cadence check: %w", err)
+		}
+		// 没启用的任务不会被插入；周期非正的配置由各自那条「River 一秒下限」
+		// 先拦（那条给出的错误更具体），这里不抢它的话。
+		if !enabled || interval <= 0 {
+			continue
+		}
+		if timeout < interval {
+			continue
+		}
+		return fmt.Errorf(
+			"任务 %s 的作业期限 %s 不短于它的周期 %s（%s）："+
+				"周期唯一性按周期分桶，期限跨过桶边界时同一个任务会与自己重叠，"+
+				"同一条上游会被两份读取同时打。请把 %s 配成严格大于 %s 的整秒值",
+			spec.Kind, timeout, interval, scheduleEnv, scheduleEnv, timeout)
+	}
+	return nil
+}
+
 // jobTimeouts 记录每个 job kind 声明的执行期限。
 //
 // 它在**真正的注册点**（addWorker）填充，不是另开一份手写名单：名单与注册点

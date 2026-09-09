@@ -254,6 +254,10 @@ func (s *Store) touch(ctx context.Context, existing Alert, in UpsertInput, now t
 // 第 1 条），后者取它的值 +1。继承范围天然就是 reopenLookback（24 小时）——
 // 超过那个窗口本来就不算同一件事，不必再发明第二个「多久算同一件事」的常量。
 //
+// 两个字段各有一条**同形状的例外**：上一条自己是 000054 之前的旧行时，
+// 它那一列本来就是 NULL（「不知道」），这一行也留 NULL，不把「不知道」
+// 换算成一个确定的数或时刻。两条例外的理由逐字相同，见下面各自的注释。
+//
 // **两个字段必须同进同退。** 只继承 first_opened_at 的话，一条开→关→开
 // 四轮的告警在界面上会是「已持续 4 小时，触发 1 次」——两个数各自都对，
 // 并排放在一行上给出的合成答案却是假的，而合成正是前端被告知要做的事
@@ -261,7 +265,9 @@ func (s *Store) touch(ctx context.Context, existing Alert, in UpsertInput, now t
 // 「触发 669 次」是同一类误读，只是方向相反：那个多报，这个少报。
 func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Alert, error) {
 	status := StatusOpen
-	firstOpenedAt := now
+	// firstOpenedAtArg 与 triggerCountArg 同一条口径：**NULL 表示不知道**。
+	// 非复发路径下「第一次开」就是此刻，是一个确定的事实。
+	firstOpenedAtArg := ts(now)
 	// 新开一条告警**就是**一次真正的触发，所以非复发路径恒为 1。
 	triggerCount := int32(1)
 	triggerCountArg := &triggerCount
@@ -276,8 +282,29 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 			status = StatusReopened
 			// 上一条自己也可能是复发链上的一环，所以取它的**有效**首开时刻
 			// 而不是它的 opened_at：三次复发之后，「已持续」仍然从第一次算起。
-			if inherited, _ := previous.EffectiveFirstOpenedAt(); !inherited.IsZero() {
-				firstOpenedAt = inherited
+			//
+			// 第二个返回值必须接住。EffectiveFirstOpenedAt 为 true 时返回的是
+			// 用 opened_at **兜出来的估计值**（上一条是 000054 之前的旧行，
+			// 真实首开时刻没有人记下来过）。把估计值原样写进新行的
+			// first_opened_at，就等于把它洗成了一个确定值：库里再也分不出
+			// 「记下来过」与「兜的底」，读取侧的 estimated 从此恒为 false，
+			// 界面上那个「（估计值）」后缀永远不再出现——一个看起来像真答案的
+			// 假答案（宪法 12 条），与 triggerCount 那一支要治的是同一个病。
+			//
+			// 所以这一支留 NULL：读取侧继续按 EffectiveFirstOpenedAt 兜底，
+			// 并如实标 estimated。
+			//
+			// **取舍写在这里**：留 NULL 之后，读取侧兜的是**本行**的 opened_at，
+			// 而不是上一行的——「已持续」会短掉中间那一段（本例是复发间隔）。
+			// 这是有意的：口径只有「确定值」与「不知道」两档，没有第三档能
+			// 存住「这是个估计值，但它比本行的 opened_at 更早」。少报一段
+			// 时长、并明说它是估计值，好过报一个更准的数却谎称它是确定的。
+			// 真要两全，得给这一列配一个 estimated 标记列，那是另一片的事
+			// （见 handoff 的 follow_ups）。
+			if inherited, wasEstimated := previous.EffectiveFirstOpenedAt(); wasEstimated {
+				firstOpenedAtArg = pgtype.Timestamptz{}
+			} else if !inherited.IsZero() {
+				firstOpenedAtArg = ts(inherited)
 			}
 			// 上一条是本列上线前的旧行（TriggerCount 为 nil）时，链上真正
 			// 触发过几次没有人记下来过。这里传 NULL 而不是从 1 重新起算：
@@ -303,7 +330,7 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 		Environment:     in.Environment,
 		OpenedAt:        ts(now),
 		TriggerCount:    triggerCountArg,
-		FirstOpenedAt:   ts(firstOpenedAt),
+		FirstOpenedAt:   firstOpenedAtArg,
 		SourceMetricKey: in.SourceMetricKey,
 	})
 	if err != nil {

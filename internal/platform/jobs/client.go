@@ -829,6 +829,12 @@ func (c Config) validate() error {
 	if c.CPASyncEnabled && strings.TrimSpace(c.CPADataDir) == "" {
 		return fmt.Errorf("cpa sync 已启用（file 模式）但 CPADataDir 为空")
 	}
+	// 放在最后一条：上面每条「River 一秒下限」给出的错误更具体，同一份坏配置
+	// 该先听到那句话。这一条管的是另一件事——周期合法，但它短到让任务与自己
+	// 重叠（见 queue_slots.go 的 validateJobCadence）。
+	if err := validateJobCadence(c); err != nil {
+		return err
+	}
 	return nil
 }
 

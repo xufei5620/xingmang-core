@@ -376,6 +376,13 @@ func silenceCreateHandler(store *Store) action.Handler {
 //     另外两个参数确实收得住：metric_key 必须在这个环境下真有观测，
 //     version 必须与平台自己观测到的 value_json.version 逐字相同。
 //
+//     note 今天只有**一条**读路径：GET /api/v1/audit/events，要 audit.read。
+//     已核对清单那个端点（GET /api/v1/alerts/upstream-versions，ops.read）
+//     有意**不**回显它——它初版回显过，复审指出那等于把 note 从 audit.read
+//     掉到 ops.read（staff 这个粗粒度角色拿的是 registry.read + ops.read +
+//     ui.saved_view.manage，不含 audit.read）。要给 note 再开任何一条通道，
+//     得先回到这一段把「有哪些通道、各要什么 scope」写全。
+//
 //  2. 它也确实不该是 L0：L0 的定位是「保存个人视图、低影响偏好」，而这个
 //     动作会让一条规则不再命中、让既有告警在下一轮被解决，是改变系统行为的
 //     写操作，与 alerts.silence.create 同一档。

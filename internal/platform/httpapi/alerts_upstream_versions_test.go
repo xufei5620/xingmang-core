@@ -62,9 +62,15 @@ func sampleAck() alerts.UpstreamVersionAck {
 		Source:         "sub2api-prod",
 		AcknowledgedBy: "staff_alice",
 		AcknowledgedAt: time.Date(2026, 9, 9, 3, 40, 0, 0, time.UTC),
-		Note:           "桥接契约与兼容矩阵已核对",
+		// 仓储层**确实**带着 note 回来——下面那条缺席断言要的就是这个前提：
+		// 不是「没有 note 可回显」，是「有也不回显」。
+		Note: ackNoteMarker,
 	}
 }
+
+// ackNoteMarker 是一个只可能来自 note 的标记串：它不出现在本用例任何别的
+// 字段里，所以在响应体里找到它就等于找到了 note。
+const ackNoteMarker = "备注只该出现在审计事件里"
 
 // TestListUpstreamVersionAcksMakesTheSuppressorVisible：抑制器必须看得见。
 //
@@ -87,7 +93,6 @@ func TestListUpstreamVersionAcksMakesTheSuppressorVisible(t *testing.T) {
 			Source         string `json:"source"`
 			AcknowledgedBy string `json:"acknowledged_by"`
 			AcknowledgedAt string `json:"acknowledged_at"`
-			Note           string `json:"note"`
 		} `json:"items"`
 		RevokeAction string `json:"revoke_action"`
 	}
@@ -109,9 +114,6 @@ func TestListUpstreamVersionAcksMakesTheSuppressorVisible(t *testing.T) {
 	if got.AcknowledgedAt != "2026-09-09T03:40:00Z" {
 		t.Fatalf("时刻必须是 UTC RFC3339: %q", got.AcknowledgedAt)
 	}
-	if got.Note != "桥接契约与兼容矩阵已核对" {
-		t.Fatalf("当时那个人说了什么是复核这条抑制是否合理的唯一依据: %q", got.Note)
-	}
 	// 撤销入口写在响应里：读到这份清单的人下一个问题必然是「点错了怎么办」。
 	if body.RevokeAction != alerts.ActionRevokeUpstreamVersion {
 		t.Fatalf("revoke_action = %q, want %q", body.RevokeAction, alerts.ActionRevokeUpstreamVersion)
@@ -119,6 +121,47 @@ func TestListUpstreamVersionAcksMakesTheSuppressorVisible(t *testing.T) {
 	// 环境来自调用者身份，不是参数。
 	if lister.gotEnv != "development" {
 		t.Fatalf("查询环境 = %q, want development", lister.gotEnv)
+	}
+}
+
+// TestListUpstreamVersionAcksDoesNotEchoTheNote：note **不得**出现在这条
+// ops.read 的响应里。
+//
+// 理由是同一份代码里已经写死的一条：note 是 ≤200 字节的自由文本，除长度外
+// 没有形态校验，「形状上装得下凭据」正是
+// alerts.upstream_version.acknowledge 被永久锁在 L1 的第一条理由
+// （alerts/actions.go 的 acknowledgeUpstreamVersionDef）。那条理由禁的是
+// 「给 note 开一条展示给人看的通道」；本端点只要 alerts.ScopeRead，而 staff
+// 这个粗粒度角色就带着它（docs/modules/httpapi/PERMISSIONS.md），
+// 审计事件的读路径却单独要 audit.ScopeRead。回显 note 等于把它从后一档
+// 掉到前一档——两处注释就此互相矛盾，而互相矛盾的两处注释里必有一处会被
+// 拿去做相反的决定。
+//
+// 缺席型断言的两个前提都写在这条用例里，缺一它就会恒真（memory
+// 「缺席型断言要做变异验证」）：(1) 仓储层确实带着 note 回来
+// （sampleAck 填了 ackNoteMarker）；(2) 投影确实渲染了
+// （acknowledged_by 在场）。
+func TestListUpstreamVersionAcksDoesNotEchoTheNote(t *testing.T) {
+	rec := getAcks(t, ackRouter(t, &fakeAckLister{
+		items: []alerts.UpstreamVersionAck{sampleAck()},
+	}), "", "ops.read")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	// 在场断言：投影真的渲染了这一条，否则下面两条缺席断言只是在空响应上恒真。
+	if !strings.Contains(body, `"acknowledged_by":"staff_alice"`) {
+		t.Fatalf("这一条压根没渲染出来，缺席断言会恒真: %s", body)
+	}
+
+	// 缺席断言之一：字段本身不存在。
+	if strings.Contains(body, `"note"`) {
+		t.Fatalf("响应里不得出现 note 字段（它只能走 audit.read）: %s", body)
+	}
+	// 缺席断言之二：内容也没有换个键名溜出去。
+	if strings.Contains(body, ackNoteMarker) {
+		t.Fatalf("note 的内容出现在响应里了（哪怕换了键名也不行）: %s", body)
 	}
 }
 

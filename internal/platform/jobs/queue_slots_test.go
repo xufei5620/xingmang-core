@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -300,4 +301,131 @@ func logStrings(t *testing.T, value any) []string {
 		out = append(out, text)
 	}
 	return out
+}
+
+// TestJobCadenceRejectsSelfOverlappingInterval 钉住「一个任务不可能与自己
+// 重叠」这条不变量在**配置域上**成立，而不是只在默认值上成立。
+//
+// 这是复审那条 major 的直接落点：原先这条不变量只被 slotConfig(t)（也就是
+// DefaultConfig，300s 周期 vs 120s 期限）测过。把 XM_NEWAPI_SYNC_INTERVAL
+// 配成 90s 就能让它不成立，而在这条闸之前没有任何一道门禁会红——唯一的下限
+// 是 River 的 1 秒。所以这里的每一行都用**非默认**配置。
+//
+// 边界取严：期限恰好等于周期也要红。周期唯一性按周期分桶，期限跑满一整个
+// 周期时下一个桶已经开了。
+func TestJobCadenceRejectsSelfOverlappingInterval(t *testing.T) {
+	newapiTimeout := newapiSyncJobTimeout(DefaultNewAPIRequestTimeout)
+	sub2apiTimeout := sub2apiSyncJobTimeout(DefaultSub2APIRequestTimeout)
+
+	for _, tc := range []struct {
+		name    string
+		apply   func(*Config)
+		wantErr bool
+	}{
+		{"复审那条探针：newapi 周期 90s，期限 2m0s", func(c *Config) {
+			c.NewAPISyncInterval = 90 * time.Second
+		}, true},
+		{"newapi 周期恰好等于期限", func(c *Config) {
+			c.NewAPISyncInterval = newapiTimeout
+		}, true},
+		{"newapi 周期比期限多一秒", func(c *Config) {
+			c.NewAPISyncInterval = newapiTimeout + time.Second
+		}, false},
+		{"sub2api 周期恰好等于期限", func(c *Config) {
+			c.Sub2APISyncInterval = sub2apiTimeout
+		}, true},
+		{"sub2api 周期比期限多一秒", func(c *Config) {
+			c.Sub2APISyncInterval = sub2apiTimeout + time.Second
+		}, false},
+		{"finance 周期恰好等于期限", func(c *Config) {
+			c.FinanceCollectInterval = financeCollectJobTimeout
+		}, true},
+		{"finance 周期比期限多一秒", func(c *Config) {
+			c.FinanceCollectInterval = financeCollectJobTimeout + time.Second
+		}, false},
+		{"关掉的任务不参与：周期再短也不该拦启动", func(c *Config) {
+			c.NewAPISyncEnabled = false
+			c.NewAPISyncInterval = 90 * time.Second
+		}, false},
+		{"没覆写 Timeout() 的任务不参与：留存清理配 90s 照样放行", func(c *Config) {
+			c.RetentionInterval = 90 * time.Second
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := slotConfig(t)
+			tc.apply(&cfg)
+			err := cfg.normalized().validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("这份配置让某个任务会与自己重叠，validate 必须拒绝")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("这份配置是合法的，validate 不该拒绝: %v", err)
+			}
+		})
+	}
+}
+
+// TestJobCadenceErrorNamesTheKnob：拒绝启动的那句话必须说清动哪个旋钮。
+//
+// 一条只说「配置非法」的启动错误会让运维去翻代码。这里钉住三样：是哪个任务、
+// 那两个数各是多少、以及该改哪个环境变量。
+func TestJobCadenceErrorNamesTheKnob(t *testing.T) {
+	cfg := slotConfig(t)
+	cfg.NewAPISyncInterval = 90 * time.Second
+	err := cfg.normalized().validate()
+	if err == nil {
+		t.Fatal("期限 2m0s、周期 1m30s 的配置必须被拒绝")
+	}
+	for _, want := range []string{
+		NewAPISyncJobKind,
+		"XM_NEWAPI_SYNC_INTERVAL",
+		newapiSyncJobTimeout(DefaultNewAPIRequestTimeout).String(),
+		(90 * time.Second).String(),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("启动错误里缺 %q，运维只能去翻代码: %v", want, err)
+		}
+	}
+}
+
+// TestConfiguredJobTimeoutCoversEverySlowJob 是这条闸的**范围检查**。
+//
+// validateJobCadence 的任务清单来自注册表（发现），启用与周期来自
+// effectiveJobConfig（发现），只有「期限是多少」这一项在 configuredJobTimeout
+// 里按 kind 分支——那是一份手写名单，而手写名单与被它描述的对象漂开时不会
+// 报错，只会给出旧答案。
+//
+// 所以这里从**真实注册点**反查：跑一次 NewClient（它经 addWorker 收集每个
+// Worker 自己声明的 Timeout()），读它算出来的 slow_job_kinds，逐个要求
+// configuredJobTimeout 认得。加第四个慢任务却忘了在这里登记的人会看到这条红。
+func TestConfiguredJobTimeoutCoversEverySlowJob(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := slotConfig(t)
+	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+
+	// 与 TestNewClientWiresDerivedMaintenanceSlots 同一条路子：不连库。
+	pool, err := pgxpool.New(context.Background(), "postgres://localhost/xingmang")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := NewClient(pool, cfg); err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	kinds := logStrings(t, findLogEvent(t, logs.Bytes(), "queue_slots")["slow_job_kinds"])
+	if len(kinds) == 0 {
+		t.Fatal("一个慢任务都没数出来，下面的循环会空转（恒真）")
+	}
+	for _, kind := range kinds {
+		declared, ok := configuredJobTimeout(cfg.normalized(), kind)
+		if !ok {
+			t.Fatalf("%s 被真实注册点判成慢任务，但 configuredJobTimeout 不认得它："+
+				"validateJobCadence 会静静跳过它，那条不变量对它不成立", kind)
+		}
+		if declared <= riverDefaultJobTimeout {
+			t.Fatalf("%s 登记的期限 %s 不超过 River 默认值，与它被判成慢任务矛盾",
+				kind, declared)
+		}
+	}
 }

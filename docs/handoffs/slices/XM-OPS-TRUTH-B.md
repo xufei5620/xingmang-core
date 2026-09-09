@@ -4,15 +4,21 @@
   **含两处需要负责人裁定的越界**，见 risks 第 1 条与「审稿处置轮」§0
 - **branch**: `ai/claude/XM-OPS-TRUTH`（接在子片 A 的 `ddf4b36` 之上）
 - **commit**: `c9d4d9a`（41 files changed, +4050 / -282）→ `fb00f18`（回填 SHA）
-  → `4763ac5`（审稿处置轮，29 files changed, +2235 / -153）
+  → `4763ac5`（审稿处置轮，29 files changed, +2235 / -153）→ `30f8c7e`（回填 SHA）
+  → `PENDING`（复审处置轮，见文末最后一节）
 - **时间**: 2026-09-09T03:05:47Z – 2026-09-09T04:02Z（实现，约 56 分钟）；
-  2026-09-09T04:27Z – 2026-09-09T05:22Z（审稿处置轮，约 55 分钟，见文末「门禁」）
+  2026-09-09T04:27Z – 2026-09-09T05:22Z（审稿处置轮，约 55 分钟）；
+  2026-09-09T05:31Z – 2026-09-09T05:42Z（复审处置轮，约 11 分钟，见文末「门禁」）
 
 - **需求来源**: `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md`
   §二第一行（NewAPI 三条翻面 + 「已持续」归零 + 连续失败计数被成功清零）、
   §二第二行（版本告警 669 次、没有「我核对过了」这个动作）、
   §二第四行（288 条 card_sync 把「我的待处理」占满）、§四第二组
 
+> **文末最后一节「复审处置轮」是最新的一轮**，处置复审判定仍未解决的 3 条
+> major：新增一条作业周期启动闸、堵住「估计值被洗成确定值」、把 `note` 从
+> 已核对清单端点上去掉。它又改了一处契约（该端点**不再返回** `note`）。
+>
 > **先读文末的「审稿处置轮」一节。** 那一轮改掉了两条 fatal 与十条 major，
 > 其中三处**改了本文档前面几节写下的契约**：`failed_jobs_by_kind` 的空值口径
 > 变成三态、webhook 投递体补了三个字段、新增了一个只读端点与一个撤销 Action。
@@ -631,8 +637,11 @@ Action 用 `ops.KnownMetricKey` 那份**手列**白名单做准入闸；落库�
 **处置**：`InsertAlert` 的 `trigger_count` 从硬编码 1 改成入参（`sqlc.narg`，
 可空）；`Store.insert` 在复发分支里与 `first_opened_at` **一起**继承：
 `trigger_count = 上一条 + 1`。**例外**：上一条自己是 000054 之前的旧行
-（`TriggerCount IS NULL`）时留 `NULL`——「不知道」是诚实的，从 1 重新起算不是；
-时刻仍然继承（上一行的 `opened_at` 是真实发生过的）。
+（两列皆 `NULL`）时两列都留 `NULL`——「不知道」是诚实的，从 1 重新起算不是。
+
+> ⚠️ 这一段的初版写的是「时刻仍然继承（上一行的 `opened_at` 是真实发生过的）」，
+> 复审证伪：那个时刻是 `EffectiveFirstOpenedAt` 兜出来的**估计值**，写进新行
+> 就把它洗成了确定值。已在复审处置轮改正，见本文档末尾第 2 条。
 
 **测试**：`TestFirstOpenedAtSurvivesRecurrence` 就地改写（三次复发后
 `trigger_count == 3`、窗口外重新起算为 1）；新增
@@ -699,15 +708,20 @@ K=6 / W=8（30 分钟）。`CATALOG.md` 那一行也补了「那条 15 分钟、
       "version": "0.2.3",
       "source": "sub2api-prod",
       "acknowledged_by": "staff_alice",
-      "acknowledged_at": "2026-09-09T03:40:00Z",
-      "note": "桥接契约与兼容矩阵已核对"
+      "acknowledged_at": "2026-09-09T03:40:00Z"
     }
   ],
   "revoke_action": "alerts.upstream_version.revoke"
 }
 ```
 
-- `source` 是服务端从观测里读出来的，不是参数；`note` 是执行者写的自由文本，可为空串。
+- `source` 是服务端从观测里读出来的，不是参数。
+- **没有 `note`，前端不要给它留位置。** 执行时写的那段自由文本除 ≤200 字节外
+  没有形态校验，「形状上装得下凭据」正是这个 Action 被永久锁在 L1 的第一条
+  理由；本端点只要 `ops.read`（staff 就有），而审计事件的读路径单独要
+  `audit.read`。回显它等于把它降一档。要看「当时那个人说了什么」，
+  走 `GET /api/v1/audit/events`。**这一条覆盖本文档前面出现过的
+  带 `note` 的响应样例**（复审处置轮第 3 条）。
 - 环境来自调用者身份，不是查询参数；跨环境读取一律拒绝。
 - **界面上建议放在「运行保障 → 告警」里**，或做成版本告警旁边的一个「已核对
   记录」抽屉：读到这份清单的人下一个问题必然是「点错了怎么办」，
@@ -837,3 +851,213 @@ POST /api/v1/actions/alerts.upstream_version.revoke/versions/1/execute
    但撤不掉，只是把闩挪了个位置。
 5. **`note` / `reason` 仍是无形态校验的自由文本。** 两个 Action 因此永久锁 L1。
    若将来 `action.Schema` 支持 Pattern / Redacted 标记，可重新评估。
+
+---
+
+# 复审处置轮（2026-09-09T05:31Z – 05:42Z）
+
+复审对上一轮的 7 + 10 条 finding 逐条重跑变异，判定 3 条仍未解决（全部 major）。
+本节处置这 3 条。**没有新增功能，全部是补闸、改正与去掉一条泄漏通道。**
+
+## 1. 【major】「慢任务不可能与自己重叠」只在默认配置下成立
+
+**问题**：这条不变量是把 maintenance 从 1 槽抬到 4 槽的前提，但
+`TestSlowMaintenanceJobsCannotOverlapThemselves` 用的是 `slotConfig(t)`
+（= `DefaultConfig()`），只比过默认的 300s。复审用探针把
+`cfg.NewAPISyncInterval` 配成 90s：`validate()` 放行（唯一下限是 River 的
+1 秒），`maintenanceQueueSlots` 照给 4 槽，而 `newapi_sync` 的作业期限是
+2m0s —— 期限 ≥ 周期，自重叠窗口成立，全套门禁一条不红。周期性插入用的
+`UniqueOpts.ByPeriod` 是**本次配置的周期**（`newManifestPeriodicJob`），
+所以 90 秒后那次插入落在**另一个** period 桶里，River 的唯一性拦不住它。
+
+**处置**（复审修法 a）：新增启动闸 `validateJobCadence`
+（`internal/platform/jobs/queue_slots.go`），由 `Config.validate()` 在最后一条
+调用——上面每条「River 一秒下限」的错误更具体，同一份坏配置该先听到那句话。
+判据：**启用**的、**覆写过 `Timeout()`** 的 maintenance 任务，其作业期限必须
+**严格小于**它的周期，否则进程拒绝启动。
+
+闸的范围是**发现**出来的，不是手列的（memory「闸的范围要发现不要手列」）：
+
+- 任务清单 ← `RegisteredPeriodicJobSpecs()`；
+- 启用状态与周期 ← `effectiveJobConfig`（与 `/ops` 那张部署态时刻表、与
+  `maintenanceQueueSlots` 同一段代码）；
+- 作业期限 ← 新增的 `configuredJobTimeout`。只有这一项是按 kind 分支的手写
+  名单，所以给它配了一条**反查**测试 `TestConfiguredJobTimeoutCoversEverySlowJob`：
+  跑一次真实 `NewClient`（它经 `addWorker` 收集每个 Worker 自己声明的
+  `Timeout()`），读它算出来的 `slow_job_kinds`，逐个要求
+  `configuredJobTimeout` 认得。加第四个慢任务却忘了登记的人会看到这条红。
+
+**范围比派工多一个 `finance_collect`**：派工只点名 newapi / sub2api，但
+finance 是同一个队列上的第三个慢任务（`queue_slots.go` 自己数出来的三个之一），
+期限同样 120s。只挡两条等于留一个已知的洞。
+
+**真实下限**（派工说的「README:81 的下限 1 秒」在仓库里不存在，见 deviations
+第 2 条）改写在运维真正会读的地方 `deploy/compose/.env.example`：
+`XM_NEWAPI_SYNC_INTERVAL` 最小 121s、`XM_FINANCE_COLLECT_INTERVAL` 最小 121s、
+`XM_SUB2API_SYNC_INTERVAL` 最小 101s；`XM_ALERT_EVALUATE_INTERVAL` 的下限
+**确实**还是 1 秒（评估任务没覆写期限），这一点也写明了，免得读者以为所有
+周期都被抬了。
+
+**测试**：`TestJobCadenceRejectsSelfOverlappingInterval`（表驱动，9 行，
+全部用非默认配置，含复审那条 90s 探针与三个「恰好等于期限」的边界）、
+`TestJobCadenceErrorNamesTheKnob`（启动错误必须点名任务、两个数、环境变量）、
+`TestConfiguredJobTimeoutCoversEverySlowJob`（范围反查）。
+
+## 2. 【major】估计值被洗成确定值（含随之而来的三处相反陈述）
+
+**问题**：`store.go` 的复发分支写的是
+`if inherited, _ := previous.EffectiveFirstOpenedAt(); ...`——第二个返回值
+（「这是不是兜出来的估计值」）被丢掉了。上一环是 000054 之前的旧行时，
+兜底值被原样写进新行的 `first_opened_at`，库里从此分不出「记下来过」与
+「兜的底」，读取侧的 `first_opened_at_estimated` 恒为 `false`，界面上那个
+「（估计值）」后缀永远不再出现。
+
+**处置**：接住那个 bool，为真时**不写** `first_opened_at`（保持 NULL），
+读取侧继续按 `EffectiveFirstOpenedAt` 兜底并如实标 `estimated`。
+`insert` 里 `firstOpenedAt time.Time` 改成 `firstOpenedAtArg pgtype.Timestamptz`
+——与 `triggerCountArg` 同一条口径：**NULL 表示不知道**。
+
+**取舍写在了三处（代码注释 / README / 这里），不留一句好听的**：留 NULL 之后
+「已持续」从**本行**的 `opened_at` 起算，比真实时长短掉中间那一段复发间隔。
+库里只有「确定值」与「不知道」两档，没有第三档能存住「这是估计值但它更早」。
+少报一段并明说是估计，好过报一个更准的数却谎称它确定（宪法 12 条）。
+要两全得给这一列配一个 `estimated` 标记列，见 follow_ups。
+
+**同步改正三处相反陈述**：`store_integration_test.go` 那条「时刻仍然继承
+（上一行的 opened_at 是真实发生过的）」的注释与断言、
+`docs/modules/alerts/README.md` 的同一句、本文档「7 / 13」那一节
+（原地加了一条 ⚠️ 更正，没有把旧话悄悄抹掉）。
+
+## 3. 【major】新端点把 note 从 audit.read 降到了 ops.read
+
+**问题**（上一轮修正引入的新问题）：`alerts_upstream_versions.go` 在
+`ops.read` 这一档把 `note` 原样回显，注释写「它已经进了审计链，在这里回显
+不新增泄漏面」。这句不成立：审计链的读路径是 `router.go` 的
+`RequireScope(audit.ScopeRead)`，那一行自己写着「审计事件带前后摘要，敏感度
+高于 ops.read」；而 `staff` 这个粗粒度角色拿的是
+`registry.read + ops.read + ui.saved_view.manage`，**不含 `audit.read`**。
+于是同一份代码在两个地方给出互相矛盾的判断——`actions.go` 说 note
+「形状上装得下凭据、所以永远不能进展示通道」，这里却开了一条。
+
+**处置**（复审修法的第一支）：去掉 `upstreamVersionAckItem.Note`（字段 + 赋值
++ 测试里那条在场断言）。响应只回 `metric_key` / `version` / `source` /
+`acknowledged_by` / `acknowledged_at` —— 五个全部是平台自己写下的事实，
+足够回答「这条抑制是谁按的、按的是哪个版本」。要看「当时那个人说了什么」，
+走既有的 `GET /api/v1/audit/events`（`audit.read`），那是它本来就该在的一档。
+
+顺带在 `actions.go` 的 L1 声明里把「note 今天有哪些读路径、各要什么 scope」
+写全，并写明这个端点**有意**不回显它——否则下一个人还会照着「已经进审计链了」
+那句话再开一次。
+
+**测试**：新增 `TestListUpstreamVersionAcksDoesNotEchoTheNote`（缺席型断言，
+两条：响应里既不许有 `"note"` 这个键，也不许有 note 的内容换个键名溜出去）。
+两个防恒真前提都写在同一条用例里：仓储桩**确实**带着 note 回来
+（`sampleAck()` 填了 `ackNoteMarker`），且投影**确实**渲染了
+（`acknowledged_by` 在场）。
+
+---
+
+## 复审处置轮的变异验证表（5 条，全部实测）
+
+| # | 变异 | 被打中的断言 | 结果 |
+|---|---|---|---|
+| M1 | `alerts_upstream_versions.go` 把 `Note` 字段与赋值加回去 | `TestListUpstreamVersionAcksDoesNotEchoTheNote` | **红**（响应体里出现 `"note"` 及其内容）→ 还原后绿 |
+| M2 | `store.go` 把 `wasEstimated` 改回丢弃（`inherited, _ :=`） | `TestRecurrenceOfALegacyRowKeepsTheCountUnknown` | **红**（新行 `first_opened_at` 非 NULL）→ 还原后绿 |
+| M3 | `client.go` 去掉 `validate()` 里的 `validateJobCadence(c)` 调用 | `TestJobCadenceRejectsSelfOverlappingInterval` 的 4 个子用例 + `TestJobCadenceErrorNamesTheKnob` | **红** → 还原后绿 |
+| M4 | `queue_slots.go` 把判据从 `timeout < interval` 放宽成 `<=` | 三个「周期恰好等于期限」子用例 | **红** → 还原后绿 |
+| M5 | `queue_slots.go` 的 `configuredJobTimeout` 删掉 `NewAPISyncJobKind` 分支 | `TestConfiguredJobTimeoutCoversEverySlowJob` | **红**（真实注册点把它判成慢任务，闸却不认得它）→ 还原后绿 |
+
+**M5 是这一轮最有价值的一条**：它证明这条闸的手写部分（期限名单）与被它描述
+的对象（真实 Worker 声明的 `Timeout()`）之间有对账，而不是又一份会静静漂开的
+副本（memory「被信任的过期闸最危险」）。
+
+---
+
+## 复审处置轮的门禁（实测时刻，非估计；UTC）
+
+下表是**提交前那一遍**的实测时刻（此前另有一遍中途门禁，05:40:38–05:41:33，
+结果相同）。
+
+| 门禁 | 开始 | 结束 | 耗时 | 结果 |
+|---|---|---|---|---|
+| `scripts/dev/worktree-testdb.sh --print-url` | 05:31:16 | 05:31:18 | 2 秒 | 库已存在，无待应用迁移 |
+| `go build ./...` | 05:45:40 | 05:45:41 | 1 秒 | 无输出 |
+| `go vet ./...` | 05:45:41 | 05:45:42 | 1 秒 | 无输出 |
+| `go test -p 1 -count=1 ./internal/platform/jobs/ ./internal/platform/alerts/... ./internal/platform/httpapi/ ./cmd/...` | 05:45:42 | 05:46:03 | 21 秒 | 14 个包全部 ok（集成用例真跑，`XM_TEST_DATABASE_URL` 指向 `xm_test_wt_xm_ops_truth`） |
+| `bash scripts/check-governance.sh` | 05:46:03 | 05:46:06 | 3 秒 | exit 0 |
+| `gofmt -l internal cmd` | 05:46:06 | 05:46:07 | 1 秒 | 只剩 `internal/platform/integration/types_test.go`——**本轮没碰过它**，是仓库既有漂移，不在本片修 |
+
+中途我把两个集成测试文件的字段对齐改乱过一次，`gofmt -w` 已修（05:40:44）。
+
+**未跑**：全量 `go test ./...`（派工明确由主控者跑）、前端 `pnpm`（本轮不改
+`web/`）、`sqlc generate`（本轮不改 SQL）。
+
+---
+
+## 复审处置轮改动的文件
+
+- `internal/platform/jobs/queue_slots.go`（新增 `configuredJobTimeout`、
+  `validateJobCadence`）
+- `internal/platform/jobs/client.go`（`validate()` 末尾调用新闸）
+- `internal/platform/jobs/queue_slots_test.go`（三条新测试 + `strings` 导入）
+- `internal/platform/jobs/newapi_sync_integration_test.go`、
+  `internal/platform/jobs/sub2api_sync_integration_test.go`
+  （1 秒周期改 10 分钟，见 deviations 第 5 条）
+- `internal/platform/alerts/store.go`（接住 `wasEstimated`、`firstOpenedAtArg`、
+  `insert` 文档注释）
+- `internal/platform/alerts/store_integration_test.go`（那条注释与断言）
+- `internal/platform/alerts/actions.go`（L1 声明里补「note 的读路径」）
+- `internal/platform/httpapi/alerts_upstream_versions.go`（去掉 `Note`）
+- `internal/platform/httpapi/alerts_upstream_versions_test.go`（缺席断言）
+- `docs/modules/alerts/README.md`（继承例外、端点字段说明）
+- `deploy/compose/.env.example`（三处真实下限）
+- 本文档（「7 / 13」的更正、契约节的 `note` 移除、本节）
+
+---
+
+## 复审处置轮的 deviations（与派工不一致处，全部有意，全部当下记下）
+
+1. **handoff 文件名**：派工写的是 `docs/handoffs/slices/XM-OPS-TRUTH.md`，
+   仓库里没有这个文件——本切片拆成 A / B 两个子片，本轮的改动全部落在 B，
+   所以写进 `XM-OPS-TRUTH-B.md`。
+2. **「README:81 的下限 1 秒」在仓库里不存在**：全仓没有 jobs 模块的 README，
+   `grep` 也找不到任何 `.md` 写过这句话（复审给的位置是错的）。真实下限改写在
+   运维真正会读的地方：`deploy/compose/.env.example` 三处。
+3. **复审给的断言原文自相矛盾，取了它的前两句**：原文要求「新行
+   `first_opened_at` 仍为 NULL **且** `EffectiveFirstOpenedAt` 的 estimated
+   为 true、**时刻等于上一行 opened_at**」。第三句与前两句不可能同时成立——
+   `first_opened_at` 为 NULL 时兜底取的是**本行**的 `opened_at`，读取侧拿不到
+   上一行。落地取前两句，第三句改成「等于本行 `opened_at`」，并**额外**钉住
+   「不等于上一行 `opened_at`」（否则估计值换条路又被继承进来）。代价见第 2 节。
+4. **闸的范围比派工多一个 `finance_collect`**，理由见第 1 节。
+5. **改了两个既有集成用例的周期（1 秒 → 10 分钟）**。这不是为了让门禁变绿而
+   改测试：那两份配置正是这条不变量禁止的形状（期限 100s / 120s 的任务每秒被
+   排一次）。两个用例要的都只是 `RunOnStart` 触发的那**一次**执行，周期只需大到
+   用例结束前不会再来第二次。
+
+---
+
+## 复审处置轮的 risks
+
+1. **新闸是启动闸，不是降级**。生产若有人把三条采集周期配到期限以下，
+   worker 会**拒绝启动**。当前生产是 300s 默认值
+   （`deploy/compose/server-prod.yaml`、`launch.yaml`），不受影响；
+   但下次调这几个值的人必须先读 `.env.example` 里新加的那三段。
+2. **两条同步的作业期限今天实际是常量**：`Sub2APIRequestTimeout` /
+   `NewAPIRequestTimeout` 没有 env 入口（`cmd/platform-worker/config.go` 只读
+   `XM_FINANCE_COLLECT_REQUEST_TIMEOUT`），所以期限恒为 100s / 120s，
+   `.env.example` 里写的「最小 101s / 121s」是真值。将来给这两个超时开 env
+   入口时，那三段文案会跟着变——它们是**算**出来的，不是常量。
+3. **`first_opened_at` 的「已持续」在旧行复发链上会少报一段**（第 2 节的取舍）。
+   影响面限于 000054 迁移之前就存在的行，且界面上带「（估计值）」标注。
+
+## 复审处置轮的 follow_ups
+
+1. **给 `first_opened_at` 配一个 `estimated` 标记列**，就能同时保住「继承更早
+   的时刻」与「如实说它是估计值」。今天只有两档口径，必须二选一。
+2. **`XM_SUB2API_SYNC_INTERVAL` 在 `.env.example` 里没有独立条目**（只在
+   `XM_ALERT_EVALUATE_INTERVAL` 的注释里被引用），所以它的下限说明只能挂在
+   别人旁边。建议补一个正式条目，与 newapi / finance 对齐。
+3. **`validateJobCadence` 只管 maintenance 队列**。`assurance.QueueProbe` 上的
+   探测任务今天是按需触发、没有周期，将来给它加周期任务时要把这条闸的队列
+   范围一起想清楚。

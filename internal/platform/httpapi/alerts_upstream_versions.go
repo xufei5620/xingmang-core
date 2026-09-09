@@ -22,17 +22,27 @@ type UpstreamVersionAckLister interface {
 
 // upstreamVersionAckItem 是一条已核对记录的对外投影。
 //
-// 全部字段都是平台自己写下的事实：version 与 source 来自观测，
-// acknowledged_by 来自 Principal。note 是执行者写的自由文本——它已经进了
-// 审计链，在这里回显不新增泄漏面，而「当时那个人说了什么」正是别人复核这条
-// 抑制是否合理时唯一有用的东西。
+// 五个字段全部是**平台自己写下的事实**：metric_key 与 version 在执行时被逐字
+// 校验过（version 必须与平台观测到的 value_json.version 相同），source 来自
+// 观测，acknowledged_by 来自 Principal，acknowledged_at 来自内核。
+//
+// **note 有意不在这里。** 它是执行者写的自由文本，除 ≤200 字节外没有任何形态
+// 校验——它在形状上装得下凭据，这正是 alerts.upstream_version.acknowledge
+// 被永久锁在 L1 的第一条理由（见 alerts/actions.go 的
+// acknowledgeUpstreamVersionDef）。那条理由说的是「不能给 note 开一条展示给
+// 人看的通道」，而本端点的权限是 alerts.ScopeRead（staff 这个粗粒度角色就有，
+// 见 docs/modules/httpapi/PERMISSIONS.md）。把 note 放进来等于把它从
+// audit.read 那一档掉到 ops.read 这一档——审计事件的读路径单独要
+// audit.ScopeRead，router.go 那一行自己写着「敏感度高于 ops.read」。
+//
+// 所以「当时那个人说了什么」走 GET /audit/events（audit.read），那是它本来
+// 就该在的那一档；这份清单只回答「这条抑制是谁按的、按的是哪个版本」。
 type upstreamVersionAckItem struct {
 	MetricKey      string `json:"metric_key"`
 	Version        string `json:"version"`
 	Source         string `json:"source"`
 	AcknowledgedBy string `json:"acknowledged_by"`
 	AcknowledgedAt string `json:"acknowledged_at"`
-	Note           string `json:"note"`
 }
 
 // ListUpstreamVersionAcksHandler 列出某环境下全部「已核对的上游版本」。
@@ -70,7 +80,6 @@ func ListUpstreamVersionAcksHandler(store UpstreamVersionAckLister) http.Handler
 				Source:         a.Source,
 				AcknowledgedBy: a.AcknowledgedBy,
 				AcknowledgedAt: a.AcknowledgedAt.UTC().Format(time.RFC3339),
-				Note:           a.Note,
 			})
 		}
 		WriteJSON(w, http.StatusOK, map[string]any{

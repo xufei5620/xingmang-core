@@ -793,10 +793,16 @@ func TestFirstOpenedAtSurvivesRecurrence(t *testing.T) {
 // TestRecurrenceOfALegacyRowKeepsTheCountUnknown：继承链的上一环是本列上线前
 // 的旧行时，触发次数必须留成「不知道」。
 //
-// 这是「两个字段同进同退」的边界：first_opened_at 仍然能继承（上一行的
-// opened_at 是一个真实发生过的时刻），但触发次数没有任何可继承的东西——
-// 从 1 重新起算会造出一个看起来像真答案的假答案（宪法 12 条）。
+// 这是「两个字段同进同退」的边界，而它们是**一起**退的：上一环的
+// first_opened_at 是 NULL，它的「有效首开时刻」是用 opened_at 兜出来的
+// **估计值**；触发次数同样没有任何可继承的东西。两个都从一个编出来的值
+// 重新起算，就都会造出看起来像真答案的假答案（宪法 12 条）。
 // 界面上那一行会是「已持续 X（估计值），触发 —」，两个空值口径一致。
+//
+// 代价明说：留 NULL 之后「已持续」从**本行**的 opened_at 起算，比真实时长
+// 短掉中间那一段复发间隔。库里只有「确定值」与「不知道」两档，没有第三档
+// 能存住「这是估计值但它更早」——少报一段并明说是估计，好过报一个更准的
+// 数却谎称它确定。
 func TestRecurrenceOfALegacyRowKeepsTheCountUnknown(t *testing.T) {
 	pool := testPool(t)
 	s := alerts.NewStore(pool)
@@ -826,10 +832,30 @@ func TestRecurrenceOfALegacyRowKeepsTheCountUnknown(t *testing.T) {
 	if again.TriggerCount != nil {
 		t.Fatalf("上一环不知道触发过几次，这一行也不该编一个数: %v", *again.TriggerCount)
 	}
-	// 时刻仍然继承：上一行的 opened_at 是真实发生过的。
-	if again.FirstOpenedAt == nil || !again.FirstOpenedAt.Equal(first.OpenedAt) {
-		t.Fatalf("首开时刻应继承上一行的 opened_at: got %v want %v",
-			again.FirstOpenedAt, first.OpenedAt)
+	// 时刻也留 NULL。上一环的「有效首开时刻」是 EffectiveFirstOpenedAt 用
+	// opened_at 兜出来的估计值——把它写进这一行的 first_opened_at，库里就
+	// 再也分不出「记下来过」与「兜的底」，读取侧的 estimated 从此恒为 false，
+	// 界面上那个「（估计值）」后缀永远不再出现。丢掉那个 bool 正是估计值被
+	// 洗成确定值的那一步。
+	if again.FirstOpenedAt != nil {
+		t.Fatalf("上一环的首开时刻是兜底估计值，这一行不该把它洗成确定值: %v",
+			*again.FirstOpenedAt)
+	}
+	// 这一条不是缺席断言的重复，而是它的**正面**形式：读取侧必须如实说出
+	// 「这是估计值」。它为真就蕴含 first_opened_at 是 NULL，所以两条不会
+	// 一起恒真。
+	effective, estimated := again.EffectiveFirstOpenedAt()
+	if !estimated {
+		t.Fatal("读取侧必须如实标 estimated：这一行的首开时刻确实没有人记下来过")
+	}
+	// 兜的是**本行**的 opened_at（代价见上面的注释），不是上一行的。
+	if !effective.Equal(again.OpenedAt) {
+		t.Fatalf("兜底值应是本行的 opened_at: got %v want %v", effective, again.OpenedAt)
+	}
+	// 反过来也钉住：兜底值**不该**等于上一行的 opened_at——等于就说明估计值
+	// 又被继承进来了，只是换了条路。
+	if effective.Equal(first.OpenedAt) {
+		t.Fatalf("兜底值等于上一行的 opened_at，估计值又被继承了: %v", effective)
 	}
 }
 
