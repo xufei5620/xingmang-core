@@ -1,10 +1,57 @@
 # XM-INV-UNIT-DISPLAY —— 用户端不再显示后台记账刻度，改显示上游的真实余额
 
-- status: ready-for-review（第二至四轮复审意见已处理；未推送，未合入发布线）
+- status: ready-for-review（第二至五轮复审意见已处理；未推送，未合入发布线）
 - branch: `ai/claude/XM-INV-UNIT-DISPLAY`
 - base: `faadf87`（RC106 上线后的发布线）
 - commit: 见分支末条
 - worktree: `K:/发票/wt-XM-INV-UNIT-DISPLAY`
+
+## 第五轮：发现范围锚在本仓库的 Go 模块上（RC107 容器门禁红）
+
+第二、四轮把两道闸的范围从「手列」改成「从仓库根走整棵树」。**在容器里，仓库根
+不是仓库。** RC107 的隔离容器门禁（`verify-postgres.ps1`）把 `backend/` 挂在
+`/src`，而 `repoRoot()` 是从本文件自身路径往上数三级算出来的，于是解析成容器的
+`/`——发现函数照着走，把 Go 自己的测试用例也解析了：
+
+```
+eligibilitywire: parse usr/local/go/test/bombad.go: illegal byte order mark (and 4 more errors)
+```
+
+红在 application 包的 `TestUserEligibilitySummaryReasonSetIsExhaustive` 上，
+因为那条测试会触发状态扫描。
+
+**这是第二、四轮那个改动的代价，我当时没想到**：把范围从「三个写死的目录」换成
+「从根走」，解决了「新目录进不了闸」，同时引入了「根是什么由环境决定」。
+两个都是范围问题，方向相反。
+
+改法：范围锚在**本仓库自己的 Go 模块**上。新增 `DiscoverGoModuleRoots()`——只看
+`<root>/go.mod` 与 `<root>/*/go.mod`（深度 0 和 1），把有 `go.mod` 的目录当模块根；
+`DiscoverGoPackageDirs()` 只在这些模块树内发现包目录，跳过规则不变。
+
+- 本地检出：找到 `backend`、`agents` 两个模块，与第四轮扫到的集合一致。
+- 容器：`/src`、`/backend`、`/agents` 都有 `go.mod`，都会找到；`/usr` 没有，
+  于是 `/usr/local/go` 根本不会被走到。
+- `deploy/postgres/gosu-build/go.mod` 在深度 3，按这条规则不算本仓库的模块。
+  它一个 `.go` 都没有——那是钉构建用的，不承载词汇——所以这次没有损失。
+  深度限制本身是必要的：从 `/` 做深层搜索会找到 `/usr/local/go/go.mod`，
+  等于绕回原地。
+
+**重复目录只影响计数、不影响集合，这一点核对过了**：容器里同一个包会以
+`src/internal/...` 与 `backend/internal/...` 两条路径各出现一次。全仓库搜过
+`len(...)` 的用法，只有两处「集合是否为空」的判断和两处错误文案里的计数，
+**没有任何按目录计数的断言**；契约闸、覆盖探针、范围断言全部按集合判断
+（`Set(...)` / `visited[dir]`）。覆盖探针额外按文件路径去重，免得同一个文件在
+失败信息里出现两遍。
+
+**两条覆盖探针原来也从 `root` 起走**——同一个毛病的测试侧版本，在容器里会扫整个
+文件系统（还会在 `/proc`、权限不足的目录上直接报错）。两条合并成一个
+`sweepForCoverage` 辅助函数，同样锚在模块根上。它与扫描**共用的只有锚**
+（go.mod 在哪，这是关于树的事实），**判据仍然独立**：自己走一遍、按文本匹配、
+自己决定哪些文件算数。
+
+一处依赖写在这里：范围断言要求 `backend/internal/postgresstore`、`agents/sourceagent`
+等路径存在。按主控者描述，容器里 `/backend`、`/agents` 都只读挂着，所以成立。
+若将来容器只挂 `/src`，这两条断言会是最先红的地方——那时该补挂载，不是放宽断言。
 
 ## 第四轮：状态闸的扫描范围也改成发现式
 
@@ -204,9 +251,10 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 新增：
 
 - `backend/internal/eligibilitywire/unitcodes.go` —— 单位码发现闸：范围发现
-  （`DiscoverGoPackageDirs`）、两张识别网、拒绝路径、委托校验。
+  （`DiscoverGoModuleRoots` + `DiscoverGoPackageDirs`，第五轮锚到模块根）、
+  两张识别网、拒绝路径、委托校验。
 - `backend/internal/eligibilitywire/unitcodes_test.go` —— 识别规则测试、范围覆盖
-  探针、契约闸。
+  探针、契约闸；第五轮加模块锚定测试与两条探针共用的 `sweepForCoverage`。
 - `backend/internal/eligibilitywire/passthrough.go`（第三轮）—— 两道闸共用的
   「这是不是一次可读的复制」判据 `isCopyOfAReadableValue` 与 `leftmostIdent`。
 - `web/src/lib/service-units.ts` —— BigInt 换算与展示视图。
@@ -280,14 +328,19 @@ stub importer 让所有跨包类型都是 invalid，按类型判会把 `item.Uni
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 06:41:49 | 06:41:52 | 3s | exit 0 |
-| `cd web && npm test -- --run` | 06:41:52 | 06:41:53 | 1s（vitest 自报 673ms） | exit 0，22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 06:41:38 | 06:41:39 | 1s | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:41:39 | 06:41:43 | 4s | exit 0，两个包 ok |
+| `cd web && npm run typecheck` | 07:34:50 | 07:34:53 | 3s | exit 0 |
+| `cd web && npm test -- --run` | 07:34:53 | 07:34:54 | 1s（vitest 自报 632ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 07:34:28 | 07:34:29 | 1s | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 07:34:29 | 07:34:33 | 4s | exit 0，两个包 ok |
+| 加跑：`go test -run TestUserEligibilitySummaryReasonSetIsExhaustive ./internal/application/...` | 07:34:39 | 07:34:40 | 1s | exit 0（容器里红的就是这条；本机不复现容器路径，只能确认没被改坏） |
 
-上表是第四轮改动之后那一次。此前跑过：第一轮 05:40、除数定稿后 05:48、第二轮代码后
-06:11、`USDExchangeRate` 措辞后 06:17、第三轮后 06:25，每次四条全绿。
-第三、四轮只动 Go 侧，前端两条属于回归确认。
+上表是第五轮改动之后那一次。此前跑过：第一轮 05:40、除数定稿后 05:48、第二轮代码后
+06:11、`USDExchangeRate` 措辞后 06:17、第三轮后 06:25、第四轮后 06:41，每次四条全绿。
+第三到五轮只动 Go 侧，前端两条属于回归确认。
+
+**本机跑不出容器那条红**：`repoRoot()` 在这里解析到真正的仓库根，`/usr` 那种情况
+不存在。所以第五轮的证据是 `t.TempDir()` 里造的假仓库根（见 R5-M30/M31/M32），
+真正的确认要等主控者在 RC107 上重跑容器门禁。
 
 `eligibilitywire` 这个包的用时随轮次在涨（0.8s → 2.0s）：范围从 3 个目录变成 23 个，
 每个都要 parse + 类型检查，而且状态闸与单位码闸各走一遍。仍是秒级，但如果以后再加
@@ -302,7 +355,18 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 ## 变异验证（逐条 red → 还原 → green）
 
 每条都是先改坏实现、跑到红、再还原；还原后用 `diff` 与备份逐字节核对过。
-R2-* / R3-* / R4-* 是第二、三、四轮新加的。
+R2-* / R3-* / R4-* / R5-* 是第二到五轮新加的。
+
+### 第五轮
+
+| # | 变异 | 变红的断言 | 结果 |
+| --- | --- | --- | --- |
+| R5-M30 | 退回「从仓库根走整棵树」 | `TestGoPackageDiscoveryStaysInsideTheModules`，报出 `outside`、`outside/deeper`、`vendorish/nested` 都被扫进来了。**这就是 RC107 容器里发生的事**，只是那里的 `outside` 叫 `/usr` | red → green |
+| R5-M31 | 模块根改成深层搜索（不限深度 0/1） | 同一条断言，报 `got [mod mod vendorish/nested]`——深层搜索会把嵌套模块也当成本仓库的模块，从 `/` 出发就等于找到 `/usr/local/go/go.mod` | red → green |
+| R5-M32 | 找不到模块时安静返回空而不是报错 | `TestGoPackageDiscoveryRefusesARootWithNoModules`。空集合会让下游每道闸都拿空集合去比，是「绿得没有意义」的典型形状 | red → green |
+
+三条都跑在 `t.TempDir()` 造的假仓库根上，因为「不在任何 go.mod 之下的 Go 源码」
+这种情况在真实检出里造不出来——真实树里哪儿都在某个模块底下。
 
 ### 第四轮
 

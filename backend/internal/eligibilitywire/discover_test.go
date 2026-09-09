@@ -1,7 +1,6 @@
 package eligibilitywire
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -124,53 +123,9 @@ func TestStatusScanCoversEveryGoFileThatMentionsAStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := repoRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
 	visited := Set(scan.ScannedDirs)
 	mentions := regexp.MustCompile(`EligibilityStatus|eligibility_status`)
-	uncovered := []string{}
-	excluded := []string{}
-	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if path != root && (entry.Name() == ".git" || entry.Name() == "node_modules") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		if !mentions.Match(body) {
-			return nil
-		}
-		rel, err := filepath.Rel(root, filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		dir := filepath.ToSlash(rel)
-		fileRel := dir + "/" + name
-		if strings.Contains("/"+dir+"/", "/testdata/") || strings.Contains("/"+dir+"/", "/vendor/") {
-			excluded = append(excluded, fileRel)
-			return nil
-		}
-		if !visited[dir] {
-			uncovered = append(uncovered, fileRel)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		t.Fatal(walkErr)
-	}
+	uncovered, excluded := sweepForCoverage(t, mentions, visited)
 	if len(uncovered) > 0 {
 		t.Fatalf("these non-test Go files mention an eligibility_status but live in directories the scan never "+
 			"visited:\n  %s\nthe scan visited %d directories; DiscoverGoPackageDirs is missing them",

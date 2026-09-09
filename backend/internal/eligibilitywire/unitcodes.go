@@ -184,55 +184,142 @@ func (s UnitCodeScan) FirstLocations() []UnitCodeLiteral {
 	return out
 }
 
-// DiscoverGoPackageDirs returns every directory in the repository that holds
-// non-test Go source, repository-relative and slash-separated.
+// DiscoverGoModuleRoots returns this repository's own Go module roots,
+// repository-relative and slash-separated ("." for a module at the root
+// itself).
+//
+// It is what stops the package discovery from walking out of the repository.
+// repoRoot() resolves from this source file's own path -- <root>/backend/
+// internal/eligibilitywire/wire.go, three levels up -- which is exactly right
+// in a checkout and NOT right everywhere else. RC107's isolated container gate
+// mounts backend/ at /src, so repoRoot() resolved to the container's `/`, and a
+// discovery that walked the whole tree from there parsed Go's own testdata:
+//
+//	eligibilitywire: parse usr/local/go/test/bombad.go: illegal byte order mark
+//
+// A gate that reads other people's source is not merely slow, it is answering
+// a question nobody asked, and it will keep finding new ways to fail.
+//
+// Modules are looked for at depth 0 and 1 only (<root>/go.mod and
+// <root>/*/go.mod). That is where this repository keeps them (backend/, agents/)
+// and it is deliberately shallow: a deep search from `/` would find
+// /usr/local/go/go.mod and put us right back where we started. The one module
+// this misses today, deploy/postgres/gosu-build, holds no .go files at all --
+// it pins a build, it does not carry vocabulary.
+//
+// In the container the runner's copy at /src is found too, alongside the
+// read-only /backend and /agents mounts. That is harmless on purpose: every
+// consumer of this discovery compares SETS of values, never counts of
+// directories, so the same package arriving twice under two paths changes
+// nothing. The probes that do look at directories ask "is this one in the set",
+// not "how many are there".
+func DiscoverGoModuleRoots() ([]string, error) {
+	root, err := repoRoot()
+	if err != nil {
+		return nil, err
+	}
+	return discoverGoModuleRootsIn(root)
+}
+
+func discoverGoModuleRootsIn(root string) ([]string, error) {
+	roots := []string{}
+	if hasGoMod(root) {
+		roots = append(roots, ".")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("eligibilitywire: read %s: %w", root, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || skippedScanDirs[name] {
+			continue
+		}
+		if hasGoMod(filepath.Join(root, name)) {
+			roots = append(roots, name)
+		}
+	}
+	sort.Strings(roots)
+	return roots, nil
+}
+
+// hasGoMod reports whether dir holds a go.mod FILE. A directory named go.mod
+// is not a module, and on a path like `/proc` the stat simply fails, which is
+// the same answer.
+func hasGoMod(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, "go.mod"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+// DiscoverGoPackageDirs returns every directory inside this repository's own Go
+// modules that holds non-test Go source, repository-relative and
+// slash-separated.
 //
 // This is the scan's SCOPE, and it is discovered rather than declared. A new
-// top-level directory of Go code, a new command under backend/cmd, a package
-// moved out from under internal/ -- all of them are in the gate the moment they
-// exist, with nobody having to remember to add them.
+// package under backend/cmd, a package moved out from under internal/, a new
+// module beside backend/ -- all of them are in the gate the moment they exist,
+// with nobody having to remember to add them. What it will NOT do is wander
+// outside the repository; see DiscoverGoModuleRoots.
 //
-// Exported because the coverage probe compares its own, textual sweep of the
-// tree against what this actually visited.
+// Exported because the coverage probes compare their own, textual sweep of the
+// same module trees against what this actually visited.
 func DiscoverGoPackageDirs() ([]string, error) {
 	root, err := repoRoot()
 	if err != nil {
 		return nil, err
 	}
-	dirs := []string{}
-	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	return discoverGoPackageDirsIn(root)
+}
+
+func discoverGoPackageDirsIn(root string) ([]string, error) {
+	moduleRoots, err := discoverGoModuleRootsIn(root)
+	if err != nil {
+		return nil, err
+	}
+	if len(moduleRoots) == 0 {
+		return nil, fmt.Errorf(
+			"eligibilitywire: no go.mod found at %s or one level below it, so there is no repository to scan; "+
+				"either the module layout changed or repoRoot() is resolving somewhere unexpected", root)
+	}
+	found := map[string]bool{}
+	for _, moduleRoot := range moduleRoots {
+		treeRoot := root
+		if moduleRoot != "." {
+			treeRoot = filepath.Join(root, filepath.FromSlash(moduleRoot))
 		}
-		if !entry.IsDir() {
-			return nil
-		}
-		if path != root && skippedScanDirs[entry.Name()] {
-			return fs.SkipDir
-		}
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err
-		}
-		for _, file := range entries {
-			name := file.Name()
-			if file.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
-			}
-			rel, err := filepath.Rel(root, path)
+		walkErr := filepath.WalkDir(treeRoot, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
-			dirs = append(dirs, filepath.ToSlash(rel))
+			if !entry.IsDir() {
+				return nil
+			}
+			if path != treeRoot && skippedScanDirs[entry.Name()] {
+				return fs.SkipDir
+			}
+			entries, err := os.ReadDir(path)
+			if err != nil {
+				return err
+			}
+			for _, file := range entries {
+				name := file.Name()
+				if file.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+					continue
+				}
+				rel, err := filepath.Rel(root, path)
+				if err != nil {
+					return err
+				}
+				found[filepath.ToSlash(rel)] = true
+				return nil
+			}
 			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
 		}
-		return nil
-	})
-	if walkErr != nil {
-		return nil, walkErr
 	}
-	sort.Strings(dirs)
-	return dirs, nil
+	return sortedKeys(found), nil
 }
 
 // ScanUnitCodes walks every Go package in the repository's non-test sources.
