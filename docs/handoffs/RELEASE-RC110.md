@@ -26,7 +26,8 @@ RC108 的对账中自锁片在影子评估上 not_ready（见 `RELEASE-RC108.md`
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 |---|---|---|---|---|
-| 源码门禁 `scripts/verify.ps1`（经 `release/run-rc110-gate.ps1` + `run-detached.ps1`） | 待跑 | | | |
+| 源码门禁第一次（树 `c0e4be5`；`rc110-gate`） | 15:00:37 | 15:10:16 | 9m39s | PASS（exit 0） |
+| 源码门禁第二次（并入影子绑定文档尾巴 `312f647`/`16d7ce0` 后，树 `3fcb3a5`；`rc110-gate2`） | 15:11:19 | 15:19:40 | 8m21s | PASS（exit 0） |
 | 签名 tag `v0.1.0-rc110-signed` | 待打 | | | |
 | 镜像门禁 + 两次产物验证 | 待跑 | | | 预期 exit 42 |
 | `ssh-keygen -Y sign` 签 `SHA256SUMS` | 待签 | | | |
