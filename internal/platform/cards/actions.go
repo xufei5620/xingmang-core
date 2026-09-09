@@ -88,22 +88,28 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 
 // issueDef 是开卡的静态声明。
 //
-// 风险等级 L1，理由是**平台当前只能执行 L1**：内核的
+// 风险等级 L2：开卡花真钱，按 ADR-003 的等级表高于「修改低风险平台配置」
+// 那一档，L2 要的是「预览 + 幂等 + 写后确认 + 完整审计」。
+//
+// 这一格此前是 L1，那是平台能力的欠账而非风险判断：内核的
 // RiskLevel.RequiresAdvancedControls() 对 L2 及以上返回 true，而 Advanced
 // Controls（幂等键、写后读取确认、审批、Step-up MFA、冷却、Kill Switch）
-// 属于 Foundation-B / XM-0030，尚未实现——声明成 L2 的 Action 会在执行时
-// 被内核直接拒掉。按动作性质，开卡花真钱，本该高于「修改低风险平台配置」；
-// 这一格是平台能力的欠账，不是对风险的判断。
+// 属于 Foundation-B / XM-0030，当时尚未实现——声明成 L2 会让开卡变成永远
+// 跑不起来的摆设。审批中心实装并接进内核之后（internal/platform/approval，
+// cmd/platform-api 的 action.WithApprovalGateway），L2 的调用落成一张审批单
+// 再由人触发执行，而不再被直接拒掉，所以这一格恢复成设计上正确的等级。
 //
-// 所以护栏不在风险等级上，而在三处本片自己实现的东西：幂等键（防重复扣钱）、
+// 定 L2 而不是更高，依据是本注释与 contracts/actions/cards.card.issue.v1.json
+// 当初都写明的那句话：「Foundation-B 落地后应重估——届时升到 L2 才是真的
+// 加了控制」。
+//
+// 风险等级之外的护栏一道没减：幂等键（防重复扣钱）、
 // 金额上限（limits.go，fail closed）、以及内核强制的审计。
-// Foundation-B 落地后应重估这一级——届时升到 L2 才是真的加了控制，
-// 而不是让 Action 变得不可执行。
 func issueDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID:         ActionIssue,
 		Version:    actionVersion,
-		RiskLevel:  action.L1,
+		RiskLevel:  action.L2,
 		Permission: PermissionIssue,
 		Schema: action.Schema{
 			Fields: []action.Field{

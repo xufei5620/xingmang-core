@@ -23,6 +23,11 @@ import type { ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
 import { ProxyAssetDialog } from "./ProxyAssetDialog";
 import { SubscriptionBatchDialog } from "./SubscriptionBatchDialog";
+import {
+  SubscriptionLifecycleDialog,
+  subjectFromBatch,
+  subjectFromProxy,
+} from "./SubscriptionLifecycleDialog";
 import { TokenMappingEditor } from "./TokenMappingEditor";
 
 /** 登记簿金额 → 展示文本。
@@ -220,7 +225,12 @@ function SubscriptionSection({
               description="批次记录的是「为这条订阅渠道付了多少钱」，登记走 finance.subscription_batch.register。"
             />
           ) : (
-            <BatchTable batches={batchPage?.items ?? []} />
+            <BatchTable
+              batches={batchPage?.items ?? []}
+              account={account}
+              canManage={canManage}
+              onDone={afterWrite}
+            />
           )}
         </ApiStateView>
         <PageEvidence page={batchPage} />
@@ -277,20 +287,39 @@ function PageEvidence({
 const TH = "px-2 py-1 text-left text-xs font-medium text-fg-muted whitespace-nowrap";
 const TD = "px-2 py-1 align-top text-xs text-fg";
 
-function BatchTable({ batches }: { batches: SubscriptionBatchItem[] }) {
+function BatchTable({
+  batches,
+  account,
+  canManage,
+  onDone,
+}: {
+  batches: SubscriptionBatchItem[];
+  account: UpstreamAccountItem;
+  canManage: boolean;
+  onDone: (result: ActionResult) => void;
+}) {
   return (
     <div className="relative max-w-full overflow-x-auto rounded-md border border-edge">
       <table className="w-full border-collapse">
         <caption className="sr-only">订阅批次：付款、摊销与有效期</caption>
         <thead className="border-b border-edge bg-surface-muted">
           <tr>
-            {["起止", "有效天数", "实付", "附加费", "已退", "成本基数", "本账号分摊", "每日摊销", "状态"].map(
-              (h) => (
-                <th key={h} scope="col" className={TH}>
-                  {h}
-                </th>
-              ),
-            )}
+            {[
+              "起止",
+              "有效天数",
+              "实付",
+              "附加费",
+              "已退",
+              "成本基数",
+              "本账号分摊",
+              "每日摊销",
+              "状态",
+              "操作",
+            ].map((h) => (
+              <th key={h} scope="col" className={TH}>
+                {h}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
@@ -310,6 +339,27 @@ function BatchTable({ batches }: { batches: SubscriptionBatchItem[] }) {
               <td className={`${TD} tabular-nums`}>{formatMoneyItem(b.daily_amortization)}</td>
               <td className={TD}>
                 <BatchStatus batch={b} />
+              </td>
+              <td className={TD}>
+                {/* 退款与终止是两个独立的会计事件，各给一个有名字的按钮。
+                    刻意不合成一个「更多」菜单：不可逆的动作藏在二级菜单里，
+                    等于把「这一步撤不回来」这句话也藏进去了 */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <SubscriptionLifecycleDialog
+                    subject={subjectFromBatch(b)}
+                    action="refund"
+                    businessDayTz={account.business_day_tz}
+                    disabled={!canManage}
+                    onDone={onDone}
+                  />
+                  <SubscriptionLifecycleDialog
+                    subject={subjectFromBatch(b)}
+                    action="terminate"
+                    businessDayTz={account.business_day_tz}
+                    disabled={!canManage}
+                    onDone={onDone}
+                  />
+                </div>
               </td>
             </tr>
           ))}
@@ -407,12 +457,28 @@ function ProxyTable({
                   </Badge>
                 </td>
                 <td className={TD}>
-                  <ProxyAssetDialog
-                    account={account}
-                    proxy={p}
-                    disabled={!canManage}
-                    onDone={(runId) => onDone({ title: "代理资产已更新", runId })}
-                  />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <ProxyAssetDialog
+                      account={account}
+                      proxy={p}
+                      disabled={!canManage}
+                      onDone={(runId) => onDone({ title: "代理资产已更新", runId })}
+                    />
+                    <SubscriptionLifecycleDialog
+                      subject={subjectFromProxy(p)}
+                      action="refund"
+                      businessDayTz={account.business_day_tz}
+                      disabled={!canManage}
+                      onDone={onDone}
+                    />
+                    <SubscriptionLifecycleDialog
+                      subject={subjectFromProxy(p)}
+                      action="terminate"
+                      businessDayTz={account.business_day_tz}
+                      disabled={!canManage}
+                      onDone={onDone}
+                    />
+                  </div>
                 </td>
               </tr>
             );

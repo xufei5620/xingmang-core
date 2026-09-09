@@ -7,8 +7,10 @@ import {
   PLATFORM_CHANNEL_BINDING_MANAGE_PERMISSION,
   type PlatformChannelRow,
 } from "../api/platformChannels";
+import { CHANNEL_BINDING_HISTORY_QUERY_KEY } from "../api/platformChannelBindings";
 import { ActionErrorNote } from "./ActionErrorNote";
 import { ActionResultNote, type ActionResult } from "./ActionResultNote";
+import { ChannelBindingHistory } from "./ChannelBindingHistory";
 
 const CANDIDATE_LABELS: Record<string, { label: string; tone: "success" | "warning" | "danger" | "neutral" }> = {
   unmapped: { label: "未映射", tone: "neutral" },
@@ -105,6 +107,11 @@ export function ChannelBindingCard({
           <RemoveBindingDialog serviceId={serviceId} row={row} bindingId={row.binding.id} onDone={(runId) => afterWrite({ title: "上游映射已解除", runId })} />
         ) : null}
       </div>
+
+      {/* 绑定历史放在这张卡里、动作按钮下面：它说的是同一件事的过去时。
+          单独摆成一张卡会让人把「现在绑在谁身上」和「以前绑过谁」当成两块
+          互不相干的信息，而改绑之前最该看的恰恰是上一次为什么这么绑 */}
+      <ChannelBindingHistory serviceId={serviceId} externalChannelId={row.channelRef.externalChannelId} />
     </section>
   );
 }
@@ -153,6 +160,8 @@ function ConfirmBindingDialog({
       setAttempts(0);
       setReason("");
       void queryClient.invalidateQueries({ queryKey: ["platform-channels"] });
+      // 确认/改绑会往 finance.platform_channel_binding 插一行，历史因此多一条
+      void queryClient.invalidateQueries({ queryKey: [CHANNEL_BINDING_HISTORY_QUERY_KEY] });
       onDone(run.runId);
     },
   });
@@ -285,6 +294,9 @@ function RemoveBindingDialog({
       setAttempts(0);
       setReason("");
       void queryClient.invalidateQueries({ queryKey: ["platform-channels"] });
+      // 解绑不插新行，但它会让「当前生效」那个标记从这条渠道上消失——
+      // 历史列表照样要重取，否则那一行会继续标着「当前生效」
+      void queryClient.invalidateQueries({ queryKey: [CHANNEL_BINDING_HISTORY_QUERY_KEY] });
       onDone(run.runId);
     },
   });

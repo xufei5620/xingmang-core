@@ -20,8 +20,9 @@ import { cardStatusLabel, cardStatusTone, isCardLocked } from "../lib/cardStatus
 import { formatMinorUnits } from "../lib/money";
 import { Link } from "react-router";
 import { ActionErrorNote } from "./ActionErrorNote";
-import { ActionResultNote, type ActionResult } from "./ActionResultNote";
+import { actionResultOf, ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ApprovalReasonField, isApprovalReasonUsable } from "./ApprovalReasonField";
 
 const CARDS_QUERY = "cards";
 const CARD_BALANCES_QUERY = "card-balances";
@@ -144,6 +145,8 @@ export function IssueCardDialog({
   const [email, setEmail] = useState("");
   const [holder, setHolder] = useState("");
   const [ownerRef, setOwnerRef] = useState("");
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
 
@@ -156,18 +159,28 @@ export function IssueCardDialog({
 
   const mutation = useMutation({
     mutationFn: () =>
-      issueCard({
-        account: effectiveAccount,
-        idempotency_key: idempotencyKey,
-        product_id: Number(productId),
-        top_up_amount: amount.trim(),
-        token_type: tokenType,
-        user_email: email.trim(),
-        holder_name: holder.trim(),
-        ...(ownerRef.trim() ? { owner_ref: ownerRef.trim() } : {}),
-      }),
-    onSuccess: (run) => {
-      onIssued?.({ runId: run.runId, title: "已提交开卡请求" });
+      issueCard(
+        {
+          account: effectiveAccount,
+          idempotency_key: idempotencyKey,
+          product_id: Number(productId),
+          top_up_amount: amount.trim(),
+          token_type: tokenType,
+          user_email: email.trim(),
+          holder_name: holder.trim(),
+          ...(ownerRef.trim() ? { owner_ref: ownerRef.trim() } : {}),
+        },
+        reason.trim(),
+      ),
+    onSuccess: (outcome) => {
+      // 开卡是 L2：多半落成审批单而不是当场开出来。两种结局的措辞必须分开
+      // ——把「已受理为审批单」说成「已提交开卡请求」，人会以为卡在路上了。
+      onIssued?.(
+        actionResultOf(outcome, {
+          executed: "已提交开卡请求",
+          approvalPending: "开卡已提交审批，卡还没有开",
+        }),
+      );
       void queryClient.invalidateQueries({ queryKey: [CARDS_QUERY] });
       setOpen(false);
       // 下一次开卡是另一笔业务，必须换一个幂等键
@@ -175,6 +188,8 @@ export function IssueCardDialog({
       setAmount("");
       setEmail("");
       setHolder("");
+      setReason("");
+      setReasonTouched(false);
       setError(null);
     },
     onError: (err) => setError(err),
@@ -193,6 +208,8 @@ export function IssueCardDialog({
         className="flex flex-col gap-3"
         onSubmit={(e) => {
           e.preventDefault();
+          setReasonTouched(true);
+          if (!isApprovalReasonUsable(reason)) return;
           mutation.mutate();
         }}
       >
@@ -280,6 +297,14 @@ export function IssueCardDialog({
             onChange={(e) => setOwnerRef(e.target.value)}
           />
         </FormField>
+
+        <ApprovalReasonField
+          id={`${formId}-reason`}
+          value={reason}
+          onChange={setReason}
+          subject="开卡"
+          touched={reasonTouched}
+        />
 
         <p className="text-xs text-fg-muted">
           幂等键 <span className="font-mono">{idempotencyKey}</span>

@@ -1,0 +1,27 @@
+{
+  "id": "publishing.draft.archive",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "publishing.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "IDEMPOTENT_BY_DRAFT_ID",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "MANUAL",
+  "params": {
+    "draft_id": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "归档不是删除：草稿可能已被发布记录引用，且「这条内容当时长什么样」是审计事实。归档同时撤下排期。 XM-EXT-PUBLISHING（ADMIN-IA §5.4.1，2026-09-08 裁定变更）。平台今天没有任何出站投递器：内容发布的第一层只保证「内容的生命周期在平台内是真的」。"
+}

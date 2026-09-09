@@ -124,6 +124,75 @@ export async function listAlerts(
   return (await listAlertsPage(options, client, config)).items;
 }
 
+/** 静默窗口此刻处在哪一态（Go 侧 httpapi/alert_silences.go 的 state 字段）。
+ *
+ *  **没有「已取消」**：平台今天没有撤销静默的能力，窗口只会自己到期。
+ *  编一个前端状态出来，会让运营以为「取消」这件事已经做得到。 */
+export type SilenceState = "active" | "scheduled" | "expired";
+
+/** `GET /api/v1/alerts/silences` 的一条记录（httpapi/alert_silences.go silenceItem）。 */
+export interface SilenceItem {
+  id: string;
+  /** 空串 = 全局窗口（该环境下所有规则）。翻译成中文是前端的事。 */
+  rule_key: string;
+  environment: string;
+  reason: string;
+  starts_at: string;
+  ends_at: string;
+  created_by: string;
+  created_at: string;
+  /** 由服务端按 as_of 算，**前端不要自己比时间**：一台快五分钟的机器会把
+   *  刚过期的窗口显示成「生效中」，而运营据此以为告警还压着。 */
+  state: SilenceState;
+}
+
+/** state 查询参数的两个取值。 */
+export const SILENCE_STATE_ACTIVE = "active";
+export const SILENCE_STATE_ALL = "all";
+
+export interface ListSilencesOptions extends ListOptions {
+  /** 不传 = 只看此刻生效的（服务端默认）。传 SILENCE_STATE_ALL 则含未开始与已过期。 */
+  state?: typeof SILENCE_STATE_ACTIVE | typeof SILENCE_STATE_ALL;
+  limit?: number;
+}
+
+export interface SilencesPage {
+  items: SilenceItem[];
+  /** 服务端说的「这一页可能不是全部」，理由同 AlertsPage.truncated。 */
+  truncated: boolean;
+  /** 服务端实际生效的上限；没给就是 0（不显示）。 */
+  limit: number;
+  /** 服务端判定三态所用的时刻。空串表示老后端没给——那时不显示「截至」。 */
+  as_of: string;
+}
+
+/** 列出某环境下的静默窗口。
+ *
+ *  这条端点存在之前，静默**只能建不能看**：运营按得下去，却回答不了
+ *  「现在有哪些静默生效中、是谁按的、什么时候到期」。 */
+export async function listSilencesPage(
+  options: ListSilencesOptions = {},
+  client: ApiClient = apiClient,
+  config: PlatformApiConfig = appApiConfig,
+): Promise<SilencesPage> {
+  const body = await client.get<
+    ListResponse<SilenceItem> & { truncated?: boolean; limit?: number; as_of?: string }
+  >("/api/v1/alerts/silences", {
+    searchParams: {
+      environment: config.environment,
+      ...(options.state === undefined ? {} : { state: options.state }),
+      ...(options.limit === undefined ? {} : { limit: String(options.limit) }),
+    },
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  return {
+    items: body.items ?? [],
+    truncated: body.truncated === true,
+    limit: typeof body.limit === "number" && Number.isSafeInteger(body.limit) ? body.limit : 0,
+    as_of: typeof body.as_of === "string" ? body.as_of : "",
+  };
+}
+
 /** alerts.alert.acknowledge@1 声明的 Permission（alerts/permissions.go）。 */
 export const ACKNOWLEDGE_PERMISSION = "alerts.alert.manage";
 
@@ -176,12 +245,19 @@ export function createSilence(
   );
 }
 
-/** 第一批规则的键与中文名（Go 侧 alerts/rules.go 的 RuleKeys）。
+/** 全部规则的键与中文名（Go 侧 alerts/rules.go 的 Rules，label 逐字取自
+ *  那边每条规则的 Title）。
  *
  *  前端重复这份清单，是为了让静默对话框的下拉框有可选项——后端没有
  *  「列出规则」的端点（Foundation-A 不值得为一个静态清单开一条 API）。
- *  重复的代价由 alerts.test.ts 里那条断言兜住：它对着后端错误文案里
- *  列出的键做形态校验，键名改了会在集成测试里显形。
+ *
+ *  重复就会分叉，而且**已经分叉过一次**：后端在 XM-0033 之后陆续加了
+ *  upstream.version.changed / upstream.runway.low / approval.pending.too_long
+ *  三条，这份清单一直停在最早的五条——于是那三类告警在界面上只显示原始
+ *  英文键，静默对话框里也根本选不到它们（运营想压住「审批单挂太久」的刷屏
+ *  只能整个环境全局静默）。XM-I18N-LABELS 补齐，并把「不许再分叉」变成门禁：
+ *  labels.reconcile.test.ts 直接读 rules.go，键少一条、多一条、或者中文名与
+ *  后端 Title 不一致，那条测试都会红。
  *
  *  拼错的 rule_key 会被后端当场拒绝（它会静默零条告警，而创建者以为
  *  已经静默了），所以这里给的是下拉而不是自由输入。 */
@@ -191,6 +267,9 @@ export const ALERT_RULES: { key: string; label: string }[] = [
   { key: "metric.sync.consecutive_failed", label: "同步连续失败" },
   { key: "channel.token.invalid", label: "渠道 token 失效" },
   { key: "channel.balance.low", label: "渠道余额不足" },
+  { key: "upstream.version.changed", label: "上游版本变化" },
+  { key: "upstream.runway.low", label: "上游可用天数不足" },
+  { key: "approval.pending.too_long", label: "审批单挂太久" },
 ];
 
 /** 把规则键翻成中文名；未知键原样返回。

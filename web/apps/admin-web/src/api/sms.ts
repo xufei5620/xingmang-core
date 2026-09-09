@@ -12,7 +12,13 @@ import {
   looksLikeUnmountedRoute,
   type ApiClient,
 } from "./client";
-import { executeAction, type ActionRun, type ListOptions } from "./platform";
+import {
+  executeAction,
+  submitAction,
+  type ActionOutcome,
+  type ActionRun,
+  type ListOptions,
+} from "./platform";
 
 interface ListResponse<T> {
   items?: T[];
@@ -210,10 +216,13 @@ export function setSMSProviderEnabled(
   );
 }
 
-/** 买号（`sms.number.purchase@1`）。**花真钱且不可退。**
+/** 买号（`sms.number.purchase@1`，**L2**）。**花真钱且不可退。**
  *
  *  `operation_id` 必须由调用方稳定生成：它是幂等键，重试要带同一个；
- *  而未决唯一索引会挡住「换一个 UUID 重发同一份请求」。 */
+ *  而未决唯一索引会挡住「换一个 UUID 重发同一份请求」。
+ *
+ *  L2：内核多半会受理成审批单并回 202（XM-RISK-RESTORE 把它从 L1 恢复），
+ *  所以返回 ActionOutcome、`reason` 必填。 */
 export function purchaseSMSNumbers(
   params: {
     provider: string;
@@ -232,11 +241,12 @@ export function purchaseSMSNumbers(
     /** 与 max_price 一起用：严格按这个价成交。 */
     fixed_price?: boolean;
   },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction(
-    { actionId: "sms.number.purchase", version: "1", params },
+): Promise<ActionOutcome> {
+  return submitAction(
+    { actionId: "sms.number.purchase", version: "1", params, reason },
     options,
     client,
   );
@@ -488,7 +498,9 @@ export const getSMS62GoodsDetail = (goodsId: string, o: ListOptions = {}, c: Api
 export const listSMS62Orders = (page = 1, pageSize = 20, o: ListOptions = {}, c: ApiClient = apiClient) =>
   getObject<SMS62OrdersPage>(`/api/v1/sms/sms62/orders${qs({ page, page_size: pageSize })}`, o, c);
 
-/** 租用一个号（`sms.rent.purchase@1`）。**花真钱且按小时计费。** */
+/** 租用一个号（`sms.rent.purchase@1`，**L2**）。**花真钱且按小时计费。**
+ *
+ *  L2：内核多半会受理成审批单并回 202，所以返回 ActionOutcome、`reason` 必填。 */
 export function rentSMSNumber(
   params: {
     operation_id: string;
@@ -498,24 +510,38 @@ export function rentSMSNumber(
     operator?: string;
     currency?: number;
   },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction(
-    { actionId: "sms.rent.purchase", version: "1", params: { provider: "hero_sms", ...params } },
+): Promise<ActionOutcome> {
+  return submitAction(
+    {
+      actionId: "sms.rent.purchase",
+      version: "1",
+      params: { provider: "hero_sms", ...params },
+      reason,
+    },
     options,
     client,
   );
 }
 
-/** 买邮箱接码（`sms.email.purchase@1`）。**花真钱。** count>1 走批量（上限 10）。 */
+/** 买邮箱接码（`sms.email.purchase@1`，**L2**）。**花真钱。** count>1 走批量（上限 10）。
+ *
+ *  L2：内核多半会受理成审批单并回 202，所以返回 ActionOutcome、`reason` 必填。 */
 export function purchaseSMSEmails(
   params: { operation_id: string; site: string; domain: string; count?: number; service?: string },
+  reason: string,
   options: ListOptions = {},
   client: ApiClient = apiClient,
-): Promise<ActionRun> {
-  return executeAction(
-    { actionId: "sms.email.purchase", version: "1", params: { provider: "hero_sms", ...params } },
+): Promise<ActionOutcome> {
+  return submitAction(
+    {
+      actionId: "sms.email.purchase",
+      version: "1",
+      params: { provider: "hero_sms", ...params },
+      reason,
+    },
     options,
     client,
   );

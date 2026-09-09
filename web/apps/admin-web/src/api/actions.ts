@@ -1,9 +1,11 @@
 import { apiClient, type ApiClient } from "./client";
 
-/** 操作与审批页（`/actions`，ADMIN-IA §2.2 `g/actions`）的三个已接通数据源：
- *  操作目录、执行记录列表、执行记录详情。「待审批」子页签没有对应端点——
- *  approval/ 目前只有 .gitkeep（Foundation-B 尚未实装，内核对 L2 及以上
- *  一律拒绝执行），页面据此显示门禁而不是伪造一个空队列。 */
+/** 操作与审批页（`/actions`，ADMIN-IA §2.2 `g/actions`）的三个数据源：
+ *  操作目录、执行记录列表、执行记录详情。
+ *
+ *  「待审批」子页签走的是另一份客户端（api/approvals.ts，XM-0030b）——
+ *  审批中心的后端已实装，只是还没在环境里启用，端点不存在时那一层会把裸 404
+ *  翻成「未启用」而不是一个泛型报错。 */
 
 /** Action 目录条目（`GET /api/v1/actions`，httpapi/actions.go actionSummary）。
  *

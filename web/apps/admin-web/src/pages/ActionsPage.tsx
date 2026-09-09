@@ -8,7 +8,7 @@ import {
   PageState,
   type DataTableColumn,
 } from "@xingmang/ui-admin";
-import { Badge, Button, Input, Select, Tabs, type BadgeTone } from "@xingmang/ui-primitives";
+import { Badge, Button, Input, Select, Tabs } from "@xingmang/ui-primitives";
 import { useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import {
@@ -22,23 +22,26 @@ import {
   type ActionRunStatusFilter,
 } from "../api/actions";
 import { ApiStateView } from "../components/ApiStateView";
+import { ApprovalQueue } from "../components/ApprovalQueue";
+import { RiskBadge } from "../components/RiskBadge";
+import {
+  actionRunStatus,
+  errorCodeHint,
+  errorCodeNote,
+  principalTypeHint,
+  principalTypeText,
+  RISK_LEVELS,
+  riskLevelText,
+} from "../lib/labels";
 
 const ACTIONS_SUB_TABS = (navItemByPath("/actions")?.item.subTabs ?? []).map(
   (tab) => [tab.id, tab.label] as const,
 );
 const DEFAULT_SUB_TAB = "catalog";
 
-const RISK_LEVEL_TONE: Readonly<Record<string, BadgeTone>> = {
-  L0: "neutral",
-  L1: "info",
-  L2: "warning",
-  L3: "warning",
-  L4: "danger",
-};
-
-function riskTone(level: string): BadgeTone {
-  return RISK_LEVEL_TONE[level] ?? "neutral";
-}
+/** 等级筛选下拉的选项。与列的 value 用同一个函数算，两边一定对得上；
+ *  写死一份「L0 最低风险」的字面量清单迟早与 riskLevelText 分叉。 */
+const RISK_FILTER_OPTIONS = ["L0", "L1", "L2", "L3", "L4"].map(riskLevelText);
 
 /** 操作与审批页（ADMIN-IA §2.2 `g/actions`：操作目录 / 待审批 / 执行记录 /
  *  风险与启用条件）。
@@ -116,14 +119,28 @@ function renderActionsSubTab(value: string): ReactNode {
 
 /** 页面级门禁说明（ADMIN-IA §七 / 交接文档 §2.5 同一条纪律的操作与审批版本）。
  *
- *  这两句话要在页面上**看得见**，不能只写在文档里：审批链（Foundation-B）
- *  尚未上线，本页不提供任何执行入口。此处永远不会出现「假装执行成功」的
- *  按钮——写操作只走 Action，且 L2 及以上需要人工审批。 */
+ *  这句话要在页面上**看得见**，不能只写在文档里。它随审批链的进度改过两次：
+ *
+ *  1. XM-0030b-ui：从「尚未上线」改成「尚未启用」——后端已实装但没注入，
+ *     两者的下一步不同。
+ *  2. XM-0030-ENABLE（本次）：**那句话现在是错的，而且错了两处。**
+ *     一是审批服务已经在 platform-api / platform-worker 两端注入，「尚未
+ *     启用」不再是编译期就能断言的事实——某个环境挂没挂，只有那个环境的
+ *     `/api/v1/approvals` 通不通才知道，那由「待审批」子页签自己如实报
+ *     （api/approvals.ts 的 APPROVALS_NOT_MOUNTED_DESCRIPTION）。
+ *     二是「本页不提供任何执行入口」也不成立了：「待审批」里一张**已批准**
+ *     的单上就有「执行」按钮（ApprovalQueue 的 canExecute 分支）。
+ *
+ *  所以这条横幅收回到它唯一始终为真的那件事：**目录页不是执行入口**。
+ *  L2 及以上从目录里点不动，要先成单、被人批准，执行按钮只长在那张单上。
+ *  一条会随环境变真变假的断言不该写死在组件里——写死就一定会像刚才那样，
+ *  在环境变了之后继续理直气壮地说错话。 */
 function AdvancedControlsGate() {
   return (
     <p role="status" className="rounded-md border border-warning bg-warning/15 px-3 py-2 text-xs text-fg">
-      门禁：审批链（Foundation-B）尚未上线，本页不提供任何执行入口。此处永远不会出现
-      「假装执行成功」的按钮——写操作只走 Action，且 L2 及以上需要人工审批。
+      门禁：操作目录只用来看，不是执行入口。写操作只走 Action，L2 及以上一律先由
+      内核受理成审批单、由人批准，执行按钮只出现在「待审批」里那张已批准的单上，
+      并且只按单上冻结的参数跑。此处永远不会出现「假装执行成功」的按钮。
     </p>
   );
 }
@@ -152,7 +169,7 @@ function ActionCatalogTab() {
           rows={query.data ?? []}
           rowKey={(row) => `${row.id}@${row.version}`}
           searchable
-          filters={[{ columnId: "risk", label: "风险等级", options: ["L0", "L1", "L2", "L3", "L4"] }]}
+          filters={[{ columnId: "risk", label: "风险等级", options: RISK_FILTER_OPTIONS }]}
           emptyState={
             <PageState
               kind="empty"
@@ -182,8 +199,10 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
   {
     id: "risk",
     header: "风险等级",
-    value: (row) => row.risk_level,
-    cell: (row) => <Badge tone={riskTone(row.risk_level)}>{row.risk_level}</Badge>,
+    // value 带上中文：它同时是搜索文本与筛选比较值，只放 `L2` 的话
+    // 搜「高风险」搜不到，而筛选下拉里也只能摆一串读不懂的字母。
+    value: (row) => riskLevelText(row.risk_level),
+    cell: (row) => <RiskBadge level={row.risk_level} />,
   },
   {
     id: "permission",
@@ -199,7 +218,10 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
   {
     id: "principalTypes",
     header: "允许身份类型",
-    cell: (row) => (row.principal_types.length > 0 ? row.principal_types.join(" / ") : "—"),
+    cell: (row) =>
+      row.principal_types.length > 0
+        ? row.principal_types.map(principalTypeText).join(" / ")
+        : "—",
   },
   {
     id: "executable",
@@ -222,25 +244,7 @@ const CATALOG_COLUMNS: DataTableColumn<ActionDefinitionItem>[] = [
 // ---------------------------------------------------------------------------
 
 function ActionPendingApprovalTab() {
-  return (
-    <section className="flex flex-col gap-3">
-      <PageHeader
-        title="待审批"
-        description="L2 及以上风险等级的 Action 需要人工审批（宪法 9 条：L3/L4 必须审批）；AI 不作为 L3/L4 的第二审批人（宪法 10 条、ADR-009）。"
-      />
-      <PageState
-        kind="unavailable"
-        title="审批队列尚未接入"
-        description={
-          "approval 模块目前只有目录占位（internal/platform/approval/ 仅 .gitkeep），Foundation-B 的人工审批流未实装；" +
-          "内核对 L2 及以上风险等级一律拒绝执行（ADVANCED_CONTROLS_REQUIRED），不会有任何动作停在这里等审批——" +
-          "因为它们根本不会被内核接受，不是「审批慢」而是「审批还不存在」。审批模型的提案（申请/审批人/期限/与执行的" +
-          "衔接）见交接文档 docs/handoffs/slices/XM-ACTIONS0.md，待产品/架构拍板后再实装。"
-        }
-        footnote="Foundation-B · XM-0030"
-      />
-    </section>
-  );
+  return <ApprovalQueue />;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,11 +459,13 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
   {
     id: "principal",
     header: "身份",
-    value: (row) => `${row.principal_id} ${row.principal_type}`,
+    value: (row) => `${row.principal_id} ${principalTypeText(row.principal_type)}`,
     cell: (row) => (
       <span>
         <span className="font-medium">{row.principal_id}</span>
-        <p className="text-xs text-fg-muted">{row.principal_type}</p>
+        <p className="text-xs text-fg-muted" title={principalTypeHint(row.principal_type)}>
+          {principalTypeText(row.principal_type)}
+        </p>
       </span>
     ),
   },
@@ -472,8 +478,8 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
   {
     id: "risk",
     header: "风险等级",
-    value: (row) => row.risk_level,
-    cell: (row) => <Badge tone={riskTone(row.risk_level)}>{row.risk_level}</Badge>,
+    value: (row) => riskLevelText(row.risk_level),
+    cell: (row) => <RiskBadge level={row.risk_level} />,
   },
   {
     id: "status",
@@ -483,10 +489,21 @@ const RUN_COLUMNS: DataTableColumn<ActionRunItem>[] = [
     sortAs: (row) => row.status,
     cell: (row) => (
       <span className="flex flex-col gap-0.5">
-        <Badge tone={row.status === "succeeded" ? "success" : "danger"}>
-          {row.status === "succeeded" ? "成功" : "失败"}
+        {/* 查表而不是二选一：后端将来加第三个状态时，二选一会把它显示成
+            「失败」——那不是翻译不到位，是说了一句假话。认不出来就原样显示。 */}
+        <Badge
+          tone={row.status === "succeeded" ? "success" : "danger"}
+          title={actionRunStatus(row.status)?.hint}
+        >
+          {actionRunStatus(row.status)?.label ?? row.status}
         </Badge>
-        {row.error_code ? <span className="font-mono text-xs text-danger">{row.error_code}</span> : null}
+        {row.error_code ? (
+          // 中文在前、原码在括号里：这一列的原码是拿去 grep 服务端日志的，
+          // 一个字都不能改（withCode 保证不认识的码原样吐出来）。
+          <span className="text-xs text-danger" title={errorCodeHint(row.error_code)}>
+            {errorCodeNote(row.error_code)}
+          </span>
+        ) : null}
       </span>
     ),
   },
@@ -598,44 +615,54 @@ function DetailField({ label, value, mono }: { label: string; value: string; mon
 // 风险与启用条件
 // ---------------------------------------------------------------------------
 
-interface RiskLevelInfo {
+interface RiskLevelRow {
   level: string;
+  /** 该等级的中文名（「中风险」），来自 lib/labels.ts。 */
+  label: string;
   examples: string;
+  /** ADR-003 表里的「基础控制」一栏。 */
   controls: string;
-  /** 该等级在 Foundation-A 阶段是否可能被执行（L0/L1 是；L2 及以上恒为否，
-   *  见 action.RiskLevel.RequiresAdvancedControls）。纯展示用的静态治理事实，
-   *  不是查询结果——变更需要走 ADR，不随部署环境变化。 */
-  foundationAReady: boolean;
+  /** 该等级能不能被**直接**执行（L0/L1 能；L2 及以上不能，见
+   *  action.RiskLevel.RequiresAdvancedControls）。纯展示用的静态治理事实，
+   *  不是查询结果——变更需要走 ADR，不随部署环境变化。
+   *
+   *  这个字段以前叫 foundationAReady，措辞是「（全部待 Foundation-B）」。
+   *  审批中心启用（XM-0030-ENABLE）之后那句话是错的：L2 及以上不再是「等下一个
+   *  阶段」，而是**现在就能提，只是先落审批单**。「不能直接执行」是这一栏唯一
+   *  始终为真的意思，所以字段跟着改名——一个会过期的名字迟早会把过期的话
+   *  再说一遍。至于某个环境接没接上审批中心，只有那个环境知道，由后端逐条给
+   *  blocked_reason（httpapi.ListActionsHandler 的 approvalsWired 分支），
+   *  显示在「操作目录」的「可执行」列里，本页不猜。 */
+  directlyExecutable: boolean;
+  /** 要几票、能不能自批、多久过期——一句话，来自 approval.DefaultPolicy()。 */
+  approvalHint: string;
 }
 
-/** ADR-003（docs/adr/ADR-003-Action唯一写入口.md）的风险等级表，逐字对齐。 */
-const RISK_LEVELS: readonly RiskLevelInfo[] = [
-  { level: "L0", examples: "保存个人视图、低影响偏好", controls: "权限 + 基础审计", foundationAReady: true },
-  {
-    level: "L1",
-    examples: "修改低风险平台配置、确认普通告警",
-    controls: "权限 + 审计；按需幂等",
-    foundationAReady: true,
-  },
-  {
-    level: "L2",
-    examples: "批量配置、启停低风险资源",
-    controls: "预览 + 幂等 + 写后确认 + 完整审计",
-    foundationAReady: false,
-  },
-  {
-    level: "L3",
-    examples: "服务切换、账号批量导入、敏感配置",
-    controls: "人工批准 + MFA + 冷却 + 补偿",
-    foundationAReady: false,
-  },
-  {
-    level: "L4",
-    examples: "退款、生产基础设施高影响动作、开票关键动作",
-    controls: "双人审批目标；单人阶段 Break-glass",
-    foundationAReady: false,
-  },
-];
+/** ADR-003 表里那一栏「基础控制」。
+ *
+ *  只有它留在本页：等级、中文名、典型场景、要不要先落审批单都改由
+ *  lib/labels.ts 提供（那一份对着后端 risk.go 与 approval.DefaultPolicy()
+ *  有对账测试）。基础控制是治理文档的话，后端代码里没有对应事实，
+ *  没有可对账的对象，所以留在这里并注明出处。 */
+const RISK_CONTROLS: Readonly<Record<string, string>> = {
+  L0: "权限 + 基础审计",
+  L1: "权限 + 审计；按需幂等",
+  L2: "预览 + 幂等 + 写后确认 + 完整审计",
+  L3: "人工批准 + MFA + 冷却 + 补偿",
+  L4: "双人审批目标；单人阶段 Break-glass",
+};
+
+/** ADR-003（docs/adr/ADR-003-Action唯一写入口.md）的风险等级表。 */
+const RISK_LEVEL_ROWS: readonly RiskLevelRow[] = Object.entries(RISK_LEVELS)
+  .sort(([a], [b]) => a.localeCompare(b))
+  .map(([level, meaning]) => ({
+    level,
+    label: meaning.label,
+    examples: meaning.examples,
+    controls: RISK_CONTROLS[level] ?? "—",
+    directlyExecutable: !meaning.requiresApproval,
+    approvalHint: meaning.hint,
+  }));
 
 /** 风险与启用条件：ADR-003 的静态治理表 + 操作目录的实时统计。
  *
@@ -663,33 +690,37 @@ function ActionRiskConditionsTab() {
       <ApiStateView isPending={query.isPending} error={query.error} onRetry={() => void query.refetch()}>
         <div className="overflow-x-auto rounded-lg border border-edge">
           <table className="w-full min-w-[640px] text-left text-xs">
-            <caption className="sr-only">风险等级、例子、基础控制、已注册数量与可执行数量</caption>
+            <caption className="sr-only">风险等级、例子、基础控制、审批条件、已注册数量与可执行数量</caption>
             <thead className="bg-surface-muted text-fg-muted">
               <tr>
                 <th className="px-3 py-2 font-medium">等级</th>
                 <th className="px-3 py-2 font-medium">例子</th>
                 <th className="px-3 py-2 font-medium">基础控制</th>
+                <th className="px-3 py-2 font-medium">审批条件</th>
                 <th className="px-3 py-2 text-right font-medium">已注册</th>
                 <th className="px-3 py-2 text-right font-medium">可执行</th>
               </tr>
             </thead>
             <tbody>
-              {RISK_LEVELS.map((r) => (
+              {RISK_LEVEL_ROWS.map((r) => (
                 <tr key={r.level} className="border-t border-edge">
                   <td className="px-3 py-2">
-                    <Badge tone={riskTone(r.level)}>{r.level}</Badge>
+                    <RiskBadge level={r.level} />
                   </td>
                   <td className="px-3 py-2 text-fg-muted">{r.examples}</td>
                   <td className="px-3 py-2 text-fg-muted">{r.controls}</td>
+                  {/* 票数、能不能自批、多久过期取自 approval.DefaultPolicy()，
+                      不是这一页自己写的数字（见 lib/labels.ts 的对账测试）。 */}
+                  <td className="px-3 py-2 text-fg-muted">{r.approvalHint}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-fg">{countByLevel(r.level)}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-fg">
                     {executableByLevel(r.level)}
-                    {!r.foundationAReady && countByLevel(r.level) > 0 ? (
+                    {!r.directlyExecutable && countByLevel(r.level) > 0 ? (
                       <span
                         className="ml-1 text-fg-muted"
-                        title="Foundation-A 阶段，L2 及以上一律拒绝执行（ADVANCED_CONTROLS_REQUIRED）"
+                        title="L2 及以上不能直接执行：内核受理成审批单，批准后在「待审批」里由人触发"
                       >
-                        （全部待 Foundation-B）
+                        （全部先落审批单）
                       </span>
                     ) : null}
                   </td>
@@ -700,7 +731,9 @@ function ActionRiskConditionsTab() {
         </div>
         <p className="text-xs text-fg-muted">
           依据 docs/adr/ADR-003-Action唯一写入口.md。「可执行」由内核按风险等级实时判定
-          （L2/L3/L4 在 Foundation-A 阶段恒为不可执行），不是本页写死的规则；隐藏或灰显同样不构成安全控制。
+          （L2/L3/L4 恒为否——它们<strong>不能被直接执行</strong>，而是先由内核受理成审批单，
+          批准后在「待审批」子页签由人触发），不是本页写死的规则；隐藏或灰显同样不构成安全控制。
+          某个环境接没接上审批中心，逐条写在「操作目录」的「可执行」列里，由后端给出。
         </p>
       </ApiStateView>
     </section>

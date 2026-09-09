@@ -1,0 +1,70 @@
+{
+  "id": "integration.automation_rule.set",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "integration.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "REQUIRED_FOUNDATION_B",
+  "write_confirmation": "REQUIRED_FOUNDATION_B",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "AUTOMATIC",
+  "params": {
+    "rule_id": {
+      "type": "string",
+      "required": false
+    },
+    "name": {
+      "type": "string",
+      "required": true
+    },
+    "description": {
+      "type": "string",
+      "required": false
+    },
+    "trigger_kind": {
+      "type": "string",
+      "required": true,
+      "enum": [
+        "manual",
+        "schedule",
+        "event",
+        "webhook"
+      ]
+    },
+    "trigger_detail": {
+      "type": "string",
+      "required": false
+    },
+    "target_action_id": {
+      "type": "string",
+      "required": true
+    },
+    "target_action_version": {
+      "type": "string",
+      "required": true
+    },
+    "status": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "draft",
+        "registered",
+        "disabled"
+      ]
+    },
+    "notes": {
+      "type": "string",
+      "required": false
+    }
+  },
+  "notes": "XM-EXT-INTEGRATION（2026-09-08，ADMIN-IA §5.4.1「自动化流程先做只读」）：自动化规则登记簿。**没有执行器**——登记一条「当 X 发生时执行 Y」不会让 Y 跑起来，仓库里没有任何代码读 core.automation_rule 去触发 Action。L1 的依据正是这一条：它写的是一条纯记录，与 server.asset.set 同一档。**这个等级与「没有执行器」是绑在一起的**：哪天真接上执行器，等级要按被触发的目标 Action 里最高的那一档重新评估（一条能自动触发 L4 的规则本身就该按 L4 来批），那是另一次裁定的事。status 的三个取值都不会让规则跑起来，它们描述的是这条登记处在编写、已定稿还是已作废；trigger_kind/trigger_detail 只被记录，不被订阅、不被轮询、不被监听。target_action_id 刻意不做外键、不校验是否已注册——注册表是进程内的运行期对象、不在数据库里；是否指向一个真实存在的 Action 由读取端点对照后如实标出。rule_id 留空=新登记，填了=改这一条（整行替换语义）。无 environment 参数——环境取自调用者身份（宪法 15 条）；同一环境下 name 唯一。"
+}

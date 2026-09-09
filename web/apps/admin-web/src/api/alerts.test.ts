@@ -128,8 +128,11 @@ describe("写路径", () => {
 });
 
 describe("规则清单", () => {
-  it("五条规则，键的形态与后端 CHECK 一致", () => {
-    expect(ALERT_RULES).toHaveLength(5);
+  it("键的形态与后端 CHECK 一致", () => {
+    // 条数不写死在这里：清单该有几条由后端 alerts/rules.go 说了算，
+    // 那条对账在 lib/labels.reconcile.test.ts（它直接读 rules.go 求差集）。
+    // 这里写一个数字只会在后端加规则时红在一个说不清原因的地方。
+    expect(ALERT_RULES.length).toBeGreaterThan(0);
     for (const rule of ALERT_RULES) {
       // 库层 CHECK：^[a-z0-9][a-z0-9_.-]{0,127}$
       expect(rule.key).toMatch(/^[a-z0-9][a-z0-9_.-]{0,127}$/);

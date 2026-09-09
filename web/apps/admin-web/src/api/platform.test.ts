@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "./client";
 import type { PlatformApiConfig } from "./config";
 import {
+  APPROVAL_REQUIRED_STATUS,
+  ApprovalRequiredError,
   AUDIT_PAGE_SIZE,
   createService,
   executeAction,
@@ -13,6 +15,7 @@ import {
   observeService,
   serviceFreshness,
   SERVICE_STALENESS_THRESHOLD_SECONDS,
+  submitAction,
   type ServiceItem,
 } from "./platform";
 
@@ -195,6 +198,89 @@ describe("executeAction：写路径唯一入口", () => {
   it("响应里没有 run_id 时给空串，不编一个", async () => {
     const run = await executeAction({ actionId: "a.b.c", version: "1", params: {} }, {}, fakeClient({}));
     expect(run.runId).toBe("");
+  });
+
+  // executeAction 只准备接「执行完了」这一种结局。拿到审批受理时**必须炸**，
+  // 而不是像本片之前那样返回 { runId: "" }：那个空串会被调用点当成一次成功，
+  // 界面上就是「已提交开卡请求 · 这次响应里没有 action_run_id」。
+  it("L0/L1 入口拿到审批受理时抛错，不返回空 run_id 的假成功", async () => {
+    const client = fakeClient({
+      approval_request_id: "ap-9",
+      status: APPROVAL_REQUIRED_STATUS,
+      message: "action a.b.c 风险等级 L3 需要审批，已受理为审批单 ap-9",
+    });
+    await expect(
+      executeAction({ actionId: "a.b.c", version: "1", params: {} }, {}, client),
+    ).rejects.toBeInstanceOf(ApprovalRequiredError);
+  });
+});
+
+describe("submitAction：两种结局分得开", () => {
+  // 字段名逐字照抄 httpapi/actions.go 的 approvalRequiredResponse：
+  // approval_request_id / status / message。凭记忆写参数名在本仓库栽过。
+  const approvalBody = {
+    approval_request_id: "ap-2f1c",
+    status: "APPROVAL_REQUIRED",
+    message: "action cards.withdraw.execute 风险等级 L3 需要审批，已受理为审批单 ap-2f1c",
+  };
+
+  it("202 的响应体折成 approval_pending，带单号与后端原话", async () => {
+    const outcome = await submitAction(
+      { actionId: "cards.withdraw.execute", version: "1", params: {}, reason: "季度结算" },
+      {},
+      fakeClient(approvalBody),
+    );
+    // 断言 kind 而不是「runId 是不是空」：旧实现返回的是 { runId: "", result }，
+    // 这三条在旧实现下都取不到值，红得干脆。
+    expect(outcome.kind).toBe("approval_pending");
+    if (outcome.kind !== "approval_pending") throw new Error("不该走到这里");
+    expect(outcome.approvalRequestId).toBe("ap-2f1c");
+    expect(outcome.message).toBe(approvalBody.message);
+  });
+
+  it("单号为空但 status 说了 APPROVAL_REQUIRED 时，仍然算审批受理", async () => {
+    const outcome = await submitAction(
+      { actionId: "a.b.c", version: "1", params: {} },
+      {},
+      fakeClient({ approval_request_id: "", status: APPROVAL_REQUIRED_STATUS, message: "" }),
+    );
+    // 少了单号是排障线索，不是「那就当它执行了」的理由。
+    expect(outcome.kind).toBe("approval_pending");
+  });
+
+  it("200 的响应体折成 executed", async () => {
+    const outcome = await submitAction(
+      { actionId: "a.b.c", version: "1", params: {} },
+      {},
+      fakeClient({ action_run_id: "run-7", result: { ok: true } }),
+    );
+    expect(outcome.kind).toBe("executed");
+    if (outcome.kind !== "executed") throw new Error("不该走到这里");
+    expect(outcome.runId).toBe("run-7");
+  });
+
+  it("给了 reason 就发出去（httpapi.executeActionBody 的字段名是 reason）", async () => {
+    const client = fakeClient({ action_run_id: "run-1" });
+    await submitAction(
+      { actionId: "a.b.c", version: "1", params: { x: 1 }, reason: "上游额度到期，先补一张" },
+      {},
+      client,
+    );
+    expect(client.post).toHaveBeenCalledWith(
+      "/api/v1/actions/a.b.c/versions/1/execute",
+      { params: { x: 1 }, reason: "上游额度到期，先补一张" },
+      expect.anything(),
+    );
+  });
+
+  // L0/L1 的请求形状不因为这一片而改变：后端用 DisallowUnknownFields 解析，
+  // 而「发一个空 reason」和「不发 reason」在审计上不是一回事。
+  it("没给 reason 时请求体里没有这个字段", async () => {
+    const client = fakeClient({ action_run_id: "run-1" });
+    await submitAction({ actionId: "a.b.c", version: "1", params: { x: 1 } }, {}, client);
+    const body = (client.post as unknown as { mock: { calls: unknown[][] } }).mock.calls[0]?.[1];
+    expect(body).toEqual({ params: { x: 1 } });
+    expect(Object.keys(body as object)).not.toContain("reason");
   });
 });
 

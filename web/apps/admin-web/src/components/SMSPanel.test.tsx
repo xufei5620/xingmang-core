@@ -109,7 +109,7 @@ it("买号需要两步确认，第一次点击不发请求", async () => {
   fireEvent.click(armButtons[armButtons.length - 1]!);
 
   expect(purchaseSMSNumbers).not.toHaveBeenCalled();
-  expect(await screen.findByRole("button", { name: /确认买/ })).toBeTruthy();
+  expect(await screen.findByRole("button", { name: /提交买 1 个号的审批/ })).toBeTruthy();
 });
 
 // 62 一个生命周期动作都没有，**明说而不是把按钮灰掉**。

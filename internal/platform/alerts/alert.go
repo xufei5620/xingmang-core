@@ -174,6 +174,20 @@ func (s Silence) Matches(ruleKey string, at time.Time) bool {
 	if s.RuleKey != "" && s.RuleKey != ruleKey {
 		return false
 	}
+	return s.Active(at)
+}
+
+// Active 报告该窗口此刻是否开着——**不问规则**。
+//
+// 与 Matches 分开是因为这是两个问题：Matches 答「这条规则现在被压着吗」，
+// Active 答「这个窗口现在生效吗」。列表页问的是后者：一个 rule_key 为空的
+// 全局窗口在 Matches 下永远要配一个具体规则才有答案，拿它去判「这条记录
+// 是不是生效中」会把全局窗口整片判成不生效。
+//
+// 边界规则只写在这里一处。它原先长在 Matches 里，HTTP 层要判「生效中 vs
+// 已过期」时若照抄一遍，两份实现迟早分叉，而分叉的后果是列表说「已过期」、
+// 投递侧仍在静默（或反过来）——那比没有列表更糟。
+func (s Silence) Active(at time.Time) bool {
 	at = at.UTC()
 	// 左闭右开：[starts_at, ends_at)。右开让「窗口正好到期的那一刻」
 	// 归属明确——到点即失效，不会出现多静默一轮的边界争议。

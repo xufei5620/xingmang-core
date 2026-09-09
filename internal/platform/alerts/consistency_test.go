@@ -16,6 +16,20 @@ import (
 // 那几个包（connectors/sub2api、ops、jobs）。做法照搬 ops/metrickeys_test.go：
 // 字面量重复的代价由一致性测试兜住——任何一边改了，这里当场失败。
 
+// TestApprovalQueueMetricKeyMatchesJob：alerts 把审批队列的观测键写成字面量
+// （不 import jobs——那会造成 alerts ↔ jobs 的环）。它必须与 jobs 实际写出的
+// 键逐字一致，否则 approval.pending.too_long **一条都不评估**：没有报错，
+// 只是永远不响，而这条规则的整个价值就在于「有人在等」时会响。
+func TestApprovalQueueMetricKeyMatchesJob(t *testing.T) {
+	if alerts.DefaultApprovalQueueMetricKey != jobs.MetricApprovalQueue {
+		t.Fatalf("审批队列指标键漂移：alerts=%q, jobs=%q",
+			alerts.DefaultApprovalQueueMetricKey, jobs.MetricApprovalQueue)
+	}
+	if !ops.KnownMetricKey(alerts.DefaultApprovalQueueMetricKey) {
+		t.Fatalf("%q 不在 ops 的已注册指标白名单里", alerts.DefaultApprovalQueueMetricKey)
+	}
+}
+
 // TestChannelBalanceMetricKeyMatchesConnector：alerts 把渠道余额的指标键
 // 写成字面量，是为了不让平台层依赖某一个具体 Connector。
 // 那个字面量必须与 connectors/sub2api 实际产出的键逐字一致，
@@ -77,6 +91,8 @@ func TestAlertEvaluateIntervalIsFasterThanCollection(t *testing.T) {
 // 改名等于让已存在的静默窗口失配——只增不改。
 func TestRulesCoverDocumentedFirstBatch(t *testing.T) {
 	want := []string{
+		// XM-0030c：有审批单挂太久没人决定。
+		"approval.pending.too_long",
 		"channel.balance.low",
 		"channel.token.invalid",
 		"metric.data.stale",

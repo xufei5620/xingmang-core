@@ -196,6 +196,32 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 重新排队投递。这条转换是 `Store.Upsert` 里唯一会重置投递状态的路径；
 平时（`OPEN` 持续命中）绝不重置，否则每 60 秒重发一次同样的消息。
 
+**没有「取消」**：平台不提供撤销静默的能力，窗口只会自己到期。按早了就只能
+等——这是取舍，不是漏做：一个能被随手撤销的静默窗口，其审计价值远低于
+一个必须等它走完的窗口。
+
+### 列出窗口（`GET /api/v1/alerts/silences`，XM-SILENCE-LIST）
+
+静默此前**只能建不能看**。看不见的静默窗口比看得见的危险得多——运营按得下
+去，却回答不了「现在有哪些静默生效中、是谁按的、什么时候到期」。
+
+| 参数 | 说明 |
+|---|---|
+| `environment` | 不传用调用者自己的；传了必须一致（规格 §20.5），否则 403 |
+| `state` | `active`（默认，只给此刻生效的）或 `all`（含未开始与已过期）。其余取值当场 400 |
+| `limit` | 正整数，上界由 `alerts.MaxListLimit` 钳制。非正整数当场 400 |
+
+响应是 `{items, limit, truncated, as_of}`。每条带一个服务端算出的
+`state`：`active` / `scheduled` / `expired`——判据是
+`alerts.Silence.Active`，与投递侧压制告警用的是**同一段代码**，前端不自行
+比对时间。`as_of` 是判定所用的时刻。
+
+`state=active` 走 `ListActiveSilences`（SQL 带时间条件、无 LIMIT，limit 由
+HTTP 层兑现）；`state=all` 走 `ListSilences`（按 `starts_at` 倒序，SQL 带
+LIMIT）。**不是「全取回来再在 Go 里筛」**：那样会先被 limit 截断，一屏历史
+窗口就能把生效中的挤掉，页面于是显示「当前没有静默」。管理端出于同样的理由
+分两次请求，「生效中」的计数不跟历史列表共用一份数据。
+
 ---
 
 ## 投递（规格 §9.4）
@@ -290,6 +316,7 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 | 能力 | Scope | 风险等级 |
 |---|---|---|
 | 读告警（`GET /api/v1/alerts`） | `ops.read` | — |
+| 读静默窗口（`GET /api/v1/alerts/silences`） | `ops.read` | — |
 | 确认告警（`alerts.alert.acknowledge@1`） | `alerts.alert.manage` | L0 |
 | 创建静默窗口（`alerts.silence.create@1`） | `alerts.silence.manage` | L1 |
 

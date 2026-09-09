@@ -132,11 +132,25 @@ func bindingPrincipal(ctx context.Context) (principal.Principal, error) {
 func bindingActionError(err error) error {
 	switch {
 	case errors.Is(err, ErrBindingConflict):
-		return action.NewError(action.CodeConflict, "channel binding changed; refresh and retry", err)
+		// REVISION_CONFLICT 而不是笼统的 CONFLICT：两者都映射 409，但这一条
+		// 是**乐观并发的版本冲突**（读到写之间被别人改了），与 approval 包里
+		// 那些状态冲突（已执行过 / 重复投票）不是一回事。CodeRevisionConflict
+		// 就是为这个概念声明的，在此之前全仓一处未用。
+		return action.NewError(action.CodeRevisionConflict, "channel binding changed; refresh and retry", err)
 	case errors.Is(err, ErrBindingPrecondition):
 		return action.NewError(action.CodePreconditionFailed, "channel inventory is not complete and fresh", err)
 	case errors.Is(err, ErrNotFound):
-		return action.NewError(action.CodeNotRegistered, "binding resource not found", err)
+		// PRECONDITION_FAILED（412）而不是 CodeNotRegistered（404）。
+		//
+		// CodeNotRegistered 的对外字符串是 **ACTION_NOT_REGISTERED**——它说的是
+		// 「这个 Action 没注册」。用在 Query 路径上没问题（GET 一个不存在的资源，
+		// 404 正是对的，全仓有 13 处这么用）；但这里是 **Action handler**：端点
+		// 存在、Action 注册着，不存在的是参数里指名的那条绑定。回一个
+		// ACTION_NOT_REGISTERED 会让调用方去查部署，而不是去查自己给的 id。
+		//
+		// 412 是本仓三个 Action handler 对「参数指名的对象不存在」的既有做法
+		// （assurance 的声明、credentials 的 credential_ref、alerts 的告警）。
+		return action.NewError(action.CodePreconditionFailed, "binding resource not found", err)
 	case errors.Is(err, ErrMissingField), errors.Is(err, ErrInvalidFormat):
 		return action.NewError(action.CodeInvalidParams, "binding parameters are invalid", err)
 	default:

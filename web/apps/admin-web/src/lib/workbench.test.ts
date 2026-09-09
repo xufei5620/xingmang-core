@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { AlertItem } from "../api/alerts";
+import type { ApprovalItem } from "../api/approvals";
 import type { JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import {
+  approvalsDueSoonCount,
   focusRows,
   platformMatrixRows,
   recentlyRecoveredCount,
   urgentCount,
   truncationNote,
   workItemsFromAlerts,
+  workItemsFromApprovals,
   workItemsFromJobRuns,
   ACTIVE_ALERTS_LIMIT,
+  APPROVAL_DUE_WINDOW_HOURS,
+  WORK_APPROVALS_LIMIT,
   WORK_JOBS_LIMIT,
   RECOVERED_WINDOW_HOURS,
   WORK_CATEGORIES,
@@ -116,6 +121,49 @@ describe("顶部四格的计数口径", () => {
     const noTimestamp = alert({ id: "1", status: "RESOLVED", resolved_at: null });
     expect(recentlyRecoveredCount([noTimestamp], NOW)).toBe(0);
   });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一格以前叫「今日到期」，数审批 + 重试 + 轮换到期
+  // 三样，副行写着「随 Foundation-B 与后台任务页上线」。两样今天都在了，那句话
+  // 是错的；而三样合成一个数同样错——轮换到期一个都算不出来，合计恒偏低。
+  describe("「审批到期」只数一件有真正截止时刻的事", () => {
+    function due(over: Partial<ApprovalItem> = {}): ApprovalItem {
+      return {
+        id: "ap-due", action_id: "registry.connector.create", action_version: "1",
+        risk_level: "L2", params: {}, params_hash: "sha256:abc", requester_id: "staff_bob",
+        requester_type: "HUMAN", reason: "上线新连接器", status: "PENDING",
+        created_at: "2026-08-28T08:00:00Z", expires_at: "2026-08-28T15:00:00Z",
+        decisions: [], votes_required: 2, votes_cast: 0,
+        privileged_vote_required: false, privileged_vote_cast: false, ...over,
+      };
+    }
+
+    it("窗口是滚动 24 小时，边界之内算、之外不算", () => {
+      // NOW = 2026-08-28T12:00:00Z
+      expect(APPROVAL_DUE_WINDOW_HOURS).toBe(24);
+      const inside = due({ id: "a", expires_at: "2026-08-29T11:59:00Z" });
+      const onEdge = due({ id: "b", expires_at: "2026-08-29T12:00:00Z" });
+      const outside = due({ id: "c", expires_at: "2026-08-29T12:01:00Z" });
+      expect(approvalsDueSoonCount([inside, onEdge, outside], NOW)).toBe(2);
+    });
+
+    it("已过期的不算，哪怕库里仍记着 PENDING——那张单谁也批不动了", () => {
+      // ExpirePending 定时任务会滞后，服务端在执行那一刻才按 expires_at 判；
+      // 照抄 status 会让这一格把一批动不了的事算成「快到期了，去看一眼」
+      const expired = due({ id: "a", expires_at: "2026-08-28T11:00:00Z" });
+      expect(approvalsDueSoonCount([expired], NOW)).toBe(0);
+    });
+
+    it("非 PENDING 的不算：已批准/已执行的单不是待办", () => {
+      const approved = due({ id: "a", status: "APPROVED" });
+      const executed = due({ id: "b", status: "EXECUTED" });
+      expect(approvalsDueSoonCount([approved, executed], NOW)).toBe(0);
+    });
+
+    it("expires_at 解析不出来的不算——不替它断言「快到期了」", () => {
+      const broken = due({ id: "a", expires_at: "不是一个时间" });
+      expect(approvalsDueSoonCount([broken], NOW)).toBe(0);
+    });
+  });
 });
 
 describe("我的待处理", () => {
@@ -130,14 +178,23 @@ describe("我的待处理", () => {
     ]);
   });
 
-  it("「故障」与「失败任务」有数据源，其余四类都写明被什么挡着", () => {
+  it("「故障」「待审批」与「失败任务」有数据源，其余三类都写明被什么挡着", () => {
     // 摆一个永远空的分类而不说为什么，人会以为「这一类现在没有问题」
     const withSource = WORK_CATEGORIES.filter((c) => c.source);
-    expect(withSource.map((c) => c.id)).toEqual(["incidents", "jobs"]);
+    expect(withSource.map((c) => c.id)).toEqual(["incidents", "approvals", "jobs"]);
     for (const category of WORK_CATEGORIES) {
       expect(Boolean(category.source) !== Boolean(category.blockedBy)).toBe(true);
       if (category.blockedBy) expect(category.blockedBy.length).toBeGreaterThan(0);
     }
+  });
+
+  // XM-WORKBENCH-APPROVALS：接上数据源之后 blockedBy 必须撤掉。这不只是文案
+  // 问题——OverviewPage 是先看 blockedBy 再决定要不要渲染列表的，留着它，真
+  // 数据一行也显示不出来，而界面还理直气壮地说「还没有数据源」。
+  it("「待审批」接上数据源之后不再挂 blockedBy", () => {
+    const approvals = WORK_CATEGORIES.find((c) => c.id === "approvals");
+    expect(approvals?.source).toBeTruthy();
+    expect(approvals?.blockedBy).toBeUndefined();
   });
 
   it("已解决的告警不进待办", () => {
@@ -233,12 +290,126 @@ describe("失败任务：只收已放弃的后台任务", () => {
   });
 });
 
+// XM-WORKBENCH-APPROVALS：审批中心（XM-0030）已启用，这一类原来只有一句
+// 「后端在、前端没接」的占位。占位比缺功能更糟：等着人投票的 L3/L4 动作在
+// 首屏彻底不可见。
+describe("待审批：只收此刻真的还等着人投票的单", () => {
+  function approval(over: Partial<ApprovalItem> = {}): ApprovalItem {
+    return {
+      id: "ap-1",
+      action_id: "registry.connection.set_status",
+      action_version: "1",
+      risk_level: "L3",
+      params: {},
+      params_hash: "sha256:abc",
+      requester_id: "staff_bob",
+      requester_type: "HUMAN",
+      reason: "上游换域名，需要重新登记",
+      status: "PENDING",
+      created_at: "2026-08-28T08:00:00Z",
+      expires_at: "2026-08-28T15:00:00Z",
+      decisions: [],
+      votes_required: 2,
+      votes_cast: 0,
+      privileged_vote_required: false,
+      privileged_vote_cast: false,
+      ...over,
+    };
+  }
+
+  it("一条待办给出等级、提交人、还差几票与到期时间，并直达「待审批」子页签", () => {
+    const item = workItemsFromApprovals([approval({ votes_cast: 1 })], NOW)[0];
+    // 前缀不能省：告警的 id 直接就是 alert.id，审批单的 id 也是一串 UUID,
+    // 三类合并成一张清单之后撞上一次，就是 React 静默丢掉一行
+    expect(item?.id).toBe("approval-ap-1");
+    expect(item?.categoryId).toBe("approvals");
+    // 徽章上放风险等级：这一屏唯一要当场判断的是「先看哪一张」
+    expect(item?.categoryLabel).toBe("L3");
+    expect(item?.tone).toBe("warning");
+    expect(item?.title).toBe("registry.connection.set_status@1");
+    expect(item?.meta).toBe("staff_bob 提交 · 还差 1 票（已 1/2）");
+    // NOW = 2026-08-28T12:00:00Z，夹具的到期时刻是当天 15:00
+    expect(item?.due).toBe("3 小时后到期");
+    expect(item?.to).toBe("/actions?sub=pending");
+  });
+
+  it("L4 排在 L3 前面，同一档里先到期的在前——与审批队列页同一条排序规则", () => {
+    const items = workItemsFromApprovals(
+      [
+        approval({ id: "l3-late", risk_level: "L3", expires_at: "2026-08-28T20:00:00Z" }),
+        approval({ id: "l4", risk_level: "L4" }),
+        approval({ id: "l3-soon", risk_level: "L3", expires_at: "2026-08-28T13:00:00Z" }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => i.id)).toEqual([
+      "approval-l4",
+      "approval-l3-soon",
+      "approval-l3-late",
+    ]);
+  });
+
+  it("L4 是危险色；不认识的等级照原样显示成中性徽章，不静默丢掉", () => {
+    expect(workItemsFromApprovals([approval({ risk_level: "L4" })], NOW)[0]?.tone).toBe("danger");
+    const unknown = workItemsFromApprovals([approval({ risk_level: "L9" })], NOW)[0];
+    expect(unknown?.categoryLabel).toBe("L9");
+    expect(unknown?.tone).toBe("neutral");
+  });
+
+  // ExpirePending 是定时任务，库里的 status 会滞后，而服务端在执行那一刻才按
+  // expires_at 判。照抄 status 会让首屏混进一批谁也批不动的单。
+  it("库里仍记着 PENDING 但已过期的单不进待办：它已经批不动了", () => {
+    const items = workItemsFromApprovals(
+      [
+        approval({ id: "alive", expires_at: "2026-08-28T15:00:00Z" }),
+        approval({ id: "dead", expires_at: "2026-08-28T11:00:00Z" }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => i.id)).toEqual(["approval-alive"]);
+  });
+
+  it("非 PENDING 的单一律不进待办", () => {
+    const items = workItemsFromApprovals(
+      [
+        approval({ id: "ok" }),
+        approval({ id: "approved", status: "APPROVED" }),
+        approval({ id: "rejected", status: "REJECTED" }),
+        approval({ id: "executed", status: "EXECUTED" }),
+        approval({ id: "cancelled", status: "CANCELLED" }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => i.id)).toEqual(["approval-ok"]);
+  });
+
+  it("票数满了但还缺特权票时，那句话原样落在这一行上", () => {
+    // 只说「已 2/2 票」会让人以为该批了，而它还挂着——那看起来像故障。
+    // 措辞只有 voteProgress 一份，这里钉住它确实被用上了
+    const item = workItemsFromApprovals(
+      [approval({ votes_cast: 2, privileged_vote_required: true })],
+      NOW,
+    )[0];
+    expect(item?.meta).toBe("staff_bob 提交 · 票数已满 2/2，但还缺一张 approval.l4 特权票");
+  });
+
+  it("到期时刻解析不出来时说「到期时间未知」，不拼出「—后到期」", () => {
+    const item = workItemsFromApprovals([approval({ expires_at: "" })], NOW)[0];
+    expect(item?.due).toBe("到期时间未知");
+  });
+});
+
 // XM-WORKBENCH-TRUNCATION：取满上限时要说出来。
 //
 // 一张"没有待处理事项"的清单如果其实被截断了，人会据此收工——这比少一条
 // 信息严重得多。
 describe("这一屏是不是全部", () => {
-  const none = { activeCategoryId: "", alertsTruncated: false, jobsTruncated: false };
+  const none = {
+    activeCategoryId: "",
+    alertsTruncated: false,
+    jobsTruncated: false,
+    approvalsTruncated: false,
+  };
 
   it("没到上限时不说话——显示一句「没有截断」是噪声", () => {
     expect(truncationNote(none)).toBeNull();
@@ -250,6 +421,7 @@ describe("这一屏是不是全部", () => {
     expect(note).toContain("可能不是全部");
     expect(note).toContain(String(ACTIVE_ALERTS_LIMIT));
     expect(note).not.toContain("后台任务");
+    expect(note).not.toContain("待审批");
   });
 
   it("任务被截断时说出来", () => {
@@ -259,22 +431,44 @@ describe("这一屏是不是全部", () => {
     expect(note).not.toContain("活跃告警");
   });
 
-  it("两边都被截断就都说", () => {
+  it("待审批被截断时说出来", () => {
+    const note = truncationNote({ ...none, approvalsTruncated: true });
+    expect(note).toContain("待审批的单");
+    expect(note).toContain(String(WORK_APPROVALS_LIMIT));
+    expect(note).not.toContain("活跃告警");
+    expect(note).not.toContain("后台任务");
+  });
+
+  it("三边都被截断就都说", () => {
     const note = truncationNote({
       activeCategoryId: "",
       alertsTruncated: true,
       jobsTruncated: true,
+      approvalsTruncated: true,
     });
     expect(note).toContain("活跃告警");
+    expect(note).toContain("待审批的单");
     expect(note).toContain("后台任务");
   });
 
   // 在「待审批」下面提"告警取了 200 条"是噪声：那一格根本不显示告警。
+  //
+  // 这里逐字比整句而不是 `not.toContain`：断言"某一句不在"太容易恒真
+  // （拼错一个字、少一个格子，它照样"不在"）。整句相等既钉住了该说的，
+  // 也钉住了不该说的。
   it("只说当前这一格可能被截断的那一条", () => {
-    const both = { alertsTruncated: true, jobsTruncated: true };
-    expect(truncationNote({ ...both, activeCategoryId: "incidents" })).not.toContain("后台任务");
-    expect(truncationNote({ ...both, activeCategoryId: "jobs" })).not.toContain("活跃告警");
-    expect(truncationNote({ ...both, activeCategoryId: "approvals" })).toBeNull();
+    const all = { alertsTruncated: true, jobsTruncated: true, approvalsTruncated: true };
+    expect(truncationNote({ ...all, activeCategoryId: "incidents" })).toBe(
+      "这一屏可能不是全部：活跃告警只取了 200 条。完整清单在各自的页面里。",
+    );
+    expect(truncationNote({ ...all, activeCategoryId: "approvals" })).toBe(
+      "这一屏可能不是全部：待审批的单只取了 20 条。完整清单在各自的页面里。",
+    );
+    expect(truncationNote({ ...all, activeCategoryId: "jobs" })).toBe(
+      "这一屏可能不是全部：已放弃的后台任务只取了 20 条。完整清单在各自的页面里。",
+    );
+    // 没有数据源的分类底下一条都不说
+    expect(truncationNote({ ...all, activeCategoryId: "finance" })).toBeNull();
   });
 });
 
@@ -299,6 +493,32 @@ describe("运营焦点：三个领域分开，绝不合成总健康分", () => {
     expect(rows[2]?.count).toBeUndefined();
     expect(rows[1]?.state).toBe("未接入");
     expect(rows[2]?.state).toBe("未接入");
+  });
+
+  // XM-UPSTREAM-DETAIL-COPY：这一行以前写着「凭据到期与权限异常随『人员与权限』
+  // 页上线」。/identity 早就建成了——一句指错方向的话比没有话更坏，它让人去等
+  // 一个已经到货的东西。同一句话的另一份副本（WORK_CATEGORIES.expiring）上一次
+  // 已经订正过，这一份被漏掉了，所以现在两处共用同一段文案。
+  it("「安全」说的是真正的缺口，不是某个早就建成的页面", () => {
+    const security = focusRows([])[2];
+    expect(security?.domain).toBe("安全");
+    // 凭据到期缺的是数据模型：CredentialRef 只有 scope/name
+    expect(security?.detail).toContain("凭据模型里还没有到期时间");
+    expect(security?.detail).toContain("CredentialRef");
+    // 权限异常缺的是判定规则，不是页面
+    expect(security?.detail).toContain("权限异常则还没有判定规则");
+    // 缺席断言，已做变异验证（把旧那句写回 focusRows 后本行转红）。
+    // 上面三条正向断言已经落在同一个字符串上，这一行不会因为「还没渲染」假绿。
+    expect(security?.detail).not.toContain("人员与权限");
+  });
+
+  // 两处共用一份的证据：文案漂开过一次，就是这一格被漏掉的原因
+  it("「安全」行与「即将到期」分类说的是同一个凭据缺口，不各写一份", () => {
+    const security = focusRows([])[2];
+    const expiring = WORK_CATEGORIES.find((c) => c.id === "expiring");
+    const shared = "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，不记录签发与轮换到期。";
+    expect(security?.detail.startsWith(shared)).toBe(true);
+    expect(expiring?.blockedBy?.startsWith(shared)).toBe(true);
   });
 });
 

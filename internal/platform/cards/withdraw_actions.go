@@ -65,17 +65,35 @@ func withdrawAddressRegisterDef(accounts []string) action.Definition {
 	}
 }
 
+// withdrawDef 是发起一次提现的声明。
+//
+// 风险等级 L3，**这一档给的正是「第二人审批」**。这里选 L3 而不是 L2 是有意
+// 的：按 approval.DefaultPolicy()，L2 是一票且允许提交人自批（等级本意如此），
+// 那样提现仍然是一个人从头做到尾；L3 要两票且审批人≠提交人，才真的落成
+// 「另一个人看过并同意」。而这个 Action 此前那段注释里写明缺的就是这道闸。
+//
+// 此前是 L1：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED（Foundation-B
+// 未实现），声明成 L2 会让提现变成永远跑不起来的摆设。审批中心实装并接进
+// 内核之后（cmd/platform-api 的 action.WithApprovalGateway），这个理由不再
+// 成立，恢复成设计上正确的等级。依据另见
+// docs/handoffs/slices/XM-0030a-approval-core.md：那份文档把本行连同
+// funds_actions.go、sms/actions.go 一起列为「被迫把本该 L2/L3 的 Action
+// 声明成 L1」，以及宪法条款 9「L3/L4 必须审批」。
+//
+// **L3 还是 L4 由产品负责人裁定。** ADR-003 的等级表把「退款」这类钱出去的
+// 动作放在 L4，而提现是平台里唯一一个把钱转到平台之外、不可逆也不可追回的
+// 动作，按字面读它够得上 L4。没有直接定成 L4 的原因是：L4 需要一张
+// approval.l4 特权票，而该 scope 按设计**默认不发给任何人**
+// （见 oidcauth/rolemap.go 的 approval-l4 角色），在有人持有它之前，L4 的
+// 提现单会一直停在 PENDING 直到过期。这是「谁来持特权票」的授权决定，
+// 不是本片能替负责人做的判断。
+//
+// 风险等级之外的护栏一道没减：独立权限（不给 admin，由 fund-operator 持有）、
+// 地址白名单、金额上限（不许 unlimited）、幂等键、审计、页面两步确认。
 func withdrawDef(accounts []string) action.Definition {
 	return action.Definition{
 		ID: ActionWithdraw, Version: actionVersion,
-		// 仍是 L1：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
-		// （Foundation-B 未实现），声明成 L2 会让提现变成永远跑不起来的摆设。
-		//
-		// 这意味着**平台今天没有第二人审批**这道闸。提现的护栏只有：
-		// 独立权限（不给 admin）、地址白名单、金额上限（不许 unlimited）、
-		// 幂等键、审计、页面两步确认。这一点必须写在这里，
-		// 免得有人以为 L1 是「评估过风险不高」。
-		RiskLevel: action.L1, Permission: PermissionWithdraw,
+		RiskLevel: action.L3, Permission: PermissionWithdraw,
 		Schema: action.Schema{
 			Fields: []action.Field{
 				accountField(accounts),

@@ -103,6 +103,14 @@ func RegisteredPeriodicJobSpecs() []JobSpec {
 			IdempotencyEvidence: "cutoff-bounded batched delete; repeating a batch cannot expand its deletion range",
 		},
 		{
+			ID: ApprovalExpireJobKind, Kind: ApprovalExpireJobKind, Queue: QueueMaintenance,
+			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
+			ScheduleConfig: "XM_APPROVAL_EXPIRE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.ApprovalExpireRunOnStart",
+			CatchUp: jobManifestCatchUp, EnqueueFences: manifestFences(), UniqueStates: manifestUniqueStates(),
+			Execution: jobManifestExecution, SideEffectClass: "bounded_status_transition_then_observation",
+			IdempotencyEvidence: "expiry only moves PENDING rows whose expires_at already passed; a repeat finds none left and the observation is an upsert",
+		},
+		{
 			ID: AlertEvaluateJobKind, Kind: AlertEvaluateJobKind, Queue: QueueMaintenance,
 			OwnerProcess: jobManifestOwnerProcess, Ownership: OwnershipClusterSingleton,
 			ScheduleConfig: "XM_ALERT_EVALUATE_INTERVAL", RunOnStartSource: "jobs.DefaultConfig.AlertEvaluateRunOnStart",

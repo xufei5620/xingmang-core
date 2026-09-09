@@ -589,7 +589,36 @@ export const UPSTREAM_ACCOUNTS_QUERY = "finance-upstream-accounts";
 export const SUBSCRIPTION_BATCHES_QUERY = "finance-subscription-batches";
 export const PROXY_ASSETS_QUERY = "finance-proxy-assets";
 /** 上游汇总（本文件上半部分的 `listUpstreamSummaries`）。
- *  与登记簿分开的 key：改倍率要刷登记簿，但不会立刻改变已入账的窗口汇总。 */
+ *  与登记簿分开的 key：改倍率要刷登记簿，但不会立刻改变已入账的窗口汇总。
+ *
+ *  ## 上面那段话说的事，在这一条上真的发生过（2026-09-08 修复）
+ *
+ *  这条 key 一度有**两种写法**：这里的常量（`["finance-upstream-summary"]`）
+ *  与散写在五个组件里的 `["finance", "upstreams", "summary"]`。react-query 的
+ *  失效是**前缀匹配**，两个数组互不为前缀，于是谁都作废不了谁——在上游详情页
+ *  记一笔退款/终止/登记批次，摊销当场变，而平台概览资金卡、渠道管理表、
+ *  跨平台财务页、渠道详情页四处照旧显示旧的余额、可用天数、成本与毛利；
+ *  反过来，渠道管理表改绑或改倍率之后，上游详情页那几格也不动。
+ *
+ *  它躲了这么久，是因为三条性质凑齐了：没刷新的那一半**看起来完全正常**
+ *  （不是空白也不是错误态，就是一个陈旧但形状完美的读数）；**同屏内不自相
+ *  矛盾**（共用一份缓存的那几处要陈旧一起陈旧），只有跨页切换才撞得见;
+ *  而组件级用例**两侧都过**——每个组件只装配自己那一侧，断言「写完调了
+ *  invalidateQueries」，各自作废的确实是自己读的那个 key。
+ *
+ *  ## 现在由哪条测试拦着
+ *
+ *  `src/upstreamSummaryCache.test.tsx`。**注释拦不住这件事**——上面那段话
+ *  逐字预言了它，它照样发生了；所以真正的护栏是那两条跨组件用例：
+ *
+ *  - 同一个 `QueryClient` 下挂 `UpstreamAccountDetail`（写）与
+ *    `FinanceSummaryCards`（读），写完断言**读者屏幕上的数变了**；
+ *  - 四个组件同屏，断言缓存里只留**一份**上游汇总（按响应形状认，不按 key 认,
+ *    否则就成了拿 key 校验 key）。
+ *
+ *  两条都做过变异验证（把任一侧的 key 改回字面量即转红，且红在目标断言上）。
+ *  新增一处读或一处失效时，**用这个常量**；要新起一个 key 就把它加进那个文件
+ *  的同屏用例里，别让它成为第三种写法。 */
 export const UPSTREAM_SUMMARY_QUERY = "finance-upstream-summary";
 
 export async function listUpstreamAccounts(
@@ -727,6 +756,144 @@ export function setProxyAsset(
       };
   return executeAction(
     { actionId: "finance.proxy_asset.set", version: "1", params: allowed },
+    options,
+    client,
+  );
+}
+
+// --- 订阅批次与代理资产的四个生命周期 Action（退款 / 终止）---
+//
+// 字段名与必填性逐字抄自 `internal/platform/finance/subscription_actions.go`
+// 的四个 `Definition`（`subscriptionBatchRefundDef` / `…TerminateDef` /
+// `proxyAssetRefundDef` / `proxyAssetTerminateDef`）。Schema 是**白名单**语义
+// （`action/schema.go`：「未声明的字段一律拒绝」），所以这里逐个复制字段，
+// 不透传调用方对象。
+//
+// **`reason` 是这四个 Action 自己 Schema 里的字段，走 `params`。**
+// 它与 XM-ACTION-REASON 给请求体加的那个顶层 `reason` 不是同一个东西：
+// 后者是内核对 **L2 及以上**的审批理由（`action/kernel.go`），这四个是 L1，
+// 内核不要求、也不会因此落审批单。填错地方的后果是 Schema 校验直接 400
+// （params 缺 reason），而不是「多传了一个无害字段」。
+//
+// 因此这四个都用 `executeAction`（只接受同步执行完这一种结局）而不是
+// `submitAction`：L1 不会走 202，真拿到 202 说明等级被人改过，那时抛
+// `ApprovalRequiredError` 比悄悄显示成功正确——界面这一层没有承接审批单的地方。
+
+/** `finance.subscription_batch.refund@1` 的参数。 */
+export interface SubscriptionBatchRefundParams {
+  subscription_batch_id: string;
+  /** **累计**退款额（不是本次新增），scale-6 纯整数字符串。
+   *  仓储只增不减（`SetBatchRefund` 的 `ErrRefundNotDecreasing`）。 */
+  refunded_minor: string;
+  /** 退款生效日 `YYYY-MM-DD`，决定从哪天起冲减剩余未摊天。 */
+  refunded_on: string;
+  reason: string;
+}
+
+/** `finance.subscription_batch.terminate@1` 的参数。 */
+export interface SubscriptionBatchTerminateParams {
+  subscription_batch_id: string;
+  /** 终止日 `YYYY-MM-DD`，必须落在有效期内，且决定结转多少损失。 */
+  terminated_on: string;
+  reason: string;
+}
+
+/** `finance.proxy_asset.refund@1` 的参数。 */
+export interface ProxyAssetRefundParams {
+  proxy_asset_id: string;
+  refunded_minor: string;
+  refunded_on: string;
+  reason: string;
+}
+
+/** `finance.proxy_asset.terminate@1` 的参数。 */
+export interface ProxyAssetTerminateParams {
+  proxy_asset_id: string;
+  terminated_on: string;
+  reason: string;
+}
+
+/** 记一笔订阅批次的累计退款额（`finance.subscription_batch.refund@1`）。 */
+export function refundSubscriptionBatch(
+  params: SubscriptionBatchRefundParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.subscription_batch.refund",
+      version: "1",
+      params: {
+        subscription_batch_id: params.subscription_batch_id,
+        refunded_minor: params.refunded_minor,
+        refunded_on: params.refunded_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 提前失效一笔订阅批次并结转损失（`finance.subscription_batch.terminate@1`）。 */
+export function terminateSubscriptionBatch(
+  params: SubscriptionBatchTerminateParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.subscription_batch.terminate",
+      version: "1",
+      params: {
+        subscription_batch_id: params.subscription_batch_id,
+        terminated_on: params.terminated_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 记一笔代理资产的累计退款额（`finance.proxy_asset.refund@1`）。 */
+export function refundProxyAsset(
+  params: ProxyAssetRefundParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.proxy_asset.refund",
+      version: "1",
+      params: {
+        proxy_asset_id: params.proxy_asset_id,
+        refunded_minor: params.refunded_minor,
+        refunded_on: params.refunded_on,
+        reason: params.reason,
+      },
+    },
+    options,
+    client,
+  );
+}
+
+/** 提前失效一份代理资产并结转损失（`finance.proxy_asset.terminate@1`）。 */
+export function terminateProxyAsset(
+  params: ProxyAssetTerminateParams,
+  options: ListOptions = {},
+  client: ApiClient = apiClient,
+): Promise<ActionRun> {
+  return executeAction(
+    {
+      actionId: "finance.proxy_asset.terminate",
+      version: "1",
+      params: {
+        proxy_asset_id: params.proxy_asset_id,
+        terminated_on: params.terminated_on,
+        reason: params.reason,
+      },
+    },
     options,
     client,
   );

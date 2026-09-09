@@ -298,11 +298,100 @@ func TestCheckedInPolicyContractLoads(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := LoadStateEvents(eventData)
-	if err != nil || len(events) != 2 {
+	if err != nil || len(events) == 0 {
 		t.Fatalf("checked-in event log rejected: %v (%d events)", err, len(events))
 	}
-	if events[0].CurrentPolicySHA256 != "43c54c51b79b26684e2a874ddfc904bb8f208ec897731481c1db3ee49e02aed0" || events[1].CurrentPolicySHA256 != RawDigest(data) {
-		t.Fatalf("event chain policy digests drifted: %+v", events)
+	// Head and tail, not a count.
+	//
+	// This used to assert `len(events) != 2`, which had to be edited on every
+	// legitimate append while protecting nothing the digest chain does not
+	// already protect: LoadStateEvents runs the full hash/sequence chain check,
+	// so events cannot be reordered, replayed, or silently rewritten.
+	//
+	// What actually needs pinning is the two ends:
+	//   * genesis carries a known constant, so the chain's origin cannot be
+	//     re-founded on a different policy;
+	//   * the LAST event must attest to the policy bytes on disk right now.
+	//     That is the invariant a policy edit breaks — and it stays a one-line
+	//     assertion no matter how many events accumulate.
+	const genesisPolicyDigest = "43c54c51b79b26684e2a874ddfc904bb8f208ec897731481c1db3ee49e02aed0"
+	if events[0].Kind != EventKindGenesis || events[0].CurrentPolicySHA256 != genesisPolicyDigest {
+		t.Fatalf("genesis anchor drifted: kind=%q digest=%q", events[0].Kind, events[0].CurrentPolicySHA256)
+	}
+	last := events[len(events)-1]
+	if last.CurrentPolicySHA256 != RawDigest(data) {
+		t.Fatalf("last event does not attest the checked-in policy: event %d (%s) says %q, file is %q\n"+
+			"append a policy-update event binding the new digest",
+			last.Sequence, last.EventID, last.CurrentPolicySHA256, RawDigest(data))
+	}
+	if violations := ValidateEventChain(events); len(violations) != 0 {
+		t.Fatalf("checked-in event chain has violations: %+v", violations)
+	}
+}
+
+// TestSchemaMigrationStateViewIsTheOnlyWayRuntimeReadsMigrationVersion pins the
+// XM-READONLY-QUERIES decision: the platform API reads migration state through
+// core.schema_migration_state (migration 000050), never through public.
+//
+// Design §7.6 keeps `public` River-only and marks public.schema_migrations
+// no-runtime-access, and names "another approved read-only view" as the way
+// out. Both halves have to hold, so both are asserted — granting the view but
+// also opening `public` would silently make the view pointless.
+func TestSchemaMigrationStateViewIsTheOnlyWayRuntimeReadsMigrationVersion(t *testing.T) {
+	policy := DefaultPolicyV1()
+
+	var view *ObjectGrant
+	var base *ObjectGrant
+	var publicSchema *ObjectGrant
+	for i := range policy.Objects {
+		switch o := &policy.Objects[i]; {
+		case o.Schema == "core" && o.Name == "schema_migration_state":
+			view = o
+		case o.Schema == "public" && o.Name == "schema_migrations":
+			base = o
+		case o.Kind == "schema" && o.Name == "public":
+			publicSchema = o
+		}
+	}
+	if view == nil || base == nil || publicSchema == nil {
+		t.Fatalf("policy is missing one of the three objects: view=%v base=%v publicSchema=%v",
+			view != nil, base != nil, publicSchema != nil)
+	}
+
+	if view.Kind != "view" {
+		t.Fatalf("core.schema_migration_state kind=%q, want view", view.Kind)
+	}
+	if view.Owner != "xm_migrator" {
+		// Owner matters for correctness, not just tidiness: the view runs with
+		// the owner's privileges (security_invoker defaults to false), and only
+		// xm_migrator owns the base table.
+		t.Fatalf("core.schema_migration_state owner=%q, want xm_migrator", view.Owner)
+	}
+	for _, role := range []string{"xm_api_runtime", "xm_ops_read", "xm_backup_read"} {
+		if !policy.AllowsTable(role, "core.schema_migration_state", "SELECT") {
+			t.Fatalf("%s cannot SELECT the migration-state view", role)
+		}
+	}
+	// The worker is deliberately excluded (§7.6: worker gets no access to
+	// schema_migrations). Granting it via the view would be an end-run.
+	if policy.AllowsTable("xm_worker_runtime", "core.schema_migration_state", "SELECT") {
+		t.Fatal("xm_worker_runtime must not reach schema migration state, not even through the view")
+	}
+
+	// The other half: `public` stays River-only.
+	if policy.PublicSchemaContract != "river-only" {
+		t.Fatalf("public schema contract=%q", policy.PublicSchemaContract)
+	}
+	if !base.NoRuntimeAccess {
+		t.Fatal("public.schema_migrations must stay no-runtime-access")
+	}
+	for _, role := range []string{"xm_api_runtime", "xm_ops_read", "xm_backup_read", "xm_lifecycle_runtime"} {
+		if slices.Contains(publicSchema.Privileges[role], "USAGE") {
+			t.Fatalf("%s gained USAGE on schema public — the view exists precisely so that never happens", role)
+		}
+		if policy.AllowsTable(role, "public.schema_migrations", "SELECT") {
+			t.Fatalf("%s can SELECT public.schema_migrations directly", role)
+		}
 	}
 }
 

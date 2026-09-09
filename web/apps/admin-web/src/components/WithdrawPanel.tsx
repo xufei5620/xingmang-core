@@ -15,8 +15,9 @@ import {
   type WithdrawLimit,
 } from "../api/withdraw";
 import { ActionErrorNote } from "./ActionErrorNote";
-import { ActionResultNote, type ActionResult } from "./ActionResultNote";
+import { actionResultOf, ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ApprovalReasonField, isApprovalReasonUsable } from "./ApprovalReasonField";
 
 const WITHDRAW_ADDRESSES_QUERY = "withdraw-addresses";
 const WITHDRAWALS_QUERY = "withdrawals";
@@ -515,6 +516,8 @@ function WithdrawForm({
   const [tokenType, setTokenType] = useState("USDT");
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [armed, setArmed] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
@@ -526,23 +529,35 @@ function WithdrawForm({
   const mutation = useMutation({
     mutationFn: (requestId: string) => {
       if (!selected) throw new Error("没有可用的提现地址");
-      return executeWithdraw({
-        account: selected.account,
-        request_id: requestId,
-        // 链与账号都跟着选中的地址走，不让人另选一遍：两处各选一次
-        // 就有了不一致的可能，而链不一致的钱找不回来。后端也会再核一遍。
-        chain: selected.chain,
-        token_type: tokenType,
-        amount: amount.trim(),
-        address_id: selected.address_id,
-        ...(note.trim() ? { note: note.trim() } : {}),
-      });
+      return executeWithdraw(
+        {
+          account: selected.account,
+          request_id: requestId,
+          // 链与账号都跟着选中的地址走，不让人另选一遍：两处各选一次
+          // 就有了不一致的可能，而链不一致的钱找不回来。后端也会再核一遍。
+          chain: selected.chain,
+          token_type: tokenType,
+          amount: amount.trim(),
+          address_id: selected.address_id,
+          ...(note.trim() ? { note: note.trim() } : {}),
+        },
+        reason.trim(),
+      );
     },
-    onSuccess: (run) => {
-      onDone({ runId: run.runId, title: "已提交提现请求" });
+    onSuccess: (outcome) => {
+      // 提现是 L3，正常路径就是「落单等批」。executed 那一支保留是因为回执
+      // 该照实说，而不是由前端替后端断言「这次一定没执行」。
+      onDone(
+        actionResultOf(outcome, {
+          executed: "已提交提现请求",
+          approvalPending: "提现已提交审批，钱还没有转出",
+        }),
+      );
       setArmed(null);
       setAmount("");
       setNote("");
+      setReason("");
+      setReasonTouched(false);
       setError(null);
     },
     // 失败时**不清 armed**：那是同一笔业务的重试，键必须保持不变。
@@ -607,6 +622,15 @@ function WithdrawForm({
         </FormField>
       </div>
 
+      {/* 备注进台账，理由进审批单——两句话给的是两拨人看的，所以是两个字段。 */}
+      <ApprovalReasonField
+        id={`${formId}-reason`}
+        value={reason}
+        onChange={setReason}
+        subject="这笔提现"
+        touched={reasonTouched}
+      />
+
       <p className="text-fg-muted font-mono text-xs" title={selected.address}>
         将转到 {selected.chain}：{selected.address}
       </p>
@@ -618,12 +642,25 @@ function WithdrawForm({
               variant="danger"
               size="sm"
               disabled={mutation.isPending}
-              onClick={() => mutation.mutate(armed)}
-              title="再点一次将真的发起转账，链上转账没有撤回"
+              onClick={() => {
+                setReasonTouched(true);
+                if (!isApprovalReasonUsable(reason)) return;
+                mutation.mutate(armed);
+              }}
+              // 以前这句是「再点一次将真的发起转账」。提现恢复成 L3 之后不成立：
+              // 这一点只会落一张审批单，转账要等批准后由人在审批队列里触发。
+              title="提交后先落审批单，批准并由人执行之后才会真的转账；链上转账没有撤回"
             >
-              {mutation.isPending ? "提交中…" : `确认提现 ${amount} ${tokenType}`}
+              {mutation.isPending ? "提交中…" : `提交提现审批 ${amount} ${tokenType}`}
             </Button>
-            <Button variant="ghost" size="sm" onClick={() => setArmed(null)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setArmed(null);
+                setReasonTouched(false);
+              }}
+            >
               取消
             </Button>
           </>

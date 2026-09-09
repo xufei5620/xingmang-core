@@ -7,6 +7,7 @@ import {
   accountRowType,
   listUpstreamAccounts,
   listUpstreamSummaries,
+  UPSTREAM_SUMMARY_QUERY,
   type UpstreamAccountItem,
   type UpstreamSummary,
 } from "../api/finance";
@@ -90,7 +91,7 @@ export function ManagedChannelTable({
     queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
   });
   const summaryQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 
@@ -110,7 +111,7 @@ export function ManagedChannelTable({
         // 的数据变化才看得出来
         void queryClient.invalidateQueries({ queryKey: ["platform-channels", platform, serviceId] });
         void queryClient.invalidateQueries({ queryKey: ["finance-upstream-accounts"] });
-        void queryClient.invalidateQueries({ queryKey: ["finance", "upstreams", "summary"] });
+        void queryClient.invalidateQueries({ queryKey: [UPSTREAM_SUMMARY_QUERY] });
       }}
     />
   );

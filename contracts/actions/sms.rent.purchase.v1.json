@@ -1,7 +1,7 @@
 {
   "id": "sms.rent.purchase",
   "version": "1",
-  "risk_level": "L1",
+  "risk_level": "L2",
   "permission": "sms.purchase",
   "principal_types": ["HUMAN"],
   "environments": ["development", "staging", "production"],

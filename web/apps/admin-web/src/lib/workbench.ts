@@ -1,13 +1,32 @@
 import type { BadgeTone } from "@xingmang/ui-primitives";
 import { describeServiceStatus, platformNavSpec, type FreshnessContract } from "@xingmang/ui-admin";
 import type { AlertItem } from "../api/alerts";
+import type { ApprovalItem } from "../api/approvals";
 import { jobKindLabel, type JobRunItem } from "../api/jobs";
 import type { MetricItem, ServiceItem } from "../api/platform";
 import { describeSeverity, sortForDisplay } from "./alerts";
+import { groupByRisk, isEffectivelyExpired, voteProgress } from "./approvals";
 import { PLATFORM_CATALOG, pendingBadge, platformOfMetricKey } from "./platforms";
 
 /** 「最近恢复」的回看窗口（原型副标题逐字：「最近 24 小时」）。 */
 export const RECOVERED_WINDOW_HOURS = 24;
+
+/** 「审批到期」这一格向前看多久。
+ *
+ *  用滚动 24 小时而不是「今天」：审批单的 `expires_at` 是一个时刻，而「今天」
+ *  要先定按哪个时区切日（宪法 14 条）。这一格没有业务日语义可依，硬挑一个时区
+ *  会让同一批单在两台机器上数出不同的结果——同「最近恢复」那格的窗口口径。 */
+export const APPROVAL_DUE_WINDOW_HOURS = 24;
+
+/** 「凭据到期」今天缺的是什么。**抽成一份给两处共用**。
+ *
+ *  这句话有过两份副本：`WORK_CATEGORIES.expiring` 与 `focusRows()` 的「安全」行。
+ *  上一次订正只改了前者，于是首屏那一行继续写着「随『人员与权限』页上线」——
+ *  而 `/identity` 早就建成了，那句话把人指向一个根本不缺的东西。共用一份之后，
+ *  下一次订正不可能只改一半。 */
+const CREDENTIAL_EXPIRY_GAP =
+  "凭据模型里还没有到期时间：CredentialRef 只登记 secret://<scope>/<name>，" +
+  "不记录签发与轮换到期。";
 
 /** 待处理事项的分类（原型运营工作台的筛选条，逐字按顺序）。
  *
@@ -36,7 +55,14 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "approvals",
     label: "待审批",
-    blockedBy: "审批链随 Foundation-B（XM-0030）上线",
+    // XM-WORKBENCH-APPROVALS：这一格接上了 `GET /api/v1/approvals?status=PENDING`。
+    // 它原来写着「后端已启用、这一格的取数还没接」——那句话现在过期了，而一个
+    // 说「还没接」的占位比缺功能更糟：它让人不去看本来就有的数据，于是等着人
+    // 投票的 L3/L4 动作在首屏彻底不可见。
+    //
+    // 只收**此刻真的还等着人投票**的单（见 workItemsFromApprovals）：已过期的
+    // 不算待办，哪怕库里仍记着 PENDING。
+    source: "审批中心里仍等着投票的单（已过期的不算，见 workItemsFromApprovals）",
   },
   {
     id: "jobs",
@@ -55,12 +81,22 @@ export const WORK_CATEGORIES: readonly WorkCategory[] = [
   {
     id: "expiring",
     label: "即将到期",
-    blockedBy: "凭据轮换到期随「人员与权限」页上线",
+    // 「人员与权限」页（/identity）早就建成了，所以这句话也不能再那么写。
+    // 真正的缺口在更下面一层：**凭据模型里根本没有到期这个概念**——
+    // secrets.CredentialRef 只有 scope/name 两个字段，全仓找不到任何
+    // ExpiresAt / RotatedAt。没有到期时间，就没有「即将到期」可算。
+    blockedBy: `${CREDENTIAL_EXPIRY_GAP}要先给凭据加到期元数据，这一格才有得算。`,
   },
   {
     id: "changes",
     label: "待评审变更",
-    blockedBy: "变更单随 Foundation-B 上线",
+    // 同上：Foundation-B 已交付，这一格等的不是它。变更单本体今天**不在平台里**
+    // （没有 change_request 表、没有只读端点、没有 change.* Action），真实的
+    // 变更单是仓库 docs/change-requests/ 下的 CR-xxxx。要不要搬进平台登记
+    // 待产品负责人裁定——逐字同 ChangesPage 的 TAB_SOURCE.requests。
+    blockedBy:
+      "变更单本体今天不在平台里：真实的变更单是仓库 docs/change-requests/ 下的 " +
+      "CR-xxxx（Markdown），后台没有读它的路径。要不要搬进平台登记待产品负责人裁定。",
   },
 ];
 
@@ -77,13 +113,29 @@ export interface WorkItem {
   to: string;
 }
 
-function ageText(fromIso: string, now: Date): string {
-  const seconds = Math.max(0, Math.round((now.getTime() - Date.parse(fromIso)) / 1000));
+/** 把一段秒数说成人话。`ageText`（过去多久）与 `untilText`（还有多久）共用这
+ *  一份单位阶梯：两处各写一套，迟早会长成「3 小时」和「3小时」两种写法。 */
+function durationText(seconds: number): string {
   if (!Number.isFinite(seconds)) return "—";
-  if (seconds < 60) return `${seconds} 秒`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时`;
-  return `${Math.floor(seconds / 86400)} 天`;
+  const whole = Math.max(0, Math.round(seconds));
+  if (whole < 60) return `${whole} 秒`;
+  if (whole < 3600) return `${Math.floor(whole / 60)} 分钟`;
+  if (whole < 86400) return `${Math.floor(whole / 3600)} 小时`;
+  return `${Math.floor(whole / 86400)} 天`;
+}
+
+function ageText(fromIso: string, now: Date): string {
+  return durationText((now.getTime() - Date.parse(fromIso)) / 1000);
+}
+
+/** 距离某个未来时刻还有多久；时刻解析不出来时返回 null。
+ *
+ *  **不在这里退回一个占位字符串**：调用方要拼的是「N 小时后到期」，拿到 "—"
+ *  会拼出「—后到期」这种既不是时间也不是说明的句子。让它显式地判一次。 */
+function untilText(toIso: string, now: Date): string | null {
+  const at = Date.parse(toIso);
+  if (!Number.isFinite(at)) return null;
+  return durationText((at - now.getTime()) / 1000);
 }
 
 /** 活跃告警 → 待处理事项。
@@ -139,18 +191,79 @@ export function workItemsFromJobRuns(runs: readonly JobRunItem[], now: Date): Wo
     });
 }
 
-/** 「我的待处理」两条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。 */
+/** 风险等级的色调。**与 components/ApprovalQueue.tsx 里的 RISK_TONE 是同一张表**
+ *  ——那一份在组件内私有，本片不改那个文件，所以这里照抄一份。将来加档位时两处
+ *  要一起改：同一个 L3 在工作台上是黄的、在审批队列上是红的，人会以为是两回事。 */
+const APPROVAL_RISK_TONE: Readonly<Record<string, BadgeTone>> = {
+  L2: "warning",
+  L3: "warning",
+  L4: "danger",
+};
+
+/** 待审批的动作 → 待处理事项（XM-WORKBENCH-APPROVALS）。
+ *
+ *  两道过滤缺一不可：
+ *
+ *  1. **只收 PENDING。** 取数那一层已经带了 `status=PENDING`，这里仍然再滤一遍：
+ *     这是个纯函数，调用方换个取法（比如为了省一次请求而复用不带筛选的列表）
+ *     时，它不该悄悄把已驳回、已执行的单也列成待办。
+ *  2. **过期的不收，哪怕库里仍记着 PENDING。** 过期是定时任务 ExpirePending 写
+ *     回去的，库里的 status 会滞后，而服务端在执行那一刻才按 expires_at 判
+ *     （见 lib/approvals 的 isEffectivelyExpired）。照抄 status 会让首屏混进一批
+ *     谁也批不动的单——「我的待处理」是"我必须动手的事"，摆一件动不了的事进来，
+ *     人翻两次就不再信这张清单，这与「重试中的任务不列进来」是同一条理由。
+ *
+ *  排序复用审批队列页那一套（groupByRisk：L4 → L3 → L2，组内先到期的在前），
+ *  两处不能各排各的——同一批单在两个页面上排成两个样子，人会以为看的是两份
+ *  数据。 */
+export function workItemsFromApprovals(items: readonly ApprovalItem[], now: Date): WorkItem[] {
+  const waiting = items.filter(
+    (item) => item.status === "PENDING" && !isEffectivelyExpired(item, now),
+  );
+  return groupByRisk(waiting).flatMap((group) =>
+    group.items.map((item) => {
+      const remaining = untilText(item.expires_at, now);
+      return {
+        id: `approval-${item.id}`,
+        categoryId: "approvals",
+        // 徽章上放风险等级而不是「待审批」：这一屏上唯一要当场判断的是「先看
+        // 哪一张」，而 L4 与 L2 的差别正是答案。不认识的等级照原样显示成中性
+        // 徽章，不丢弃——静默吞掉一整档待审批比显示一个陌生的等级名危险得多。
+        categoryLabel: item.risk_level,
+        tone: APPROVAL_RISK_TONE[item.risk_level] ?? "neutral",
+        title: `${item.action_id}@${item.action_version}`,
+        // 与审批队列卡片的落款同一行内容：谁提交的、还差几票。「还差几票」比
+        // 「何时提交」更能回答「我现在能不能推动它」，而票数措辞（含「票数够了
+        // 但还缺一张特权票」那种）只有 voteProgress 一份，不在这里另写。
+        meta: `${item.requester_id} 提交 · ${voteProgress(item, now)}`,
+        // 右侧那一列问的是「什么时候要处理完」——审批单的答案就是到期时刻。
+        due: remaining === null ? "到期时间未知" : `${remaining}后到期`,
+        // 直达「操作与审批」页的「待审批」子页签：投票、执行、撤回都在那里，
+        // 落到页面首屏还要自己找是多余的一步。
+        to: "/actions?sub=pending",
+      };
+    }),
+  );
+}
+
+/** 「我的待处理」三条数据源各自的取数上限（XM-WORKBENCH-TRUNCATION）。 */
 export const ACTIVE_ALERTS_LIMIT = 200;
 export const WORK_JOBS_LIMIT = 20;
+/** 待审批只取一屏够看的量。完整队列在「操作与审批」页——那边按等级分组，
+ *  也只有那边能投票和执行；这一格是入口，不是清单。服务端上界是 100
+ *  （httpapi/approvals.go 的 maxApprovalLimit），这个数远在其下。 */
+export const WORK_APPROVALS_LIMIT = 20;
 
 /** 这一屏是不是没显示全，以及该怎么说。
  *
- *  **两个判据都由服务端给，前端不自己算**（XM-ALERTS-LIST-TRUNCATED）：
+ *  **三个判据都由服务端给，前端不自己算**（XM-ALERTS-LIST-TRUNCATED）：
  *  - 告警：`/api/v1/alerts` 的 `truncated`。调用方传的 limit 与真正生效的
  *    limit 可能不是一个数（不传、或传得比服务端上界还大都会被钳），拿自己传
  *    的数去比会**永远判不出截断**。
  *  - 后台任务：`/api/v1/jobs/runs` 的 `next_before`——它本来就是游标分页的
  *    "还有下一页"，比数个数可靠。
+ *  - 待审批：`/api/v1/approvals` 的 `truncated`，与告警同一条理由（服务端算的
+ *    是"返回条数 >= 生效上限"，生效上限只有服务端知道）。
  *
  *  仍然只说"可能"：服务端的判据是"返回条数正好等于生效上限"，恰好等于时也
  *  可能就是恰好这么多。含糊不好，但假装看到的是全部更糟——一张"没有待处理
@@ -162,12 +275,17 @@ export function truncationNote(input: {
   activeCategoryId: string;
   alertsTruncated: boolean;
   jobsTruncated: boolean;
+  approvalsTruncated: boolean;
 }): string | null {
   const parts: string[] = [];
   const showAlerts = input.activeCategoryId === "" || input.activeCategoryId === "incidents";
+  const showApprovals = input.activeCategoryId === "" || input.activeCategoryId === "approvals";
   const showJobs = input.activeCategoryId === "" || input.activeCategoryId === "jobs";
   if (showAlerts && input.alertsTruncated) {
     parts.push(`活跃告警只取了 ${ACTIVE_ALERTS_LIMIT} 条`);
+  }
+  if (showApprovals && input.approvalsTruncated) {
+    parts.push(`待审批的单只取了 ${WORK_APPROVALS_LIMIT} 条`);
   }
   if (showJobs && input.jobsTruncated) {
     parts.push(`已放弃的后台任务只取了 ${WORK_JOBS_LIMIT} 条`);
@@ -182,6 +300,37 @@ export function truncationNote(input: {
  *  于是它不再能回答「现在要不要放下手里的事」。 */
 export function urgentCount(alerts: readonly AlertItem[]): number {
   return alerts.filter((a) => a.status !== "RESOLVED" && a.severity === "critical").length;
+}
+
+/** 顶部四格里「审批到期」的口径：`APPROVAL_DUE_WINDOW_HOURS` 内到期的待审批单。
+ *
+ *  ## 这一格为什么只数审批
+ *
+ *  它以前叫「今日到期」，数的是原型说的**审批 + 重试 + 轮换到期**三样，副行写着
+ *  「随 Foundation-B 与后台任务页上线」。那句话今天是错的（审批中心 XM-0030 已
+ *  启用，后台任务页与 /jobs/runs 也早就在），但把三样合成一个数同样是错的：
+ *
+ *  - **重试不是到期。** 后台任务的 `scheduled_at` 是「下一次什么时候再试」，不是
+ *    一条截止线；而且工作台只查 `state=discarded`——那些已经把重试用尽了，根本
+ *    没有未来时刻可数。已放弃的任务在同一屏的「失败任务」一类里逐条列着。
+ *  - **轮换到期今天一个数都算不出来**（见 CREDENTIAL_EXPIRY_GAP）。把它算进合计
+ *    等于让这个数**恒偏低**，而偏低的数与正确的数长得一模一样。
+ *
+ *  所以这一格收窄成「审批到期」：数一件有真正截止时刻的事，并且对这件事是完整的。
+ *
+ *  ## 已过期的不算
+ *
+ *  与 `workItemsFromApprovals` 同一条判据（`isEffectivelyExpired`）：库里的 status
+ *  会滞后于 `expires_at`，而一张已经过期的单谁也批不动了——把它算进「快到期了，
+ *  去看一眼」的计数里，只会让人白跑一趟。`expires_at` 解析不出来的同样不算：
+ *  我们无法断言它什么时候到期，就不能替它断言「快到了」。 */
+export function approvalsDueSoonCount(items: readonly ApprovalItem[], now: Date): number {
+  const until = now.getTime() + APPROVAL_DUE_WINDOW_HOURS * 3600 * 1000;
+  return items.filter((item) => {
+    if (item.status !== "PENDING" || isEffectivelyExpired(item, now)) return false;
+    const at = Date.parse(item.expires_at);
+    return Number.isFinite(at) && at <= until;
+  }).length;
 }
 
 /** 顶部四格里「最近恢复」的口径：近 24 小时内自动恢复的告警。 */
@@ -232,7 +381,13 @@ export function focusRows(alerts: readonly AlertItem[]): FocusRow[] {
       domain: "安全",
       tone: "neutral",
       state: "未接入",
-      detail: "凭据到期与权限异常随「人员与权限」页上线",
+      // 这一行以前写着「随『人员与权限』页上线」，而 /identity 早已建成——
+      // 一句指错方向的话比没有话更坏：它让人去等一个已经到货的东西。两件事
+      // 各有各的缺口，都不在页面上：凭据到期缺的是数据模型（同上面的
+      // WORK_CATEGORIES.expiring，共用 CREDENTIAL_EXPIRY_GAP 一份文案），
+      // 权限异常缺的是判定规则——员工账号有角色，但全仓没有任何一处算过
+      // 「哪个角色组合算异常」，没有规则就没有异常可报。
+      detail: `${CREDENTIAL_EXPIRY_GAP}权限异常则还没有判定规则：员工账号与角色读得到，但没有任何一条规则说什么算异常。`,
     },
   ];
 }

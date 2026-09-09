@@ -26,8 +26,9 @@ import {
   type SMSResource,
 } from "../api/sms";
 import { ActionErrorNote } from "./ActionErrorNote";
-import { ActionResultNote, type ActionResult } from "./ActionResultNote";
+import { actionResultOf, ActionResultNote, type ActionResult } from "./ActionResultNote";
 import { ApiStateView } from "./ApiStateView";
+import { ApprovalReasonField, isApprovalReasonUsable } from "./ApprovalReasonField";
 import { ExtendDialog, HeroBalance, ProlongHistory, UpstreamCodes } from "./SMSExtrasPanels";
 import { SMSRequestDialog } from "./SMSRequestDialog";
 
@@ -613,6 +614,8 @@ function PurchaseDialog({
   const [verificationType, setVerificationType] = useState("sms");
   const [fixedPrice, setFixedPrice] = useState(false);
   const [duration, setDuration] = useState("");
+  const [reason, setReason] = useState("");
+  const [reasonTouched, setReasonTouched] = useState(false);
   const [armed, setArmed] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const formId = useId();
@@ -621,25 +624,35 @@ function PurchaseDialog({
 
   const mutation = useMutation({
     mutationFn: (operationID: string) =>
-      purchaseSMSNumbers({
-        provider,
-        operation_id: operationID,
-        quantity: Number(quantity) || 1,
-        ...(isSMS62 ? { goods_id: goodsID.trim() } : {}),
-        ...(isSMS62 ? {} : { service: service.trim(), country: Number(country) || 0 }),
-        ...(maxPrice.trim() ? { max_price: maxPrice.trim() } : {}),
-        ...(isSMS62
-          ? {}
-          : {
-              verification_type: verificationType,
-              ...(fixedPrice && maxPrice.trim() ? { fixed_price: true } : {}),
-              ...(Number(duration) > 0 ? { duration: Number(duration) } : {}),
-            }),
-      }),
-    onSuccess: (run) => {
-      onDone({ runId: run.runId, title: "已提交买号请求" });
+      purchaseSMSNumbers(
+        {
+          provider,
+          operation_id: operationID,
+          quantity: Number(quantity) || 1,
+          ...(isSMS62 ? { goods_id: goodsID.trim() } : {}),
+          ...(isSMS62 ? {} : { service: service.trim(), country: Number(country) || 0 }),
+          ...(maxPrice.trim() ? { max_price: maxPrice.trim() } : {}),
+          ...(isSMS62
+            ? {}
+            : {
+                verification_type: verificationType,
+                ...(fixedPrice && maxPrice.trim() ? { fixed_price: true } : {}),
+                ...(Number(duration) > 0 ? { duration: Number(duration) } : {}),
+              }),
+        },
+        reason.trim(),
+      ),
+    onSuccess: (outcome) => {
+      onDone(
+        actionResultOf(outcome, {
+          executed: "已提交买号请求",
+          approvalPending: "买号已提交审批，还没有下单",
+        }),
+      );
       setOpen(false);
       setArmed(null);
+      setReason("");
+      setReasonTouched(false);
       setError(null);
     },
     // 失败时**不清 armed**：那是同一笔业务的重试，幂等键必须保持不变。
@@ -758,6 +771,14 @@ function PurchaseDialog({
           </>
         )}
 
+        <ApprovalReasonField
+          id={`${formId}-reason`}
+          value={reason}
+          onChange={setReason}
+          subject="买号"
+          touched={reasonTouched}
+        />
+
         {error ? <ActionErrorNote error={error} /> : null}
 
         <div className="flex items-center gap-2">
@@ -767,9 +788,13 @@ function PurchaseDialog({
                 variant="danger"
                 size="sm"
                 disabled={mutation.isPending}
-                onClick={() => mutation.mutate(armed)}
+                onClick={() => {
+                  setReasonTouched(true);
+                  if (!isApprovalReasonUsable(reason)) return;
+                  mutation.mutate(armed);
+                }}
               >
-                {mutation.isPending ? "提交中…" : `确认买 ${quantity} 个号`}
+                {mutation.isPending ? "提交中…" : `提交买 ${quantity} 个号的审批`}
               </Button>
               <Button variant="ghost" size="sm" onClick={() => setArmed(null)}>
                 取消

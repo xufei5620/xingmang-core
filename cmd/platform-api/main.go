@@ -18,17 +18,22 @@ import (
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/assurance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
 	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
+	"github.com/xufei5620/xingmang-platform/internal/platform/extapp"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
+	"github.com/xufei5620/xingmang-platform/internal/platform/integration"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
+	"github.com/xufei5620/xingmang-platform/internal/platform/lifecycle"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
+	"github.com/xufei5620/xingmang-platform/internal/platform/publishing"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
 	"github.com/xufei5620/xingmang-platform/internal/platform/server"
@@ -36,6 +41,14 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// 同时设成全局默认（XM-LOG-INJECTED）：注入 logger 只覆盖得到拿得到它的
+	// 调用点，而 `WriteJSON` 的编码失败那一处没有 ctx 也没有 logger 参数
+	// （它有近百个调用点，为一条极少发生的日志改签名不划算）。不设默认的话
+	// 那一条会以文本格式写 stderr，与其余 JSON/stdout 的日志分家。
+	//
+	// 安全性已核对：全仓没有任何地方用标准 `log` 包，所以这一行不会改变
+	// 除 slog 之外的任何输出。
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -133,10 +146,52 @@ func main() {
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
 	}
+	// 前端应用登记簿的写操作（登记/修改/下线站点、记录一次已发生的发布）
+	// 同样必须经 Action 内核（宪法 2 条 / ADR-003）。
+	//
+	// **注意 extapp.release.record 记录的是已经发生的发布，它不发布任何东西**：
+	// 发布与回滚是 Platform Lifecycle Operation（宪法 2、3 条），走版本化脚本
+	// + 人工批准，这里没有、也不该有那条通道。
+	// 注册失败即拒绝启动——一个「应用与配置页有按钮但后端没注册动作」的进程，
+	// 会让人在真要登记一个新站点的时候才发现保存键点不动。
+	extAppStore := extapp.NewStore(pool)
+	if err := extapp.RegisterActions(actionRegistry, extAppStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 「接口与自动化」的两张登记簿（XM-EXT-INTEGRATION，ADMIN-IA §5.4.1）。
+	// 四个 L1 Action 都是纯登记写入：调用方登记簿**不是授权面**（登记不发
+	// 凭据、不授权、不限流），规则登记簿**没有执行器**（登记一条规则不会让
+	// 任何 Action 跑起来）。注册失败即拒绝启动，同上。
+	//
+	// 环境显式传给仓储、不由请求参数自称（宪法 15 条）。
+	integrationStore := integration.NewStore(pool, cfg.Environment, nil)
+	if err := integration.RegisterActions(actionRegistry, integrationStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
 	// 个人表格视图同样遵守 Query/Action 分离：读由下方 Deps.SavedViews 暴露，
 	// set/remove 只在这里注册成 HUMAN-only L0 Action。注册失败即拒绝启动。
 	savedViewStore := savedviews.NewStore(pool)
 	if err := savedviews.RegisterActions(actionRegistry, savedViewStore); err != nil {
+		logger.Error("api_start_failed", slog.String("module", "platform.api"),
+			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	// 内容发布（XM-EXT-PUBLISHING）。七个 Action 都只给人；发布是 L3，
+	// 会经审批中心落单后由人触发执行。注册失败即拒绝启动。
+	//
+	// **第二个参数是投递器表，这里传 nil，意思是「平台没有任何出站投递器」。**
+	// 这不是一个可以在部署时打开的开关——本仓库根本没有 publishing.Deliverer
+	// 的实现（见 internal/platform/publishing/doc.go）。发布走完审批之后落下的
+	// 记录，结果一律是「未投递」，库层的 result 闭集也只认这一个值。
+	// 接上真投递器需要一次显式迁移 + 一份 Connector 契约 + 一条经 ADR-021
+	// 登记的写通道，不是在这里填一个 map 就成立的。
+	publishingStore := publishing.NewPgStore(pool, cfg.Environment)
+	publishingService := publishing.NewService(publishingStore, nil, nil)
+	if err := publishing.RegisterActions(actionRegistry, publishingService); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)
@@ -214,10 +269,26 @@ func main() {
 	// EnrollTOTP/ConfirmTOTP/ResetTOTP 三个 HTTP 方法内部要经同一个 Kernel
 	// 执行对应 Action，localauth.NewHandlers 需要它作为构造参数。
 	actionRunStore := action.NewPgRunStore(pool, logger)
+
+	// 审批中心（XM-0030）。接上之后，内核对 L2 及以上不再直接拒绝，而是落一张
+	// 待批审批单并返回 202——registry.connection.set_status 与
+	// registry.connector.create 这两个「声明了 L2 却执行不了」的 Action 因此
+	// 变得可用（经审批）。
+	//
+	// **不接的话内核仍然 fail closed**（返回 ADVANCED_CONTROLS_REQUIRED），
+	// 那是 Foundation-A 的行为；这里显式接上，是产品负责人 2026-09-07 的启用
+	// 指示。启用的前置件（过期清理任务 + PENDING>4h 告警规则 + Runbook）已随
+	// XM-0030c 就位。
+	approvalService := approval.NewService(
+		approval.NewPgStore(pool, cfg.Environment, nil),
+		approval.DefaultPolicy(),
+		nil,
+	)
 	kernel := action.NewKernel(
 		actionRegistry,
 		actionRunStore,
 		action.WithAuditSink(audit.NewActionSink(auditStore)),
+		action.WithApprovalGateway(approvalService),
 		action.WithLogger(logger),
 	)
 	// 本地登录账号管理（XM-LOGIN + XM-AUTH-TOTP0）：只在 local 模式下注册
@@ -468,8 +539,20 @@ func main() {
 		Resolver:       resolver,
 		Kernel:         kernel,
 		ActionRegistry: actionRegistry,
-		Services:       registryStore,
-		Metrics:        opsStore,
+		// 审批队列的读写端点与执行端点（XM-0030b）。执行走内核的
+		// ExecuteApproved，所以两个字段指向的是同一条链的两端。
+		Approvals:    approvalService,
+		ApprovalExec: kernel,
+		Services:     registryStore,
+		// 资源目录另外两张表（XM-READONLY-QUERIES）复用同一个 registryStore：
+		// 三张表在同一个仓储里，读它们不该另开第二条访问 core.* 的路径。
+		Connectors:  registryStore,
+		Connections: registryStore,
+		// 「版本与发布 → 数据库变更」读已应用的迁移版本（XM-READONLY-QUERIES）。
+		// 独立的 Store：它读的是 public.schema_migrations，与 core.* 不是同一个
+		// schema，也不属于任何业务仓储。
+		Migrations: lifecycle.NewStore(pool),
+		Metrics:    opsStore,
 		// 历史样本复用同一个 Store：最新态与样本是同一个仓储的两张表
 		MetricHistory: opsStore,
 		// 后台任务概览与运行记录（XM-JOBS0）
@@ -482,10 +565,17 @@ func main() {
 		ActionRuns: actionRunStore,
 		// 详情端点关联的审计前后摘要同样复用 auditStore：新增的只是一条查询
 		// 方法（GetByActionRunID），不是第二条访问审计表的路径。
-		ActionRunAudit:          auditStore,
-		Alerts:                  alertStore,
+		ActionRunAudit: auditStore,
+		Alerts:         alertStore,
+		// 静默窗口列表复用同一个 Store：读的是同一张表，不另开一条路径。
+		Silences:                alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,
+		// 内容发布的五个只读端点。仓储与 Action 用同一份实现，不另开一条
+		// 访问 publishing.* 表的路径。PublishingDeliver 交的是 Service——
+		// 「哪些平台真的能发出去」由它回答（今天是空列表）。
+		Publishing:        publishingStore,
+		PublishingDeliver: publishingService,
 		// nil 时两个「请求」端点不挂载（见 httpapi.Deps.RequestLogs）
 		RequestLogs: requestLogsOrNil(requestLogs),
 		// nil 时「渠道保障」两个端点不挂载（见 httpapi.Deps.ChannelAssurance）
@@ -539,6 +629,14 @@ func main() {
 		ServerSuppliers:    serverStore,
 		ServerDomains:      serverStore,
 		ServerServiceNotes: serverStore,
+		ExtApps:            extAppStore,
+		ExtAppReleases:     extAppStore,
+		// 「接口与自动化」两张登记簿的读与写共用同一个仓储（同上）。
+		// CallerActivity 是**另一张表**（action.action_run）的汇总——
+		// 调用方那一格的价值全在登记簿与它的对账上，所以两者一起给。
+		APIClients:      integrationStore,
+		CallerActivity:  action.NewPgCallerStore(pool),
+		AutomationRules: integrationStore,
 		// 看板供数是**只读**的：余额由采集任务写，这里只查询。
 		// 时钟传 nil（=time.Now）——可用天数要判「余额过期没有」，
 		// 而本进程没有任何写入路径会用到注入时钟。

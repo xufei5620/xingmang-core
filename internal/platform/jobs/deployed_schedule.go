@@ -178,6 +178,7 @@ func DeployedSchedulesFromEnv(getenv func(string) string) (map[string]DeployedJo
 		NewAPISyncJobKind:     "XM_NEWAPI_SYNC_ENABLED",
 		FinanceCollectJobKind: "XM_FINANCE_COLLECT_ENABLED",
 		RetentionJobKind:      "XM_RETENTION_ENABLED",
+		ApprovalExpireJobKind: "XM_APPROVAL_EXPIRE_ENABLED",
 		AlertEvaluateJobKind:  "XM_ALERT_EVALUATE_ENABLED",
 		ReqlogMetricsJobKind:  "XM_REQLOG_MODE=file",
 		ConnectorProbeJobKind: "XM_CONNECTOR_PROBE_ENABLED",

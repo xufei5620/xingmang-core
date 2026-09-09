@@ -3,6 +3,7 @@ import { Badge, EmptyState } from "@xingmang/ui-primitives";
 import type { ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import { appApiConfig } from "../api/config";
+import { principalTypeHint, principalTypeText } from "../lib/labels";
 import { CredentialsPage } from "./CredentialsPage";
 
 /** 设置：平台治理段里「管平台自己」的那一页（ADMIN-IA 一、平台治理）。
@@ -64,8 +65,9 @@ export function SettingsPage() {
           <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface p-4">
             <p className="text-sm font-medium text-fg">告警与故障</p>
             <p className="text-xs leading-5 text-fg-muted">
-              查看可用天数 R5 规则、当前阈值、影响预览与变更历史。规则页只读预览；
-              写入仍需 Foundation-B / C3c 的审批链。
+              查看可用天数 R5 规则、当前阈值、影响预览与变更历史。规则页只读预览：
+              阈值写入还没有注册对应的 Action——审批中心（XM-0030）已启用，
+              L2 现在会落成审批单，缺的是那条写路径本身。
             </p>
             <Link
               to="/alerts?sub=rules"
@@ -111,7 +113,9 @@ function IdentitySection() {
           <dt className="text-fg-muted">主体 ID</dt>
           <dd className="font-mono text-fg">{principalId || "—"}</dd>
           <dt className="text-fg-muted">主体类型</dt>
-          <dd className="text-fg">{principalType}</dd>
+          <dd className="text-fg" title={principalTypeHint(principalType)}>
+            {principalTypeText(principalType)}
+          </dd>
           <dt className="text-fg-muted">请求 scope</dt>
           <dd className="flex flex-wrap gap-1">
             {scopes.length === 0 ? (

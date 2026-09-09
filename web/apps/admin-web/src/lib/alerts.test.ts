@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { AlertItem } from "../api/alerts";
+import type { AlertItem, SilenceItem } from "../api/alerts";
 import {
   canAcknowledge,
   countBySeverity,
   describeNotifyStatus,
   describeSeverity,
+  describeSilenceState,
   describeStatus,
+  formatSilenceRemaining,
   SILENCE_DURATION_OPTIONS,
   sortForDisplay,
+  sortSilencesForDisplay,
 } from "./alerts";
 
 function alert(partial: Partial<AlertItem>): AlertItem {
@@ -147,5 +150,73 @@ describe("静默时长选项", () => {
     expect(Math.max(...values)).toBe(7 * 24 * 60);
     // 全部为正：一个 0 分钟的窗口不会静默任何东西，但创建者以为静默了
     expect(values.every((v) => v > 0)).toBe(true);
+  });
+});
+
+describe("静默窗口三态", () => {
+  function sil(partial: Partial<SilenceItem>): SilenceItem {
+    return {
+      id: "s",
+      rule_key: "metric.sync.failed",
+      environment: "development",
+      reason: "理由",
+      starts_at: "2026-09-08T11:00:00Z",
+      ends_at: "2026-09-08T13:00:00Z",
+      created_by: "staff_alice",
+      created_at: "2026-09-08T10:59:00Z",
+      state: "active",
+      ...partial,
+    };
+  }
+
+  it("生效中用 danger——告警此刻是哑的，那不是「一切正常」", () => {
+    // 绿色会让人一眼扫过去以为没事，而静默期间恰恰最容易出事
+    expect(describeSilenceState("active").tone).toBe("danger");
+    expect(describeSilenceState("active").label).toBe("生效中");
+  });
+
+  it("未开始与已过期各有自己的说法，不压成一句「不生效」", () => {
+    // 前者要等，后者要重建。混成一个会让人对着还没生效的窗口反复重建
+    expect(describeSilenceState("scheduled").label).toBe("未开始");
+    expect(describeSilenceState("expired").label).toBe("已过期");
+    expect(describeSilenceState("scheduled").label).not.toBe(describeSilenceState("expired").label);
+  });
+
+  it("后端新增取值时显示原值并标成 warning，不冒充已知态", () => {
+    const unknown = describeSilenceState("cancelled");
+    expect(unknown.label).toBe("cancelled");
+    expect(unknown.tone).toBe("warning");
+  });
+
+  it("排序：生效中置顶，同组内最快解除的在前", () => {
+    const sorted = sortSilencesForDisplay([
+      sil({ id: "expired", state: "expired", ends_at: "2026-09-01T00:00:00Z" }),
+      sil({ id: "active-late", state: "active", ends_at: "2026-09-08T20:00:00Z" }),
+      sil({ id: "scheduled", state: "scheduled", ends_at: "2026-09-09T00:00:00Z" }),
+      sil({ id: "active-soon", state: "active", ends_at: "2026-09-08T13:00:00Z" }),
+    ]);
+    expect(sorted.map((s) => s.id)).toEqual(["active-soon", "active-late", "scheduled", "expired"]);
+  });
+
+  it("排序不修改入参", () => {
+    const input = [sil({ id: "a", state: "expired" }), sil({ id: "b", state: "active" })];
+    sortSilencesForDisplay(input);
+    expect(input.map((s) => s.id)).toEqual(["a", "b"]);
+  });
+
+  it("剩余时间按服务端的两个时刻算，跨小时与跨天都说得出来", () => {
+    expect(formatSilenceRemaining("2026-09-08T12:30:00Z", "2026-09-08T12:00:00Z")).toBe("还剩 30 分钟");
+    expect(formatSilenceRemaining("2026-09-08T14:00:00Z", "2026-09-08T12:00:00Z")).toBe("还剩 2 小时");
+    expect(formatSilenceRemaining("2026-09-08T14:30:00Z", "2026-09-08T12:00:00Z")).toBe("还剩 2 小时 30 分钟");
+    expect(formatSilenceRemaining("2026-09-10T12:00:00Z", "2026-09-08T12:00:00Z")).toBe("还剩 2 天");
+    expect(formatSilenceRemaining("2026-09-10T15:00:00Z", "2026-09-08T12:00:00Z")).toBe("还剩 2 天 3 小时");
+  });
+
+  it("算不出来就不显示，绝不显示一个算错的数", () => {
+    // 已经过期、缺时刻、时刻不可解析——三种都返回空串
+    expect(formatSilenceRemaining("2026-09-08T11:00:00Z", "2026-09-08T12:00:00Z")).toBe("");
+    expect(formatSilenceRemaining("2026-09-08T12:00:00Z", "")).toBe("");
+    expect(formatSilenceRemaining("", "2026-09-08T12:00:00Z")).toBe("");
+    expect(formatSilenceRemaining("不是时间", "2026-09-08T12:00:00Z")).toBe("");
   });
 });

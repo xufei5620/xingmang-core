@@ -101,6 +101,20 @@ func recordPrincipalID(ctx context.Context, id string) {
 //
 // **只记 principal_id，不记 scopes / issuer / 身份类型**：ID 足以归责，其余是
 // 授权决策的输入，进日志只会扩大留存面。需要复原授权判定时看审计链。
+// Logging 把进程的结构化 logger 放进请求上下文，供 WriteError 等取用。
+//
+// 与 AccessLog 分开是因为两件事的时机不同：AccessLog 在 next 返回**之后**
+// 才记一条访问日志，而 handler 在执行**期间**就需要那个 logger。把注入折进
+// AccessLog 也做得到，但那会让「取 logger」隐式依赖「有没有开访问日志」——
+// 一个独立的、只做一件事的中间件更难被误关。
+func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(WithLogger(r.Context(), logger)))
+		})
+	}
+}
+
 func AccessLog(logger *slog.Logger, service, environment string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

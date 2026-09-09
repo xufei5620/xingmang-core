@@ -44,6 +44,15 @@ const (
 	// 前四条规则读的都是 ops 观测，这一条读的是 finance 的可用天数——
 	// 它是本包第一条**不来自 ops.metric_observation** 的规则，理由见 RunwaySource。
 	RuleUpstreamRunwayLow = "upstream.runway.low"
+	// RuleApprovalPendingTooLong：有审批单挂了太久没人决定（XM-0030c）。
+	//
+	// 报的是**最久那一张**等了多久，不是队列有多长：二十张刚提交的单不是
+	// 问题，一张挂了六小时的才是。审批是人对人的等待，没有「上游」可以责怪
+	// ——这条告警的收件人就是该去点那两个按钮的人。
+	//
+	// warning 而不是 critical：一张单挂着不等于生产出事，它等于**一件本该
+	// 发生的变更还没发生**。真正的故障会由别的规则报出来。
+	RuleApprovalPendingTooLong = "approval.pending.too_long"
 )
 
 // 默认配置。三个数字都可由部署覆盖（见 RuleConfig 各字段与 cmd/platform-worker）。
@@ -64,6 +73,18 @@ const (
 	// 字面量重复的代价由外部测试包里的一致性测试兜住——那个测试同时看得见
 	// 两边，任何一边改了键名都会当场失败（照搬 ops/metrickeys_test.go 的做法）。
 	DefaultChannelBalanceMetricKey = "sub2api.channels.balance"
+	// DefaultApprovalPendingThreshold 是「挂太久」的门槛（设计稿 §4：PENDING 超 4h）。
+	//
+	// 4 小时是**半个工作日**：短于它会在午休和会议里误报，长于它就等不到
+	// 当天处理。它同时短于 L4 单 4 小时的有效期——告警必须在单过期之前响，
+	// 否则人赶到时那张单已经作废、只能让提交人重来一遍。
+	DefaultApprovalPendingThreshold = 4 * time.Hour
+	// DefaultApprovalQueueMetricKey 是审批规则读的那条观测。
+	//
+	// 与 DefaultChannelBalanceMetricKey 同一条纪律：写字面量而不是 import
+	// jobs（那会造成 alerts ↔ jobs 的环），重复的代价由外部包里的一致性
+	// 测试兜住——它同时看得见 jobs.MetricApprovalQueue 和这一行。
+	DefaultApprovalQueueMetricKey = "platform.approval.queue"
 )
 
 // staleCyclesBeforeAlert 是 R1b 的「持续时间」，单位是采集周期。
@@ -157,6 +178,10 @@ type RuleConfig struct {
 	// 静态构造时它必须与 `/finance/upstreams/summary` 使用的档位完全相同；
 	// 生产 provider 路径会在每轮读取同一个 DB revision，避免两个进程漂移。
 	RunwayThresholds finance.RunwayThresholds
+	// ApprovalPendingThreshold 是审批单「挂太久」的门槛（XM-0030c）。
+	ApprovalPendingThreshold time.Duration
+	// ApprovalQueueMetricKey 是审批规则读的观测键。
+	ApprovalQueueMetricKey string
 	// Owner 是这批规则的负责人（§9.3 要求每条规则都有）。
 	Owner string
 }
@@ -171,6 +196,8 @@ func DefaultRuleConfig() RuleConfig {
 		ConsecutiveFailureThreshold: DefaultConsecutiveFailureThreshold,
 		ChannelBalanceMetricKey:     DefaultChannelBalanceMetricKey,
 		RunwayThresholds:            finance.DefaultRunwayThresholds(),
+		ApprovalPendingThreshold:    DefaultApprovalPendingThreshold,
+		ApprovalQueueMetricKey:      DefaultApprovalQueueMetricKey,
 		Owner:                       "platform-ops",
 	}
 }
@@ -205,6 +232,15 @@ func (c RuleConfig) normalized() RuleConfig {
 		// （同 BalanceThresholdMinorUnits 的理由，只是失效方向相反：
 		// 那个是永不触发，这个是永远触发）。
 		c.RunwayThresholds = d.RunwayThresholds
+	}
+	if c.ApprovalPendingThreshold <= 0 {
+		// 零与负都等于「立刻告警」（条件是 age >= threshold），也就是每一张
+		// 刚提交的单都会当场响一次。回落到默认值——与余额阈值同一条道理，
+		// 只是失效方向相反：那个是永不触发，这个是永远触发。
+		c.ApprovalPendingThreshold = d.ApprovalPendingThreshold
+	}
+	if strings.TrimSpace(c.ApprovalQueueMetricKey) == "" {
+		c.ApprovalQueueMetricKey = d.ApprovalQueueMetricKey
 	}
 	if strings.TrimSpace(c.Owner) == "" {
 		c.Owner = d.Owner
@@ -316,6 +352,26 @@ func Rules(cfg RuleConfig) []Rule {
 			Recovery: "可用天数回到告警档之上，或该上游不再算得出天数" +
 				"（余额读不到 / 无消耗 / 停用）",
 			DedupKey:      RuleUpstreamRunwayLow + ":<environment>:<upstream_account_id>",
+			Channels:      defaultChannels,
+			SilencePolicy: silencePolicyText,
+			Owner:         cfg.Owner,
+		},
+		{
+			Key:    RuleApprovalPendingTooLong,
+			Title:  "审批单挂太久",
+			Source: cfg.ApprovalQueueMetricKey + " 的 value_json.oldest_pending_age_seconds",
+			Condition: fmt.Sprintf("最久那张未过期的 PENDING 审批单已等待 ≥ %s",
+				cfg.ApprovalPendingThreshold),
+			// For 是 0 而不是「持续多久」：观测本身就是一个持续量——
+			// 「已经等了 4 小时」自带持续时间，再要求它持续几轮等于把门槛
+			// 悄悄抬到 4 小时加几分钟。
+			For:      0,
+			Severity: SeverityWarning,
+			Recovery: "最久那张降回门槛以内（有人批了或驳了），或队列清空",
+			// 去重键的主体是**队列本身**（固定 "queue"），不带单号：一条
+			// 「有人在等」就够了。带单号的话，一个没人看的队列会一张单一条
+			// 告警刷屏，而它们说的是同一件事、要做的也是同一件事。
+			DedupKey:      RuleApprovalPendingTooLong + ":<environment>:queue",
 			Channels:      defaultChannels,
 			SilencePolicy: silencePolicyText,
 			Owner:         cfg.Owner,
@@ -555,6 +611,11 @@ func (e *Evaluator) Evaluate(ctx context.Context, environment string, now time.T
 
 		if o.MetricKey == e.cfg.ChannelBalanceMetricKey {
 			findings = append(findings, e.channelFindings(o, f, environment)...)
+		}
+		if o.MetricKey == e.cfg.ApprovalQueueMetricKey {
+			if finding, ok := e.approvalFinding(o, f, environment); ok {
+				findings = append(findings, finding)
+			}
 		}
 		// R6：上游自报版本变了。判据是这条观测里**有没有 version**，不是它的
 		// 指标键叫什么——将来多一个连接器探测，它自动就被覆盖，不必回来改这里。
@@ -940,4 +1001,79 @@ func describeCurrency(currency string) string {
 		return ""
 	}
 	return "，" + currency
+}
+
+// approvalFinding 判「有没有人等太久」（XM-0030c 的 R8）。
+//
+// 三处讲究，都是**不误报**的分寸：
+//
+//  1. **failed / uninitialized 不判。** 观测失败时 value_json 里是上一轮的
+//     数字，拿它算「等了多久」会报出一个早已不成立的事实。这一类由既有的
+//     「指标同步失败」规则负责——那才是当下真正出问题的东西。
+//  2. **队列为空或字段缺失时不判。** 判据是 `pending_count > 0`：缺字段解出
+//     0，与空队列走同一条出口。这里**只留这一道**——曾经还有一道
+//     `oldest_pending_age_seconds` 的缺失判断，但缺字段同样解出 0，而 0 低于
+//     任何合法门槛（normalized 挡住了 0 与负数），那道判断永远不会改变结果。
+//     一段读起来像保护、实际永不生效的代码比没有它更糟：它会让人不再去找
+//     真正的保护在哪。
+func (e *Evaluator) approvalFinding(o ops.Observation, f ops.Freshness, environment string) (Finding, bool) {
+	if f.State == ops.StateFailed || f.State == ops.StateUninitialized {
+		return Finding{}, false
+	}
+	pending, _ := numericField(o.Value, "pending_count")
+	if pending <= 0 {
+		return Finding{}, false
+	}
+	ageSeconds, _ := numericField(o.Value, "oldest_pending_age_seconds")
+	age := time.Duration(ageSeconds) * time.Second
+	if age < e.cfg.ApprovalPendingThreshold {
+		return Finding{}, false
+	}
+	return Finding{
+		RuleKey:  RuleApprovalPendingTooLong,
+		DedupKey: dedupKey(RuleApprovalPendingTooLong, environment, "queue"),
+		Severity: SeverityWarning,
+		Title:    fmt.Sprintf("有审批单已等待 %s 无人决定", age.Round(time.Minute)),
+		Detail: fmt.Sprintf(
+			"队列里有 %d 张待审批，最久的一张已等待 %s（门槛 %s）。"+
+				"处置见 docs/runbooks/APPROVAL-QUEUE.md：先确认审批人在不在，"+
+				"再决定是批、是驳，还是让提交人撤回重提。数据时间 %s。",
+			pending, age.Round(time.Minute), e.cfg.ApprovalPendingThreshold,
+			describeObservedAt(f.ObservedAt)),
+		SourceMetricKey: o.MetricKey,
+	}, true
+}
+
+// numericField 从观测的 value_json 里取一个整数字段。
+//
+// 返回第二个值区分「没有这个字段」与「值是 0」——两者在告警里是完全不同的
+// 事实（见 approvalFinding 的第 2 条）。JSON 解出来的数字可能是 float64、
+// json.Number 或整型，逐个认。
+func numericField(value map[string]any, key string) (int64, bool) {
+	raw, ok := value[key]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case float64:
+		return int64(v), true
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	default:
+		return 0, false
+	}
 }

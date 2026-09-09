@@ -38,8 +38,13 @@ func StatusForCode(c action.Code) int {
 		return http.StatusConflict
 	case action.CodePreconditionFailed:
 		return http.StatusPreconditionFailed
-	case action.CodeNotRegistered:
+	case action.CodeNotRegistered, action.CodeApprovalNotFound:
 		return http.StatusNotFound
+	case action.CodeApprovalRequired:
+		// 202：调用被**受理**了，只是还没执行——不是失败。走 WriteError 会把它
+		// 记成 error 级日志并包成错误体，所以 handler 单独处理这一支；这里的
+		// 映射是兜底，防止别处误用 WriteError 时给出 500。
+		return http.StatusAccepted
 	case action.CodeAdvancedControlsRequired:
 		return http.StatusNotImplemented
 	case action.CodeExecutionFailed:
@@ -86,7 +91,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	status := StatusForCode(code)
 	requestID := RequestIDFrom(r.Context())
 
-	slog.ErrorContext(r.Context(), "请求失败",
+	LoggerFrom(r.Context()).ErrorContext(r.Context(), "请求失败",
 		slog.String("module", "httpapi"),
 		slog.String("request_id", requestID),
 		slog.String("path", r.URL.Path),
@@ -101,6 +106,36 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 		Message:   msg,
 		RequestID: requestID,
 	}})
+}
+
+type loggerKey struct{}
+
+// WithLogger 把进程的结构化 logger 放进请求上下文（由 Logging 中间件调用）。
+//
+// 为什么要走 context 而不是给 WriteError 加一个参数：`WriteError(w, r, err)`
+// 有几十个调用点，加参数是一次纯机械的大改，而且以后每加一个 handler 都要
+// 记得传。走 context 之后**一个调用点都不用动**。
+//
+// 为什么不干脆用 slog.Default()：那正是这一片要修的毛病。两个进程都建了
+// JSON handler 的 logger 注入进 Deps.Logger，但错误路径走的是包级 slog，
+// 于是**最需要被检索的那类日志**（错误）以文本格式进 stderr，其余日志是
+// JSON 进 stdout——按 JSON 解析的采集会整片漏掉它们。
+func WithLogger(ctx context.Context, logger *slog.Logger) context.Context {
+	if logger == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, loggerKey{}, logger)
+}
+
+// LoggerFrom 取出请求上下文里的 logger；没有就回落到 slog.Default()。
+//
+// 回落是必要的：直接构造 handler 的测试、以及 Logging 中间件之外的调用路径
+// 都拿不到那个值，而「日志记不出来」不该让请求失败。
+func LoggerFrom(ctx context.Context) *slog.Logger {
+	if logger, ok := ctx.Value(loggerKey{}).(*slog.Logger); ok && logger != nil {
+		return logger
+	}
+	return slog.Default()
 }
 
 type requestIDKey struct{}

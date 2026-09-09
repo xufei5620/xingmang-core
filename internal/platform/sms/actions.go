@@ -59,10 +59,24 @@ var (
 
 // RegisterActions 把十二个 Action 注册进内核。
 //
-// **全部 L1**：内核对 L2 及以上返回 ADVANCED_CONTROLS_REQUIRED
-// （Foundation-B 未实现），声明成 L2 会让它们变成永远跑不起来的摆设。
-// 这意味着平台今天**没有第二人审批**这道闸——买号的护栏是权限、未决防重、
-// 台账与页面确认，不是审批流。这一点写在这里免得有人把 L1 读成"风险不高"。
+// **风险等级分两档**（XM-RISK-RESTORE）：向供应商付费换资源的那几个是 L2，
+// 其余配置类的仍是 L1。
+//
+// 这些 Action 此前**全部** L1，理由是内核对 L2 及以上返回
+// ADVANCED_CONTROLS_REQUIRED（Foundation-B 未实现），声明成 L2 会让它们变成
+// 永远跑不起来的摆设——那时买号的护栏只有权限、未决防重、台账与页面确认，
+// 不是审批流。审批中心实装并接进内核之后这个理由不再成立。
+//
+// 划线的依据是各 Action 自己的注释而不是"花钱与否"的直觉：
+//   - 花真钱且不可退的 sms.number.purchase / sms.rent.purchase /
+//     sms.email.purchase 恢复成 L2；三个都只给人（humanOnly）。
+//   - **sms.number.request 仍是 L1**，尽管它同样花真钱：它按设计对机器身份
+//     开放（XM-SMS4，PrincipalTypes 含 SERVICE），而机器凑不出审批人；
+//     它那一路的花钱护栏是消费者配额（actions_quota.go 的 sms.quota.set
+//     ——"配额不花钱，但决定一个机器一天最多能花多少"），不是审批。
+//     把它抬到 L2 会让无人值守的要号链路整条停摆。
+//   - 路由规则、告警阈值、配额、收藏这些各自的注释都写着"不花钱……与开关
+//     供应商同一档"，属 ADR-003 的"修改低风险平台配置"，保持 L1。
 func RegisterActions(reg *action.Registry, svc *Service) error {
 	if reg == nil || svc == nil {
 		return nil
@@ -175,10 +189,15 @@ func verifyHandler(svc *Service) action.Handler {
 	}
 }
 
+// purchaseDef 是买号的声明。
+//
+// L2：花真钱且买到的号不可退（契约里 compensation_mode 是 NOT_POSSIBLE），
+// 数量上限 200——一次手滑就是两百个号。ADR-003 的 L2 要的正是
+// 「预览 + 幂等 + 写后确认 + 完整审计」。幂等键（operation_id）与未决防重照旧。
 func purchaseDef(providers []string) action.Definition {
 	return action.Definition{
 		ID: ActionNumberPurchase, Version: actionVersion,
-		RiskLevel: action.L1, Permission: PermissionPurchase,
+		RiskLevel: action.L2, Permission: PermissionPurchase,
 		Schema: action.Schema{Fields: []action.Field{
 			providerField(providers),
 			// operation_id 由调用方**稳定**生成：它是幂等键，重试必须带同一个。

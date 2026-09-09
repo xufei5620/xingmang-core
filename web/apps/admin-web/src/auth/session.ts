@@ -7,6 +7,7 @@
  *
  *  路由门禁、登录页、顶栏、API 客户端都只问这里，不各自判断模式。 */
 import type { BearerTokenProvider, UnauthenticatedReason } from "../api/client";
+import { appApiConfig } from "../api/config";
 import { devLogout, isAuthenticated as devIsAuthenticated } from "./devSession";
 import { cachedLocalUser, logout as localLogout } from "./localSession";
 import { createOidcClient, safeNextPath, type OidcClient, type OidcConfig } from "./oidc";
@@ -68,6 +69,30 @@ export function currentUserLabel(): string {
     return user ? user.display_name || user.username : "已登录";
   }
   return "开发模式";
+}
+
+/** 当前登录者的 principal_id——**与审计和审批单里的 principal_id 是同一个值**。
+ *
+ *  三种模式都拿得到（与角色不同）：oidc 用 preferred_username（oidc.ts 的
+ *  getIdentity 注释说明它与审计里的 principal_id 一致），local 用 username，
+ *  dev-header 用 X-Dev-Principal-ID 的配置值。
+ *
+ *  用途限于**「这条记录是不是我的」**这类自我判断（审批页的「撤回自己的单」、
+ *  「我已经投过票了」）。它**不能**用来判断权限——scope 在任何模式下都不下发
+ *  到前端，想按权限藏按钮只能靠猜，猜错的两个方向都不好：藏错了让有权限的人
+ *  找不到入口，没藏住则点了必然 403。审批页因此只按记录自身的状态与归属藏
+ *  按钮，权限一律交给服务端拒绝并就地显示原因。
+ *
+ *  `""` 表示判不出来（会话已失效等），调用方应把它当作"不做自我判断"。 */
+export function currentPrincipalId(): string {
+  switch (authMode()) {
+    case "oidc":
+      return oidc.getIdentity()?.username ?? "";
+    case "local":
+      return cachedLocalUser()?.username ?? "";
+    default:
+      return appApiConfig.principalId;
+  }
 }
 
 /** 当前登录者的角色清单；`null` 表示"这个鉴权模式下前端读不到角色"，不是

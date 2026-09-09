@@ -5,10 +5,11 @@ import type { ReactNode } from "react";
 import { Link, useParams } from "react-router";
 import { listServices } from "../api/platform";
 import { listPlatformChannels, type PlatformChannelRow } from "../api/platformChannels";
-import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
+import { accountRowType, describeAccessMethod, listUpstreamAccounts, listUpstreamSummaries, UPSTREAM_SUMMARY_QUERY, type UpstreamAccountItem, type UpstreamSummary } from "../api/finance";
 import { channelFieldNullReason, SCHEDULING_WRITE_HINT, USAGE_WINDOW_SUB2API_HINT } from "../lib/channelFieldReasons";
 import { formatScaledMinorUnits } from "../lib/money";
 import { runwayReasonText } from "../lib/runway";
+import { upstreamAccountStatusHint, upstreamAccountStatusText } from "../lib/labels";
 import { ApiStateView } from "../components/ApiStateView";
 import { ChannelBindingCard } from "../components/ChannelBindingCard";
 import { NotFoundView } from "./NotFoundPage";
@@ -118,7 +119,7 @@ function ChannelDetailShell({ platform, channelId }: { platform: SupplyPlatform;
     queryFn: ({ signal }) => listUpstreamAccounts({ signal }),
   });
   const summaryQuery = useQuery({
-    queryKey: ["finance", "upstreams", "summary"],
+    queryKey: [UPSTREAM_SUMMARY_QUERY],
     queryFn: ({ signal }) => listUpstreamSummaries({ signal }),
   });
 
@@ -323,7 +324,18 @@ function ChannelDetailBody({
               <UnavailableFact label="可用模型" hint="要渠道保障（M1.5）上线后才有" />
             )}
             <Fact label="登记状态">
-              {account ? <Badge tone={account.status === "active" ? "success" : "neutral"}>{account.status}</Badge> : "未接入"}
+              {account ? (
+                // 「disabled」不是坏了，是有意停采（宪法 26 条的 Kill Switch）。
+                // 中文说清这件事，原码留在括号里给排查用。
+                <Badge
+                  tone={account.status === "active" ? "success" : "neutral"}
+                  title={upstreamAccountStatusHint(account.status)}
+                >
+                  {upstreamAccountStatusText(account.status)}
+                </Badge>
+              ) : (
+                "未接入"
+              )}
             </Fact>
           </DetailList>
         </DetailSection>

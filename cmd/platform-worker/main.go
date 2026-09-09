@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/xufei5620/xingmang-platform/internal/platform/approval"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 )
@@ -19,6 +20,14 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// 同时设成全局默认（XM-LOG-INJECTED）：注入 logger 只覆盖得到拿得到它的
+	// 调用点，而 `WriteJSON` 的编码失败那一处没有 ctx 也没有 logger 参数
+	// （它有近百个调用点，为一条极少发生的日志改签名不划算）。不设默认的话
+	// 那一条会以文本格式写 stderr，与其余 JSON/stdout 的日志分家。
+	//
+	// 安全性已核对：全仓没有任何地方用标准 `log` 包，所以这一行不会改变
+	// 除 slog 之外的任何输出。
+	slog.SetDefault(logger)
 	ctx, stopSignal := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignal()
 
@@ -171,6 +180,15 @@ func main() {
 		logger.InfoContext(ctx, "worker_migration_completed", "event", "worker_migration_completed", "module", "platform.worker", "environment", config.Environment, "principal_id", "worker:platform")
 		return
 	}
+
+	// 审批中心（XM-0030c）：过期清理任务要靠它把过期的 PENDING 推到 EXPIRED，
+	// 并写下队列观测——那条观测是 alerts 的 approval.pending.too_long 规则的
+	// **唯一输入**。为 nil 时任务不注册（jobs.NewClient 里两个条件都要满足）。
+	config.Approvals = approval.NewService(
+		approval.NewPgStore(pool, config.Environment, nil),
+		approval.DefaultPolicy(),
+		nil,
+	)
 
 	client, err := jobs.NewClient(pool, config)
 	if err != nil {

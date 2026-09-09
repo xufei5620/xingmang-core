@@ -199,7 +199,7 @@ describe("设置 · 全部凭据元数据", () => {
     renderPanel();
 
     expect(await screen.findByText("加载失败")).toBeTruthy();
-    expect(screen.getByText(/凭据列表尚未接入（错误码 ACTION_NOT_REGISTERED）/)).toBeTruthy();
+    expect(screen.getByText(/凭据列表尚未接入（动作未注册或资源不存在，错误码 ACTION_NOT_REGISTERED）/)).toBeTruthy();
     expect(screen.getByText(/request_id: req-list-1/)).toBeTruthy();
     expect(screen.queryByText("暂无凭据引用")).toBeNull();
     const form = screen.getByRole("heading", { name: "添加凭据" }).closest("section") as HTMLElement;

@@ -5,7 +5,14 @@
  *
  *  颜色**只经 BadgeTone**，不出现任何色值（宪法：前端禁止硬编码颜色）。 */
 import type { BadgeTone } from "@xingmang/ui-primitives";
-import type { AlertItem, AlertNotifyStatus, AlertSeverity, AlertStatus } from "../api/alerts";
+import type {
+  AlertItem,
+  AlertNotifyStatus,
+  AlertSeverity,
+  AlertStatus,
+  SilenceItem,
+  SilenceState,
+} from "../api/alerts";
 
 export interface Display {
   label: string;
@@ -111,6 +118,67 @@ export function sortForDisplay(alerts: AlertItem[]): AlertItem[] {
     const rb = rank[b.severity] ?? 0;
     if (ra !== rb) return ra - rb;
     return b.last_seen_at.localeCompare(a.last_seen_at);
+  });
+}
+
+/** 静默窗口三态的展示口径（Go 侧 httpapi/alert_silences.go 的 state）。
+ *
+ *  「生效中」用 danger 而不是 success：一个正在生效的静默窗口意味着
+ *  **告警此刻是哑的**，那是需要被看见的状态，不是一切正常。绿色会让人
+ *  一眼扫过去以为没事——而静默期间恰恰是最容易出事的时候。 */
+export function describeSilenceState(state: SilenceState | string): Display {
+  switch (state) {
+    case "active":
+      return { label: "生效中", tone: "danger", hint: "此刻正在压着告警：命中的规则不会投递" };
+    case "scheduled":
+      return { label: "未开始", tone: "info", hint: "窗口还没到开始时间，暂时不影响任何告警" };
+    case "expired":
+      return { label: "已过期", tone: "neutral", hint: "窗口已经结束，条件仍成立的告警会转回未处理并重新投递" };
+    default:
+      return { label: state || "未知", tone: "warning", hint: `未知状态 ${state}：后端可能新增了取值` };
+  }
+}
+
+/** 全局窗口（rule_key 为空串）的显示名。 */
+export const GLOBAL_SILENCE_RULE_LABEL = "全部规则（全局）";
+
+/** 还要压多久（只对生效中的窗口有意义）。
+ *
+ *  两个时刻**都来自服务端**（ends_at 与响应里的 as_of），不碰浏览器时钟：
+ *  一台快五分钟的机器会把「还剩 3 分钟」算成「已经结束」，而这一行正是
+ *  运营用来判断「要不要等它自己过期」的依据。
+ *
+ *  两者任一缺失或不可解析时返回空串——宁可不显示，也不显示一个算错的数。 */
+export function formatSilenceRemaining(endsAt: string, asOf: string): string {
+  if (!endsAt || !asOf) return "";
+  const end = Date.parse(endsAt);
+  const now = Date.parse(asOf);
+  if (Number.isNaN(end) || Number.isNaN(now)) return "";
+  const minutes = Math.ceil((end - now) / 60000);
+  if (minutes <= 0) return "";
+  if (minutes < 60) return `还剩 ${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    const rest = minutes % 60;
+    return rest === 0 ? `还剩 ${hours} 小时` : `还剩 ${hours} 小时 ${rest} 分钟`;
+  }
+  const days = Math.floor(hours / 24);
+  const restHours = hours % 24;
+  return restHours === 0 ? `还剩 ${days} 天` : `还剩 ${days} 天 ${restHours} 小时`;
+}
+
+/** 静默列表排序：生效中在最前，然后按结束时间升序（最快解除的在前）。
+ *
+ *  「哪些此刻在压着告警」是这一页唯一要一眼看出来的东西，所以它们置顶。
+ *  同组内按 ends_at 升序，是因为运营接下来要问的是「还要压多久」——
+ *  快到期的排前面，才排得上处理顺序。 */
+export function sortSilencesForDisplay(items: SilenceItem[]): SilenceItem[] {
+  const rank: Record<string, number> = { active: 0, scheduled: 1, expired: 2 };
+  return [...items].sort((a, b) => {
+    const ra = rank[a.state] ?? 3; // 未知态排最后：它不是「现在压着」的证据
+    const rb = rank[b.state] ?? 3;
+    if (ra !== rb) return ra - rb;
+    return a.ends_at.localeCompare(b.ends_at);
   });
 }
 
