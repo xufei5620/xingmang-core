@@ -103,4 +103,10 @@ RC106 的 API 镜像**起不来**，回滚必须两步：
 2. 再按常规 roll-forward 到 RC106（`/root/invoice-system/app/releases/7efece3e…`）。
 
 两步都是 Platform Lifecycle Operation，需负责人批准后执行；第 1 步 SQL 在执行前先 `SELECT` 核对只命中一行。
-仓库里没有现成的「带迁移回滚」手册段落（grep 过 PRODUCTION-RUNBOOK.md），这是 L2（0033）前必须补的 runbook 欠账，记入 follow_ups。
+
+**2026-09-09 补记：这条 runbook 欠账已补。** 上面这套做法已提升为通用章节
+`docs/PRODUCTION-RUNBOOK.md` §12.1「带迁移的发布如何回滚」，§12 Rollback 的镜像
+回滚条款处也加了指向。通用章节比本节多写了三件本节没展开的：加索引与加列的还原
+判断不同（索引可留；加列 `DROP COLUMN` 前须评估数据）、改列类型/删列/加非空这类
+不可逆迁移不走两步而走第 11 节的隔离栈恢复、以及 L2（0033）发布前必须先演练一次
+这条流程。本节此后只保留 RC107 的具体文件名与目标 release 路径。
