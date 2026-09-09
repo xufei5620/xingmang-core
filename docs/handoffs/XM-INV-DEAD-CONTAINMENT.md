@@ -704,8 +704,94 @@ N13–N15 只有「修后」一列：豁免名单是这一轮新引入的，修�
 - **`SourceStreamHealthRow` 现在是 App.tsx 的导出**。它没有自己的样式或状态，
   就是原来那一行；但它现在是个可以被别处引用的名字，改它要想到表格之外可能有调用方。
 
+## 就绪原因词表（第五刀，一个提交）
+
+上一轮把这条写成了 follow_up，复审判定它是**现在就存在的可见缺陷**、不留待办，
+在本分支单独一刀修掉。
+
+### 修了什么
+
+前端 `sourceReasonLabels`（`web/src/App.tsx`）：
+
+- 补 `ECONOMIC_RESCAN_ACTIVE` 的中文——「经济账本正在重扫对账，账号事实暂停推进，
+  重扫完成后自动恢复」。这条是**非致命**的（在 `nonFatalStreamHealthReasons` 里），
+  流仍然 ready，所以文案要说清楚「在动、会自己好」，而不是像其他条那样报阻断。
+  修之前运维在来源健康页上看到的是「未识别的安全阻断原因」——页面在事故当口告诉
+  运维，它不认识自己后端刚说的话。
+- 删 `SCAN_CYCLE_INCOMPLETE` 与 `CONFIGURATION_DRIFT`。全仓 Go 源码里除注释外
+  没有这两个字面量，是两句永远不会出现的话。它们无害，直到有人把这张表当成
+  「系统能报什么」的清单去读。
+
+改完两侧都是 11 个值，一一对应。
+
+### 对拍闸：`TestEveryReadinessReasonHasExactlyOneLabel`
+
+新文件 `backend/internal/postgresstore/readiness_reason_vocabulary_test.go`。
+形状与本片其他三条规则一致：**两侧都靠发现，不许手列**，比较是双向精确的
+「不多不少」。
+
+- **后端侧**按 `eligibilitywire` 的同款做法：范围**由类型决定**而不是由文件名——
+  凡是签名里提到 `SourceStreamHealth` 的函数，其中每一处
+  `x.Reasons = append(x.Reasons, ...)` 都算产出点。所以将来有人在别的包里再写一个
+  产出函数，是被**发现**而不是被漏掉。追加的值逐个折成字符串常量：字面量直接读，
+  标识符查同包的包级 `const`（`economicRescanActiveReason` /
+  `eventsDeadContainedReason` 就是这么来的）。**折不出常量就拒绝作答**——报错退出，
+  而不是跳过它。跳过的后果正是「报出一个比真实词表少了那一条的集合」，
+  而少掉的必然是没人想到的那条。
+- **前端侧**锚在声明 `const sourceReasonLabels: Record<string, string> = {` 上而不是
+  行号，表挪位置还能找到；找不到、重复声明、或者表里有一行读不成
+  `KEY: "文案"`，都是拒绝作答而不是按少的那个集合去比。
+- 两侧各有空转下限（少于 8 条即判定「扫到了但几乎什么都没读出来」）。
+- 顺带把 `nonFatalStreamHealthReasons` 也钉进来：里面若留着一条没人产出的原因，
+  它豁免的是空气，而它当初想豁免的那个条件已经重新变成致命的了。这属于同一族词表，
+  一条断言的事。
+
+### 变异表（9 条：P1–P9）
+
+| # | 变异 | 预期 | 实际 | 报出来的话 |
+| --- | --- | --- | --- | --- |
+| P1 | 后端新增一个原因 `ZZ_NEWLY_INVENTED_REASON` | 红 | 红 | 产出了但前端没文案 |
+| P2 | 后端追加一个折不出常量的表达式（`strings.ToUpper(...)+"_BACKLOG"`） | 红 | 红 | 拒绝作答，指名文件行号 |
+| P3 | 前端删掉 `EVENTS_DEAD` 的文案 | 红 | 红 | 同 P1 的方向 |
+| P4 | 前端加一条没人产出的文案 | 红 | 红 | 「删掉它，这是被当文档读的错话」 |
+| P5 | 把前端文案表整个还原成**本提交之前的样子** | 红 | 红 | 一次报出三条：`ECONOMIC_RESCAN_ACTIVE` 缺文案、`CONFIGURATION_DRIFT` 与 `SCAN_CYCLE_INCOMPLETE` 是死文案 |
+| P6 | 往 `nonFatalStreamHealthReasons` 里塞一条没人产出的 | 红 | 红 | 「它豁免的是空气」 |
+| P7 | 前端把表改名 | 红 | 红 | 「这条规则已经什么都不比了」 |
+| P8 | 把闸认的产出者类型名改掉 | 红 | 红 | 「没有函数既提到该类型又追加 Reasons」 |
+| P9 | 对照：不改任何东西 | 绿 | 绿 | —— |
+
+**P5 是这一轮最要紧的一条**：它把树还原成上一个提交的真实状态，闸一次报出全部三条
+实际存在的缺陷。也就是说这道闸不是「为已经修好的东西补一张网」，
+它确实会抓住那个当时没人发现的问题。P7 / P8 钉的是拒绝作答的两条路径——
+闸失去目标时必须变红，不能变绿。
+
+### 门禁（全部实测，UTC）
+
+| 门禁 | 命令 | 开始 | 结束 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 后端静态 | `go vet ./...` | 06:40:40 | 06:40:40 | <1s | exit 0 |
+| 后端全量 | `env -u <八个代理变量> INVOICE_TEST_DATABASE_URL=...invoice_test_l1merge go test -p 1 -count=1 ./...` | 06:40:40 | 06:48:07 | 7m27s | exit 0，30 包 ok，零 FAIL |
+| 前端类型 | `npm run typecheck` | 06:48:20 | 06:48:22 | 2s | exit 0 |
+| 前端用例 | `npm test -- --run` | 06:48:22 | 06:48:24 | 2s | 22 文件 / 339 例全绿 |
+| 密钥扫描 | `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 06:48:24 | 06:48:25 | 1s | exit 0 |
+
+后端全量耗时靠前的包（秒）：`internal/postgresstore` 319.375、`internal/testdb`
+35.877、`internal/application` 28.064、`cmd/eligibility-repair` 15.766、
+`internal/auth` 10.740、`internal/migrate` 7.778。包列表仍写在所有 flag 之前。
+
+### 这一刀留下的边界
+
+- **闸只覆盖「产出 → 文案」这一段**。`cmd/api/runtime.go` 里 readyz 判定用的
+  `readySourceStreamAllowedReasons` / `notReadySourceStreamAllowedReasons` 两张表
+  是**消费侧**的手列名单，本轮没动，也没有被这道闸覆盖。它们漂了会怎样是另一件事
+  （readyz 的判定，不是页面文案），要修应当单开一刀，别混进这一族。
+- **前端侧是按文本读 TS 的**，不是解析 AST。表里出现模板字符串键、展开运算符、
+  或者把文案抽成变量，闸都会拒绝作答（红），不会假绿——方向是安全的那一侧，
+  但改表的人会先撞到一条「读不懂这一行」的红。
+
 ## 提交
 
 提交消息与 trailer 见 `git log`。本片未推送 GitHub、未部署、未连接生产库。
 收尾轮三个提交：`b39a123`（cherry-pick 0032 排除表）、`80d5774`（发现型闸的
-四个静默出口）、`f8386f8`（合并 RC106）。
+四个静默出口）、`f8386f8`（合并 RC106）；此后 `df97427`（收尾轮 handoff）、
+`59d22ec`（终审四条 major）、以及本刀的就绪原因词表。

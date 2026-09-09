@@ -5851,10 +5851,9 @@ const sourceReasonLabels: Record<string, string> = {
   EVENTS_PENDING: "仍有待处理事件",
   EVENTS_DEAD: "存在死信事件",
   EVENTS_DEAD_CONTAINED: "存在死信事件（已由账号冻结兜住，不影响同来源其他客户）",
-  SCAN_CYCLE_INCOMPLETE: "完整扫描周期尚未完成",
   ECONOMIC_WATERMARK_NEVER_PUBLISHED: "经济账本尚未发布首个完整水位",
   ECONOMIC_WATERMARK_STALE: "经济账本水位尚未追平",
-  CONFIGURATION_DRIFT: "上游资金配置已漂移",
+  ECONOMIC_RESCAN_ACTIVE: "经济账本正在重扫对账，账号事实暂停推进，重扫完成后自动恢复",
 };
 
 const sourceStreamLabels: Record<SourceStreamHealth["streamId"], string> = {
