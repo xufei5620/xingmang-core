@@ -5,6 +5,7 @@ import type {
   SourceAccount,
   UserEligibilitySummary,
 } from "../types";
+import type { InvoiceApiClient } from "./api-contract";
 
 // XM-INV-LOT-REASON-CONTRACT.
 //
@@ -229,4 +230,75 @@ export function applyUserDataResults(
   const plan = planUserDataLoad(results);
   applyUserDataPlan(plan, setters);
   return plan;
+}
+
+export const userDataLoadFailureMessage = "读取开票数据失败，请稍后重试。";
+
+/**
+ * The plan for a refresh that failed AS A WHOLE -- not one of the five
+ * requests rejecting (planUserDataLoad handles that per request) but the
+ * refresh itself throwing after they settled: applyUserDataResults blowing up
+ * on a malformed result, a setter throwing, anything the outer `catch` sees.
+ *
+ * It records every request as failed. Before this, the outer catch only set
+ * the banner text, and on a first load that left `sourceAccounts` at [] with
+ * an empty failed list -- which sourceAccountPanelMode reads as "you have no
+ * accounts", i.e. the binding wizard. The same shape as the incident, one
+ * `return` away from being reachable. No data key is present, so applying it
+ * clears nothing: a whole-load failure keeps every last-good panel exactly
+ * like a per-request one does.
+ */
+export function userDataLoadFailurePlan(error: unknown): UserDataLoadPlan {
+  return {
+    failed: [...userDataRequestKeys],
+    loadError: readableReason(error) ?? userDataLoadFailureMessage,
+  };
+}
+
+export type UserDataSource = Pick<
+  InvoiceApiClient,
+  | "getOrders"
+  | "getProfiles"
+  | "getSourceAccounts"
+  | "getUserEligibilitySummary"
+  | "getUserRequestPage"
+>;
+
+/**
+ * One full refresh of the user invoice centre: five independent reads,
+ * settled independently, then applied through planUserDataLoad. Lives here
+ * rather than in the React component so that the whole-load `catch` -- the
+ * one that decides whether a thrown error becomes "本次读取失败" or the
+ * binding wizard -- is code a test can actually reach (the repo has no DOM
+ * renderer to drive the component's effect).
+ *
+ * `isCurrent` is the component's stale-refresh guard: if a newer refresh has
+ * started while these were in flight, nothing is applied.
+ */
+export async function loadUserInvoiceData(
+  api: UserDataSource,
+  setters: UserDataSetters,
+  isCurrent: () => boolean = () => true,
+): Promise<UserDataLoadPlan | undefined> {
+  const [orders, profiles, sourceAccounts, eligibilitySummaries, requests] =
+    await Promise.allSettled([
+      api.getOrders(),
+      api.getProfiles(),
+      api.getSourceAccounts(),
+      api.getUserEligibilitySummary(),
+      api.getUserRequestPage(),
+    ]);
+  if (!isCurrent()) return undefined;
+  try {
+    return applyUserDataResults(
+      { orders, profiles, sourceAccounts, eligibilitySummaries, requests },
+      setters,
+    );
+  } catch (error) {
+    // Whole-load failure: every panel is marked unreadable (see
+    // userDataLoadFailurePlan), never "empty".
+    const plan = userDataLoadFailurePlan(error);
+    applyUserDataPlan(plan, setters);
+    return plan;
+  }
 }

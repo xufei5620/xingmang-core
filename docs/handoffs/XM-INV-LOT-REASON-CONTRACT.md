@@ -173,6 +173,84 @@ false/undefined 时不在、混合列表只出现在降级那一行；「不在�
 测试在导入前 stub 了一个只有 `location.href` 的 `window`（App.tsx 与 AuthProvider.tsx
 各在模块顶层读一次 `window.location.href`，导入链上没有别的浏览器依赖）。
 
+### 复审整改（第三轮·续）
+
+第三轮提交 `2bf67d4` 之后复审又提了 2 条，都是**同一事故形状的残留点**：仍有一处闭集
+硬拒能把整条请求拒掉，仍有一条路径能让首屏的空账号列表被读成「你没有绑定」。修法与
+本分支既有机制同源（`wellFormedEnumCode` 形状校验、`failed` 名单 + `"unavailable"`
+面板态），没有另起一套。变异 MF30–MF39 见文末第三张变异表的续表。
+
+### R10 —— `mapSourceAccount` 对未知 `source_type` 整条硬拒
+
+`http-api.ts` 的 `mapSourceAccount` 用 `["sub2api","newapi"].includes(...)` 闭集校验
+`source_type`，不在集合里就抛 `INVALID_SOURCE_ACCOUNT`；`getSourceAccounts()` 对每一行
+都 map，所以**一行**未知平台就让整条账号请求 reject。账号请求 reject ⇒ 首屏
+`sourceAccounts` 停在 `[]` ⇒ 若不是 R3 的 `failed` 名单兜着，就是绑定向导。第三个平台
+接入、或后端先于前端 bundle 发布，就是这次事故的同一形状。
+
+改法（与 `eligibility_status` 同款）：
+
+- `mapSourceAccount` 改为 `wellFormedEnumCode(value.source_type, statusCodePattern)`
+  形状校验：小写 code 形状通过则**保留原值**；空串、大写、带空格/连字符、数字开头、
+  超长仍抛 `INVALID_SOURCE_ACCOUNT`（文案不变）。
+- `types.ts` 新增 `SourceTypeWire = SourceType | (string & {})`，`SourceAccount.source`
+  宽化到它；`BackendSourceAccount.source_type` 改为 `string`（它本来就是线上的值）。
+- `source-labels.ts` 新增 `isKnownSourceType()`（从 `sourceName` 表推导，不再第二次手列）、
+  `unknownSourceTypeLabel = "未识别的平台"`、`sourceTypeLabel()` 兜底访问器；`sourceName`
+  表本身仍以精确联合为键，保持穷尽。
+- `App.tsx` 的 `SourceBadge` 改收 `SourceTypeWire`：未知平台渲染
+  `<span class="badge badge-neutral">未识别的平台</span>`（复用既有 `.badge-neutral`，
+  不加颜色），已知平台照旧。行的 `sourceLabel` 优先用后端 `source_name`，没有则同样兜底。
+- **有意没有加 `sourceDegraded` 字段**。摘要需要 `eligibilityDegraded` 是因为状态可以已知
+  而信封键未知；账号行的「平台未知」恰好等于 `!isKnownSourceType(source)`，再加一个
+  布尔就是一份会漂的副本。徽章直接从 `source` 推导。
+- `embedded-scope.ts` 的 `scopeBySource` 在**按平台过滤时保留未知平台行**
+  （`item.source === embeddedPlatform || !isKnownSourceType(item.source)`）。scoping 的
+  目的是把**另一个已知平台**的数据挡在 iframe 外，未知 code 不是那个；反过来把它滤掉，
+  一个唯一绑定顶着新 code 的用户在嵌入视图里就会看到空列表——空列表就是向导。代价是
+  scoped 视图最多多出一行「未识别的平台」。
+
+测试：`invoice-contract.test.ts` +11（未知但形状合法不抛、保留原值、无 `source_name`
+时标签为「未识别的平台」、有则优先、行的状态/标识保留、已知平台标签不变；6 种非法形状仍抛且
+`code === INVALID_SOURCE_ACCOUNT`）；`embedded-scope.test.ts` +3（scoped 视图保留未知行且
+仍丢弃另一已知平台、unscoped 全保留、**未知行在三种 scope 下都不把面板判成 onboarding**）；
+`App.source-account-panel.test.tsx` +2（未知行渲染为 neutral 徽章且无向导、已知平台标签不变）。
+
+### R11 —— 顶层 `catch` 不登记失败，首屏整体失败仍会退回向导
+
+`App.tsx` 的 `refresh` 顶层 `catch` 只做 `setEligibilitySummaries([])` + `setLoadError`，
+不调 `setFailed`。首屏时 `sourceAccounts` 仍是初始 `[]`、`failedRequests` 仍是 `[]`，
+`sourceAccountPanelMode` 判 `"onboarding"`。今天它不可达仅仅是因为 `applyUserDataResults`
+后面紧跟一个 `return`——去掉那个 return、或在它前面插一个 `await`，就原样复发。
+仓库没有 DOM 渲染器能驱动组件的 effect，所以这条 catch 只要留在组件里就永远测不到。
+
+改法：
+
+- `user-data-load.ts` 新增 `userDataLoadFailurePlan(error)`：`failed` = 全部五个键、
+  `loadError` = `readableReason(error) ?? "读取开票数据失败，请稍后重试。"`；**不带任何数据键**，
+  所以经 `applyUserDataPlan` 应用时什么面板都不清空——整体失败与单路失败一样保留
+  last-good。（顺带：旧 catch 里的 `setEligibilitySummaries([])` 因此不再发生；它与「失败
+  请求不得清空别人的面板」相悖，也是唯一一个在失败时清面板的地方。）
+- 新增 `loadUserInvoiceData(api, setters, isCurrent)`：五路 `allSettled` +
+  `applyUserDataResults` + **整体失败的 catch** 整个搬进 lib。`App.tsx` 用户分支只剩一行
+  `await loadUserInvoiceData(invoiceApi, setters, () => version === refreshVersion.current)`。
+- `App.tsx` 的 setters 对象提到 try 之前定义一次；顶层 catch 改为
+  `applyUserDataPlan(userDataLoadFailurePlan(error), setters)`。用户路径现在在 lib 里
+  自己 catch、到不了这条；它是管理员路径的 catch 和兜底。**这一行没有测试覆盖**
+  （MF39 绿，见 risks 15），能测的那条 catch 在 lib 里（MF34 红）。
+- `SourceAccountStatus` 与 `DataContext` 导出，供渲染测试。
+
+测试：`user-data-load.test.ts` +8（失败计划列全五键、应用它不清空 last-good、
+**accountCount 0 + 整体失败 ⇒ "unavailable"**、中文横幅且丢弃英文原因；
+`loadUserInvoiceData` 全成功应用全部、单路 reject 只记该路、**setter 抛错（即
+`applyUserDataResults` 抛错）⇒ 五键全记失败且面板态 unavailable**、被新刷新超越时什么都不
+应用）。`App.source-account-panel.test.tsx` +3：用**真实** `loadUserInvoiceData` 跑一次
+setter 抛错，把得到的 `failedRequests` 喂进 `<DataContext.Provider>` 渲染真实
+`<SourceAccountStatus/>`，断言「已关联账号暂时无法读取 / 这只是本次读取失败」在、三步向导
+的标题与第一步文字不在；后续刷新整体失败时仍渲染 last-good 行而非提示；末尾一条**正控**用
+同一组字符串故意渲染向导，证明「不在」不是恒真。`AuthProvider` 直接包一层即可
+（静态渲染不跑 effect，`user` 为 null ⇒ 未 scoped），不必导出 AuthContext。
+
 ---
 
 ## summary
@@ -288,6 +366,22 @@ XM-INV-ELIG-AUTO-RECONCILE 给后端加了第 4 个持久化 `eligibility_status
 | `web/src/App.tsx` | `EligibilitySummaryPanel` 导出；摘要卡头部补「账本状态待确认」徽章 |
 | `web/src/App.eligibility-summary-panel.test.tsx` | **新增** 4 条 `renderToStaticMarkup` 渲染断言（在场 / 缺席 / 已知状态但 degraded / 混合列表定位） |
 
+第三轮（续，R10 / R11）另外修改：
+
+| 文件 | 改动 |
+| --- | --- |
+| `web/src/types.ts` | 新增 `SourceTypeWire`；`SourceAccount.source` 宽化；注释说明为何**不**加 `sourceDegraded` |
+| `web/src/lib/source-labels.ts` | 新增 `isKnownSourceType` / `unknownSourceTypeLabel` / `sourceTypeLabel` |
+| `web/src/lib/http-api.ts` | `BackendSourceAccount.source_type: string`；`mapSourceAccount` 闭集 → 形状校验，标签走 `sourceTypeLabel` |
+| `web/src/lib/embedded-scope.ts` | `scopeBySource` 泛型放宽到 `SourceTypeWire`，scoped 视图保留未知平台行 |
+| `web/src/lib/user-data-load.ts` | 新增 `userDataLoadFailureMessage` / `userDataLoadFailurePlan` / `UserDataSource` / `loadUserInvoiceData`（五路加载 + 整体失败 catch 整个搬进来） |
+| `web/src/lib/mock-api.ts` | 仅类型：demo 账号数组收窄为 `SourceAccount & { source: SourceType }`，`mockUnitBalances` 键改 `SourceType` |
+| `web/src/App.tsx` | setters 提前定义一次；用户分支改调 `loadUserInvoiceData`；顶层 catch 改 `applyUserDataPlan(userDataLoadFailurePlan(error), setters)`（不再 `setEligibilitySummaries([])`）；`SourceBadge` 收 `SourceTypeWire` 并渲染「未识别的平台」；`DataContext` 与 `SourceAccountStatus` 导出 |
+| `web/src/lib/invoice-contract.test.ts` | +11：未知但形状合法的 `source_type` 5 条、非法形状 6 条 |
+| `web/src/lib/embedded-scope.test.ts` | +3：未知行在 scoped / unscoped 视图的去留、不把面板判成 onboarding |
+| `web/src/lib/user-data-load.test.ts` | +8：失败计划 4 条、`loadUserInvoiceData` 4 条 |
+| `web/src/App.source-account-panel.test.tsx` | **新增** 5 条：整体失败首屏（unavailable 非向导）、后续整体失败保留 last-good、未知平台行渲染、已知平台标签、向导正控 |
+
 ### 被有意推翻的既有断言
 
 `invoice-contract.test.ts` 原有：
@@ -328,6 +422,12 @@ expect(() => mapLot({ ...lot, reason_code: "UNKNOWN" })).toThrow(
 | `cd web && npm run typecheck && npm test -- --run` | typecheck exit 0；19 files / **303** tests passed | 17:57:13Z → 17:57:19Z，6 s |
 | `cd backend && go vet ./... && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | vet exit 0；ok ×2 | 17:57:21Z → 17:57:25Z，4 s |
 
+第三轮（续，R10 / R11）整改后重跑（UTC 实测；本轮只动前端，未动 Go）：
+
+| 命令 | 结果 | 起止 / 耗时 |
+| --- | --- | --- |
+| `cd web && npm run typecheck && npm test -- --run` | typecheck exit 0；20 files / **330** tests passed（+27） | 2026-09-09 02:46:31Z → 02:46:35Z，4 s |
+
 **门禁顺序天然正确**：`verify.ps1` 的 go test 排在 npm test 之前，所以契约漂移会先在
 Go 侧变红，前端根本走不到。
 
@@ -338,11 +438,14 @@ Go 侧变红，前端根本走不到。
   受影响最相关的是 `internal/application` 与 `internal/postgresstore` 的资格摘要集成
   测试——`ListUserEligibilitySummaries` 的抽取是纯移动，但**没有被集成测试实际覆盖过**，
   见 risks。
-- **浏览器端到端 / 组件渲染**：仓库无 RTL / jsdom / Playwright 用户流。
-  「面板不再退回向导」是通过 `applyUserDataResults` + `sourceAccountPanelMode` 这两条
+- **浏览器端到端**：仓库无 RTL / jsdom / Playwright 用户流。
+  ~~「面板不再退回向导」是通过 `applyUserDataResults` + `sourceAccountPanelMode` 这两条
   真实代码路径断言的，**不是渲染断言**——`SourceAccountStatus` 里把 context 的
   `failedRequests` 传进去那一行，以及「unavailable 态不渲染三步向导」这件事本身，
-  只有 `typecheck` 看着。见 risks 12。
+  只有 `typecheck` 看着。见 risks 12。~~ **第三轮（续）更正**：这两件事现在由
+  `App.source-account-panel.test.tsx` 用 `renderToStaticMarkup` 渲染真实
+  `SourceAccountStatus` 钉住（MF36、MF37 红）。仍未做的是真实浏览器里的 effect 驱动：
+  `DataProvider.refresh` 这个闭包本身（尤其其顶层 catch，见 risks 15）没有被任何测试执行。
 - **迁移未在真实 Postgres 上跑过**（未连库）。第二轮的迁移解析闸是纯文本分析，
   变异用的临时迁移 `0099_*.sql` 已删除，`git status` 干净。
 - **未 ssh、未连生产库、未查看任何密钥文件、未推 GitHub。**
@@ -479,6 +582,24 @@ service.go 用 `git checkout`），还原后 `diff -q` 通过，两段门禁复�
 | MF28 | 摘要面板徽章删掉 | 红 | 3 红 |
 | MF29 | `items.length > 32` 上限放到 320 | 红 | 1 红（33 条被接受） |
 
+### 前端（第三轮·续，R10 / R11）
+
+每条变异用 Edit 工具改坏、跑 4 个相关测试文件（99 用例）、`cp` 整改后快照还原、
+`diff -q` 通过后复跑绿；最后一次全量门禁在全部还原之后（见 tests_run）。
+
+| # | 变异 | 预期 | 实际 |
+| --- | --- | --- | --- |
+| MF30 | `mapSourceAccount` 改回 `["sub2api","newapi"].includes` 闭集 | 红 | 4 红：不抛且保留原值、无名时标签「未识别的平台」、有名优先、状态/标识保留 |
+| MF31 | `mapSourceAccount` 形状校验删掉（只剩 `typeof === "string"`） | 红 | 6 红：空串、大写、空格、连字符、数字开头、超长全部被接受 |
+| MF32 | `sourceTypeLabel` 去掉兜底（直接下标，未知得 `""`） | 红 | 2 红：mapper 标签、面板 neutral 徽章 |
+| MF33 | `scopeBySource` 改回只留 `=== embeddedPlatform` | 红 | 2 红：scoped 视图保留未知行、未知行不把面板判成 onboarding |
+| MF34 | **复审原话**：`loadUserInvoiceData` 的 catch 里删掉失败登记（只 `setLoadError`） | 红 | 2 红：`loadUserInvoiceData` 五键全记失败、**渲染测试「首屏显示读取失败而不是向导」** |
+| MF35 | `userDataLoadFailurePlan` 的 `failed` 改 `[]` | 红 | 5 红：列全五键、应用不清空、accountCount 0 ⇒ unavailable、`loadUserInvoiceData` 抛错登记、渲染测试首屏 |
+| MF36 | **旧 MF24 原样**：`SourceAccountStatus` 里 `failed: failedRequests` → `failed: []` | 红（两轮以来第一次） | 1 红：渲染测试首屏 |
+| MF37 | 三步向导改成无条件渲染（**缺席型断言的变异验证**） | 红 | 3 红：首屏 unavailable、后续整体失败保留 last-good、未知平台行；正控仍绿 |
+| MF38 | `SourceBadge` 改回 `sourceName[source]` + cyan | 红 | 1 红：未知行的 neutral 徽章 |
+| MF39 | `App.tsx` 顶层 catch 里删掉 `applyUserDataPlan(...)`（只 `setLoadError`） | **绿**（无覆盖，见 risks 15） | 绿 |
+
 ---
 
 ## risks / follow_ups
@@ -550,12 +671,14 @@ service.go 用 `git checkout`），还原后 `diff -q` 通过，两段门禁复�
     `getUserEligibilitySummary` 的信封改成忽略未知键 + degraded）。
 11. **`exactObjectKeys` 的必填键校验在那 13 个调用点没有测试覆盖**（变异 MF20 只红了本轮
     新写的那一条）。既有欠账，本轮没有扩大也没有修；补的话是独立一刀。
-12. **`SourceAccountStatus` 里 `failed: failedRequests` 这一行没有任何测试覆盖**
+12. ~~**`SourceAccountStatus` 里 `failed: failedRequests` 这一行没有任何测试覆盖**
     （变异 MF24 至今是绿的）。仓库没有 RTL / jsdom，`typecheck` 也接受一个空数组。
     判断逻辑本身已经搬进被测的 `sourceAccountPanelMode`，裸露的只剩「有没有把 context
     里的列表传进去」。**要真正闭合，需要引入一次渲染测试**（RTL + jsdom，或 Playwright
     一条用户流），那是一个需要加依赖的独立决定，不该塞进本次修复。在那之前，改动
-    `SourceAccountStatus` 的人请自己确认这一行还在。
+    `SourceAccountStatus` 的人请自己确认这一行还在。~~ **第三轮（续）已闭合**：不需要
+    新依赖——R9 已经证明 `renderToStaticMarkup` 够用，`App.source-account-panel.test.tsx`
+    渲染真实 `SourceAccountStatus`，MF36（= 旧 MF24）现在红。
 13. **摘要键集（item、嵌套源服务单位、响应信封）放宽后，「未知键」不再是拒绝理由，但仍会
     置 `eligibilityDegraded`，并且从第三轮起摘要面板真的会渲染它。** 也就是说后端加
     字段会让用户在摘要卡头部看到「账本状态待确认」徽章（与 lot 列表同款）而不是红横幅。
@@ -570,6 +693,40 @@ service.go 用 `git checkout`），还原后 `diff -q` 通过，两段门禁复�
     留作独立一刀：导出/搬出 `accountBlockStateLabels` 后一行断言把两张表钉在一起，
     徽章文字改用 `eligibilityStatusLabel(order.eligibilityStatus)`。
 
+### 第三轮（续）新增
+
+15. **`App.tsx` `refresh` 的顶层 catch 仍然没有测试覆盖**（MF39 绿）。用户路径的整体失败
+    catch 已搬进 `loadUserInvoiceData`（MF34 红），顶层这条现在只剩管理员路径
+    （`getAdminRequestPage` reject）和「未来有人让用户路径重新抛出来」的兜底。它调的是
+    同一个 `applyUserDataPlan(userDataLoadFailurePlan(error), setters)`，逻辑在一处；
+    裸露的只是「这一行还在不在」。管理员路由不渲染 `SourceAccountStatus`，所以它今天的
+    用户影响只有横幅文案。要闭合得能执行 `DataProvider.refresh` 本身——那需要 DOM
+    渲染器，仍是独立决定。
+16. **顶层 catch 不再 `setEligibilitySummaries([])`。** 这是随 R11 一起的行为变化：
+    整体失败时摘要面板保留 last-good（与其余四个面板一致），而不是清空。用户可见差异只在
+    「刷新整体失败」这一场景下：之前摘要卡消失、只剩横幅，现在摘要卡留着、横幅照出。
+    认为这是修正而非回归（清空恰好是「失败请求不得清别人面板」的反例），但发版说明里要提。
+17. **`scopeBySource` 在 scoped 嵌入视图里保留未知平台行，是一个写下来的取舍。**
+    第三个平台真的接入后，若 xingmang 的 sub2api iframe 里出现一行「未识别的平台」，
+    那是这条规则在起作用，不是数据串了。正确的后续动作是给新平台补 `sourceName`
+    表项（`isKnownSourceType` 从表推导，补一处即全链路认识它），**不是**把过滤改回
+    严格相等——那会让唯一绑定顶着新 code 的用户在嵌入视图里看到向导。`accountIdentityLabel`
+    的 OIDC 分支仍按严格相等找绑定行，未知行只是不参与头部身份文案，不影响面板。
+18. **`source_type` 的其余闭集校验点本轮没动**（按整改后行号逐个核过）：
+    `mapEligibilitySummary`（http-api.ts ~746，**在用户开票页上**）、
+    `mapEligibilityFreeze`（~881，管理端）、`accountLedgerListFieldsToItem`（~1001，管理端）、
+    `mapSourceHealth`（~1901，管理端）都还是 `["sub2api","newapi"].includes`；
+    `mapPaymentCandidate` 是 `!== "newapi"`。`mapLot` 不校验 `source_type`。复审只点了
+    `mapSourceAccount`，而且这几处的后果不同：摘要那条若遇到第三个平台会整条拒掉，但落到
+    R3 的 `failed` 名单里——用户看到「开票资格摘要暂时无法读取」横幅，账号面板不受影响、
+    不会退回向导；管理端三处炸的是各自一个列表。放宽它们要连带
+    `UserEligibilitySummary.source` / `FundingOrder.source` 的精确联合与 `fixedSourceLabel`
+    一起改，是独立一刀。**第三个平台接入前必须一起处理**，否则 R10 只救了账号面板。
+19. **未知平台行没有 `sourceDegraded` 字段，与摘要/lot 的 `eligibilityDegraded` 不对称。**
+    有意（见 R10：它恰好等于 `!isKnownSourceType(source)`，第二个字段是会漂的副本）。
+    如果将来账号行也出现「平台已知但别的东西未知」的情形，再加字段，并且让它和这里的
+    徽章走同一条渲染路径。
+
 ## commit
 
 - 第一轮实现：`a3d7a84c36805820448fed1b2c42a0a1bca045c2`（父提交 `a265b90` =
@@ -579,8 +736,9 @@ service.go 用 `git checkout`），还原后 `diff -q` 通过，两段门禁复�
   1410 insertions(+), 185 deletions(-)。按要求是**追加提交**，没有 amend / rebase。
   本文件的哈希回填是紧随其后的 `docs` 提交，因为哈希在提交前不存在。
 - 第二轮哈希回填：`9c5a8cf`（`docs`）。
-- **第三轮复审整改**：紧随 `9c5a8cf` 的追加提交（本文件随该提交一起改动，哈希在提交前
-  不存在；要时看 `git log -1 -- backend/internal/eligibilitywire/discover_test.go`）。
+- **第三轮复审整改：`2bf67d4`**（父提交 `9c5a8cf`）。没有 amend / rebase。
+- **第三轮（续，R10 / R11）**：紧随 `2bf67d4` 的追加提交，只动 `web/` 与本文件（哈希在
+  提交前不存在；要时看 `git log -1 -- web/src/App.source-account-panel.test.tsx`）。
   没有 amend / rebase。
 
 分支 `ai/claude/XM-INV-LOT-REASON-CONTRACT`，worktree `K:/发票/wt-XM-INV-FE-REASONS`。

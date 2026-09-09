@@ -32,6 +32,14 @@ export type EligibilityStatusKnown = LotEligibilityStatusWire;
 export type LotReasonCodeKnown = GeneratedLotReasonCode;
 
 export type SourceType = "sub2api" | "newapi";
+// Widened for the one place a platform code arrives from the network without
+// the frontend having a say in it: a bound source account's `source_type`.
+// A third platform, or a backend that ships one deploy ahead of this bundle,
+// used to be a hard INVALID_SOURCE_ACCOUNT throw that rejected the WHOLE
+// accounts request -- and an empty accounts list is the binding wizard (see
+// user-data-load.ts). Same shape as EligibilityStatusWire: the known union
+// keeps its label table exhaustive, the wire value may be something newer.
+export type SourceTypeWire = SourceType | (string & {});
 export type UserRole = "user" | "admin";
 export type VerificationState = "verified" | "pending" | "attention";
 export type InvoiceProfileType = "personal" | "enterprise";
@@ -139,13 +147,22 @@ export type AuthSession =
 
 export interface SourceAccount {
   id: string;
-  source: SourceType;
+  // Widened (see SourceTypeWire): a platform this bundle does not know still
+  // renders as a row -- labelled 「未识别的平台」 -- instead of rejecting the
+  // whole accounts request and dropping the user into the binding wizard.
+  source: SourceTypeWire;
   sourceInstanceId: string;
   sourceLabel: string;
   externalUserIdMasked: string;
   status: "pending" | "verified" | "frozen" | "revoked";
   verifiedAt?: string;
   lastObservedAt?: string;
+  // There is deliberately no `sourceDegraded` flag next to this. Unlike a
+  // summary (whose status can be known while an unknown envelope key still
+  // degrades it), "this row's platform is unknown" is exactly
+  // `!isKnownSourceType(source)` -- a second field would be a copy that can
+  // drift. Renderers derive the 「未识别的平台」 badge from `source` itself
+  // (see SourceBadge in App.tsx and sourceTypeLabel in lib/source-labels.ts).
 }
 
 // Another hand-copy of a backend enum this slice removed: this list was

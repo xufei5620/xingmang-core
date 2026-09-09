@@ -37,6 +37,7 @@ import {
   type InvoiceApiClient,
 } from "./api-contract";
 import { isUnobservedTimestamp } from "./format";
+import { sourceTypeLabel } from "./source-labels";
 import {
   lotEligibilityStatuses,
   lotReasonCodes,
@@ -117,7 +118,10 @@ export function platformLoginTwoFABody(input: PlatformLoginTwoFAInput) {
 
 export type BackendSourceAccount = {
   id: string;
-  source_type: "sub2api" | "newapi";
+  // Wire value: whatever platform code the backend currently emits. The two
+  // this bundle knows are "sub2api" and "newapi"; mapSourceAccount only checks
+  // the shape (see there).
+  source_type: string;
   source_instance_id: string;
   source_name: string;
   external_user_id_masked: string;
@@ -1748,7 +1752,18 @@ function mapSession(value: BackendSession): AuthSession {
 }
 
 export function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
-  if (!(["sub2api", "newapi"] as string[]).includes(value.source_type)) {
+  // Shape check only, same as mapLot's eligibility_status: a platform code
+  // this bundle has not seen is NOT a reason to reject the whole accounts
+  // request. Today the only values are sub2api / newapi; the day a third
+  // platform ships, or the backend deploys one step ahead of this bundle, a
+  // closed list here would throw INVALID_SOURCE_ACCOUNT, getSourceAccounts()
+  // would reject as a whole, and the "已关联的平台账号" panel would show the
+  // binding wizard to users whose bindings are fine -- the exact shape of the
+  // incident this slice exists because of. So: well-formed but unknown keeps
+  // its raw value and the row renders with a 「未识别的平台」 badge (derived
+  // from `source` by sourceTypeLabel, no separate flag); malformed (empty,
+  // upper-case, not a code) is still refused.
+  if (!wellFormedEnumCode(value.source_type, statusCodePattern)) {
     throw new InvoiceApiError("源账号包含无法识别的平台类型。", {
       code: "INVALID_SOURCE_ACCOUNT",
     });
@@ -1757,9 +1772,7 @@ export function mapSourceAccount(value: BackendSourceAccount): SourceAccount {
     id: value.id,
     source: value.source_type,
     sourceInstanceId: value.source_instance_id,
-    sourceLabel:
-      value.source_name ||
-      (value.source_type === "newapi" ? "SoloV 模型平台" : "SoloV API"),
+    sourceLabel: value.source_name || sourceTypeLabel(value.source_type),
     externalUserIdMasked: value.external_user_id_masked,
     status: value.binding_status,
     verifiedAt: value.verified_at,

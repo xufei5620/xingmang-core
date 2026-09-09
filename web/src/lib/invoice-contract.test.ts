@@ -97,6 +97,70 @@ describe("source account HTTP contract", () => {
         .lastObservedAt,
     ).toBeUndefined();
   });
+
+  // XM-INV-LOT-REASON-CONTRACT R10. `source_type` used to be a closed list
+  // (sub2api | newapi) that threw INVALID_SOURCE_ACCOUNT for anything else --
+  // and getSourceAccounts() maps every row, so one row on a third platform
+  // (or a backend one deploy ahead of this bundle) rejected the WHOLE accounts
+  // request. An empty accounts list on a first load is the binding wizard.
+  // Same prescription as eligibility_status: shape check, keep the raw value,
+  // label it 「未识别的平台」; malformed is still refused.
+  describe("an unrecognised but well-formed source_type", () => {
+    const unknown = { ...backendAccount, source_type: "thirdapi" };
+
+    it("does not throw, and keeps the raw platform code on the row", () => {
+      expect(() => mapSourceAccount(unknown)).not.toThrow();
+      expect(mapSourceAccount(unknown).source).toBe("thirdapi");
+    });
+
+    it("labels the row 「未识别的平台」 when the backend sent no display name", () => {
+      expect(
+        mapSourceAccount({ ...unknown, source_name: "" }).sourceLabel,
+      ).toBe("未识别的平台");
+    });
+
+    it("prefers the backend's own display name over the fallback label", () => {
+      expect(
+        mapSourceAccount({ ...unknown, source_name: "第三平台" }).sourceLabel,
+      ).toBe("第三平台");
+    });
+
+    it("keeps the row's binding status and identity, so the panel can list it", () => {
+      const row = mapSourceAccount(unknown);
+      expect(row.status).toBe("verified");
+      expect(row.externalUserIdMasked).toBe("n***8");
+      expect(row.id).toBe(backendAccount.id);
+    });
+
+    it("still resolves the known platforms to their fixed labels", () => {
+      expect(
+        mapSourceAccount({ ...backendAccount, source_type: "sub2api", source_name: "" })
+          .sourceLabel,
+      ).toBe("SoloV API");
+      expect(
+        mapSourceAccount({ ...backendAccount, source_type: "newapi", source_name: "" })
+          .sourceLabel,
+      ).toBe("SoloV 模型平台");
+    });
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["an upper-case code", "SUB2API"],
+    ["a code with a space", "new api"],
+    ["a code with a hyphen", "sub2-api"],
+    ["a code starting with a digit", "3rdapi"],
+    ["a code over the length cap", `a${"b".repeat(63)}`],
+  ])("still refuses %s as a source_type", (_label, sourceType) => {
+    expect(() =>
+      mapSourceAccount({ ...backendAccount, source_type: sourceType }),
+    ).toThrow("源账号包含无法识别的平台类型。");
+    try {
+      mapSourceAccount({ ...backendAccount, source_type: sourceType });
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe("INVALID_SOURCE_ACCOUNT");
+    }
+  });
 });
 
 describe("request recovery and document routes", () => {

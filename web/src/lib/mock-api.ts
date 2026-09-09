@@ -16,6 +16,7 @@ import type {
   RefundCaseStatus,
   SourceAccount,
   SourceHealthReport,
+  SourceType,
   SubmitInvoicePayload,
   UserEligibilitySummary,
 } from "../types";
@@ -52,7 +53,9 @@ const mockSession: AuthSession = {
   oidcAdminLoginEnabled: true,
 };
 
-const sourceAccounts: SourceAccount[] = [
+// Demo rows are always one of the two platforms this bundle knows (the
+// summaries below index mockUnitBalances by it); the wire type is wider.
+const sourceAccounts: (SourceAccount & { source: SourceType })[] = [
   {
     id: "link-sub2-demo",
     source: "sub2api",
@@ -341,7 +344,7 @@ let refundCases: RefundCase[] = [
 ];
 
 const mockUnitBalances: Record<
-  SourceAccount["source"],
+  SourceType,
   Pick<UserEligibilitySummary, "legacyNoninvoiceable" | "noncash">
 > = {
   sub2api: {

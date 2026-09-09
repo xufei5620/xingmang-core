@@ -2,14 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import { InvoiceApiError } from "./api-contract";
 import {
+  applyUserDataPlan,
   applyUserDataResults,
+  loadUserInvoiceData,
   planUserDataLoad,
   readableReason,
   sourceAccountPanelMode,
+  userDataLoadFailureMessage,
+  userDataLoadFailurePlan,
   userDataRequestKeys,
   type UserDataRequestKey,
   type UserDataResults,
   type UserDataSetters,
+  type UserDataSource,
 } from "./user-data-load";
 import type {
   FundingOrder,
@@ -436,5 +441,129 @@ describe("the accounts panel tells 'cannot read' apart from 'you have none'", ()
         failed: state.failed,
       }),
     ).toBe("accounts");
+  });
+});
+
+// XM-INV-LOT-REASON-CONTRACT R11: the refresh failing AS A WHOLE, after the
+// five requests settled -- applyUserDataResults itself throwing. The outer
+// catch used to set only the banner text; on a first load that left
+// sourceAccounts at [] and failedRequests at [], which sourceAccountPanelMode
+// reads as "you have no accounts" -- the wizard again, through a different
+// door. It was unreachable only because of an early `return` one line above.
+describe("a refresh that fails as a whole marks every panel unreadable", () => {
+  it("lists all five requests as failed", () => {
+    const plan = userDataLoadFailurePlan(new Error("boom"));
+    expect([...plan.failed].sort()).toEqual([...userDataRequestKeys].sort());
+  });
+
+  it("carries no data, so applying it clears nothing", () => {
+    const { state, setters } = makeState();
+    applyUserDataResults(allOk(), setters);
+    applyUserDataPlanFrom(new Error("boom"), setters);
+    expect(state.sourceAccounts).toEqual(ACCOUNTS);
+    expect(state.orders).toEqual(ORDERS);
+    expect(state.eligibilitySummaries).toEqual(SUMMARIES);
+    expect(state.failed).toHaveLength(userDataRequestKeys.length);
+  });
+
+  it("shows the unavailable notice, not the wizard, on a first load", () => {
+    const { state, setters } = makeState();
+    expect(state.sourceAccounts).toHaveLength(0);
+    applyUserDataPlanFrom(new Error("boom"), setters);
+    expect(
+      sourceAccountPanelMode({
+        accountCount: 0,
+        failed: state.failed,
+      }),
+    ).toBe("unavailable");
+  });
+
+  it("uses a Chinese banner, keeping a readable reason and dropping an English one", () => {
+    expect(
+      userDataLoadFailurePlan(new Error("开票服务暂时不可用，请稍后重试。"))
+        .loadError,
+    ).toBe("开票服务暂时不可用，请稍后重试。");
+    expect(userDataLoadFailurePlan(new Error("Failed to fetch")).loadError).toBe(
+      userDataLoadFailureMessage,
+    );
+    expect(userDataLoadFailurePlan(undefined).loadError).toBe(
+      userDataLoadFailureMessage,
+    );
+    expect(userDataLoadFailureMessage).toMatch(/[一-鿿]/);
+  });
+
+  // The same two calls the component's outer catch makes.
+  function applyUserDataPlanFrom(error: unknown, setters: UserDataSetters) {
+    applyUserDataPlan(userDataLoadFailurePlan(error), setters);
+  }
+});
+
+describe("loadUserInvoiceData: the whole refresh, catch included", () => {
+  function api(overrides: Partial<UserDataSource> = {}): UserDataSource {
+    return {
+      getOrders: async () => ORDERS,
+      getProfiles: async () => PROFILES,
+      getSourceAccounts: async () => ACCOUNTS,
+      getUserEligibilitySummary: async () => SUMMARIES,
+      getUserRequestPage: async () => REQUEST_PAGE,
+      ...overrides,
+    };
+  }
+
+  it("applies every panel when all five reads succeed", async () => {
+    const { state, setters } = makeState();
+    const plan = await loadUserInvoiceData(api(), setters);
+    expect(plan?.failed).toEqual([]);
+    expect(state.sourceAccounts).toEqual(ACCOUNTS);
+    expect(state.orders).toEqual(ORDERS);
+    expect(state.loadError).toBeNull();
+    expect(state.failed).toEqual([]);
+  });
+
+  it("marks only the rejecting read as failed", async () => {
+    const { state, setters } = makeState();
+    await loadUserInvoiceData(
+      api({
+        getOrders: async () => {
+          throw new InvoiceApiError("充值记录包含无效的资金账本状态。", {
+            code: "INVALID_ELIGIBILITY_STATUS",
+          });
+        },
+      }),
+      setters,
+    );
+    expect(state.failed).toEqual(["orders"]);
+    expect(state.sourceAccounts).toEqual(ACCOUNTS);
+  });
+
+  // The R11 case proper. The reads all settle; what throws is the apply step
+  // (here: a setter). Before, this reached the component's catch, which set
+  // the banner and nothing else.
+  it("registers every read as failed when applying the results throws", async () => {
+    const { state, setters } = makeState();
+    const plan = await loadUserInvoiceData(api(), {
+      ...setters,
+      setOrders: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(plan?.failed).toHaveLength(userDataRequestKeys.length);
+    expect(state.failed).toHaveLength(userDataRequestKeys.length);
+    expect(state.loadError).toBe(userDataLoadFailureMessage);
+    expect(
+      sourceAccountPanelMode({
+        accountCount: state.sourceAccounts.length,
+        failed: state.failed,
+      }),
+    ).toBe("unavailable");
+  });
+
+  it("applies nothing when a newer refresh has overtaken this one", async () => {
+    const { state, setters } = makeState();
+    const plan = await loadUserInvoiceData(api(), setters, () => false);
+    expect(plan).toBeUndefined();
+    expect(state.sourceAccounts).toEqual([]);
+    expect(state.failed).toEqual([]);
+    expect(state.loadError).toBeNull();
   });
 });

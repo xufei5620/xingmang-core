@@ -63,15 +63,22 @@ import {
 
 import { dateTime, dateTimeShanghai, maskTaxId, money } from "./lib/format";
 import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
-import { sourceName } from "./lib/source-labels";
+import {
+  isKnownSourceType,
+  sourceName,
+  sourceTypeLabel,
+} from "./lib/source-labels";
 import {
   eligibilityReasonLabel,
   eligibilityStatusLabel,
 } from "./lib/eligibility-labels";
 import {
-  applyUserDataResults,
+  applyUserDataPlan,
+  loadUserInvoiceData,
   sourceAccountPanelMode,
+  userDataLoadFailurePlan,
   type UserDataRequestKey,
+  type UserDataSetters,
 } from "./lib/user-data-load";
 import {
   accountIdentityLabel,
@@ -131,6 +138,7 @@ import type {
   SourceHealthReport,
   SourceStreamHealth,
   SourceType,
+  SourceTypeWire,
   UserEligibilitySummary,
 } from "./types";
 
@@ -291,7 +299,9 @@ type AppData = {
   loadMoreRequests: () => Promise<void>;
 };
 
-const DataContext = createContext<AppData | null>(null);
+// Exported for the render test (App.source-account-panel.test.tsx), which
+// feeds SourceAccountStatus a value produced by the real loadUserInvoiceData.
+export const DataContext = createContext<AppData | null>(null);
 
 function useData() {
   const value = useContext(DataContext);
@@ -353,6 +363,24 @@ function DataProvider({ children }: { children: ReactNode }) {
   const refresh = async () => {
     const version = ++refreshVersion.current;
     setLoading(true);
+    // Defined once, up here, because the whole-load `catch` below needs the
+    // same setters as the happy path: it must register every request as
+    // failed through the same applyUserDataPlan, not through a hand-written
+    // subset that stops calling setFailed the next time someone edits it.
+    const setters: UserDataSetters = {
+      setOrders,
+      setProfiles,
+      setSourceAccounts,
+      setEligibilitySummaries,
+      setRequests: (page) => {
+        setRequests(page.items);
+        setRequestsNextCursor(page.nextCursor);
+      },
+      setSummary: (page, availableMinor) =>
+        setSummary(summarizeRequests(page.items, availableMinor)),
+      setLoadError,
+      setFailed: setFailedRequests,
+    };
     try {
       if (adminRoute) {
         if (user?.role !== "admin") {
@@ -409,51 +437,29 @@ function DataProvider({ children }: { children: ReactNode }) {
         //
         // Each request now keeps its own last-good value and reports its own
         // failure. A failing request must never blank a panel it does not own.
-        const [orders, profiles, sourceAccounts, summaries, requests] =
-          await Promise.allSettled([
-            invoiceApi.getOrders(),
-            invoiceApi.getProfiles(),
-            invoiceApi.getSourceAccounts(),
-            invoiceApi.getUserEligibilitySummary(),
-            invoiceApi.getUserRequestPage(),
-          ]);
-        if (version !== refreshVersion.current) return;
-        // Which panels survive a partial failure is decided (and tested) in
+        //
+        // The five reads, the allSettled, which panels survive a partial
+        // failure, AND the whole-load catch all live (and are tested) in
         // lib/user-data-load.ts, not here.
-        applyUserDataResults(
-          {
-            orders,
-            profiles,
-            sourceAccounts,
-            eligibilitySummaries: summaries,
-            requests,
-          },
-          {
-            setOrders,
-            setProfiles,
-            setSourceAccounts,
-            setEligibilitySummaries,
-            setRequests: (page) => {
-              setRequests(page.items);
-              setRequestsNextCursor(page.nextCursor);
-            },
-            setSummary: (page, availableMinor) =>
-              setSummary(summarizeRequests(page.items, availableMinor)),
-            setLoadError,
-            setFailed: setFailedRequests,
-          },
+        await loadUserInvoiceData(
+          invoiceApi,
+          setters,
+          () => version === refreshVersion.current,
         );
         return;
       }
       setLoadError(null);
     } catch (error) {
       if (version !== refreshVersion.current) return;
-      setEligibilitySummaries([]);
-      setLoadError(
-        error instanceof Error
-          ? error.message
-          : "读取开票数据失败，请稍后重试。",
-      );
+      // A refresh that failed as a whole. Registered through the same plan
+      // machinery as a per-request failure so that every panel reads as
+      // "could not read this" rather than "empty": on a first load the old
+      // `setLoadError`-only catch left sourceAccounts at [] with nothing in
+      // failedRequests, which sourceAccountPanelMode renders as the binding
+      // wizard. The user path above catches its own errors and cannot reach
+      // here; this is the admin path's catch and the safety net for anything
+      // a future edit lets escape.
+      applyUserDataPlan(userDataLoadFailurePlan(error), setters);
     } finally {
       if (version === refreshVersion.current) setLoading(false);
     }
@@ -876,15 +882,25 @@ function Badge({
   return <span className={`badge badge-${tone}`}>{children}</span>;
 }
 
-function SourceBadge({ source }: { source: SourceType }) {
-  return (
-    <Badge tone={source === "newapi" ? "violet" : "cyan"}>
-      {sourceName[source]}
-    </Badge>
-  );
+// Takes the wire type: a source account row may carry a platform code this
+// bundle predates (see SourceTypeWire), and the badge is where that becomes
+// visible -- 「未识别的平台」 in the neutral tone -- instead of an empty badge
+// from indexing sourceName with a key it does not have.
+function SourceBadge({ source }: { source: SourceTypeWire }) {
+  const tone = !isKnownSourceType(source)
+    ? "neutral"
+    : source === "newapi"
+      ? "violet"
+      : "cyan";
+  return <Badge tone={tone}>{sourceTypeLabel(source)}</Badge>;
 }
 
-function SourceAccountStatus() {
+// Exported for the render test (App.source-account-panel.test.tsx): the
+// "unavailable, not the wizard" decision is unit-tested in
+// sourceAccountPanelMode, but whether this component actually hands it the
+// context's failedRequests -- and renders the notice instead of the three
+// steps -- is only checkable by rendering it.
+export function SourceAccountStatus() {
   const {
     sourceAccounts: allSourceAccounts,
     loading,
