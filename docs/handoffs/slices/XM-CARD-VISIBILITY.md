@@ -470,6 +470,29 @@ bash scripts/check-governance.sh                                     # exit 0
 上真跑过（`version=55 dirty=false`），`TestPgStoreAccountSyncPauseRoundTrip`
 验的是真 Postgres 上的往返。
 
+### 第三轮（主控者补跑全量，2026-09-09）
+
+派工明令不跑的全量，主控者在有库的机器上补跑了，抓到两处两轮都没看见的漏：
+
+1. `internal/platform/notify` 的 `TestCatalogListsEveryAlertRule` 红：新规则
+   `cards.sync.failed` 没写进 `docs/modules/notify/CATALOG.md`。已补一行（触发、
+   自愈、该做什么，含「先暂停止血再恢复」的口径），表头「七条规则」改「九条」
+   （之前 `approval.pending.too_long` 加进来时也没改）。
+2. admin-web 的 `labels.reconcile.test.ts` 两条红：静默对话框下拉里没有这条规则的
+   中文名；而「中文名逐字取自后端 Title」那条只扫 `rules.go`，本片把声明放在
+   `rules_cards.go`，它根本看不见。修法：`api/alerts.ts` 的 `ALERT_RULES` 加
+   `{ key: "cards.sync.failed", label: "卡片同步连续失败" }`；测试改成走目录发现
+   `rules*.go`（非测试文件）并断言至少发现 `rules.go` 与 `rules_cards.go`。
+   变异：把发现范围退回只认 `rules.go` → 「抽取器确实抓到了」与「Title 逐字」两条红，
+   还原后绿。这是「闸的范围要发现不要手列」的又一次发作。
+
+全量门禁（UTC，实测）：`go build` 0 / `go vet ./...` 0 / `go test -p 1 -count=1 ./...`
+（`XM_TEST_DATABASE_URL` 指向 worktree 专用库 `xm_test_wt_xm_card_visibility`）
+03:10:52Z 起 66s exit 0（含 `TestPgStoreAccountSyncPauseRoundTrip` 真跑）/ admin-web
+typecheck 0、2115 用例全绿 / ui-admin 262 全绿 / `check-governance.sh` 0 /
+gitleaks 11 条存量基线未新增。前端跑起来靠把 node_modules 用 junction 镜像到本
+worktree（memory 里的既有做法），不是 `pnpm install`。
+
 ## 替负责人做的决定（都可以推翻，理由写在这里）
 
 1. **`rejected` 一次退避重试都不给**，直接终结本轮该步骤。理由：`rejected`
