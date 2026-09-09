@@ -2171,96 +2171,22 @@ the freeze only appears when the event can be correlated to an account. **Take
 the census from these audit rows, not from the freezes** — counting freezes
 silently omits every dead event that never correlated to an account.
 
-**Recovering them (XM-INV-DEAD-REQUEUE).** A dead ingest event never revives
-on its own. Requeue it with the same repair binary the projection path uses,
-under a different `--kind`:
-
-```bash
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
-```
-
-Dry run is the default (each account's transaction is rolled back, nothing is
-written), `--apply` requires `--operator-id`, every requeued row is audited,
-and `--account` / `--event` narrow the selection. It resets `attempt_count` to
-zero, which is not cosmetic: the claim predicate is `attempt_count <` the dead
-threshold, so a row flipped back to `queued` without that reset is **never
-claimed again** — `Dead` drops to zero, `/readyz` stops reporting
-`source_ingest_dead_events` and starts failing on pending age instead, and the
-work still never runs. That state is worse than not repairing at all.
-
-**Read `cycle_status` in the dry-run report before applying.**
-`verifyFactBatchContextTx` (`postgresstore/consumption.go`) looks the event up
-by the exact `(event_id, batch_id, scan_cycle_id)` triple and accepts only
-`receiving`, `processing` or `published`; anything else is `ErrConflict`.
-`published` is safe, `processing` is fine but holds that stream's watermark
-until it drains, and **`blocked` must not be requeued** — the facts are
-rejected, so the event burns another retry round and dies again.
-
-> **`blocked` does not mean "try again later".** Nothing about waiting changes
-> a cycle's status. A dead event bound to a blocked cycle **cannot be
-> recovered by requeueing at all**, now or later. The options are to resolve
-> the cycle itself first, or to accept that this event's data is lost and
-> resolve its eligibility freeze through the normal path
-> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
-> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
-> "to see" costs a retry round and leaves everything exactly as it was.
-
-**As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
-the repair against production found all three dead events bound to blocked
-cycles — `e58b9430` (balances) and `b1de0e2b` (usage, shared by two events).
-Those cycles were superseded on 09-07 when the collection agent restarted.
-That is `supersede` working as designed, but note the consequence: **once it
-terminates a cycle, events still incomplete on that cycle can never be
-reprojected.** Expect this shape after any agent restart that supersedes a
-cycle with unfinished events on it, and check `cycle_status` first rather than
-reaching for `--apply`.
-
-The repair deliberately leaves eligibility freezes alone. The scan-cycle
-completeness filter is `NOT (status IN ('failed','dead') AND ef.id IS NOT
-NULL)` — the freeze is precisely what stops a dead event from holding its
-cycle open. Clearing it and then failing the reprojection again produces "dead
-but unfrozen", which blocks the whole stream indefinitely.
-
-**Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
-A per-account error from the eligibility-projection worker no longer trips
-`/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
-`eligibility_projection_jobs.status='dead'` -- is the only per-account
-condition that makes readiness unhealthy; it is reached only after 8
-consecutive processing errors for the same account, with exponential backoff
-(30s doubling, capped at 30 minutes) between attempts. A job merely retrying
-inside that backoff (`Retrying` in the admin source-health report,
-`GET /api/v1/admin/source-health`'s `eligibility_projection` object) never
-affects readiness, and is excluded from the stuck-job budget
-(`OldestPending`, 15 minutes) for as long as its own backoff has not
-elapsed -- the same treatment `BALANCE_PROOF_PENDING` jobs already got. A
-dead job never revives on its own (a new fact for that account advances its
-pending work but leaves it dead); recover it with:
-
-`invoice_eligibility_repair` below is the shell function defined in the next
-section ("Running `invoice-eligibility-repair` in production") -- copy that
-block into the shell first; there is no compose service for this binary.
-
-```bash
-invoice_eligibility_repair --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
-```
-
-See `docs/ELIGIBILITY-OPERATIONS.md` for the full grading/dead/requeue
-contract, and the next section for what `invoice_eligibility_repair` expands
-to.
-
 ### Running `invoice-eligibility-repair` in production
 
-RC104 and RC105 both recorded repair runs without ever writing down the
-command, so every run since has been reconstructed from the compose file.
-Written down once, here. There is **no compose service** for this binary --
-it lives only in the tools image -- so it is a `docker run`, and the three
-things easiest to get wrong are the network (the database network is
-`internal: true`, so a container outside it cannot reach `postgres` at all),
-the owner DSN (these repairs write tables `invoice_app` has no grants on),
-and `--pull=never` (production never pulls).
+RC104 and RC105 both recorded repair runs without writing down the command,
+so every run since was reconstructed from the compose file. Written down once,
+here, and confirmed against what those releases actually executed. There is
+**no compose service** for this binary -- it lives only in the tools image --
+so it is a `docker run`, and the three things easiest to get wrong are the
+network (the database network is `internal: true`, so a container outside it
+cannot reach `postgres` at all), the owner DSN (these repairs write tables
+`invoice_app` has no grants on), and `--pull=never` (production never pulls).
+
+Every `invoice_eligibility_repair` snippet in this runbook and in
+`docs/ELIGIBILITY-OPERATIONS.md` is this function. Both documents used to
+spell out `/app/bin/invoice-eligibility-repair` with
+`/run/secrets/invoice-db-url` and `field-keyring.json` instead -- three paths
+that do not exist in any image, in text that had never been run.
 
 ```bash
 export INVOICE_IMAGE_TAG='<exact tag from the verified release manifest>'
@@ -2426,6 +2352,79 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
       ORDER BY created_at DESC"
 ```
 Expected output is empty. Anything else goes to whoever owns the release.
+
+**Recovering them (XM-INV-DEAD-REQUEUE).** A dead ingest event never revives
+on its own. Requeue it with the same repair binary the projection path uses,
+under a different `--kind`:
+
+```bash
+invoice_eligibility_repair --kind=ingest-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+```
+
+Dry run is the default (each account's transaction is rolled back, nothing is
+written), `--apply` requires `--operator-id`, every requeued row is audited,
+and `--account` / `--event` narrow the selection. It resets `attempt_count` to
+zero, which is not cosmetic: the claim predicate is `attempt_count <` the dead
+threshold, so a row flipped back to `queued` without that reset is **never
+claimed again** — `Dead` drops to zero, `/readyz` stops reporting
+`source_ingest_dead_events` and starts failing on pending age instead, and the
+work still never runs. That state is worse than not repairing at all.
+
+**Read `cycle_status` in the dry-run report before applying.**
+`verifyFactBatchContextTx` (`postgresstore/consumption.go`) looks the event up
+by the exact `(event_id, batch_id, scan_cycle_id)` triple and accepts only
+`receiving`, `processing` or `published`; anything else is `ErrConflict`.
+`published` is safe, `processing` is fine but holds that stream's watermark
+until it drains, and **`blocked` must not be requeued** — the facts are
+rejected, so the event burns another retry round and dies again.
+
+> **`blocked` does not mean "try again later".** Nothing about waiting changes
+> a cycle's status. A dead event bound to a blocked cycle **cannot be
+> recovered by requeueing at all**, now or later. The options are to resolve
+> the cycle itself first, or to accept that this event's data is lost and
+> resolve its eligibility freeze through the normal path
+> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
+> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
+> "to see" costs a retry round and leaves everything exactly as it was.
+
+**As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
+the repair against production found all three dead events bound to blocked
+cycles — `e58b9430` (balances) and `b1de0e2b` (usage, shared by two events).
+Those cycles were superseded on 09-07 when the collection agent restarted.
+That is `supersede` working as designed, but note the consequence: **once it
+terminates a cycle, events still incomplete on that cycle can never be
+reprojected.** Expect this shape after any agent restart that supersedes a
+cycle with unfinished events on it, and check `cycle_status` first rather than
+reaching for `--apply`.
+
+The repair deliberately leaves eligibility freezes alone. The scan-cycle
+completeness filter is `NOT (status IN ('failed','dead') AND ef.id IS NOT
+NULL)` — the freeze is precisely what stops a dead event from holding its
+cycle open. Clearing it and then failing the reprojection again produces "dead
+but unfrozen", which blocks the whole stream indefinitely.
+
+**Eligibility-projection failure grading (XM-INV-PROJECTION-FAILURE-GRADING).**
+A per-account error from the eligibility-projection worker no longer trips
+`/readyz` on the first occurrence. `EligibilityProjectionHealth.Dead` --
+`eligibility_projection_jobs.status='dead'` -- is the only per-account
+condition that makes readiness unhealthy; it is reached only after 8
+consecutive processing errors for the same account, with exponential backoff
+(30s doubling, capped at 30 minutes) between attempts. A job merely retrying
+inside that backoff (`Retrying` in the admin source-health report,
+`GET /api/v1/admin/source-health`'s `eligibility_projection` object) never
+affects readiness, and is excluded from the stuck-job budget
+(`OldestPending`, 15 minutes) for as long as its own backoff has not
+elapsed -- the same treatment `BALANCE_PROOF_PENDING` jobs already got. A
+dead job never revives on its own (a new fact for that account advances its
+pending work but leaves it dead); recover it with:
+
+```bash
+invoice_eligibility_repair --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
+```
+
+See `docs/ELIGIBILITY-OPERATIONS.md` for the full grading/dead/requeue
+contract.
+
 
 ```bash
 docker compose --env-file deploy/.env.production \

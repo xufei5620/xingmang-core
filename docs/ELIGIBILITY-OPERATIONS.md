@@ -375,14 +375,16 @@ already asks for -- and the derivation only happens inside it. When `newest
 published` is above that window the account is just waiting for the
 finalization delay to pass, and the automatic path will reach it anyway.
 
-> The older snippets in this file (queue-narrow, policy-start-reanchor,
-> projection-requeue-dead, ingest-requeue-dead,
-> ingest-acknowledge-unreplayable) still show `/app/bin/...` with
-> `/run/secrets/invoice-db-url` and `field-keyring.json`. Those paths do not
-> exist: the binary is at `/usr/local/bin/invoice-eligibility-repair`, and the
-> compose secrets are `invoice_owner_database_url` and
-> `invoice_field_keyring`. Use the runbook's form for every kind until those
-> snippets are corrected.
+> Every `invoice_eligibility_repair` snippet in this file is the shell
+> function `docs/PRODUCTION-RUNBOOK.md` defines under "Running
+> `invoice-eligibility-repair` in production" -- copy that block into the
+> shell first. These snippets used to spell out a command line
+> (`/app/bin/...` with `/run/secrets/invoice-db-url` and
+> `field-keyring.json`) whose three paths do not exist and never did: the
+> binary lives at `/usr/local/bin/invoice-eligibility-repair` and the compose
+> secrets are `invoice_owner_database_url` and `invoice_field_keyring`. The
+> RC104/RC105 runs used the `docker run` form; the written-down one was never
+> executed.
 
 ## Manual queue narrowing (XM-INV-ELIG-QUEUE-NARROW, 2026-09-03)
 
@@ -428,16 +430,10 @@ migration-period reasons (`EVENT_PAYLOAD_DRIFT`, `UNIT_MISMATCH`,
 
   ```
   # dry run (default) -- reports what would change, writes nothing
-  /app/bin/invoice-eligibility-repair \
-    --database-url-file=/run/secrets/invoice-db-url \
-    --field-keyring-file=/run/secrets/field-keyring.json \
-    --kind=queue-narrow
+  invoice_eligibility_repair --kind=queue-narrow
 
   # apply -- requires an approving operator id
-  /app/bin/invoice-eligibility-repair \
-    --database-url-file=/run/secrets/invoice-db-url \
-    --field-keyring-file=/run/secrets/field-keyring.json \
-    --kind=queue-narrow --apply --operator-id=<admin-uuid>
+  invoice_eligibility_repair --kind=queue-narrow --apply --operator-id=<admin-uuid>
   ```
 
 ## Policy-start anchoring (XM-INV-ELIG-POLICY-START-ANCHOR, 2026-09-03)
@@ -492,18 +488,12 @@ precisely predicts whether re-anchoring changes anything:
 Like `--kind=queue-narrow`, this processes one account per transaction, not
 the whole run in one transaction.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=policy-start-reanchor
+invoice_eligibility_repair --kind=policy-start-reanchor
 
 # apply -- requires an approving operator id
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=policy-start-reanchor --apply --operator-id=<admin-uuid>
+invoice_eligibility_repair --kind=policy-start-reanchor --apply --operator-id=<admin-uuid>
 ```
 
 Production sequence: apply migration 0021 first (it must be live before the
@@ -581,24 +571,15 @@ event (`eligibility.projection.requeued`). Like `--kind=queue-narrow`, this
 processes one account per transaction, so one account's own conflict never
 blocks any other account in the same run.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead
+invoice_eligibility_repair --kind=projection-requeue-dead
 
 # apply -- requires an approving operator id
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead --apply --operator-id=<admin-uuid>
+invoice_eligibility_repair --kind=projection-requeue-dead --apply --operator-id=<admin-uuid>
 
 # narrow to one account
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=projection-requeue-dead --account=<external-account-uuid> \
+invoice_eligibility_repair --kind=projection-requeue-dead --account=<external-account-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
@@ -700,25 +681,16 @@ It deliberately changes nothing else:
   is unhealthy` instead of `contains dead events`) until the event actually
   reaches `processed`. That is accurate, not a regression.
 
-```
+```bash
 # dry run (default) -- reports what would change, writes nothing
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead
+invoice_eligibility_repair --kind=ingest-requeue-dead
 
 # apply one specific, individually reviewed event
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead --event=<ingest-event-uuid> \
+invoice_eligibility_repair --kind=ingest-requeue-dead --event=<ingest-event-uuid> \
   --apply --operator-id=<admin-uuid>
 
 # narrow to one account (correlated through that account's open freezes)
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-requeue-dead --account=<external-account-uuid> \
+invoice_eligibility_repair --kind=ingest-requeue-dead --account=<external-account-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 
@@ -838,18 +810,12 @@ Guardrails, because this writes off customer data:
 - Open freezes are untouched: closing the event is not the same judgment as
   declaring the account clean.
 
-```
+```bash
 # dry run (default) -- reports the event and why it is unreplayable
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid>
+invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid>
 
 # apply -- one reviewed event, with a named operator
-/app/bin/invoice-eligibility-repair \
-  --database-url-file=/run/secrets/invoice-db-url \
-  --field-keyring-file=/run/secrets/field-keyring.json \
-  --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid> \
+invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<ingest-event-uuid> \
   --apply --operator-id=<admin-uuid>
 ```
 

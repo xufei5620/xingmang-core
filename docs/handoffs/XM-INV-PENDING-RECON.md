@@ -367,7 +367,26 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
    99,948,771,408（管理员加约 1000 元当量）→ 之后每分钟一张检查点持续消费，09-09 10:39Z
    余额 84,084,681,007。pending 自 09-06 17:38:06Z，reason `UNKNOWN_NEGATIVE_BALANCE`，
    连击 0。→ **C5 的合成量 ≈ 加款额 + 当时 deficit**，不是设计稿推测的 999.49+D。
-4. 用户 34 的 09-02 四条 UNKNOWN_POSITIVE 各自路径：仍未核（留给 admin-credits 切片的去重）。
+4. 用户 34 的合成额度（主控者 2026-09-09 12:45Z 只读核实）——**不是设计稿说的「09-02 四条」，
+   而是 09-01 三条 + 09-02 一条**：
+   | event_time | 单位 | ≈ 元当量 | created_at |
+   | --- | ---: | ---: | --- |
+   | 09-01 14:51:09 | 10,144,440,689 | 101.44 | 09-01 21:10:52 |
+   | 09-01 15:05:17 | 10,105,221,407 | 101.05 | 09-01 21:10:52 |
+   | 09-01 15:16:17 | 39,219,282 | 0.39 | 09-01 21:10:52 |
+   | 09-02 18:27:18 | 30,000,000,000 | 300.00（管理员加款） | 09-02 18:54:45 |
+
+   前三条 `created_at` 相同，是 identity_catchup 于 09-01 14:49 之后首轮重建的同一次
+   `projection.rebuilt`。四条都是 `external_event_id` 前缀 `unknown-positive:`、无
+   `causal_domain`、无 funding_lot；作为对照，PRE_POLICY 额度带
+   `causal_domain=payment_orders`。
+
+   **09-06 17:18 那次管理员加约 1000 没有对应的合成行**——账号在 17:38 直接进了 pending
+   （连击 0）。这与根因分析一致：正向分支被延后、永不确认，所以什么也没合成。
+
+   参考（用户 12）：08-24 切点 UNKNOWN_POSITIVE 1,998,791,280（created 09-03 09:19）、
+   四条 PRE_POLICY（payment_orders）、08-31 16:00 policy-start UNKNOWN_POSITIVE 2,994,240
+   （created 09-03 11:58）。
 5. 用户 12（`acdcdce9-c7f4-4cb4-9a02-ce527849a440`）：最后一张真实检查点 09-06 11:29:30Z
    （余额 0 负、deficit 3,610,140），此后无检查点；pending 自 09-04 10:03:06Z，连击 1。
    全库 `source_ingest_events` **无 failed/dead**。→ 没有死信 hold 要先处理，C2 的闲置派生
@@ -382,8 +401,7 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
 `pending_finalization`，评估结果不在这张表。手册的确认 SQL 已改为查
 `balance_checkpoint_evaluations` / `balance_carry_forward_evaluations`。
 
-**仍未核实：** 第 4 条（34 的四条旧合成额度各走哪条路径）；第 8、10、11、12、13 条与本切片的
-实现无关，未处置。
+**仍未核实：** 第 8、10、11、12、13 条与本切片的实现无关，未处置。
 
 ## 7. 部署后预期观测
 
@@ -467,3 +485,28 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
 说了它不会对平——为一个已知不会成立的结果永久烧掉一个周期，没有值得留的口子。真需要时是等一条
 真实事实，不是等一个操作者。若后续认为过严，加 flag 是个小改动，但要连同「谁批准、审计里怎么
 记」一起设计。
+
+### 8.4 follow_up：ADMIN-CREDITS 切片必须带去重
+
+当桥接把 `redeem_codes.type='admin_balance'` 放行、真实管理员加款作为额度事件进账本之后，
+用户 34 已有的四条 `UNKNOWN_POSITIVE` 合成额度会与真实加款**重复计数**（§6 第 4 条的实测值）：
+
+| 合成行 event_time | 单位 | ≈ 元 | 对应的真实加款 |
+| --- | ---: | ---: | --- |
+| 09-01 14:51:09 | 10,144,440,689 | 101.44 | 待 ADMIN-CREDITS 核对 |
+| 09-01 15:05:17 | 10,105,221,407 | 101.05 | 待 ADMIN-CREDITS 核对 |
+| 09-01 15:16:17 | 39,219,282 | 0.39 | 待 ADMIN-CREDITS 核对 |
+| 09-02 18:27:18 | 30,000,000,000 | 300.00 | 管理员加款 300 元 |
+
+09-01 三笔合计约 203 元，09-02 一笔 300 元。**再加上本切片 C5 在生产会新合成的那一笔**
+（≈ 09-06 17:18 的加款额 + 当时 deficit），一共五条要处置。
+
+去重只有两条路，ADMIN-CREDITS 必须在设计里选一条并写进它自己的交接单：
+
+1. **按金额 + 时间窗匹配**后删除合成行。0019 的 GUC 门只允许删 `UNKNOWN_POSITIVE`
+   （`0019_balance_blip_repair.sql`），所以删得掉；难点是匹配规则要能解释 09-01 那三条
+   （同一次重建里连着写的三笔，与上游事件不是一对一）。
+2. **退役合成行**：不删，改为在投影里排除（需要新列或新 credit_kind，等于迁移）。
+
+无论选哪条，判据是同一个：处置前后账号的 `ExpectedBalance − UnallocatedUnits` 不变，
+且 `funding_lots` 的现金口径一分不动（合成额度从来不进现金池，不产生 `cash_minor_delta`）。
