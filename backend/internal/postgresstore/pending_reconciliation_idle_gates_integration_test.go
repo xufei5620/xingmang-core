@@ -275,7 +275,7 @@ func TestIdleDerivationStopsAtTheNewestCandidateEvenIfAnOlderOneIsFree(t *testin
 		f.candidateForCycle(t, newerCycle.cycleID),
 	}
 	candidates[1].hasRealCheckpoint = true
-	if err = deriveIdlePendingCarryForwardProofTx(f.ctx, tx, account, candidates,
+	if err = deriveIdlePendingCarryForwardProofTx(f.ctx, tx, account, candidates, newerAt.Add(time.Minute),
 		AuditActor{Type: "system", ID: "idle-gate-test"}); err != nil {
 		t.Fatalf("derivation returned an error: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestIdleDerivationStopsAtTheNewestCandidateEvenIfAnOlderOneIsFree(t *testin
 	}
 	defer func() { _ = tx.Rollback(f.ctx) }()
 	candidates[1].hasRealCheckpoint = false
-	if err = deriveIdlePendingCarryForwardProofTx(f.ctx, tx, account, candidates,
+	if err = deriveIdlePendingCarryForwardProofTx(f.ctx, tx, account, candidates, newerAt.Add(time.Minute),
 		AuditActor{Type: "system", ID: "idle-gate-test"}); err != nil {
 		t.Fatalf("control derivation returned an error: %v", err)
 	}
@@ -344,4 +344,95 @@ func (f *idlePendingFixture) candidateForCycle(t *testing.T, cycleID string) car
 	}
 	item.asOf, item.watermark, item.observed = item.asOf.UTC(), item.watermark.UTC(), item.observed.UTC()
 	return item
+}
+
+// TestIdleDerivationIgnoresEvidenceBelowTheAnchorFloor is the second review's
+// second new finding. The unevaluated-evidence count carried its own copy of
+// the evaluator's selection and omitted its anchor floor -- and that floor is
+// not an optimisation. XM-INV-PREANCHOR-BALANCE puts a POLICY_ANCHOR account's
+// pre-anchor evidence permanently out of the evaluator's scope: it is never
+// selected, so it never gets an evaluation row, so a count without the floor
+// reports it forever.
+//
+// Both callers gate on that count being zero. An account with one such row
+// therefore had idle derivation closed permanently and every
+// pending-reevaluate refused permanently, with a report saying "the worker
+// will handle it" about a row the worker will never look at.
+//
+// The fixture is production's own shape: a POLICY_ANCHOR account with a
+// cutover-kind checkpoint below its anchor and a reconciliation checkpoint
+// below its anchor, both unevaluated, alongside ordinary evaluated evidence
+// above it.
+func TestIdleDerivationIgnoresEvidenceBelowTheAnchorFloor(t *testing.T) {
+	f := newIdlePendingFixture(t)
+	var bootstrapKind string
+	var cutoverAt time.Time
+	if err := f.store.pool.QueryRow(f.ctx, `SELECT bootstrap_kind,cutover_at
+		FROM source_account_eligibility_state WHERE external_account_id=$1`,
+		f.accountID).Scan(&bootstrapKind, &cutoverAt); err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapKind != "POLICY_ANCHOR" {
+		t.Fatalf("fixture: this test is about the POLICY_ANCHOR floor, got %q", bootstrapKind)
+	}
+
+	// Two unevaluated rows below the anchor, the shapes production actually
+	// holds: the cutover checkpoint every account carries, and a
+	// reconciliation checkpoint from before the anchor moved.
+	f.insertUnevaluatedCheckpointAt(t, "floor-cutover", cutoverAt.Add(-90*time.Minute), "cutover", 91)
+	f.insertUnevaluatedCheckpointAt(t, "floor-reconciliation", cutoverAt.Add(-45*time.Minute), "reconciliation", 92)
+
+	tx, err := f.store.pool.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, err := countUnevaluatedBalanceEvidenceTx(f.ctx, tx, f.accountID, f.lastEvidenceAt.Add(time.Hour))
+	_ = tx.Rollback(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Owed != 0 {
+		t.Fatalf("owed=%d, want 0: evidence below the anchor floor is never the evaluator's work", counts.Owed)
+	}
+	if counts.PreAnchor != 1 {
+		t.Fatalf("pre-anchor reconciliation checkpoints=%d, want 1 (the cutover-kind row is not counted at all)",
+			counts.PreAnchor)
+	}
+
+	// And the derivation runs, which is the behaviour the missing floor was
+	// blocking.
+	proofsBefore := f.proofCount(t)
+	carryAt := f.lastEvidenceAt.Add(idleCycleSpacing)
+	f.publishEmptyBalancesCycle(t, 991, carryAt)
+	f.runFinalize(t, carryAt.Add(time.Minute))
+	f.processJobs(t)
+	if got := f.proofCount(t); got != proofsBefore+1 {
+		t.Fatalf("proofs=%d, want %d: pre-anchor rows must not close idle derivation", got, proofsBefore+1)
+	}
+	if row := readPendingReconciliation(t, f.store, f.ctx, f.accountID); row.status != "active" {
+		t.Fatalf("the account should have exited: %+v", row)
+	}
+}
+
+// insertUnevaluatedCheckpointAt writes one checkpoint row with no evaluation,
+// directly, so a test can place evidence on either side of the anchor floor
+// without going through a scan cycle.
+func (f *idlePendingFixture) insertUnevaluatedCheckpointAt(t *testing.T, checkpointID string,
+	asOf time.Time, kind string, sourceSequence int64) {
+	t.Helper()
+	if _, err := f.store.pool.Exec(f.ctx, `
+		INSERT INTO balance_reconciliation_checkpoints(
+			id,source_instance_id,external_account_id,external_event_id,checkpoint_id,
+			checkpoint_kind,baseline_member,as_of,balance_service_units,balance_negative,unit_code,
+			cutover_manifest_hash,configuration_hash,reconciliation_status,source_sequence,
+			source_cursor,stream_watermark_at,source_revision_hash,observed_at,
+			baseline_snapshot_id,source_snapshot_id,snapshot_row_count)
+		VALUES($1,$2,$3,$4,$5,$6,$6='cutover',$7,0,FALSE,'SUB2_BALANCE_1E8',
+			$8,$9,CASE WHEN $6='cutover' THEN 'cutover_baseline' ELSE 'pending_finalization' END,$10,$11,$7,$12,$7,
+			CASE WHEN $6='cutover' THEN $12::char(64) END,$12::char(64),1)`,
+		randomUUID(), f.sourceID, f.accountID, checkpointID+"-event", checkpointID, kind, asOf,
+		f.manifestHash, f.configHash, sourceSequence, "cursor:"+checkpointID,
+		testHash(checkpointID)); err != nil {
+		t.Fatalf("insert %s checkpoint at %s: %v", kind, asOf.UTC(), err)
+	}
 }

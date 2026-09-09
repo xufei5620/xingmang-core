@@ -320,12 +320,28 @@ included), it is one evidence item, and it counts as one. The acceptance line
 accepted on 2026-09-09 that for an idle account the second of the two matches
 is a restatement of the first.
 
-Two things suppress the derivation entirely, and both are deliberate: an open
-`eligibility_freezes` row (the exit would be blocked by the freeze guard
-anyway, and a proof is immutable once written), and a `balance_checkpoint`
-event that is dead or failed in that same cycle (XM-INV-DEAD-CONTAINMENT --
-writing a proof there would make migration 0014 refuse the real checkpoint
-forever). The audit row for an idle derivation carries
+Five things suppress the derivation, in this order, and every one of them is
+there because its absence released an account that should have stayed parked:
+
+1. **the consecutive-match streak is below one-short-of-the-exit** -- the
+   narrowing the acceptance line asked for, enforced in the derivation itself
+   and not only where jobs are enqueued (a job has other sources);
+2. **the evaluator still owes a verdict on a real checkpoint** -- including
+   one the finalization delay is still holding back. An idle proof restates
+   the evidence it is supposed to be independent of, so it would confirm a
+   deferred difference by construction;
+3. **the newest cycle in the window already carries a real checkpoint** -- the
+   derivation stops rather than backfilling a restatement of stale numbers
+   underneath newer evidence;
+4. **a `balance_checkpoint` event that is dead or failed in that cycle**
+   (XM-INV-DEAD-CONTAINMENT: writing a proof there would make migration 0014
+   refuse the real checkpoint forever);
+5. **an open `eligibility_freezes` row** -- the exit is blocked by the freeze
+   guard anyway, and a proof is immutable once written.
+
+Evidence dated below a POLICY_ANCHOR account's own anchor is outside all of
+this: the evaluator never selects it, so it never counts as owed and never
+blocks anything. The audit row for an idle derivation carries
 `idle_reevaluation: true`.
 
 **`invoice-eligibility-repair --kind=pending-reevaluate`** is the on-demand

@@ -125,6 +125,9 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M31 | 账本文案退回「预期 %s」 | 文案用例 | 红 |
 | M32 | 被拒绝的 apply 不再返回哨兵错误 | CLI 退出码用例 | 红 |
 | M33 | 报告的连击闸从 STOP 降成 NOTE | 连击门槛用例 | 红 |
+| M34 | 未评估计数去掉锚前下界 | 锚前用例 | 红（owed=1，闲置派生被永久关死） |
+| M35 | 未评估计数改用窗口上界 | 「最新证据还不可终局」用例 | 红（账号被放出去） |
+| M36 | 加一个既不进清单也不进手册的 blocker | 发现式同源用例 | 红 |
 
 M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
 漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
@@ -165,6 +168,9 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **终审 major 1 修复后** `go vet ./...` | 12:36:31 | 12:36:32 | 1s |
 | **终审 major 1 修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **12:36:32** | **12:44:09** | **7m37s，exit 0，30 包全 ok** |
 | **终审 major 1 修复后** `check-no-secrets.ps1` | 12:44:09 | 12:44:10 | exit 0 |
+| **终审 major 2 + 3 minor 修复后** `go vet ./...` | 12:56:10 | 12:56:12 | 2s |
+| **终审 major 2 + 3 minor 修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **12:56:12** | **13:03:33** | **7m21s，exit 0，30 包全 ok** |
+| **终审 major 2 + 3 minor 修复后** `check-no-secrets.ps1` | 13:03:33 | 13:03:34 | exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
@@ -404,6 +410,22 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
    pending 2（12、34）。真值仍要靠影子评估逐账号 diff，判据见 §4.1。
 15. 用户 34 的加款走 Sub2API 管理员加余额（`redeem_codes` type=`admin_balance`），已核。
 
+**主控者 2026-09-09 12:35Z 的第二批生产只读实测（机器时钟）：**
+
+- 12 个账号**全部** `bootstrap_kind=POLICY_ANCHOR`；每个账号都恰有一张没有评估行的
+  `checkpoint_kind='cutover'` 检查点，as_of 2026-08-24 23:49:51Z（切点），在各自 cutover_at 之前。
+  （注意：本切片的未评估计数带 `checkpoint_kind='reconciliation'` 过滤，这张不在计数内——
+  「全员被关死」的推论不成立，见 §8.5。）
+- 用户 12（cutover_at 08-31 16:00Z）：锚后 241 matched（最后一张 09-06 11:29:30Z 判 matched）、
+  416 negative_frozen、1 positive_classified_non_cash；锚前 212 positive_blip_ignored、
+  2 negative_frozen、1 positive_classified_non_cash——**这些锚前检查点是有评估行的**（锚迁移之前
+  评估的）；无评估行的只有那张 cutover。
+- 用户 34（cutover_at 08-31 17:20:03Z）：锚前 1027 matched + 1 张 cutover 无评估；锚后 2407
+  matched、2195 positive_blip_ignored、2 negative_frozen、5 positive_classified_non_cash，另有
+  3 张 12:31–12:34Z 的最新检查点无评估行（正向延后中，属预期）。
+- 账号 1113/1147/2092/2222 还有更多锚前无评估行的检查点（1147 有 2、2092 有 5、2222 有 23）；
+  **它们的 `checkpoint_kind` 待确认**，这决定本切片的下界修复在今天是否真被触发（§8.5）。
+
 另外一条与手册相关：`balance_reconciliation_checkpoints.reconciliation_status` 生产上**全是**
 `pending_finalization`，评估结果不在这张表。手册的确认 SQL 已改为查
 `balance_checkpoint_evaluations` / `balance_carry_forward_evaluations`。
@@ -421,6 +443,15 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
 - **用户 34（C5）**：接下来两张真实检查点。若出现 `eligibility.balance_blip.rebaselined`，
   说明重建没有对平 —— 按 §5 第 2 条，签名口径之后这只可能是「合成额度写不进去」，
   停下来看 detail，不要用工具清状态。
+- **两条路径（主控者 2026-09-09 复审给出，已核对代码成立）**：
+  - **用户 12** 在新代码下应是分钟级退出：连击 1 ≥ 门槛 1 → balances 每分钟发布一次触发 C1 排队
+    → 窗口内无用量/额度/现金 lot，visibilities 为空进闲置分支 → 五道闸（连击、欠判定、最新候选、
+    死信、冻结）全过 → 派生一张复述 deficit 3,610,140 那张检查点的证明 → matched → 连击 2 →
+    `active`。前提是它名下没有**锚前且未评估的 reconciliation 检查点**（见 §8.5 的存疑点）。
+  - **用户 34 根本进不了闲置分支**：它每分钟都有用量，visibilities 永远非空。它的出路是 C5——
+    正向确认合成额度 → matched → 连击 1 → 再一张 matched → `active`。今天对 34 跑 C3 多半会被
+    `cycle_has_real_checkpoint` 或 `unevaluated_checkpoints` 拒绝：**答案对，但理由不是连击 0**，
+    看报告时别把这两条读成「连击不够」。
 - **readyz**：`Queued` 偶发 1–2、秒级清零；不应出现 `eligibility_projection_stuck`。
   `docs/ELIGIBILITY-OPERATIONS.md` 已经把「pending 对 readyz 结构上不可见」这句改掉了。
 - **回滚**：重新部署上一版镜像即可（无迁移）。新代码写下的证明/评估/退出/合成额度在旧代码下
@@ -508,7 +539,36 @@ docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d 
 着补）。手册与运维文档都写明这种账号该怎么办：**没有工具能替它推进连击，只有一次真实的
 matched 评估可以**，等下一张真实检查点。变异 M33 把它降成 NOTE 即红。
 
-### 8.5 follow_up：ADMIN-CREDITS 切片必须带去重
+### 8.5 终审 major 2：未评估计数的两个界，以及一处我不同意的判断
+
+`countUnevaluatedBalanceEvidenceTx` 原来自带一份「评估器选活儿」的副本，少了两个界。
+下界（`as_of >= anchor_floor`）**必须补**：XM-INV-PREANCHOR-BALANCE 把 POLICY_ANCHOR 账号
+锚前的证据永久排除在评估器取值范围之外，它永远拿不到评估行，于是少了这个界的计数对这类账号
+永远 > 0——两个调用方都以「计数为 0」为闸，所以闲置派生被永久关死、C3 永久拒绝，文案还写着
+「worker 自己会处理」，而它永远不会。已把评估器的 evidence_floor 与两条谓词抽成常量，计数与
+评估器现在共用同一段文本。
+
+**上界（`as_of <= 窗口末端`）不能加，复审说它「无害、只偏保守」这一条我不同意，并有实测。**
+加上之后 `TestIdleDerivationDoesNotReleaseAnAccountWhoseNewestEvidenceIsUnfinalizable` 立刻
+变红：那条对不上的新检查点正好被 finalization_delay 挡在窗口之上，用窗口去数就数不到它，B1 的
+闸失效，账号在「最新上游观测未评估且不符」的状态下被放出去——正是 B2 的持久形态。**「评估器还
+欠不欠判定」与「本轮会判什么」是两个问题**，闸只能用前者。
+
+现在计数返回三个数：`Owed`（锚前之上、无评估行，不设窗口上界——闸用这个）、
+`InWindowCheckpoints/InWindowProofs`（本轮窗口内，报告用来说明 worker 这轮会处理什么）、
+`PreAnchor`（永远不会被评估的那批，报告单独说明，并指向 `--kind=policy-start-reanchor`，
+不再拿「worker 会处理」搪塞）。变异 M34（去掉下界）与 M35（改用窗口上界）各自变红。
+
+**另一处要说清楚：主控者转述的「全员性」前提与代码对不上。** 生产实测说每个账号都有一张无评估行
+的 `checkpoint_kind='cutover'` 检查点，并据此判断计数对全员恒 >0。但计数（改前改后都）带
+`checkpoint_kind='reconciliation'` 过滤，**cutover 那张根本不在计数里**。所以「全员被关死」这个
+结论不成立；真正会踩到的是**锚前且未评估的 reconciliation 检查点**。主控者给的数据里，账号
+1147（2 条）、2092（5 条）、2222（23 条）「还有更多锚前无评估行的检查点」——**这些行的
+`checkpoint_kind` 需要再确认一次**：若是 reconciliation，它们就是真实受害者；若也是 cutover，
+那么本条在今天的生产上没有实际触发，修复仍然正确（防的是明天）。我没有生产只读权限，无法自己核。
+用例两种形状都造了：cutover 那张（不计入）与锚前 reconciliation 那张（改后不计入）。
+
+### 8.6 follow_up：ADMIN-CREDITS 切片必须带去重
 
 当桥接把 `redeem_codes.type='admin_balance'` 放行、真实管理员加款作为额度事件进账本之后，
 用户 34 已有的四条 `UNKNOWN_POSITIVE` 合成额度会与真实加款**重复计数**（§6 第 4 条的实测值）：

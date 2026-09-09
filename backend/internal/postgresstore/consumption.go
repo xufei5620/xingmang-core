@@ -736,9 +736,13 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				-- watermark rows under the runtime role's lock_timeout=5s -- the exact
 				-- position that took the balances stream down for 29 minutes on
 				-- 2026-09-04 (see the note above). source_economic_scan_cycles has no
-				-- index that serves "published cycles of this stream by ceiling": the
-				-- primary key leads with a UUID scan_cycle_id, and the only partial
-				-- index covers cycle_status IN ('receiving','processing'). A correlated
+				-- index that serves "published cycles of this stream by ceiling". The
+				-- primary key is (source_instance_id, stream_id, scan_cycle_id): its
+				-- first two columns do narrow to this stream, and an EXPLAIN shows the
+				-- planner using exactly that prefix -- but scan_ceiling_at is not in it,
+				-- so every published cycle of the stream is read and filtered. The only
+				-- other index is partial on cycle_status IN ('receiving','processing'),
+				-- which excludes published rows entirely. A correlated
 				-- EXISTS there would re-scan the stream's whole cycle history -- one row
 				-- per source per minute, ~500k rows a year -- once for every pending
 				-- account matched. As a CTE it is one aggregate for the pass. Adding
@@ -3758,25 +3762,116 @@ func insertBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 // regardless of any streak), and each of them reaches the derivation.
 const pendingReconciliationIdleMinMatches = pendingReconciliationExitMatches - 1
 
-// countUnevaluatedBalanceEvidenceTx counts this account's balance evidence the
-// evaluator has not judged yet, split by kind. It is the same NOT EXISTS
-// predicate evaluatePendingBalanceEvidenceTx selects its work with, and it has
-// exactly two callers on purpose: the idle-derivation guard below, and
-// invoice-eligibility-repair --kind=pending-reevaluate's own report. An
-// operator reading "unevaluated evidence: 0" and the code deciding whether to
-// derive must be answering the same question with the same query, or the
-// report is describing a different tool than the one that runs.
-func countUnevaluatedBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string) (checkpoints, proofs int, err error) {
-	err = tx.QueryRow(ctx, `
-		SELECT (SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
-			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+// balanceEvidenceFloorCTE, pendingBalanceCheckpointPredicate and
+// pendingBalanceProofPredicate are evaluatePendingBalanceEvidenceTx's own
+// selection of "evidence I still owe a verdict on", rendered once so that
+// nothing can hold a private copy of it. $1 is the account, $2 the window end.
+//
+// The floor is XM-INV-PREANCHOR-BALANCE's. Balance evidence dated before a
+// POLICY_ANCHOR account's own cutover_at is not evidence about that account's
+// ledger, because the ledger does not exist before the anchor: evaluating it
+// anyway builds the expected balance from an empty window
+// (buildEligibilityProjectionTx floors every fact query at cutover_at), so
+// expected comes out 0, the whole reported balance reads as an unexplained
+// positive difference, and balanceEvidenceTrustIntervalTx has no interval to
+// anchor a synthesis against -- SOURCE_GAP, permanently. It is a fixed point,
+// not a transient: RepairBalanceAnchorEligibility resolves the freeze and
+// deletes the evaluation so the item goes pending again, the next projection
+// redoes the identical arithmetic, and the freeze comes straight back.
+// Production account 98cce4c8 sat there with four such checkpoints, from the
+// 21 hours between its own first post-policy checkpoint and the RC68 deploy
+// that first taught the system to bootstrap an anchor at all. This mirrors
+// the fact side, which XM-INV-PREANCHOR-USAGE already taught to skip rather
+// than freeze for the same reason (observeEligibilityFact's BootstrapKind
+// guard). A legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account keeps the old
+// behaviour: its cutover replays real history to a known point, so evidence
+// before it genuinely is a gap.
+//
+// Because that evidence is permanently out of scope, a count that omits the
+// bound reports work that will never be done -- and anything gating on the
+// count being zero then gates forever. The upper bound (as_of <= the window
+// end) matters the same way in the other direction: evidence above the window
+// is not this pass's work either.
+const (
+	balanceEvidenceFloorCTE = `evidence_floor AS (
+		SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
+			THEN state.cutover_at ELSE '-infinity'::timestamptz END AS anchor_floor
+		FROM source_account_eligibility_state state
+		WHERE state.external_account_id=$1
+	)`
+	pendingBalanceCheckpointPredicate = `checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<=$2
+			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
 			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
-				WHERE evaluation.checkpoint_id=checkpoint.id)),
-			(SELECT count(*) FROM balance_carry_forward_proofs proof
-			WHERE proof.external_account_id=$1
+				WHERE evaluation.checkpoint_id=checkpoint.id)`
+	// unevaluatedCheckpointAboveFloorPredicate deliberately drops the upper
+	// bound. "Does the evaluator still owe a verdict on real evidence?" is not
+	// the same question as "what will it judge in this pass", and for the idle
+	// derivation only the first one is safe: a checkpoint the finalization
+	// delay is still holding back is precisely the one an account must not be
+	// released ahead of. Bounding this by the window reopens the durable form
+	// of the backfill failure -- the account goes active while the newest thing
+	// the source said about it sits on file, unevaluated, disagreeing.
+	unevaluatedCheckpointAboveFloorPredicate = `checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id)`
+	pendingBalanceProofPredicate = `proof.external_account_id=$1 AND proof.as_of<=$2
+			  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
 			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
-				WHERE evaluation.proof_id=proof.id))`, accountID).Scan(&checkpoints, &proofs)
-	return checkpoints, proofs, err
+				WHERE evaluation.proof_id=proof.id)`
+)
+
+// countUnevaluatedBalanceEvidenceTx counts the balance evidence the evaluator
+// still owes this account a verdict on, split by kind, using the predicates
+// above -- literally the same text evaluatePendingBalanceEvidenceTx selects
+// its work with. It has exactly two callers on purpose: the idle-derivation
+// guard below, and invoice-eligibility-repair --kind=pending-reevaluate's own
+// report. An operator reading "unevaluated: 0" and the code deciding whether
+// to derive must be answering the same question with the same query.
+//
+// It used to carry its own copy that omitted both bounds, and the anchor floor
+// is the one that bites: evidence below a POLICY_ANCHOR account's own anchor
+// is never selected by the evaluator and therefore never gets an evaluation
+// row, so such an account counted >0 forever. Both callers gate on zero, so
+// the idle derivation would have been closed for that account permanently and
+// the repair tool would have refused it permanently -- while telling the
+// operator "the worker will handle it", which it never would.
+//
+// preAnchorCheckpoints is that excluded population, reported separately so the
+// tool can say which of the two situations an operator is looking at instead
+// of pretending the rows are not there.
+type unevaluatedBalanceEvidence struct {
+	// Owed is every real checkpoint at or above the anchor floor that has no
+	// evaluation row -- whether or not this pass's window reaches it. This is
+	// the number the idle-derivation guard and the repair tool gate on.
+	Owed int
+	// InWindowCheckpoints/InWindowProofs are the subset the current window
+	// actually selects: what the evaluator will judge in this pass.
+	InWindowCheckpoints int
+	InWindowProofs      int
+	// PreAnchor is the population the evaluator will never judge at all.
+	PreAnchor int
+}
+
+func countUnevaluatedBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string,
+	through time.Time) (counts unevaluatedBalanceEvidence, err error) {
+	err = tx.QueryRow(ctx, `
+		WITH `+balanceEvidenceFloorCTE+`
+		SELECT (SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE `+unevaluatedCheckpointAboveFloorPredicate+`),
+			(SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE `+pendingBalanceCheckpointPredicate+`),
+			(SELECT count(*) FROM balance_carry_forward_proofs proof
+			WHERE `+pendingBalanceProofPredicate+`),
+			(SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND checkpoint.as_of<(SELECT anchor_floor FROM evidence_floor)
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id))`,
+		accountID, through.UTC()).Scan(&counts.Owed, &counts.InWindowCheckpoints,
+		&counts.InWindowProofs, &counts.PreAnchor)
+	return counts, err
 }
 
 // deriveIdlePendingCarryForwardProofTx is XM-INV-PENDING-RECON C2: for an
@@ -3831,7 +3926,7 @@ func countUnevaluatedBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID
 //     and every proof is immutable and burns its cycle's exclusivity
 //     permanently.
 func deriveIdlePendingCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount,
-	carryCandidates []carryCandidate, actor AuditActor) error {
+	carryCandidates []carryCandidate, requested time.Time, actor AuditActor) error {
 	if len(carryCandidates) == 0 {
 		return nil
 	}
@@ -3844,11 +3939,11 @@ func deriveIdlePendingCarryForwardProofTx(ctx context.Context, tx pgx.Tx, accoun
 	if matches < pendingReconciliationIdleMinMatches {
 		return nil
 	}
-	unevaluatedCheckpoints, _, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, account.ExternalAccountID)
+	unevaluated, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, account.ExternalAccountID, requested)
 	if err != nil {
 		return err
 	}
-	if unevaluatedCheckpoints > 0 {
+	if unevaluated.Owed > 0 {
 		return nil
 	}
 	item := carryCandidates[len(carryCandidates)-1]
@@ -4186,7 +4281,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	//     cycle's exclusivity permanently. Nothing is lost by waiting: once
 	//     the freeze resolves, the next published cycle derives normally.
 	if len(visibilities) == 0 && account.Status == "not_invoiceable_pending_reconciliation" {
-		return deriveIdlePendingCarryForwardProofTx(ctx, tx, account, carryCandidates, actor)
+		return deriveIdlePendingCarryForwardProofTx(ctx, tx, account, carryCandidates, requested, actor)
 	}
 
 	coveredVisibility := account.FinalizedThrough.UTC()
@@ -4389,37 +4484,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		return err
 	}
 	rows, err := tx.Query(ctx, `
-		WITH evidence_floor AS (
-			-- XM-INV-PREANCHOR-BALANCE: balance evidence dated before a
-			-- POLICY_ANCHOR account's own cutover_at is not evidence about
-			-- this account's ledger, because that ledger does not exist
-			-- before the anchor. Evaluating it anyway builds the expected
-			-- balance from an empty window (buildEligibilityProjectionTx
-			-- floors every fact query at cutover_at), so expected comes out
-			-- 0, the whole reported balance reads as an unexplained positive
-			-- difference, and balanceEvidenceTrustIntervalTx has no interval
-			-- to anchor a synthesis against -- SOURCE_GAP, permanently.
-			--
-			-- It is a fixed point, not a transient: RepairBalanceAnchorEligibility
-			-- resolves the freeze and deletes the evaluation so the item goes
-			-- pending again, the next projection redoes the identical
-			-- arithmetic, and the freeze comes straight back. Production
-			-- account 98cce4c8 sat there with four such checkpoints, all
-			-- from the 21 hours between its own first post-policy checkpoint
-			-- and the RC68 deploy that first taught the system to bootstrap
-			-- an anchor at all.
-			--
-			-- This mirrors the fact side, which XM-INV-PREANCHOR-USAGE
-			-- already taught to skip rather than freeze for exactly the same
-			-- reason (see observeEligibilityFact's own BootstrapKind guard).
-			-- A legacy SIGNED_CUTOVER/POST_CUTOVER_REPLAY account keeps the
-			-- old behaviour: its cutover replays real history to a known
-			-- point, so evidence before it genuinely is a gap.
-			SELECT CASE WHEN state.bootstrap_kind='POLICY_ANCHOR'
-				THEN state.cutover_at ELSE '-infinity'::timestamptz END AS anchor_floor
-			FROM source_account_eligibility_state state
-			WHERE state.external_account_id=$1
-		)
+		WITH `+balanceEvidenceFloorCTE+`
 		SELECT evidence_kind,id,evidence_key,external_event_id,as_of,balance_service_units,
 			balance_negative,deficit_service_units,source_sequence,source_cursor,stream_watermark_at,
 			source_revision_hash,observed_at
@@ -4431,21 +4496,14 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				checkpoint.source_sequence,checkpoint.source_cursor,
 				checkpoint.stream_watermark_at,checkpoint.source_revision_hash,checkpoint.observed_at
 			FROM balance_reconciliation_checkpoints checkpoint
-			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
-			  AND checkpoint.as_of<=$2
-			  AND checkpoint.as_of>=(SELECT anchor_floor FROM evidence_floor)
-			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
-				WHERE evaluation.checkpoint_id=checkpoint.id)
+			WHERE `+pendingBalanceCheckpointPredicate+`
 			UNION ALL
 			SELECT 'carry'::text,proof.id,proof.proof_key,proof.proof_key,
 				proof.as_of,proof.balance_service_units::text,proof.balance_negative,proof.deficit_service_units::text,
 				proof.source_sequence,proof.source_cursor,proof.stream_watermark_at,
 				proof.source_revision_hash,proof.observed_at
 			FROM balance_carry_forward_proofs proof
-			WHERE proof.external_account_id=$1 AND proof.as_of<=$2
-			  AND proof.as_of>=(SELECT anchor_floor FROM evidence_floor)
-			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
-				WHERE evaluation.proof_id=proof.id)
+			WHERE `+pendingBalanceProofPredicate+`
 		) pending
 		ORDER BY as_of,source_sequence,
 			CASE evidence_kind WHEN 'real' THEN 0 ELSE 1 END,id`, accountID, through)

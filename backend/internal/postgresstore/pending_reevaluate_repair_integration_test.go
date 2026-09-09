@@ -516,9 +516,16 @@ func TestPendingReevaluateRefusesWhileARealCheckpointIsUnevaluated(t *testing.T)
 	if result.Applied || result.Queued {
 		t.Fatalf("an apply must be refused while a real checkpoint is unjudged: %+v", result)
 	}
-	if result.UnevaluatedCheckpoints != 1 || result.UnevaluatedEvidence != 1 {
-		t.Fatalf("report unevaluated checkpoints=%d total=%d, want 1/1",
-			result.UnevaluatedCheckpoints, result.UnevaluatedEvidence)
+	// The owed count is what gates, and it deliberately ignores the window:
+	// this checkpoint sits above it (no watermarks were raised), so a
+	// window-bounded count would read zero and let the derivation run ahead of
+	// the verdict the evaluator still owes.
+	if result.UnevaluatedCheckpoints != 1 {
+		t.Fatalf("report owed checkpoints=%d, want 1", result.UnevaluatedCheckpoints)
+	}
+	if result.UnevaluatedEvidence != 0 {
+		t.Fatalf("report in-window evidence=%d, want 0 (the checkpoint is above this window)",
+			result.UnevaluatedEvidence)
 	}
 	check := requireCheck(t, result, "待评估证据")
 	if check.Passed || !check.Blocker {

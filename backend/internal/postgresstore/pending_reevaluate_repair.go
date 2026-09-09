@@ -124,6 +124,11 @@ type PendingReevaluateRepairResult struct {
 	// will not run while the evaluator still owes a verdict on real evidence.
 	UnevaluatedEvidence    int
 	UnevaluatedCheckpoints int
+	// PreAnchorUnevaluatedCheckpoints is the population the evaluator will
+	// never judge: real checkpoints dated below a POLICY_ANCHOR account's own
+	// anchor. Reported so the reply to "there are unevaluated rows in the
+	// table" can be the true one rather than "the worker will get to it".
+	PreAnchorUnevaluatedCheckpoints int
 	// EffectiveRequestedThrough is the requested_through the account's job row
 	// will actually carry after an apply, and therefore the whole window the
 	// worker will then derive over. It is deliberately not finalized_through:
@@ -454,29 +459,6 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		add("job_ok", "作业", true, true, "投影作业当前状态=%s，重新排队即可", result.JobStatus)
 	}
 
-	// Check 4: evidence already waiting. Counted by the very function the
-	// derivation's own guard uses (countUnevaluatedBalanceEvidenceTx), so the
-	// number printed here and the decision the worker will make are the same
-	// answer to the same question rather than two implementations of it.
-	//
-	// An unevaluated real checkpoint is a refusal, not a note. The evaluator
-	// owes this account a verdict on real evidence, and until it gives one an
-	// idle proof would not be independent of it: XM-INV-BALANCE-BLIP defers a
-	// positive difference and waits for the next independent item, and a proof
-	// restating that same checkpoint against an unmoved projection confirms
-	// itself by construction. An unevaluated proof alone is only a note -- the
-	// worker judges it in this same pass.
-	unevaluatedCheckpoints, unevaluatedProofs, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, accountID)
-	if err != nil {
-		return err
-	}
-	result.UnevaluatedCheckpoints = unevaluatedCheckpoints
-	result.UnevaluatedEvidence = unevaluatedCheckpoints + unevaluatedProofs
-	add("unevaluated_checkpoints", "待评估证据", unevaluatedCheckpoints == 0, true,
-		"尚未评估的真实检查点 %d 条、结转证明 %d 条；只要还有未评估的真实检查点，闲置派生就不会发生"+
-			"（评估器必须先对真实证据给出判定），worker 自己会处理，不需要本工具",
-		unevaluatedCheckpoints, unevaluatedProofs)
-
 	// Check 5a: the window an apply will actually ask for. Predicted from the
 	// same SQL the requeue writes, so what the dry run says here is what the
 	// apply does -- including the case that caught the first review, where an
@@ -490,6 +472,40 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		"apply 后作业行会带 requested_through=%s（finalized_through=%s，四条流水位齐了 %d/4）；派生只在这个窗口内发生",
 		formatOptionalTime(result.EffectiveRequestedThrough),
 		formatOptionalTime(result.FinalizedThrough), streams)
+
+	// Check 4: evidence already waiting. Counted by the very function the
+	// derivation's own guard uses (countUnevaluatedBalanceEvidenceTx), so the
+	// number printed here and the decision the worker will make are the same
+	// answer to the same question rather than two implementations of it.
+	//
+	// An unevaluated real checkpoint is a refusal, not a note. The evaluator
+	// owes this account a verdict on real evidence, and until it gives one an
+	// idle proof would not be independent of it: XM-INV-BALANCE-BLIP defers a
+	// positive difference and waits for the next independent item, and a proof
+	// restating that same checkpoint against an unmoved projection confirms
+	// itself by construction. An unevaluated proof alone is only a note -- the
+	// worker judges it in this same pass.
+	unevaluated, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, accountID, result.EffectiveRequestedThrough)
+	if err != nil {
+		return err
+	}
+	result.UnevaluatedCheckpoints = unevaluated.Owed
+	result.UnevaluatedEvidence = unevaluated.InWindowCheckpoints + unevaluated.InWindowProofs
+	result.PreAnchorUnevaluatedCheckpoints = unevaluated.PreAnchor
+	add("unevaluated_checkpoints", "待评估证据", unevaluated.Owed == 0, true,
+		"评估器还欠判定的真实检查点 %d 条（其中本轮窗口内 %d 条，另有 %d 条结转证明）；只要还欠着，闲置派生就不会发生——评估器必须先对真实证据给出判定，"+
+			"包括那些还压在 finalization_delay 里、本轮窗口够不到的。worker 会在窗口推上去之后处理，不需要本工具",
+		unevaluated.Owed, unevaluated.InWindowCheckpoints, unevaluated.InWindowProofs)
+	if unevaluated.PreAnchor > 0 {
+		// A different situation entirely, and one nobody should be told to
+		// wait out: evidence below a POLICY_ANCHOR account's own anchor is
+		// permanently out of the evaluator's scope. It will never get an
+		// evaluation row, so "the worker will handle it" would be false.
+		add("pre_anchor_evidence", "锚前证据", true, false,
+			"另有 %d 条锚前（早于该账号 cutover_at）的真实检查点永远不会被评估——它们不在评估器的取值范围内，"+
+				"不影响本工具，也不会自行消失；确实需要把它们纳入账本时用 --kind=policy-start-reanchor 重锚",
+			unevaluated.PreAnchor)
+	}
 
 	// Check 5b: the cycle an idle derivation would take inside that window --
 	// selected by ensureBalanceCarryForwardProofTx's own rule, newest first,

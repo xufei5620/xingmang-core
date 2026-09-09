@@ -1,8 +1,13 @@
 package postgresstore
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -78,28 +83,120 @@ func min(a, b int) int {
 	return b
 }
 
-// TestPendingReevaluateBlockerCodesAreDeclared is the other half: every
-// blocker the tool actually emits during this package's own repair tests must
-// be one of the declared codes. Without it, a new blocker could be added with
-// an undeclared code and the length check above would keep passing.
-func TestPendingReevaluateBlockerCodesAreDeclared(t *testing.T) {
-	declared := map[string]bool{}
-	for _, code := range PendingReevaluateBlockerCodes {
-		if declared[code] {
-			t.Fatalf("duplicate blocker code %q", code)
-		}
-		declared[code] = true
+// discoverBlockerCodesFromSource parses pending_reevaluate_repair.go and
+// returns the code of every check the repair can raise as a blocker: each
+// add(code, name, passed, blocker, ...) call whose blocker argument is the
+// literal true, plus the PendingReevaluateCheck literals built directly with
+// Blocker: true.
+//
+// Discovered rather than hand-listed on purpose. A completeness check whose
+// own input is a list someone has to remember to update is not a completeness
+// check: forget the list entry and the runbook row together and it stays
+// green, which is exactly the failure it exists to prevent.
+func discoverBlockerCodesFromSource(t *testing.T) []string {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, "pending_reevaluate_repair.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse the repair source: %v", err)
 	}
-	// The codes the repair emits are asserted here as a fixed set rather than
-	// harvested at runtime: harvesting from whatever the other tests happened
-	// to trigger would make this pass by not exercising a branch.
-	for _, code := range []string{
-		"account_missing", "not_pending", "open_freeze", "job_processing", "job_dead",
-		"window_empty", "no_derivable_cycle", "cycle_has_proof", "cycle_has_stranded",
-		"prior_unknown_magnitude", "self_dealing",
-	} {
-		if !declared[code] {
-			t.Fatalf("blocker code %q is emitted by the repair but not declared in PendingReevaluateBlockerCodes", code)
+	seen := map[string]bool{}
+	codes := []string{}
+	record := func(code string) {
+		if code != "" && !seen[code] {
+			seen[code] = true
+			codes = append(codes, code)
+		}
+	}
+	stringLit := func(expr ast.Expr) string {
+		lit, ok := expr.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return ""
+		}
+		value, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return ""
+		}
+		return value
+	}
+	isLiteral := func(expr ast.Expr, name string) bool {
+		ident, ok := expr.(*ast.Ident)
+		return ok && ident.Name == name
+	}
+	// add(code, name, passed, blocker, ...) stores Blocker: blocker && !passed.
+	// So a call can raise a blocker unless the blocker argument is literally
+	// false, or the passed argument is literally true -- the latter is how the
+	// report's "this condition holds" variants are written, and they can never
+	// block however the blocker flag reads.
+	canBlock := func(passed, blocker ast.Expr) bool {
+		return !isLiteral(blocker, "false") && !isLiteral(passed, "true")
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.CallExpr:
+			ident, ok := typed.Fun.(*ast.Ident)
+			if !ok || ident.Name != "add" || len(typed.Args) < 4 {
+				return true
+			}
+			if canBlock(typed.Args[2], typed.Args[3]) {
+				record(stringLit(typed.Args[0]))
+			}
+		case *ast.CompositeLit:
+			name, ok := typed.Type.(*ast.Ident)
+			if !ok || name.Name != "PendingReevaluateCheck" {
+				return true
+			}
+			code := ""
+			blocker, passed := ast.Expr(nil), ast.Expr(nil)
+			for _, element := range typed.Elts {
+				pair, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := pair.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				switch key.Name {
+				case "Code":
+					code = stringLit(pair.Value)
+				case "Blocker":
+					blocker = pair.Value
+				case "Passed":
+					passed = pair.Value
+				}
+			}
+			// An absent Blocker field is the zero value: never a blocker.
+			if blocker != nil && !isLiteral(blocker, "false") &&
+				(passed == nil || !isLiteral(passed, "true")) {
+				record(code)
+			}
+		}
+		return true
+	})
+	if len(codes) == 0 {
+		t.Fatal("found no blocker codes in the repair source; this test would otherwise pass vacuously")
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// TestPendingReevaluateBlockerCodesAreDiscoveredNotListed closes minor finding
+// c of the second review: PendingReevaluateBlockerCodes is a hand-written
+// list, so a new blocker missing from both it and the runbook left the length
+// comparison happily green. The declared list must now equal what the source
+// actually raises.
+func TestPendingReevaluateBlockerCodesAreDiscoveredNotListed(t *testing.T) {
+	discovered := discoverBlockerCodesFromSource(t)
+	declared := append([]string(nil), PendingReevaluateBlockerCodes...)
+	sort.Strings(declared)
+	if len(discovered) != len(declared) {
+		t.Fatalf("the repair raises %d blocker codes %v but declares %d %v",
+			len(discovered), discovered, len(declared), declared)
+	}
+	for i := range discovered {
+		if discovered[i] != declared[i] {
+			t.Fatalf("blocker codes differ: raised %v, declared %v", discovered, declared)
 		}
 	}
 }
