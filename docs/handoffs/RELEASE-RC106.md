@@ -39,9 +39,20 @@
 | `go vet ./...` | 03:11:13 | 03:11:14 | 1s | 0 |
 | 前端 `npm run typecheck && npm test -- --run` | 03:11:14 | 03:11:24 | 10s | typecheck 0；**20 文件 / 330 用例全绿** |
 | `scripts/check-no-secrets.ps1` | 03:11:24 | 03:11:26 | 2s | 0 |
-| `scripts/test-release-image-gate.ps1`（改名后） | 03:2x | — | 2s | exit 0 |
-| `scripts/verify.ps1` 完整源码门禁 | 待跑 | | | |
+| `scripts/test-release-image-gate.ps1`（改名后） | 03:13 | 03:13 | 2s | exit 0 |
+| `scripts/verify.ps1` 完整源码门禁（第 3 次，`f151767`） | 03:36:54 | 03:43:24 | 390s | **exit 0，`All local verification gates passed`**（`logs/detached-runs/rc106-gate-20260909T033653Z-afd6`） |
 | 镜像门禁 / 产物校验 / 签名 | 待做 | | | |
+
+`verify.ps1` 前两次红，都不是代码问题，都记进了工具与脚本：
+
+1. 在会话 shell 里直接 `pwsh -File scripts/verify.ps1` 第 4 秒就红（ClamAV 健康检查自检、只读角色
+   role-verifier 自检）：两条 shell 自检要 POSIX 语义（悬空符号链接、真 0600 文件模式），Git for
+   Windows 的 bash 做不到；RC105 是靠 detached runner 的 PATH 让 `bash` 落到 WSL 才绿的。现在
+   `release/run-rc106-gate.ps1` 明确把 `C:\Windows\System32` 放到 PATH 最前面再起 verify.ps1。
+2. 隔离 PostgreSQL 容器里 `application` 包红（03:21–03:27、03:29–03:35 两次）：新契约测试经
+   `eligibilitywire` 读 `<仓库根>/contracts/…` 与 `<仓库根>/backend/{migrations,internal/…}`，
+   运行器镜像只带 `/src`，仓库根解析成容器根。`428e883` + `f151767` 把 `contracts/` 与 `backend/`
+   只读挂进容器。会话里全量绿、容器里红，正是「同一判定在不同根下给不同答案」的形状。
 
 三轮整改的复审：第一轮两位复审各 2/4 条 major → 第二轮 3 条 major → 第三轮 2 条同类残留，
 每轮实现者做变异验证（共 39 条变异，逐条红/绿/还原记录在切片交接单）；最终两位复审
