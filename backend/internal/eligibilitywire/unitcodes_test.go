@@ -1,8 +1,10 @@
 package eligibilitywire
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -226,6 +228,100 @@ func override(m *manifest) (err error) {
 	}
 }
 
+// TestUnitCodeScanRefusesACrossPackageUnitCodeSelector is the second hole
+// review found. `isUnitCodePassthrough` used to look only at the NAME on the
+// right of the dot, so any `<something>.UnitCode` counted as "a copy" -- and a
+// copy of another package's variable is not a copy of anything this scan has
+// read. Both spellings must be refused: the package imported (the shape real
+// code would have) and the package not imported at all (the shape the type
+// checker cannot resolve, which must not be mistaken for "fine").
+func TestUnitCodeScanRefusesACrossPackageUnitCodeSelector(t *testing.T) {
+	for name, source := range map[string]string{
+		"imported package": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type manifest struct{ UnitCode string }
+
+func override(m *manifest) {
+	m.UnitCode = zzelsewhere.WalletUnitCode
+}
+`,
+		"package not imported at all": `package probe
+
+type manifest struct{ UnitCode string }
+
+func override(m *manifest) {
+	m.UnitCode = zzelsewhere.WalletUnitCode
+}
+`,
+		"cross-package value in a composite literal": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type manifest struct{ UnitCode string }
+
+func build() manifest {
+	return manifest{UnitCode: zzelsewhere.WalletUnitCode}
+}
+`,
+		"cross-package value behind a deref": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type manifest struct{ UnitCode string }
+
+func override(m *manifest) {
+	m.UnitCode = *zzelsewhere.WalletUnitCode
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := scanUnitCodeProbePackage(t, source)
+			if err == nil {
+				t.Fatal("a unit code copied out of another package must be refused, not counted as a passthrough")
+			}
+			if !strings.Contains(err.Error(), "probe/probe.go:") {
+				t.Fatalf("the refusal must name file:line, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestUnitCodeScanStillAcceptsInPackageCopies is the other side of that rule,
+// and it is the half that would have made a careless fix expensive: the stub
+// importer leaves every IMPORTED TYPE invalid, so a rule written against the
+// base's type instead of its identity would refuse `item.UnitCode` for an
+// `item` whose struct comes from another package -- which is ordinary, correct
+// code throughout postgresstore and application.
+func TestUnitCodeScanStillAcceptsInPackageCopies(t *testing.T) {
+	scan, err := scanUnitCodeProbePackage(t, `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type manifest struct{ UnitCode string }
+
+type payload struct{ WalletUnitCode *string }
+
+// item's type is declared in an imported package, so the checker cannot type
+// it here. The VALUE still came from a variable, not from a package.
+func copyThrough(item zzelsewhere.Row, p payload, m manifest) manifest {
+	out := manifest{UnitCode: item.UnitCode}
+	out.UnitCode = m.UnitCode
+	if p.WalletUnitCode != nil {
+		out.UnitCode = *p.WalletUnitCode
+	}
+	return out
+}
+`)
+	if err != nil {
+		t.Fatalf("copying from an in-package variable must stay a passthrough: %v", err)
+	}
+	if len(scan.Values()) != 0 {
+		t.Fatalf("a copy introduces no vocabulary, got %v", scan.Values())
+	}
+}
+
 // TestUnitCodeScanDoesNotRefuseAComparisonAgainstAHelper pins the one place
 // the scan deliberately does NOT refuse. `manifest.UnitCode !=
 // expectedUnitForSource(sourceType)` is how this codebase validates the field;
@@ -296,6 +392,120 @@ func build() manifest {
 			t.Fatalf("the refusal must name the callee, got: %v", err)
 		}
 	})
+}
+
+// TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode is the answer to the
+// hole review found: the scan's roots used to be the hand-written list
+// {backend/internal, agents}, so backend/cmd -- every operational command in
+// this repository -- sat outside the gate, and a unit code planted in
+// backend/cmd/bootstrap-sources/main.go left every probe green.
+//
+// The scope is discovered now, and this probe checks that claim WITHOUT reusing
+// the discovery: it sweeps the tree textually (no parsing, no package rules,
+// its own walk) for non-test .go files that so much as mention a unit code, and
+// requires each one's directory to be one the scan actually visited. If the two
+// ever disagree, the scan is the one that is wrong.
+//
+// testdata/ and vendor/ are the discovery's only content exclusions, and they
+// are checked rather than trusted: a unit-code-mentioning .go file appearing
+// under either fails this test instead of quietly leaving the gate. There are
+// none today.
+func TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode(t *testing.T) {
+	scan, err := ScanUnitCodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	visited := Set(scan.ScannedDirs)
+	mentions := regexp.MustCompile(`UnitCode|\b[A-Z][A-Z0-9_]*_1E[0-9]+\b`)
+	uncovered := []string{}
+	excluded := []string{}
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			// .git and node_modules are not source trees; node_modules is also
+			// a junction to the main checkout in this worktree.
+			if path != root && (entry.Name() == ".git" || entry.Name() == "node_modules") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !mentions.Match(body) {
+			return nil
+		}
+		rel, err := filepath.Rel(root, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		dir := filepath.ToSlash(rel)
+		fileRel := dir + "/" + name
+		if strings.Contains("/"+dir+"/", "/testdata/") || strings.Contains("/"+dir+"/", "/vendor/") {
+			excluded = append(excluded, fileRel)
+			return nil
+		}
+		if !visited[dir] {
+			uncovered = append(uncovered, fileRel)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	if len(uncovered) > 0 {
+		t.Fatalf("these non-test Go files mention a unit code but live in directories the scan never visited:\n  %s\n"+
+			"the scan visited %d directories; DiscoverGoPackageDirs is missing them",
+			strings.Join(uncovered, "\n  "), len(scan.ScannedDirs))
+	}
+	if len(excluded) > 0 {
+		t.Fatalf("these files mention a unit code from inside testdata/ or vendor/, which the scan skips by name:\n  %s\n"+
+			"either move them, or decide explicitly that this vocabulary is out of the gate",
+			strings.Join(excluded, "\n  "))
+	}
+	// A sweep that proved nothing would also satisfy both checks above.
+	if len(visited) == 0 {
+		t.Fatal("the scan reported visiting no directories at all")
+	}
+}
+
+// TestUnitCodeScanScopeReachesTheCommands is the narrow, named form of the same
+// regression: backend/cmd is a directory tree like any other and it is in the
+// gate. Separate from the coverage probe because that probe would still pass if
+// backend/cmd stopped containing Go code entirely, and "the commands are
+// covered" is what review actually asked for.
+func TestUnitCodeScanScopeReachesTheCommands(t *testing.T) {
+	dirs, err := DiscoverGoPackageDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := []string{}
+	for _, dir := range dirs {
+		if strings.HasPrefix(dir, "backend/cmd/") {
+			commands = append(commands, dir)
+		}
+	}
+	if len(commands) == 0 {
+		t.Fatalf("no backend/cmd package is in the scan scope; discovered dirs: %v", dirs)
+	}
+	// The trees the first cut named by hand are still there, so this is a
+	// widening rather than a swap.
+	for _, needed := range []string{"backend/internal/postgresstore", "agents/sourceagent"} {
+		if !Set(dirs)[needed] {
+			t.Fatalf("%s dropped out of the scan scope; discovered dirs: %v", needed, dirs)
+		}
+	}
 }
 
 // TestServiceUnitsMatchTheSource is the contract gate: every unit code the

@@ -72,9 +72,14 @@ describe("资格卡片的两格源服务单位", () => {
 
   it("每格都带来源口径标签，数字不会孤零零地出现", () => {
     const html = render([summary()]);
-    expect(html).toContain("SoloV API 余额");
-    // 两格各一次。
-    expect(html.split("SoloV API 余额").length - 1).toBe(2);
+    // 断言的是结构不是子串：来源口径必须是那个带 service-unit-origin 的 span，
+    // 而不是散落在别处的一段同名文字。这个类名在 styles.css 里**没有**自己的规则
+    // （它落在 .eligibility-unit-grid span 上），所以这条断言就是它现在的用处——
+    // 顺手删掉类名会在这里变红，而不是等到有人想按它选中元素时才发现没了。
+    const labelled = html.match(
+      /<span class="service-unit-origin">SoloV API 余额<\/span>/g,
+    );
+    expect(labelled).toHaveLength(2);
   });
 
   it("两格的标题文案没有变，还是标着不可开票", () => {

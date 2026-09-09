@@ -62,11 +62,23 @@ import (
 	"strings"
 )
 
-// scannedUnitCodeRoots are walked recursively; every directory under them that
-// holds non-test Go files is type-checked as one package.
-var scannedUnitCodeRoots = [][]string{
-	{"backend", "internal"},
-	{"agents"},
+// skippedScanDirs are the directory NAMES the package discovery never descends
+// into. This is the one hand-written part of the scope, so it is kept to things
+// that are not this repository's own Go source by definition, and each one is
+// visible here rather than being an implicit consequence of where the walk
+// happens to start.
+//
+// The first cut of this file listed the scanned roots instead --
+// {backend/internal, agents} -- and review showed exactly what that costs:
+// backend/cmd was outside the gate in its entirety, and a unit code planted in
+// backend/cmd/bootstrap-sources/main.go left every probe green. A gate whose
+// SCOPE is hand-maintained fails the same way a gate whose expected set is
+// hand-maintained fails; the scope has to be discovered too.
+var skippedScanDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"vendor":       true,
+	"testdata":     true,
 }
 
 const (
@@ -125,6 +137,12 @@ type UnitCodeScan struct {
 	// not reached yet) and turns "I trusted a function I never read" into an
 	// error naming file:line.
 	Delegations []UnitCodeLiteral
+	// ScannedDirs is every directory this scan actually type-checked,
+	// repository-relative and slash-separated. The coverage probe compares it
+	// against its own textual sweep of the tree: "the scan visited everything
+	// that mentions a unit code" is a claim, and a claim with nothing checking
+	// it is how backend/cmd sat outside this gate in the first place.
+	ScannedDirs []string
 }
 
 // VerifyDelegations reports a unit-code position that delegates to a function
@@ -166,49 +184,83 @@ func (s UnitCodeScan) FirstLocations() []UnitCodeLiteral {
 	return out
 }
 
-// ScanUnitCodes walks the scanned trees' non-test sources.
-func ScanUnitCodes() (UnitCodeScan, error) {
+// DiscoverGoPackageDirs returns every directory in the repository that holds
+// non-test Go source, repository-relative and slash-separated.
+//
+// This is the scan's SCOPE, and it is discovered rather than declared. A new
+// top-level directory of Go code, a new command under backend/cmd, a package
+// moved out from under internal/ -- all of them are in the gate the moment they
+// exist, with nobody having to remember to add them.
+//
+// Exported because the coverage probe compares its own, textual sweep of the
+// tree against what this actually visited.
+func DiscoverGoPackageDirs() ([]string, error) {
 	root, err := repoRoot()
 	if err != nil {
-		return UnitCodeScan{}, err
+		return nil, err
 	}
-	scan := UnitCodeScan{Literals: []UnitCodeLiteral{}, UnitFuncs: map[string]bool{}, Delegations: []UnitCodeLiteral{}}
-	scannedDirs := 0
-	for _, parts := range scannedUnitCodeRoots {
-		treeRoot := filepath.Join(append([]string{root}, parts...)...)
-		walkErr := filepath.WalkDir(treeRoot, func(path string, entry fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !entry.IsDir() {
-				return nil
-			}
-			// testdata is not Go source by convention, and vendor trees are
-			// somebody else's vocabulary.
-			if name := entry.Name(); path != treeRoot && (name == "testdata" || name == "vendor") {
-				return fs.SkipDir
+	dirs := []string{}
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if path != root && skippedScanDirs[entry.Name()] {
+			return fs.SkipDir
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, file := range entries {
+			name := file.Name()
+			if file.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
 			}
 			rel, err := filepath.Rel(root, path)
 			if err != nil {
 				return err
 			}
-			scanned, err := scanUnitCodePackageDir(&scan, path, filepath.ToSlash(rel))
-			if err != nil {
-				return err
-			}
-			if scanned {
-				scannedDirs++
-			}
+			dirs = append(dirs, filepath.ToSlash(rel))
 			return nil
-		})
-		if walkErr != nil {
-			return UnitCodeScan{}, walkErr
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+// ScanUnitCodes walks every Go package in the repository's non-test sources.
+func ScanUnitCodes() (UnitCodeScan, error) {
+	root, err := repoRoot()
+	if err != nil {
+		return UnitCodeScan{}, err
+	}
+	dirs, err := DiscoverGoPackageDirs()
+	if err != nil {
+		return UnitCodeScan{}, err
+	}
+	scan := UnitCodeScan{
+		Literals: []UnitCodeLiteral{}, UnitFuncs: map[string]bool{},
+		Delegations: []UnitCodeLiteral{}, ScannedDirs: []string{},
+	}
+	for _, rel := range dirs {
+		scanned, err := scanUnitCodePackageDir(&scan, filepath.Join(root, filepath.FromSlash(rel)), rel)
+		if err != nil {
+			return UnitCodeScan{}, err
+		}
+		if scanned {
+			scan.ScannedDirs = append(scan.ScannedDirs, rel)
 		}
 	}
-	if scannedDirs == 0 {
+	if len(scan.ScannedDirs) == 0 {
 		return UnitCodeScan{}, fmt.Errorf(
-			"eligibilitywire: the unit-code scan found no Go packages under %v; the scanned roots have gone stale",
-			scannedUnitCodeRoots)
+			"eligibilitywire: the unit-code scan found no Go packages at all; the package discovery has gone stale")
 	}
 	sort.SliceStable(scan.Literals, func(i, j int) bool {
 		if scan.Literals[i].File != scan.Literals[j].File {
@@ -256,7 +308,15 @@ func scanUnitCodePackageDir(scan *UnitCodeScan, dir, rel string) (bool, error) {
 		files = append(files, file)
 		relOf[file] = rel + "/" + name
 	}
-	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}}
+	// Uses is recorded as well as Types: the passthrough rule has to be able to
+	// ask what the BASE of a selector resolves to, and "a package" and "an
+	// undefined name" both have to be answerable even though the stub importer
+	// leaves the resulting TYPE invalid. Identifier resolution survives the
+	// errors that constant folding across imports does not.
+	info := &types.Info{
+		Types: map[ast.Expr]types.TypeAndValue{},
+		Uses:  map[*ast.Ident]types.Object{},
+	}
 	config := types.Config{
 		Importer:    stubImporter{},
 		FakeImportC: true,
@@ -299,7 +359,7 @@ func scanUnitCodeFile(scan *UnitCodeScan, fset *token.FileSet, info *types.Info,
 			record(value, UnitCodePositional, expr.Pos(), fn)
 			return nil
 		}
-		if isUnitCodePassthrough(expr) {
+		if isUnitCodePassthrough(info, expr) {
 			return nil
 		}
 		// Delegation to a same-package unit-named function. Only a bare
@@ -548,10 +608,68 @@ func isUnitCodeKey(key ast.Expr) bool {
 	return false
 }
 
-// isUnitCodePassthrough reports whether expr is a unit code copied from
-// somewhere else -- which introduces no new vocabulary.
-func isUnitCodePassthrough(expr ast.Expr) bool {
-	return isUnitCodeExpr(expr)
+// isUnitCodePassthrough reports whether expr is a unit code copied from a value
+// this scan can see -- which introduces no new vocabulary.
+//
+// The name alone is NOT enough, and the first cut of this function getting that
+// wrong is what review caught: it accepted any `<something>.UnitCode`, so
+// `m.UnitCode = zzelsewhere.WalletUnitCode` -- another package's variable, whose
+// contents this scan never reads -- was waved through as "a copy". A value that
+// comes from outside the scanned source is precisely what the refusal path
+// exists for, and calling it a copy is the silent-gap answer wearing the name
+// of a safe one.
+//
+// So the BASE of the selector has to resolve, here, to something that is not a
+// package:
+//
+//   - `payload.UnitCode`, `*payload.WalletUnitCode`, `unitCode` -- the base is a
+//     variable or parameter in this package, so the value came from somewhere
+//     this scan walked (or from a caller, which the contract gate covers by
+//     going red when nothing emits a declared code). Passthrough.
+//   - `somepkg.WalletUnitCode` -- the base resolves to a *types.PkgName.
+//     Refused.
+//   - `zzelsewhere.WalletUnitCode` where zzelsewhere is not imported at all --
+//     the base resolves to nothing. Also refused: "I could not tell what this
+//     is" must never share an answer with "this is fine".
+//
+// Identifier resolution is used rather than the base's TYPE on purpose. The
+// stub importer leaves every imported type invalid, so a type-based rule would
+// refuse `item.UnitCode` for an `item` whose struct type lives in another
+// package -- ordinary, correct code all over postgresstore and application.
+func isUnitCodePassthrough(info *types.Info, expr ast.Expr) bool {
+	if !isUnitCodeExpr(expr) {
+		return false
+	}
+	base, ok := leftmostIdent(expr)
+	if !ok {
+		// `f().UnitCode`, `<-ch.UnitCode`: no identifier to ask about.
+		return false
+	}
+	object, resolved := info.Uses[base]
+	if !resolved || object == nil {
+		return false
+	}
+	_, isPackage := object.(*types.PkgName)
+	return !isPackage
+}
+
+// leftmostIdent walks down the left spine of a selector/deref/index chain to
+// the identifier everything else hangs off. `*a.b[0].UnitCode` yields `a`.
+func leftmostIdent(expr ast.Expr) (*ast.Ident, bool) {
+	for {
+		switch typed := ast.Unparen(expr).(type) {
+		case *ast.Ident:
+			return typed, true
+		case *ast.SelectorExpr:
+			expr = typed.X
+		case *ast.StarExpr:
+			expr = typed.X
+		case *ast.IndexExpr:
+			expr = typed.X
+		default:
+			return nil, false
+		}
+	}
 }
 
 // DiscoverUnitCodes is the vocabulary the code introduces, for the contract

@@ -1,10 +1,36 @@
 # XM-INV-UNIT-DISPLAY —— 用户端不再显示后台记账刻度，改显示上游的真实余额
 
-- status: ready-for-review（未推送，未合入发布线；分支只在本地 worktree）
+- status: ready-for-review（第二轮复审意见已处理；未推送，未合入发布线）
 - branch: `ai/claude/XM-INV-UNIT-DISPLAY`
 - base: `faadf87`（RC106 上线后的发布线）
 - commit: 见分支末条
 - worktree: `K:/发票/wt-XM-INV-UNIT-DISPLAY`
+
+## 第二轮（复审意见）
+
+复审判 pass/would_ship，留了 2 条 major、2 条 minor，全部已处理：
+
+| 复审意见 | 处理 |
+| --- | --- |
+| major：扫描根手列 `{backend/internal, agents}`，`backend/cmd` 整棵树在闸外 | 扫描根不再手列，改为**发现**：`DiscoverGoPackageDirs()` 走整个仓库，凡是含非测试 `.go` 的目录都进闸。另加一道**独立**的覆盖探针，用自己的文本扫描核对「凡提到单位码的非测试 Go 文件都落在扫过的目录里」 |
+| major：`isUnitCodePassthrough` 只看名字后缀，跨包选择器被无条件放行 | 改为要求选择器的**基名解析到一个非包对象**。解析到 `*types.PkgName`（包已导入）或解析不到（包没导入）一律拒绝 |
+| minor：CSS 与 1987 行的 `.eligibility-unit-grid span` 重复，且引了只用一次的色值；注释「两行结构」不对 | 整条 `.service-unit-origin` 规则删掉（那条规则已经覆盖它），只用一次的灰色随之消失；注释改成三行结构，并写明「想调请改那一条，别再抄」 |
+| minor：三条只记文档不改代码 | 见 follow_ups 6/7/8 |
+
+**为什么覆盖探针要单独存在**：扫描根改成发现之后，`TestUnitCodeScanScopeReachesTheCommands`
+断言 `backend/cmd/**` 在范围内。但那条断言只覆盖今天这棵树的形状。覆盖探针问的是另一个
+问题——**扫描实际走过的目录**（`UnitCodeScan.ScannedDirs`）是否覆盖了**任何提到单位码的
+非测试 Go 文件**——而且它用自己的文本扫描得出答案，不复用 `DiscoverGoPackageDirs`。
+两者同源就等于自己给自己打分，那正是这一轮要修的病。
+
+变异实测（见下表 R2-M21/R2-M21b）也把两者的分工暴露清楚了：**只**把扫描根退回手列时，
+覆盖探针仍然绿——因为今天 `backend/cmd` 里本来就没有单位码，没有东西要它覆盖；
+退回手列**并且**在 `backend/cmd` 里种一个码，覆盖探针立刻红并点名那个文件。
+所以这两条断言一条都不能省：一条盯范围的形状，一条盯范围与内容的关系。
+
+`agents/` 与 `backend/` 之外没有 Go 源码（`deploy/postgres/gosu-build/` 只有一个
+`go.mod`，没有 `.go`），所以这次「widening」在今天的树上只多进了 `backend/cmd/**`
+与 `agents/cmd/**`；意义在于以后新增的目录不需要有人记得来改这里。
 
 ## summary
 
@@ -82,12 +108,15 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 - `web/src/lib/http-api.ts` —— 两处 `expectedUnit` 的字面量改为经
   `expectedUnitBySource`（类型钉在 `ServiceUnitCodeWire` 上）取值。
 - `web/src/styles.css` —— 换算后的数字号 9px → 12px，新增
-  `.service-unit-origin` / `.service-unit-converted`。
+  `.service-unit-converted`（管理端折合提示）。来源口径那个 span **不另写规则**，
+  它落在既有的 `.eligibility-unit-grid span` 上。
 
 新增：
 
-- `backend/internal/eligibilitywire/unitcodes.go` —— 单位码发现闸。
-- `backend/internal/eligibilitywire/unitcodes_test.go` —— 识别规则测试 + 契约闸。
+- `backend/internal/eligibilitywire/unitcodes.go` —— 单位码发现闸：范围发现
+  （`DiscoverGoPackageDirs`）、两张识别网、拒绝路径、委托校验、跨包判据。
+- `backend/internal/eligibilitywire/unitcodes_test.go` —— 识别规则测试、范围覆盖
+  探针、契约闸。
 - `web/src/lib/service-units.ts` —— BigInt 换算与展示视图。
 - `web/src/lib/service-units.test.ts` —— 换算精确性与降级。
 - `web/src/App.service-unit-cells.test.tsx` —— 两格与管理端提示的渲染文案。
@@ -95,7 +124,13 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 
 ## 发现闸怎么保证自己不是恒真的
 
-两张**互不同源**的网，都不从契约取输入：
+**范围**：整个仓库里含非测试 `.go` 的目录，由 `DiscoverGoPackageDirs()` 走出来，
+不手列（第一版手列 `{backend/internal, agents}`，`backend/cmd` 因此整棵在闸外）。
+唯一手写的是**跳过的目录名**：`.git` / `node_modules` / `vendor` / `testdata`，
+四个都写在一处、都不是本仓库自己的 Go 源码，且后两个由覆盖探针盯着——
+它们底下一旦冒出提到单位码的 `.go`，探针会红而不是默默放过。
+
+**内容**：两张**互不同源**的网，都不从契约取输入：
 
 1. **位置网**：落在单位码位置上的常量字符串——赋值给 `unitCode` / `*UnitCode`
    名字、`UnitCode:` 或 `"unit_code":` 复合字面量值、与 `.UnitCode` 的相等比较、
@@ -123,19 +158,43 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
   被读过」时成立，所以是**查**的不是**假定**的：`VerifyDelegations()` 在整轮走完后
   核对被调名字确实在扫到的函数集合里，否则报错。
 
+第二轮补上的第三条（复审 major 2）：**「复制」必须是从这次扫描看得见的值复制**。
+
+`out.UnitCode = item.UnitCode` 这种写法，第一版只看点号右边的名字就判成「复制、
+不引入词汇」。于是 `m.UnitCode = zzelsewhere.WalletUnitCode`——另一个包的变量，
+内容这次扫描根本没读过——也被放行了。判据改成：选择器的**基名**必须在这里解析到一个
+**非包**对象。
+
+- `payload.UnitCode`、`*payload.WalletUnitCode`、`unitCode`：基名是本包的变量或参数
+  → 复制，放行。
+- `somepkg.WalletUnitCode`：基名解析成 `*types.PkgName` → 拒绝。
+- `zzelsewhere.WalletUnitCode` 且 `zzelsewhere` 压根没导入：基名什么都解析不到 → 也拒绝。
+  「我看不出这是什么」不能和「这没问题」共用一个答案。
+
+用**标识符解析**而不是基名的**类型**，是这条规则唯一不显然的地方，也是随手写会踩的坑：
+stub importer 让所有跨包类型都是 invalid，按类型判会把 `item.UnitCode`（`item` 的结构体
+来自别的包）也拒掉——而那是 postgresstore / application 里到处都是的正确代码。
+`TestUnitCodeScanStillAcceptsInPackageCopies` 专门钉这一半。
+
+同一类漏洞在 `discover.go` 的 `isStatusPassthrough`（eligibility_status 那道闸）里
+**依然存在**：它也只看名字后缀。这次没动它——那道闸随 RC106 上线，改它是另一件事——
+已记进 follow_ups 9。
+
 ## tests_run
 
 全部在 `K:/发票/wt-XM-INV-UNIT-DISPLAY` 下实测，时间为 UTC。下表是
-**NEWAPI_QUOTA description 更新之后的那一轮**（2026-09-09 05:48）；更新前
-05:40 那一轮四条同样全绿，两轮结果一致。退出码是把输出落盘后判的，不经管道
-（管道 + `head` 会因 SIGPIPE 报出与测试结果无关的失败）。
+**第二轮改动之后**的那一轮。退出码是把输出落盘后判的，不经管道（管道 + `head`
+会因 SIGPIPE 报出与测试结果无关的失败）。
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 05:48:13 | 05:48:17 | 4s | exit 0 |
-| `cd web && npm test -- --run` | 05:48:17 | 05:48:18 | 1s（vitest 自报 666ms） | exit 0，22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 05:48:04 | 05:48:04 | <1s（构建缓存命中；首轮 2s） | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 05:48:04 | 05:48:07 | 3s | exit 0，两个包 ok |
+| `cd web && npm run typecheck` | 06:11:10 | 06:11:12 | 2s | exit 0 |
+| `cd web && npm test -- --run` | 06:11:12 | 06:11:14 | 2s（vitest 自报 636ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 06:11:00 | 06:11:01 | 1s | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:11:01 | 06:11:04 | 3s | exit 0，两个包 ok |
+
+前两轮的记录（结果都是四条全绿）：第一轮 05:40，NEWAPI_QUOTA description 更新后
+05:48（typecheck 4s / web test 1s / vet <1s / go test 3s）。
 
 Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy go test …`
@@ -143,6 +202,28 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 ## 变异验证（逐条 red → 还原 → green）
 
 每条都是先改坏实现、跑到红、再还原；还原后用 `diff` 与备份逐字节核对过。
+R2-* 是第二轮新加的。
+
+### 第二轮
+
+| # | 变异 | 变红的断言 | 结果 |
+| --- | --- | --- | --- |
+| R2-M20 | 在 `backend/cmd/bootstrap-sources/main.go` 里种两个码（`ZZ_CMD_CREDIT` 无形状 + `ZZ_CMD_QUOTA_1E6` 有形状） | `TestServiceUnitsMatchTheSource`，两个码都报「emitted by code but not declared」。**这正是复审那次全绿的场景** | red → green |
+| R2-M21 | 把扫描范围退回手列的 `{backend/internal, agents}` | `TestUnitCodeScanScopeReachesTheCommands`。**覆盖探针此时仍绿**——今天 `backend/cmd` 里本来就没有单位码，没有东西要它覆盖 | red → green |
+| R2-M21b | 退回手列范围**并且**在 `backend/cmd` 里种码（复审的原始场景） | `TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode`（点名 `backend/cmd/bootstrap-sources/main.go`）+ `TestUnitCodeScanScopeReachesTheCommands` | red → green |
+| R2-M22 | `isUnitCodePassthrough` 退回只看名字（`return true`） | `TestUnitCodeScanRefusesACrossPackageUnitCodeSelector` 4 个子用例全红 | red → green |
+| R2-M23 | 把包/非包的判断取反 | 上面 4 条中的 3 条，加 `TestUnitCodeScanStillAcceptsInPackageCopies`、`TestUnitCodeScanTreatsCopiesAsIntroducingNothing`、覆盖探针、契约闸、两网断言——共 9 处 | red → green |
+| R2-M24 | 去掉 `<span className="service-unit-origin">` 的类名 | 「每格都带来源口径标签」（改成按结构断言之后才抓得到） | red → green |
+
+R2-M21 与 R2-M21b 一起说明了为什么两条范围断言都要留：一条盯范围的**形状**
+（`backend/cmd` 在不在里面），一条盯范围与**内容**的关系（有码的文件是不是都扫到了）。
+只留后者，今天这棵树上退回手列是绿的。
+
+CSS 那条改动（删重复规则）没有对应的变异：它不改任何渲染文本，行为上等价，
+`.eligibility-unit-grid span` 那条规则接管了颜色字号行高。能钉住的只有类名还在，
+R2-M24 钉的就是这个。
+
+### 第一轮
 
 | # | 变异 | 变红的断言 | 结果 |
 | --- | --- | --- | --- |
@@ -236,3 +317,27 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 4. 清掉 `source_readiness_integration_test.go` 里的 `NEWAPI_CREDIT_1E6` fixture，
    或者把测试源码也纳入发现闸的扫描范围（对应 risks 4）。
 5. 起前端看一眼这两格的实际排版（对应 risks 6）。
+
+第二轮复审记下、但**这一轮不改代码**的三条：
+
+6. **`contracts/source-agent-batch.v3.schema.json:82` 的 `$defs/unitCode` 是词表的第二份
+   手抄**：`{ "enum": ["SUB2_BALANCE_1E8", "NEWAPI_QUOTA"] }`，被同文件 6 处 `$ref` 引用，
+   与 `invoice-eligibility-wire.v1.json` 的 `service_units` 各说各的。新增第三个单位码时
+   两处都得改，而只有一处有闸盯着。做法有两条：让 `eligibilitywire` 也校验这个 schema 的
+   enum 与契约一致（最小改动），或者由契约生成它。没有在这一轮做，是因为那是**批次协议**
+   的契约、有自己的版本纪律（v1/v2/v3 三份并存），动它要先想清楚改的是不是 v3 一份。
+7. **title 上的原始刻度，触屏与读屏取不到**：换算值放正文、原始数字与单位码放
+   `title`，对鼠标用户是「停一下就看到」，对触屏用户是**看不到**，对读屏软件是
+   *可能*读、取决于实现。这两格的原始值目前只有这一条出路。要真正可达，得改成可展开的
+   `<details>`、长按可见的行内小字，或者干脆在管理端之外也给一处「显示原始刻度」的开关。
+   属于可访问性欠账，不是这一轮的功能缺陷。
+8. **欠费账号这两格会显示 `0.00`**：`service_units` 的协议形状是非负整数
+   （`^(0|[1-9][0-9]{0,77})$`，前后端与 agents 三处同形），负余额在协议里另走
+   `deficit_service_units` + `balance_negative`（见 XM-INV-NEGATIVE-DEFICIT）。
+   所以欠费账号在这两格上本来就是 0，换算之后显示 `0.00`。这是**既有行为**，不是这次
+   引入的；但换算之后它更像一个「确实是零」的断言了，如果产品认为欠费要看得出来，
+   得让摘要接口把 deficit 也带上，属于协议层改动。
+9. **`discover.go` 的 `isStatusPassthrough` 有和本轮 major 2 同款的洞**：它同样只看
+   `.EligibilityStatus` 这个名字后缀，所以跨包选择器在那道闸里仍然被当作「复制」放行。
+   那道闸随 RC106 上线，这一轮没动它。修法与 `isUnitCodePassthrough` 完全一样
+   （基名解析到非包对象），可以直接照搬。
