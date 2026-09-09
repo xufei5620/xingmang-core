@@ -1056,15 +1056,19 @@ export function SourceAccountStatus() {
 // lib/eligibility-labels.ts (XM-INV-LOT-REASON-CONTRACT) so the Chinese copy
 // can be asserted directly by tests rather than only through rendering.
 
-// XM-INV-UNIT-DISPLAY. 换算逻辑本身在 lib/service-units.ts，这里只负责摆位置：
-// 换算后的数放 <strong>，来源口径放它下面，原始数字与单位码进 title——出问题时
-// 鼠标停一下就能拿到跟上游对账用的原始值，不用叫用户去复现。
+// XM-INV-UNIT-DISPLAY / XM-INV-UNIT-DISPLAY-USERONLY. 换算逻辑本身在
+// lib/service-units.ts，这里只负责摆位置：换算后的数放 <strong>，来源口径放它下面。
+//
+// 09-09 负责人：「原始单位不应该给用户看，这个我们后端自己知道就行。」原始数字与
+// 单位码因此不进**任何用户可达的 DOM**——不进正文，也不进 title / aria-label /
+// data-*。上一版把它们放在 title 里供逐位核对，那条路已经关掉：serviceUnitView
+// 不再返回 title，这里也就没有可放的东西。要原始值去管理端账本详情或后端日志。
 // 这两格是**不可开票**额度，所以数字前后都不带 ¥ / $。
 function ServiceUnitCell({ value }: { value: ServiceUnitValue }) {
   const view = serviceUnitView(value);
   return (
     <>
-      <strong title={view.title}>{view.amount}</strong>
+      <strong>{view.amount}</strong>
       <span className="service-unit-origin">{view.note}</span>
     </>
   );
@@ -1072,6 +1076,10 @@ function ServiceUnitCell({ value }: { value: ServiceUnitValue }) {
 
 // 管理端保留原始单位（那是对账口径），后面补一句折合值。换算不出来时整句不出现，
 // 而不是出现一句写着「—」的折合——后者会被当成「折合后是零」。
+//
+// XM-INV-UNIT-DISPLAY-USERONLY 只收紧了用户端：管理端这一路**没有改**，原始数字
+// 与单位码仍由下面账本详情的 <dd> 直接打出来，本组件仍只追加折合值。「后端自己
+// 知道就行」里的「知道」就落在这里和后端日志上，所以这两处不能跟着一起藏。
 //
 // 导出是为了能直接测：它用在 AccountLedgerDetailDrawer 里，而那个抽屉在
 // useEffect 里自己取数，react-dom/server 不跑 effect，整段渲染只到 loading 态。
