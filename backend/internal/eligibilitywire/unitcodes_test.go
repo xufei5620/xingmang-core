@@ -485,25 +485,32 @@ func TestUnitCodeScanCoversEveryGoFileThatMentionsAUnitCode(t *testing.T) {
 // gate. Separate from the coverage probe because that probe would still pass if
 // backend/cmd stopped containing Go code entirely, and "the commands are
 // covered" is what review actually asked for.
+//
+// It asserts against what the SCAN VISITED, not against what
+// DiscoverGoPackageDirs returns -- a correction the status scan's twin forced
+// in round four. Asking the discovery helper only proves the helper works: a
+// scan that narrows its own loop afterwards still passes, and a mutation that
+// did exactly that sailed past this assertion. The helper is not the gate.
 func TestUnitCodeScanScopeReachesTheCommands(t *testing.T) {
-	dirs, err := DiscoverGoPackageDirs()
+	scan, err := ScanUnitCodes()
 	if err != nil {
 		t.Fatal(err)
 	}
+	visited := Set(scan.ScannedDirs)
 	commands := []string{}
-	for _, dir := range dirs {
+	for _, dir := range scan.ScannedDirs {
 		if strings.HasPrefix(dir, "backend/cmd/") {
 			commands = append(commands, dir)
 		}
 	}
 	if len(commands) == 0 {
-		t.Fatalf("no backend/cmd package is in the scan scope; discovered dirs: %v", dirs)
+		t.Fatalf("the unit-code scan visited no backend/cmd package; it visited: %v", scan.ScannedDirs)
 	}
 	// The trees the first cut named by hand are still there, so this is a
 	// widening rather than a swap.
 	for _, needed := range []string{"backend/internal/postgresstore", "agents/sourceagent"} {
-		if !Set(dirs)[needed] {
-			t.Fatalf("%s dropped out of the scan scope; discovered dirs: %v", needed, dirs)
+		if !visited[needed] {
+			t.Fatalf("the unit-code scan no longer visits %s; it visited: %v", needed, scan.ScannedDirs)
 		}
 	}
 }

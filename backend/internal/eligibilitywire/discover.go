@@ -67,15 +67,22 @@ import (
 	"strings"
 )
 
-// scannedPackageDirs are the packages that can put an eligibility_status on the
-// wire. Scanning more than strictly necessary is the safe direction: an extra
+// The packages that can put an eligibility_status on the wire are DISCOVERED,
+// not listed: ScanStatusLiterals walks whatever DiscoverGoPackageDirs finds.
+//
+// They used to be the hand-written list {application, postgresstore, httpapi},
+// on the reasoning that those are the three packages that build responses.
+// Review showed what that costs, in the same shape as the unit-code scan's own
+// hand-listed roots: `EligibilityStatus: "zz_probe_status"` planted in
+// agents/sourceagent left this gate green. The reasoning was not even wrong
+// about today's code -- it was wrong about being a list at all. A scope that
+// has to be maintained by hand fails the same way an expected-value set that
+// has to be maintained by hand fails, and this package exists because of that
+// failure mode.
+//
+// Scanning more than strictly necessary stays the safe direction: an extra
 // literal found somewhere unexpected makes a probe red and forces a human to
 // say what it is, which is the outcome we want.
-var scannedPackageDirs = [][]string{
-	{"backend", "internal", "application"},
-	{"backend", "internal", "postgresstore"},
-	{"backend", "internal", "httpapi"},
-}
 
 const (
 	// LiteralAssignment is a Go assignment of a string literal to an
@@ -130,6 +137,12 @@ type StatusScan struct {
 	// function still exists: scoping by name and finding nothing would
 	// otherwise read exactly like "this function introduces no statuses".
 	Funcs map[string]bool
+	// ScannedDirs is every directory this scan actually type-checked,
+	// repository-relative and slash-separated. The coverage probe compares it
+	// against its own textual sweep of the tree, because "the scan looked
+	// everywhere a status could come from" is a claim, and this gate's whole
+	// subject is claims with nothing checking them.
+	ScannedDirs []string
 }
 
 // InFunc returns the literals declared inside the named function.
@@ -143,18 +156,29 @@ func (s StatusScan) InFunc(name string) []StatusLiteral {
 	return out
 }
 
-// ScanStatusLiterals walks the scanned packages' non-test sources.
+// ScanStatusLiterals walks every Go package in the repository's non-test
+// sources. The scope comes from DiscoverGoPackageDirs, the same discovery the
+// unit-code scan uses -- one way of deciding what "the source" means, so the
+// two gates cannot end up looking at different trees.
 func ScanStatusLiterals() (StatusScan, error) {
 	root, err := repoRoot()
 	if err != nil {
 		return StatusScan{}, err
 	}
-	scan := StatusScan{Literals: []StatusLiteral{}, Funcs: map[string]bool{}}
-	for _, parts := range scannedPackageDirs {
-		dir := filepath.Join(append([]string{root}, parts...)...)
-		if err := scanPackageDir(&scan, dir, strings.Join(parts, "/")); err != nil {
+	dirs, err := DiscoverGoPackageDirs()
+	if err != nil {
+		return StatusScan{}, err
+	}
+	scan := StatusScan{Literals: []StatusLiteral{}, Funcs: map[string]bool{}, ScannedDirs: []string{}}
+	for _, rel := range dirs {
+		if err := scanPackageDir(&scan, filepath.Join(root, filepath.FromSlash(rel)), rel); err != nil {
 			return StatusScan{}, err
 		}
+		scan.ScannedDirs = append(scan.ScannedDirs, rel)
+	}
+	if len(scan.ScannedDirs) == 0 {
+		return StatusScan{}, fmt.Errorf(
+			"eligibilitywire: the status scan found no Go packages at all; the package discovery has gone stale")
 	}
 	sort.Slice(scan.Literals, func(i, j int) bool {
 		if scan.Literals[i].File != scan.Literals[j].File {

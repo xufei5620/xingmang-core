@@ -1,10 +1,49 @@
 # XM-INV-UNIT-DISPLAY —— 用户端不再显示后台记账刻度，改显示上游的真实余额
 
-- status: ready-for-review（第二、三轮复审意见已处理；未推送，未合入发布线）
+- status: ready-for-review（第二至四轮复审意见已处理；未推送，未合入发布线）
 - branch: `ai/claude/XM-INV-UNIT-DISPLAY`
 - base: `faadf87`（RC106 上线后的发布线）
 - commit: 见分支末条
 - worktree: `K:/发票/wt-XM-INV-UNIT-DISPLAY`
+
+## 第四轮：状态闸的扫描范围也改成发现式
+
+第三轮修的是两道闸的**判据**，范围只改了单位码那一道。复审接着在
+`agents/sourceagent` 里种 `EligibilityStatus: "zz_probe_status"`，状态闸是绿的——
+和第二轮在 `backend/cmd` 种单位码那次同款：`ScanStatusLiterals` 仍用手列的
+`scannedPackageDirs`（application / postgresstore / httpapi 三个目录）。
+
+改法与单位码侧对齐，并且**复用同一个发现函数**：`ScanStatusLiterals` 改走已导出的
+`DiscoverGoPackageDirs()`，`StatusScan` 加 `ScannedDirs`，再配一条判据不同源的覆盖
+探针 `TestStatusScanCoversEveryGoFileThatMentionsAStatus`——自己走一遍树、按文本
+匹配，要求每个命中文件的目录都在扫描实际走过的目录里。两道闸从此共用同一个
+「什么算本仓库的源码」的定义，不会各看各的树。
+
+覆盖探针匹配**两种拼写**是有理由的：`EligibilityStatus` 抓 Go 侧赋值，
+`eligibility_status` 抓 SQL 文本——这道闸的 COALESCE 默认值那一半就是从查询串里取值
+的，一个文件完全可以只出现列名、不出现 Go 字段名，却引入一个状态。
+
+放宽之后扫到的词汇没有变（契约闸原样绿），但确实多扫了几处，记下它们为什么无害：
+
+- `backend/cmd/eligibility-shadow/report.go:262` 是
+  `EligibilityStatus: account.EligibilityStatus`——复制，不引入词汇。
+- `backend/internal/domain/types.go:129` 是 `!= "active"` 的比较，而状态闸的位置规则
+  只认赋值与复合字面量键、不认比较（这一点与单位码闸不同，那边认比较）。
+- `backend/internal/eligibilitywire` 自己也进了扫描范围；里面那些正则字面量
+  （`COALESCE\s*\(...` 之类）不匹配 COALESCE 网要找的形状，两条 COALESCE 正则
+  命中数都是 0，所以不会触发「读不懂的默认值」那条拒绝。
+
+### 顺带修掉一条「断言成立、对象不对」
+
+范围断言写完先跑变异，结果**范围收窄的变异没让它红**：
+`TestStatusScanScopeReachesTheAgents` 问的是 `DiscoverGoPackageDirs()` 的返回值，
+而变异改的是 `ScanStatusLiterals` 自己的循环——助手函数没被动，断言当然为真，
+只是它证明的不是那道闸。改成断言 `scan.ScannedDirs`（扫描**实际走过**的目录）之后，
+同一个变异立刻红。
+
+单位码侧的 `TestUnitCodeScanScopeReachesTheCommands` 是第二轮我按同样思路写的，
+有同样的毛病，一并改成断言 `scan.ScannedDirs`，并用 R4-M29 单独验证过。
+助手函数不是闸，闸是扫描本身。
 
 ## 第三轮：把同款透传洞在 discover.go 一并堵上
 
@@ -150,11 +189,17 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 - `web/src/styles.css` —— 换算后的数字号 9px → 12px，新增
   `.service-unit-converted`（管理端折合提示）。来源口径那个 span **不另写规则**，
   它落在既有的 `.eligibility-unit-grid span` 上。
-- `backend/internal/eligibilitywire/discover.go`（第三轮）—— `isStatusPassthrough`
-  改用共用判据；左值那一职拆成 `isStatusField`（并补上解引用）；`types.Info` 加
-  `Uses`。
-- `backend/internal/eligibilitywire/discover_test.go`（第三轮）—— 跨包状态选择器的
-  拒绝用例与 `item.EligibilityStatus` 的对照用例。
+- `backend/internal/eligibilitywire/discover.go`（第三、四轮）—— 第三轮：
+  `isStatusPassthrough` 改用共用判据，左值那一职拆成 `isStatusField`（并补上
+  解引用），`types.Info` 加 `Uses`。第四轮：删掉手列的 `scannedPackageDirs`，
+  `ScanStatusLiterals` 改走 `DiscoverGoPackageDirs()`，`StatusScan` 加
+  `ScannedDirs`。
+- `backend/internal/eligibilitywire/discover_test.go`（第三、四轮）—— 第三轮：
+  跨包状态选择器的拒绝用例与 `item.EligibilityStatus` 的对照用例。第四轮：
+  状态侧的范围覆盖探针与 agents 范围断言。
+- `backend/internal/eligibilitywire/unitcodes_test.go`（第四轮）——
+  `TestUnitCodeScanScopeReachesTheCommands` 改成断言扫描实际走过的目录，
+  而不是发现函数的返回值。
 
 新增：
 
@@ -235,14 +280,18 @@ stub importer 让所有跨包类型都是 invalid，按类型判会把 `item.Uni
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 06:25:18 | 06:25:20 | 2s | exit 0 |
-| `cd web && npm test -- --run` | 06:25:21 | 06:25:22 | 1s（vitest 自报 656ms） | exit 0，22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 06:25:08 | 06:25:08 | <1s（缓存命中） | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:25:09 | 06:25:12 | 3s | exit 0，两个包 ok |
+| `cd web && npm run typecheck` | 06:41:49 | 06:41:52 | 3s | exit 0 |
+| `cd web && npm test -- --run` | 06:41:52 | 06:41:53 | 1s（vitest 自报 673ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 06:41:38 | 06:41:39 | 1s | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 06:41:39 | 06:41:43 | 4s | exit 0，两个包 ok |
 
-上表是第三轮改动之后那一次。此前跑过：第一轮 05:40、除数定稿后 05:48、
-第二轮代码后 06:11、`USDExchangeRate` 措辞后 06:17，每次四条全绿。
-第三轮只动 Go 侧，前端两条属于回归确认。
+上表是第四轮改动之后那一次。此前跑过：第一轮 05:40、除数定稿后 05:48、第二轮代码后
+06:11、`USDExchangeRate` 措辞后 06:17、第三轮后 06:25，每次四条全绿。
+第三、四轮只动 Go 侧，前端两条属于回归确认。
+
+`eligibilitywire` 这个包的用时随轮次在涨（0.8s → 2.0s）：范围从 3 个目录变成 23 个，
+每个都要 parse + 类型检查，而且状态闸与单位码闸各走一遍。仍是秒级，但如果以后再加
+第三道闸，值得让它们共用一次解析。
 
 前两轮的记录（结果都是四条全绿）：第一轮 05:40，NEWAPI_QUOTA description 更新后
 05:48（typecheck 4s / web test 1s / vet <1s / go test 3s）。
@@ -253,7 +302,24 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 ## 变异验证（逐条 red → 还原 → green）
 
 每条都是先改坏实现、跑到红、再还原；还原后用 `diff` 与备份逐字节核对过。
-R2-* / R3-* 是第二、三轮新加的。
+R2-* / R3-* / R4-* 是第二、三、四轮新加的。
+
+### 第四轮
+
+| # | 变异 | 变红的断言 | 结果 |
+| --- | --- | --- | --- |
+| R4-M27 | 在 `agents/sourceagent/cutover.go` 里种 `EligibilityStatus: "zz_probe_status"` | `TestLotSyntheticStatusesAreDiscovered`（报「introduced by code but not declared: [zz_probe_status]」并点名 `agents/sourceagent/cutover.go:617 in zzProbeBuildLot`）+ `TestLotEligibilityStatusIsPersistedPlusSynthetic`。**这正是复审那次全绿的场景** | red → green |
+| R4-M28 | 把 `ScanStatusLiterals` 的范围收回手列的三个目录（**不**种状态） | `TestStatusScanCoversEveryGoFileThatMentionsAStatus`（点名 `agents/sourceagent/cutover.go`、`backend/cmd/eligibility-shadow/report.go`、`backend/internal/domain/types.go`、`backend/internal/eligibilitywire/discover.go`）+ `TestStatusScanScopeReachesTheAgents` | red → green |
+| R4-M29 | 让 `ScanUnitCodes` 自己的循环跳过 `backend/cmd`（发现函数不动） | `TestUnitCodeScanScopeReachesTheCommands` | red → green |
+
+R4-M28 与单位码侧的 R2-M21 有个差别值得记：单位码那次，**只**收窄范围而不种码时覆盖
+探针仍绿（`backend/cmd` 里本来没有单位码）；状态这次，只收窄范围覆盖探针就红了——
+因为三个手列目录之外**本来就有**四个文件提到状态。也就是说这道闸的手列范围一直是
+「当时恰好够用」，不是「够用」。
+
+R4-M29 是为了验证第四轮顺手改的那条断言。改之前它问的是
+`DiscoverGoPackageDirs()`，这个变异只动扫描自己的循环、不动发现函数，
+所以改之前它**是绿的**；改成断言 `scan.ScannedDirs` 之后才红。
 
 ### 第三轮
 
