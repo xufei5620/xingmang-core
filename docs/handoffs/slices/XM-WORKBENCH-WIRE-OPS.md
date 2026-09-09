@@ -8,8 +8,8 @@
   文档，不碰 admin-web）。**无冲突**，五道门禁在 rebase 后重跑一遍，全绿。
 - **commit**: 两条实现提交
   - `48cd045` —— 失败作业聚合 + 首开时刻真值（18 files changed, +1287 / -61）
-  - 第二条 —— `effective_mode_source` 接线 + 未接清单清空（SHA 回填在紧随其后
-    的 `docs(handoff)` 提交里）
+  - `90d50e9` —— `effective_mode_source` 接线 + 未接清单清空
+    （7 files changed, +407 / -68）
 - **时间**: 2026-09-09T06:17Z – 2026-09-09T06:52Z（约 35 分钟，含 rebase 与重跑门禁）
 
 ---
