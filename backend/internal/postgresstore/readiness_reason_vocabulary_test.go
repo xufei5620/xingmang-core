@@ -49,9 +49,13 @@ const sourceReasonLabelsDecl = "const sourceReasonLabels: Record<string, string>
 // tsLabelEntryPattern reads one `KEY: "text",` line of that table.
 var tsLabelEntryPattern = regexp.MustCompile(`^\s*([A-Z][A-Z0-9_]*)\s*:\s*"(.*)",?\s*$`)
 
-// packageStringConstants collects package-level string constants per directory,
-// so that `append(item.Reasons, economicRescanActiveReason)` can be resolved to
-// the value it will actually put on the wire.
+// packageStringConstants collects package-level string constants per package
+// directory, so that `append(item.Reasons, economicRescanActiveReason)` can be
+// resolved to the value it will actually put on the wire. The containment
+// rules use the same map to resolve a constant spliced into a query.
+//
+// Keys are directories relative to root, in slash form, so a caller holding a
+// declaration's relative file path can look up its package directly.
 func packageStringConstants(t *testing.T, root string) map[string]map[string]string {
 	t.Helper()
 	constants := map[string]map[string]string{}
@@ -73,7 +77,11 @@ func packageStringConstants(t *testing.T, root string) map[string]map[string]str
 		if parseErr != nil {
 			return parseErr
 		}
-		dir := filepath.Dir(path)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		dir := filepath.ToSlash(filepath.Dir(rel))
 		for _, decl := range parsed.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.CONST {
@@ -181,7 +189,7 @@ func discoverReadinessReasons(t *testing.T) map[string]string {
 		if relErr != nil {
 			rel = path
 		}
-		dir := filepath.Dir(path)
+		dir := filepath.ToSlash(filepath.Dir(rel))
 		for _, decl := range parsed.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil || !signatureMentions(fn, sourceStreamHealthTypeName) {

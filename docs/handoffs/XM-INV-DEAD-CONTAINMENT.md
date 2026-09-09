@@ -789,9 +789,119 @@ N13–N15 只有「修后」一列：豁免名单是这一轮新引入的，修�
   或者把文案抽成变量，闸都会拒绝作答（红），不会假绿——方向是安全的那一侧，
   但改表的人会先撞到一条「读不懂这一行」的红。
 
+## 收口轮（第六刀，一个提交）
+
+复审用两种新写法又逃了几次。两条都不是「再补一种拼法」能解决的，都是**判据看的
+东西太小**：一条只看一个字符串字面量，一条只认一个短语。
+
+### N1：触发器一次只看一个字面量
+
+`mentionsDeadIngestStatus` 与相关性规则的表名检查都是对**单个字面量**（或声明的
+原始文本）做的。于是有三种写法能让每一个字面量单独看都清白：
+
+1. 把 `'dead'` 抽成同包常量再拼进去；
+2. 跨字面量从 **token 中间**断开——`` `...processing_st` + `atus='dead'` ``；
+3. 把表名放进**另一个声明**的常量里。
+
+修法：所有 SQL 规则改成读**整条拼接链**。新增 `declSQLChains`，用已有的
+`concatChainRoot` + `concatChainLeaves` 把一条 `+` 链上的字符串字面量按源码顺序
+拼起来，标识符若是**同包的字符串常量**就解析成它的值，其余（调用、变量、参数）
+不贡献文本。**片段之间不插分隔符**——`"processing_st" + "atus"` 对编译器就是一个
+列名，在这里也必须是；插任何东西进去就等于把第 2 条洞重新打开。
+
+三条规则（dead 判据、相关性、解冻关卡）现在一律跑在链文本上，不再跑
+`decl.normalized`。`packageStringConstants`（原本是上一刀就绪原因闸写的）改成按
+**相对 backend/ 的斜杠目录**做键，两处共用同一份常量表。
+
+配套自测 `TestSQLChainJoiningDefeatsFragmentation`：四条正向（三种逃逸 + 中间夹一个
+不贡献文本的调用）、一条反向对照（**同一个声明里的两条不相干查询是两条链，不能被
+拼到一起**——否则「有个状态查询、别处又有个 dead 字面量」的声明会被误报，这条规则
+一周内就会被关掉）、以及表名来自常量的解冻门。
+
+### N2：解冻关卡钉在 `UPDATE eligibility_freezes` 这个短语上
+
+复审写的第六扇门是
+
+```sql
+INSERT INTO eligibility_freezes (...) VALUES (...)
+ON CONFLICT (id) DO UPDATE SET status='resolved'
+```
+
+那个短语一次都没出现。**这不是生造的形状**：`consumption.go:2503` 与 `:2731`
+今天就是用 upsert 写这张表的（只不过只写 `updated_at`）。
+
+修法：表名与 status 赋值**分开匹配**。链文本里出现 `\beligibility_freezes\b`
+（词边界，把 `eligibility_freezes_archive` 挡在外面），且匹配到
+`SET ... status = <值>`，即命中；动词是 `UPDATE ... SET` 还是 `DO UPDATE SET`
+不影响。`SET` 仍然是必需的——它是「写这一列」与「读这一列」的分界，
+`WHERE ef.status='resolved'` 不能算。
+
+**这里踩到一个自己造的洞，是反向桩抓出来的。** 表名与动词解耦之后，
+`UPDATE eligibility_freezes_archive SET status='resolved' WHERE id IN
+(SELECT id FROM eligibility_freezes)` 被误报了：一条查询提到两张表时，
+规则说不清这个 SET 是写给谁的。补 `freezeStatusWriteTarget`——从赋值往前找最近的
+写动词，`UPDATE <名>` 取那个名字，`DO UPDATE` 则回溯到 `INSERT INTO <名>`；
+读不出目标时**当作冻结表处理**（要求过关卡），错也错在安全那一侧。
+加这一步之前那条反向桩是红的，加完才绿；桩不是摆设。
+
+### 已知边界（写进代码注释，不假装覆盖）
+
+- **状态集合走绑定参数**：`processing_status = ANY($2)`，`'dead'` 从 Go 侧在调用时
+  传入。值不在源码里，**任何读源码文本的规则都关不掉它**，再怎么收紧也够不着。
+- **渲染器产物落进 SQL `--` 注释、或被 `(true OR ...)` 短路**：两者都能满足本文件
+  的每一条规则而在运行时什么也不做。静态规则能证明片段在场，**永远证明不了它生效**。
+- **`SET "status"=` 引号标识符**：本仓库从不给标识符加引号；把引号形式补进正则
+  又会变成「名单里多一种拼法」，正是这个文件一直在拆的那个形状。
+
+三条都写在判据旁边而不是只写在这里。一条声称覆盖了实际没覆盖的规则，
+比一条边界清楚的规则更糟。
+
+### 变异表（11 条：Q1–Q11，修复前后各跑一次）
+
+| # | 变异 | 修前 | 修后 | 变红的测试 |
+| --- | --- | --- | --- | --- |
+| Q1 | `'dead'` 抽成同包常量再拼接 | 绿 | 红 | `EveryDeadStatusQueryReachesContainment` |
+| Q2 | 列名从 token 中间跨字面量断开 | 绿 | 红 | 同上 |
+| Q3 | 两者叠加，且表名来自另一个声明的常量 | 绿 | 红 | 同上 |
+| Q4 | 对照：同样碎，但与渲染器在同一条链上 | 绿 | 绿 | —— |
+| Q5 | 第六扇门写成 upsert（`ON CONFLICT ... DO UPDATE SET status='resolved'`） | 绿 | 红 | `EveryFreezeResolutionPassesTheDeadEventGuard` |
+| Q6 | 同上但 `status=$2` 参数化 | 绿 | 红 | 同上 |
+| Q7 | 门的表名来自常量 | 绿 | 红 | 同上 |
+| Q8 | 对照：upsert 这张表但不碰 status（`consumption.go` 现有两处就是这个形状） | 绿 | 绿 | —— |
+| Q9 | 对照：upsert 门但真的调了关卡 | 绿 | 绿 | —— |
+| Q10 | 手抄相关性，表名跨字面量断开 | 绿 | 红 | `ContainmentCorrelationIsWrittenInOnePlace` |
+| Q11 | 对照：不种任何东西 | 绿 | 绿 | —— |
+
+七条逃逸全部「修前绿 / 修后红」，四条对照两次都绿。
+
+### 门禁（全部实测，UTC）
+
+| 门禁 | 命令 | 开始 | 结束 | 耗时 | 结果 |
+| --- | --- | --- | --- | --- | --- |
+| 后端静态 | `go vet ./...` | 06:59:33 | 06:59:33 | <1s | exit 0 |
+| 后端全量 | `env -u <八个代理变量> INVOICE_TEST_DATABASE_URL=...invoice_test_l1merge go test -p 1 -count=1 ./...` | 06:59:43 | 07:06:14 | 6m31s | exit 0，30 包 ok，零 FAIL |
+| 前端类型 | `npm run typecheck` | 07:06:27 | 07:06:29 | 2s | exit 0 |
+| 前端用例 | `npm test -- --run` | 07:06:30 | 07:06:31 | 1s | 22 文件 / 339 例全绿 |
+| 密钥扫描 | `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 07:06:31 | 07:06:32 | 1s | exit 0 |
+
+后端全量耗时靠前的包（秒）：`internal/postgresstore` 282.400、`internal/application`
+26.750、`internal/testdb` 20.933、`cmd/eligibility-repair` 15.485、`internal/auth`
+10.117、`internal/migrate` 7.377。
+
+包列表仍写在所有 flag 之前。**全量跑不要带 `-run` 过滤**：`eligibilitywire`
+这类包里没有匹配的用例时会报 `no tests to run`，看着像跑过了其实一条没跑。
+
+### 这一刀之后的空转下限
+
+dead 规则的「有多少条查询是经渲染器到达 containment 的」下限从**按字面量数**改成
+**按查询数**，实测 6 条：两个列渲染函数各一条、周期发布、结转等待、重投候选列表、
+就绪查询。改成按链计数之后 `sourceDeadEventCountColumnsSQL` 的两个片段合成一条，
+所以数字比上一刀小，不是覆盖变少。
+
 ## 提交
 
 提交消息与 trailer 见 `git log`。本片未推送 GitHub、未部署、未连接生产库。
 收尾轮三个提交：`b39a123`（cherry-pick 0032 排除表）、`80d5774`（发现型闸的
 四个静默出口）、`f8386f8`（合并 RC106）；此后 `df97427`（收尾轮 handoff）、
-`59d22ec`（终审四条 major）、以及本刀的就绪原因词表。
+`59d22ec`（终审四条 major）、`1112322`（就绪原因词表与对拍闸），
+以及本刀的收口提交。

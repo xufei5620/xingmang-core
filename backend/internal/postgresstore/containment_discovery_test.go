@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -119,6 +120,16 @@ func declCallsFunction(decl goDecl, name string) bool {
 	return called
 }
 
+// backendRoot is the backend/ directory every tree rule in this file scans.
+func backendRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 // scanBackendDecls parses every non-test Go file under backend/ -- not just
 // this package -- and returns one entry per top-level declaration. Scanning
 // the whole tree matters for the resolution-guard rule below: a freeze
@@ -126,10 +137,7 @@ func declCallsFunction(decl goDecl, name string) bool {
 // unexported guard at all, and this rule is what would say so.
 func scanBackendDecls(t *testing.T) []goDecl {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := backendRoot(t)
 	decls := make([]goDecl, 0, 512)
 	fset := token.NewFileSet()
 	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
@@ -215,8 +223,8 @@ var containmentRenderers = []string{
 	"sourceDeadEventFlagColumnsSQL",
 }
 
-// mentionsDeadIngestStatus reports whether one SQL string literal contains a
-// dead processing_status judgment.
+// mentionsDeadIngestStatus reports whether a query contains a dead
+// processing_status judgment.
 //
 // This is the whole test, and it is deliberately not a pattern over how the
 // judgment is spelled. Three rounds of review walked through three successive
@@ -233,9 +241,30 @@ var containmentRenderers = []string{
 // exemption list below with a written reason. There is no spelling that
 // escapes this, because there is no spelling in it.
 //
+// The argument is a whole concatenation chain, not one literal. Asking it of a
+// single literal was the next escape a review found, and it had three
+// spellings of its own: pull `'dead'` out into a package constant and
+// concatenate it, break the column name across two literals in the middle of
+// the token, or keep the table name in some other declaration's constant. All
+// three leave every individual literal innocent. joinSQLChain resolves and
+// joins first, so none of them changes what this function sees.
+//
 // 'dead' carries its closing quote, so `'deadline'` is not a match, and the
 // column name is required, so a `status='dead'` on some other table is not
 // one either.
+//
+// # Known boundary, not covered and not pretended to be
+//
+// A query that takes its status set as a bind parameter --
+// `processing_status = ANY($2)` with 'dead' passed from Go at call time -- is
+// invisible to this and to any other rule that reads source text, because the
+// value is not in the source. No amount of tightening here reaches it. The
+// same is true of two subtler shapes: a rendered fragment that lands inside a
+// SQL `--` comment, and one short-circuited by `(true OR ...)`. Both would
+// satisfy every rule in this file while doing nothing at runtime; a static
+// rule can prove a fragment is present, never that it has effect. These are
+// written down rather than papered over, because a rule that claims coverage
+// it does not have is worse than one whose edges are known.
 func mentionsDeadIngestStatus(sql string) bool {
 	return strings.Contains(sql, "processing_status") && strings.Contains(sql, "'dead'")
 }
@@ -331,24 +360,93 @@ func chainCallsAnyOf(node ast.Node, parents map[ast.Node]ast.Node, names []strin
 	return false
 }
 
-// stringLiteralsIn returns every string literal under a node, with its
-// unquoted value. Comments are not literals, so nothing here can be spoofed
-// by prose.
-func stringLiteralsIn(node ast.Node) map[*ast.BasicLit]string {
-	found := map[*ast.BasicLit]string{}
-	ast.Inspect(node, func(n ast.Node) bool {
-		lit, ok := n.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
+// sqlChain is one query as the compiler will see it: every string fragment on
+// one `+` concatenation, joined in source order, together with the expression
+// that builds it.
+type sqlChain struct {
+	root ast.Node
+	text string
+}
+
+// joinSQLChain returns the text a concatenation produces, as far as it can be
+// known statically: string literals contribute their value, identifiers that
+// name a string constant in the same package contribute theirs, and anything
+// else (a call, a variable, a parameter) contributes nothing.
+//
+// Fragments are joined with no separator, on purpose. `"processing_st" +
+// "atus='dead'"` is one column name to the compiler and has to be one here
+// too; inserting anything between fragments would re-open exactly the escape
+// this closes.
+func joinSQLChain(root ast.Expr, constants map[string]string) string {
+	var text strings.Builder
+	for _, leaf := range concatChainLeaves(root) {
+		switch typed := leaf.(type) {
+		case *ast.BasicLit:
+			if typed.Kind != token.STRING {
+				continue
+			}
+			value, err := strconv.Unquote(typed.Value)
+			if err != nil {
+				value = typed.Value
+			}
+			text.WriteString(value)
+		case *ast.Ident:
+			if value, known := constants[typed.Name]; known {
+				text.WriteString(value)
+			}
+		}
+	}
+	return text.String()
+}
+
+// declSQLChains returns one entry per concatenated query in a declaration.
+//
+// Every SQL rule in this file runs over these rather than over individual
+// literals or over the declaration's raw text, and that is what makes the
+// rules independent of where a maintainer chose to put the `+` signs. A review
+// escaped the per-literal version three ways at once -- a constant holding
+// 'dead', a column name split mid-token, a table name kept in another
+// declaration -- and none of the three survives being asked of the joined
+// chain with constants resolved.
+func declSQLChains(decl goDecl, constants map[string]string) []sqlChain {
+	if decl.node == nil {
+		return nil
+	}
+	parents := nodeParents(decl.node)
+	seen := map[ast.Node]bool{}
+	var chains []sqlChain
+	ast.Inspect(decl.node, func(node ast.Node) bool {
+		switch typed := node.(type) {
+		case *ast.BasicLit:
+			if typed.Kind != token.STRING {
+				return true
+			}
+		case *ast.Ident:
+			if _, known := constants[typed.Name]; !known {
+				return true
+			}
+		default:
 			return true
 		}
-		value, err := strconv.Unquote(lit.Value)
-		if err != nil {
-			value = lit.Value
+		root, ok := concatChainRoot(node, parents).(ast.Expr)
+		if !ok || seen[root] {
+			return true
 		}
-		found[lit] = value
+		seen[root] = true
+		chains = append(chains, sqlChain{root: root, text: joinSQLChain(root, constants)})
 		return true
 	})
-	return found
+	return chains
+}
+
+// declPackageConstants returns the string constants visible to a declaration,
+// which is what lets an identifier on a concatenation be resolved to the SQL
+// it stands for.
+func declPackageConstants(decl goDecl, byPackage map[string]map[string]string) map[string]string {
+	if constants := byPackage[path.Dir(decl.file)]; constants != nil {
+		return constants
+	}
+	return map[string]string{}
 }
 
 // deadStatusExemption is one declaration that writes a dead processing_status
@@ -462,20 +560,100 @@ var freezeCorrelationPattern = regexp.MustCompile(
 // \b in front of status is what keeps `prior_status=...` from counting -- an
 // underscore is a word character, so there is no boundary there, while
 // `ef.status` has one.
+// It also no longer requires the words `UPDATE eligibility_freezes` to sit
+// next to each other. A review wrote a sixth door as
+//
+//	INSERT INTO eligibility_freezes (...) VALUES (...)
+//	ON CONFLICT (id) DO UPDATE SET status='resolved'
+//
+// which resolves a freeze without that phrase ever appearing -- and this is
+// not a contrived shape, it is how consumption.go already writes to this
+// table twice (today only touching updated_at). So the table and the
+// assignment are matched separately: freezeTableName has to appear somewhere
+// in the query, and this pattern finds the assignment wherever the SET is.
+// `UPDATE ... SET` and `DO UPDATE SET` are then the same thing, which is what
+// they are.
+//
+// SET is still required, because it is what separates writing the column from
+// reading it -- `WHERE ef.status='resolved'` is a lookup and must not count.
+//
+// Known boundary: `SET "status"=` with a quoted identifier would not match.
+// Nothing in this repository quotes identifiers, and adding the quoted form to
+// the pattern would be one more spelling in a list, which is the shape this
+// file keeps having to undo.
 var freezeStatusWritePattern = regexp.MustCompile(
-	`(?i)UPDATE eligibility_freezes(?: (?:AS )?\w+)? SET (?:[^;]*?, ?)?\bstatus ?= ?([^,;]+)`)
+	`(?i)\bSET (?:[^;]*?, ?)?\bstatus ?= ?([^,;]+)`)
+
+// freezeTableName is the table whose status column matters. It is looked for
+// in the joined concatenation rather than in one literal, so splitting it
+// across two fragments or keeping it in another declaration's constant does
+// not hide it.
+const freezeTableName = "eligibility_freezes"
+
+// freezeTablePattern matches that table and not a longer name that starts with
+// it. The word boundary is what keeps `eligibility_freezes_archive` out: an
+// underscore is a word character, so there is no boundary inside that name.
+// A plain substring test put the archive table's own status writes under this
+// rule, which the negative control below caught the moment the table name
+// stopped being anchored to the word UPDATE.
+var freezeTablePattern = regexp.MustCompile(`\b` + freezeTableName + `\b`)
 
 // freezeStatusReopenValue is the only assigned value that does not need the
 // dead-event guard. It is matched as a whole captured token so that a CASE
 // expression which merely mentions 'open' somewhere is not mistaken for one.
 const freezeStatusReopenValue = `'open'`
 
-// freezeResolutionsIn returns the assigned values, one per status write in the
-// declaration, that are not the safe re-open literal.
-func freezeResolutionsIn(normalized string) []string {
+// sqlWriteTargetPattern finds what a statement writes to. `DO UPDATE` is
+// matched as a unit and before the bare `UPDATE` alternative, because in an
+// upsert the target is the INSERT's table and there is no name after the verb.
+var sqlWriteTargetPattern = regexp.MustCompile(`(?i)\b(DO UPDATE|UPDATE(?: ONLY)? (\w+)|INSERT INTO (\w+))`)
+
+// freezeStatusWriteTarget reads which table a status assignment belongs to,
+// given everything in the query before it.
+//
+// Decoupling the table from the verb -- which is what makes the upsert
+// spelling visible -- costs the ability to tell whose status is being written
+// when one query names two tables. This gets it back without going back to
+// matching a phrase: the target is whatever the nearest preceding write verb
+// names, and for `DO UPDATE` that is the INSERT's table.
+//
+// An unreadable prefix returns "", and the caller treats that as the freeze
+// table. Demanding the guard for a write this cannot attribute is the safe
+// direction to be wrong in.
+func freezeStatusWriteTarget(prefix string) string {
+	matches := sqlWriteTargetPattern.FindAllStringSubmatch(prefix, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	last := matches[len(matches)-1]
+	if strings.EqualFold(last[1], "DO UPDATE") {
+		for index := len(matches) - 1; index >= 0; index-- {
+			if matches[index][3] != "" {
+				return matches[index][3]
+			}
+		}
+		return ""
+	}
+	if last[2] != "" {
+		return last[2]
+	}
+	return last[3]
+}
+
+// freezeResolutionsIn returns the assigned values, one per status write to the
+// freeze table in the query, that are not the safe re-open literal. A query
+// that does not name the table at all writes nothing here by definition.
+func freezeResolutionsIn(sql string) []string {
+	if !freezeTablePattern.MatchString(sql) {
+		return nil
+	}
 	var resolutions []string
-	for _, match := range freezeStatusWritePattern.FindAllStringSubmatch(normalized, -1) {
-		assigned := strings.TrimSpace(match[1])
+	for _, span := range freezeStatusWritePattern.FindAllStringSubmatchIndex(sql, -1) {
+		if target := freezeStatusWriteTarget(sql[:span[0]]); target != "" &&
+			!strings.EqualFold(target, freezeTableName) {
+			continue
+		}
+		assigned := strings.TrimSpace(sql[span[2]:span[3]])
 		if index := strings.IndexAny(assigned, " \t"); index >= 0 {
 			assigned = assigned[:index]
 		}
@@ -570,6 +748,67 @@ func TestDeclCallsFunctionIgnoresCommentsAndStrings(t *testing.T) {
 	}
 }
 
+// TestSQLChainJoiningDefeatsFragmentation is the stake under the fix that made
+// every SQL rule read a whole concatenation instead of one literal at a time.
+//
+// Per-literal was the next escape after the shape lists ran out, and it had
+// three spellings, all of which leave each individual literal innocent: pull
+// the value into a package constant, break the column name across two
+// fragments in the middle of the token, or keep the table name in some other
+// declaration's constant. This test plants all three and one negative control.
+func TestSQLChainJoiningDefeatsFragmentation(t *testing.T) {
+	constants := map[string]string{
+		"zzDeadLiteral": "'dead'",
+		"zzFreezeTable": "eligibility_freezes",
+	}
+	triggers := func(source string) bool {
+		for _, chain := range declSQLChains(parseDeclForSelfTest(t, source), constants) {
+			if mentionsDeadIngestStatus(chain.text) {
+				return true
+			}
+		}
+		return false
+	}
+	for name, source := range map[string]string{
+		"the value pulled into a package constant": "func q() string {\n\treturn `SELECT count(*) FROM source_ingest_events " +
+			"WHERE processing_status=` + zzDeadLiteral\n}",
+		"the column name split in the middle of the token": "func q() string {\n\treturn `SELECT count(*) FROM source_ingest_events " +
+			"WHERE processing_st` + `atus='dead'`\n}",
+		"both at once": "func q() string {\n\treturn `SELECT count(*) WHERE processing_st` + `atus=` + zzDeadLiteral\n}",
+		"fragments separated by a call that contributes nothing": "func q(alias string) string {\n\t" +
+			"return `WHERE ` + alias + `.processing_status=` + zzDeadLiteral\n}",
+	} {
+		if !triggers(source) {
+			t.Errorf("a dead-status judgment written as %s is invisible to the rule, so the rule can "+
+				"be walked through by choosing where to put the `+` signs:\n%s", name, source)
+		}
+	}
+	// The control that keeps the joining honest. Two separate queries in one
+	// declaration are two chains, and neither of them judges anything dead; if
+	// joining reached across them, every declaration holding a status query and
+	// a dead literal anywhere would be reported and the rule would be turned
+	// off within a week.
+	separate := "func q() (string, string) {\n\treturn `SELECT processing_status FROM source_ingest_events`, " +
+		"`SELECT 'dead'::text`\n}"
+	if triggers(separate) {
+		t.Errorf("joining reached across two separate queries in one declaration, which reports "+
+			"sites that judge nothing:\n%s", separate)
+	}
+	// The freeze table, kept in another declaration's constant. The resolution
+	// rule reads the same joined text, so this closes the same hole there.
+	viaConstant := parseDeclForSelfTest(t, "func q() string {\n\treturn `UPDATE ` + zzFreezeTable + ` SET status='resolved'`\n}")
+	resolves := false
+	for _, chain := range declSQLChains(viaConstant, constants) {
+		if len(freezeResolutionsIn(normalizeSource(chain.text))) > 0 {
+			resolves = true
+		}
+	}
+	if !resolves {
+		t.Error("a freeze resolution whose table name comes from a constant is not seen as a " +
+			"resolution, so a door can be written by naming the table somewhere else")
+	}
+}
+
 // TestEveryDeadStatusQueryReachesContainment holds the rule that no SQL in the
 // backend may judge an ingest event dead without that judgment either coming
 // from a containment renderer, sharing a concatenated query with one, or being
@@ -650,17 +889,16 @@ func TestEveryDeadStatusQueryReachesContainment(t *testing.T) {
 		exempt[exemptionKey(exemption.file, exemption.decl)] = exemption
 	}
 
+	constantsByPackage := packageStringConstants(t, backendRoot(t))
 	rendered := 0
 	for _, decl := range scanBackendDecls(t) {
-		if decl.node == nil {
-			continue
-		}
-		parents := nodeParents(decl.node)
-		for lit, value := range stringLiteralsIn(decl.node) {
-			if !mentionsDeadIngestStatus(value) {
+		for _, chain := range declSQLChains(decl, declPackageConstants(decl, constantsByPackage)) {
+			if !mentionsDeadIngestStatus(chain.text) {
 				continue
 			}
-			if chainCallsAnyOf(lit, parents, containmentRenderers) {
+			// chain.root is already the outermost expression, so no parent
+			// map is needed to find it again.
+			if chainCallsAnyOf(chain.root, nil, containmentRenderers) {
 				rendered++
 				continue
 			}
@@ -675,7 +913,7 @@ func TestEveryDeadStatusQueryReachesContainment(t *testing.T) {
 				"named rows rather than summarising a source -- add it to deadStatusExemptions "+
 				"with a reason. A dead judgment that cannot see containment reports a contained, "+
 				"single-account outage as a source-wide one:\n\t%s",
-				decl.file, decl.name, strings.TrimSpace(normalizeSource(value)))
+				decl.file, decl.name, strings.TrimSpace(normalizeSource(chain.text)))
 		}
 	}
 
@@ -702,10 +940,14 @@ func TestEveryDeadStatusQueryReachesContainment(t *testing.T) {
 	// Vacuity from the other side. If nothing in the tree reaches containment
 	// through a renderer any more, "everything reaches containment" is true of
 	// an empty set, and the health surfaces have quietly stopped asking.
+	// Six queries today, counted per concatenated query rather than per string
+	// literal: the two health-surface renderers build one query each out of two
+	// fragments, and the other four are the cycle publisher, the carry-forward
+	// wait, the requeue candidate list and the readiness query.
 	if rendered < 6 {
-		t.Fatalf("only %d dead-status queries reach containment through a renderer; the four "+
-			"health surfaces, the cycle publisher, the carry-forward wait and the requeue "+
-			"candidate list all do, so this rule has lost sight of them", rendered)
+		t.Fatalf("only %d dead-status queries reach containment through a renderer; six do today "+
+			"(the two column renderers, the cycle publisher, the carry-forward wait, the requeue "+
+			"candidate list and the readiness query), so this rule has lost sight of them", rendered)
 	}
 }
 
@@ -772,6 +1014,7 @@ func TestContainmentCorrelationIsWrittenInOnePlace(t *testing.T) {
 	}
 
 	callers := 0
+	constantsByPackage := packageStringConstants(t, backendRoot(t))
 	for _, decl := range scanBackendDecls(t) {
 		// A call, not a mention: this counts declarations whose syntax tree
 		// contains the call. The text version of this test counted the
@@ -781,15 +1024,21 @@ func TestContainmentCorrelationIsWrittenInOnePlace(t *testing.T) {
 		if declCallsFunction(decl, definition) {
 			callers++
 		}
-		if !strings.Contains(decl.normalized, "eligibility_freezes") ||
-			!freezeCorrelationPattern.MatchString(decl.normalized) {
-			continue
+		// Per joined query rather than per declaration text: the table name
+		// used to be looked for in the declaration's raw source, where
+		// `"eligibility_free" + "zes"` does not appear and a name kept in
+		// another declaration's constant does not appear either.
+		for _, chain := range declSQLChains(decl, declPackageConstants(decl, constantsByPackage)) {
+			if !freezeTablePattern.MatchString(chain.text) ||
+				!freezeCorrelationPattern.MatchString(normalizeSource(chain.text)) {
+				continue
+			}
+			t.Errorf("%s: %s correlates an eligibility freeze's source_revision_hash to an ingest "+
+				"row's payload_hash by hand. Render it from %s(alias, narrowing...) instead -- two "+
+				"copies of this predicate disagree silently, and the disagreement is either a "+
+				"re-opened source-wide outage or a permanently lost balance fact",
+				decl.file, decl.name, definition)
 		}
-		t.Errorf("%s: %s correlates an eligibility freeze's source_revision_hash to an ingest "+
-			"row's payload_hash by hand. Render it from %s(alias, narrowing...) instead -- two "+
-			"copies of this predicate disagree silently, and the disagreement is either a "+
-			"re-opened source-wide outage or a permanently lost balance fact",
-			decl.file, decl.name, definition)
 	}
 	// Vacuity from the other side: if nothing calls the definition any more,
 	// "nobody writes it by hand" is trivially true and means nothing.
@@ -843,6 +1092,18 @@ func TestEveryFreezeResolutionPassesTheDeadEventGuard(t *testing.T) {
 		// A value this rule cannot read is treated as a resolution, because
 		// the safe direction is to demand the guard.
 		`UPDATE eligibility_freezes SET status=CASE WHEN $1 THEN 'resolved' ELSE 'open' END`,
+		// The upsert. A review wrote a sixth door this way and walked it
+		// straight through: the phrase `UPDATE eligibility_freezes` never
+		// appears, and this is not a contrived shape -- consumption.go
+		// already writes this table with ON CONFLICT twice.
+		`INSERT INTO eligibility_freezes (id,status) VALUES ($1,'open') ` +
+			`ON CONFLICT (id) DO UPDATE SET status='resolved'`,
+		`INSERT INTO eligibility_freezes (id) VALUES ($1) ` +
+			`ON CONFLICT (id) DO UPDATE SET resolved_at=now(), status=$2`,
+		// The table named before the verb in a CTE, which is the same
+		// separation seen from the other side.
+		`WITH target AS (SELECT id FROM eligibility_freezes WHERE id=$1) ` +
+			`UPDATE eligibility_freezes SET status='resolved' FROM target`,
 	} {
 		if len(freezeResolutionsIn(normalizeSource(planted))) == 0 {
 			t.Fatalf("the freeze-resolution matcher misses a spelling a maintainer would write, "+
@@ -862,8 +1123,17 @@ func TestEveryFreezeResolutionPassesTheDeadEventGuard(t *testing.T) {
 		`UPDATE eligibility_freezes SET prior_status='resolved'`,
 		// A different table whose name starts with this one's.
 		`UPDATE eligibility_freezes_archive SET status='resolved'`,
-		// Reading is not writing.
+		// Reading is not writing. SET is what separates the two, and it is
+		// the only thing this rule still requires of the verb.
 		`SELECT status FROM eligibility_freezes WHERE status='resolved'`,
+		`SELECT id FROM eligibility_freezes WHERE status IN ('resolved','open')`,
+		// An upsert on this table that does not touch status. Both of
+		// consumption.go's existing writes are this shape, and reporting them
+		// would be a false alarm on the most ordinary thing in the file.
+		`INSERT INTO eligibility_freezes (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET updated_at=now()`,
+		// A status write on a different table, in a query that merely reads
+		// this one.
+		`UPDATE eligibility_freezes_archive SET status='resolved' WHERE id IN (SELECT id FROM eligibility_freezes)`,
 	} {
 		if resolutions := freezeResolutionsIn(normalizeSource(allowed)); len(resolutions) != 0 {
 			t.Fatalf("the freeze-resolution matcher fires on a write that does not resolve a "+
@@ -872,8 +1142,16 @@ func TestEveryFreezeResolutionPassesTheDeadEventGuard(t *testing.T) {
 	}
 
 	doors := 0
+	constantsByPackage := packageStringConstants(t, backendRoot(t))
 	for _, decl := range scanBackendDecls(t) {
-		if len(freezeResolutionsIn(decl.normalized)) == 0 {
+		resolves := false
+		for _, chain := range declSQLChains(decl, declPackageConstants(decl, constantsByPackage)) {
+			if len(freezeResolutionsIn(normalizeSource(chain.text))) > 0 {
+				resolves = true
+				break
+			}
+		}
+		if !resolves {
 			continue
 		}
 		doors++
