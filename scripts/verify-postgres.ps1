@@ -27,12 +27,19 @@ function Invoke-PostgresContainerCommand {
         [Parameter(Mandatory = $true)][string[]]$Environment,
         [Parameter(Mandatory = $true)][string]$Command,
         [string]$ContractsPath,
+        [string]$BackendPath,
         [Parameter(Mandatory = $true)][string]$FailureMessage
     )
 
     $arguments = @('run', '--rm', '--network', "container:$DatabaseContainer")
     if (-not [string]::IsNullOrWhiteSpace($ContractsPath)) {
         $arguments += @('--mount', "type=bind,source=$ContractsPath,target=/contracts,readonly")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BackendPath)) {
+        # eligibilitywire.repoRoot() 从自己的源文件路径往上三级算仓库根；运行器镜像把 backend/
+        # 放在 /src，于是根是 /，它接着要读 /backend/migrations 与 /backend/internal/...（发现
+        # 后端会写出的状态值）。把宿主机的 backend/ 只读挂到 /backend，和 /src 是同一份源码。
+        $arguments += @('--mount', "type=bind,source=$BackendPath,target=/backend,readonly")
     }
     foreach ($environmentEntry in $Environment) {
         $arguments += @('--env', $environmentEntry)
@@ -156,6 +163,7 @@ try {
                 -Environment @("INVOICE_TEST_DATABASE_URL=$databaseUrl") `
                 -Command "go test $($databaseTest.Package) -count=1" `
                 -ContractsPath $contractsPath `
+                -BackendPath (Join-Path $projectRoot 'backend') `
                 -FailureMessage $databaseTest.Failure
         }
 
