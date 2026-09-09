@@ -127,7 +127,13 @@ func TestPlatformLoginOriginRefusesAnUnsetVariable(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: silently used a default origin %q instead of refusing", platform, got)
 		}
-		if !strings.Contains(err.Error(), "LOGIN_BASE_URL") || !strings.Contains(err.Error(), "--env-file") {
+		// The message must name the variable AND the technique that actually
+		// works. It used to point at --env-file, which is exactly what failed
+		// on the first production dry run: the key is optional in
+		// .env.production, so the env file does not contain it.
+		if !strings.Contains(err.Error(), "LOGIN_BASE_URL") ||
+			!strings.Contains(err.Error(), "printenv") ||
+			!strings.Contains(err.Error(), "Do NOT rely on --env-file") {
 			t.Fatalf("%s: the error does not tell the operator how to fix it: %v", platform, err)
 		}
 	}

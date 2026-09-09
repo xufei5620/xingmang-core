@@ -2620,9 +2620,16 @@ dry-run 在门关着的时候**仍然会打出完整计划**并标 `timing gate:
 先按 3. 节的办法确认镜像 ID 与发布清单一致，然后：
 
 ```bash
+# 先从 api 容器取这两个 origin 实际生效的值。别指望 .env.production 里有它们
+# （原因见下面那段），也别用不带 =值 的 -e。
+S="$(docker exec invoice-system-prod-api-1 printenv SUB2API_LOGIN_BASE_URL)"
+N="$(docker exec invoice-system-prod-api-1 printenv NEWAPI_LOGIN_BASE_URL)"
+printf 'sub2api=%s\nnewapi=%s\n' "$S" "$N"   # 两行都必须非空，才能往下走
+
 docker run --rm --pull=never --network invoice-system-prod_invoice_db \
   --user 10001:10001 \
   --env-file "$PRODUCTION_ENV_FILE" \
+  -e "SUB2API_LOGIN_BASE_URL=$S" -e "NEWAPI_LOGIN_BASE_URL=$N" \
   -v /root/invoice-system/secrets/invoice_owner_database_url:/run/secrets/invoice_owner_database_url:ro \
   -v /root/invoice-system/secrets/invoice_field_keyring.json:/run/secrets/invoice_field_keyring:ro \
   --entrypoint /usr/local/bin/invoice-account-bind \
@@ -2639,11 +2646,27 @@ docker run --rm --pull=never --network invoice-system-prod_invoice_db \
 `name: invoice-system-prod` 加上内部库网络 `invoice_db`），否则连不上库。
 `--pull=never` 与 `--rm` 与本文其它工具容器一致：生产从不拉取、不构建。
 
-**`--env-file "$PRODUCTION_ENV_FILE"` 不能省，也不能换成 `-e SUB2API_LOGIN_BASE_URL`。**
-这两个变量只写在 `.env.production` 里，交互 shell 里没有 export；`-e VAR` 这种
-不带 `=值` 的写法遇到未设置的变量**什么也不传**，容器里就是空的。工具读不到
-`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` 时会**直接拒绝运行**（不再回落
-到编译进去的默认值——那个默认值今天恰好等于配置值，等哪天变量改了就会静默写错）。
+**这两个 origin 必须从 api 容器里取，`--env-file` 带不进来。**
+2026-09-09 生产第一次 dry-run 就撞在这上面。`.env.production` 里**根本没有**
+`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` 这两个键（`grep` 结果为 0）；
+api 容器里的值来自 `deploy/docker-compose.prod.yml` 的
+`${SUB2API_LOGIN_BASE_URL:-https://api.solov.cc}` /
+`${NEWAPI_LOGIN_BASE_URL:-https://xm.solov.cc}`——`:-默认值` 的写法意味着这两个键
+在 env 文件里本来就是**可选的**，只有 `deploy/.env.production.example` 里列了它们。
+后果：
+
+- `--env-file` 传进去的是**空**（文件里压根没这个键）；
+- 不带 `=值` 的 `-e VAR` 遇到 shell 里未 export 的变量**什么也不传**；
+- 两种写法都会让工具报 `... is not set` 并**拒绝运行**。
+
+所以供给 origin 的是命令块开头那两行 `docker exec ... printenv` 加
+`-e "SUB2API_LOGIN_BASE_URL=$S"`。`--env-file` 保留无害：`-e` 的优先级高于它，
+显式值总会赢；万一哪天有人把这两个键写进了 env 文件且值不同，赢的仍是从 api 容器
+取到的实际生效值。
+
+工具读不到时**直接拒绝运行**，不会回落到编译进去的默认值——那个默认值今天恰好等于
+生效值，等哪天生效值变了就会静默写错。那两行 `printenv` 若打出空串，是容器名不对或
+没在跑，先解决它再往下走。
 这个值会成为 `invoice_users.oidc_issuer`，客户的会话标识、审计身份哈希、邮箱 AAD
 全从它派生；写错了不会当场报错，客户日后登录仍然能认领到这一行（认领走的是外部
 账号，不是 issuer），但那个错误的 issuer 会永久留在库里
