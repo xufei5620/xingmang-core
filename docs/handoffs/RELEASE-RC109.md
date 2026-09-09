@@ -30,9 +30,9 @@ RC108（tag `v0.1.0-rc108-signed` = `c347396`）四片齐全、源码门禁与�
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 |---|---|---|---|---|
 | 源码门禁 `scripts/verify.ps1`（经 `release/run-rc109-gate.ps1` + `run-detached.ps1`；`rc109-gate`，树 `2157b8f`） | 13:54:08 | 14:02:21 | 8m13s | **PASS**（exit 0；postgresstore 236.6s） |
-| 签名 tag `v0.1.0-rc109-signed` | 待打 | | | |
-| 镜像门禁（`wt-XM-INV-AUTOLOGIN` detached 到 tag，`run-rc109-image-gate.ps1`） | 待跑 | | | 预期 exit 42 |
-| 产物验证（普通 + `-RequireTransferReady -SignedReleaseTag v0.1.0-rc109-signed`） | 待跑 | | | |
+| 签名 tag `v0.1.0-rc109-signed` → `11159a1`（`git verify-tag` Good，指纹 `SHA256:5MWY6R…`） | 14:03 | 14:03 | | OK |
+| 镜像门禁（`wt-XM-INV-AUTOLOGIN` detached 到 `11159a1`，`run-rc109-image-gate.ps1`，`rc109-imagegate`） | 14:03:35 | 14:15:06 | 11m31s | exit 42（唯一预期值）；`release/0.1.0-rc109-exact1` |
+| 产物验证（普通 + `-RequireTransferReady -SignedReleaseTag v0.1.0-rc109-signed`） | 同上 | 同上 | | 两次 exit 0 |
 | `ssh-keygen -Y sign` 签 `SHA256SUMS` | 待签 | | | |
 | 传输 + stage2 | 待做 | | | |
 
