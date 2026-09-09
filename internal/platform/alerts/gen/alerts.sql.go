@@ -58,6 +58,42 @@ func (q *Queries) AcknowledgeAlert(ctx context.Context, arg AcknowledgeAlertPara
 	return i, err
 }
 
+const deleteUpstreamVersionAck = `-- name: DeleteUpstreamVersionAck :one
+DELETE FROM alerts.upstream_version_ack
+WHERE environment = $1 AND metric_key = $2
+RETURNING environment, metric_key, version, source, acknowledged_by, acknowledged_at, note
+`
+
+type DeleteUpstreamVersionAckParams struct {
+	Environment string
+	MetricKey   string
+}
+
+// 撤销一条已核对记录（alerts.upstream_version.revoke）。
+//
+// 这条查询存在的理由是：已核对版本本来是一个**没有解除路径**的抑制器。
+// 点错一次，「去核对桥接契约与兼容矩阵」那条提醒就对该版本永久消失，
+// 而唯一的自动解除条件是上游再升一次版本——那是外部事件，不在操作者手里。
+// 一个引入了就撤不掉的闩，正是本片自己列在致命清单里的东西。
+//
+// 不带 version 参数：撤销的对象是「这条上游此刻记着的那条核对」，
+// 让调用方再报一次版本号只会多一种「版本对不上所以撤不掉」的失败形态。
+// RETURNING 是给审计用的 before 快照。
+func (q *Queries) DeleteUpstreamVersionAck(ctx context.Context, arg DeleteUpstreamVersionAckParams) (AlertsUpstreamVersionAck, error) {
+	row := q.db.QueryRow(ctx, deleteUpstreamVersionAck, arg.Environment, arg.MetricKey)
+	var i AlertsUpstreamVersionAck
+	err := row.Scan(
+		&i.Environment,
+		&i.MetricKey,
+		&i.Version,
+		&i.Source,
+		&i.AcknowledgedBy,
+		&i.AcknowledgedAt,
+		&i.Note,
+	)
+	return i, err
+}
+
 const getActiveAlertByDedupKey = `-- name: GetActiveAlertByDedupKey :one
 
 SELECT id, rule_key, dedup_key, severity, status, title, detail, environment, opened_at, acknowledged_at, resolved_at, last_seen_at, fire_count, source_metric_key, notify_status, notify_error, notified_at, created_at, updated_at, trigger_count, first_opened_at FROM alerts.alert
@@ -209,8 +245,9 @@ INSERT INTO alerts.alert (
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
-    $9, $9, 1, 1, $10,
-    $11, 'pending', '', NULL, now(), now()
+    $9, $9, 1, $10,
+    $11,
+    $12, 'pending', '', NULL, now(), now()
 )
 RETURNING id, rule_key, dedup_key, severity, status, title, detail, environment, opened_at, acknowledged_at, resolved_at, last_seen_at, fire_count, source_metric_key, notify_status, notify_error, notified_at, created_at, updated_at, trigger_count, first_opened_at
 `
@@ -225,6 +262,7 @@ type InsertAlertParams struct {
 	Detail          string
 	Environment     string
 	OpenedAt        pgtype.Timestamptz
+	TriggerCount    *int32
 	FirstOpenedAt   pgtype.Timestamptz
 	SourceMetricKey string
 }
@@ -234,12 +272,18 @@ type InsertAlertParams struct {
 // notify_status 恒为 pending：新告警一律先排队等投递，
 // 由投递环节决定它变 delivered 还是 failed，这里不预判。
 //
-// trigger_count 同样从 1 起：新开一条告警**就是**一次真正的触发。它与
-// fire_count 在这一刻相等，此后就分道扬镳——fire_count 每轮命中都加，
-// trigger_count 只在状态转换时加（见 TouchAlert）。
+// trigger_count 与 first_opened_at 都由调用方给，而且**必须一起给**：它们
+// 回答的是同一段时间跨度上的两个问题（「这个问题从什么时候开始的」与「它
+// 在这段里真正触发过几次」）。首开一条新告警时是 (now, 1)；复发
+// （REOPENED）时两个都从上一条继承——first_opened_at 取它的有效首开时刻，
+// trigger_count 取它的值 +1。
 //
-// first_opened_at 由调用方给（不是 opened_at 的别名）：复发（REOPENED）时它
-// 继承上一次那条的首开时刻，这样「已持续」不会因为中间恢复过一次就归零。
+// 只继承其中一个的后果，是界面上那行会读成「已持续 4 小时，触发 1 次」，
+// 而真相是它开关了四轮——与它替换掉的「触发 669 次」是同一类误读，只是
+// 方向相反（见 store.go insert 的注释）。
+//
+// trigger_count 允许为 NULL：上一条自己就是本列上线前的旧行时，链上真正
+// 触发过几次没有人记下来过，继承一个编出来的数比留空更糟。
 func (q *Queries) InsertAlert(ctx context.Context, arg InsertAlertParams) (AlertsAlert, error) {
 	row := q.db.QueryRow(ctx, insertAlert,
 		arg.ID,
@@ -251,6 +295,7 @@ func (q *Queries) InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert
 		arg.Detail,
 		arg.Environment,
 		arg.OpenedAt,
+		arg.TriggerCount,
 		arg.FirstOpenedAt,
 		arg.SourceMetricKey,
 	)

@@ -572,7 +572,10 @@ func main() {
 		ActionRunAudit: auditStore,
 		Alerts:         alertStore,
 		// 静默窗口列表复用同一个 Store：读的是同一张表，不另开一条路径。
-		Silences:                alertStore,
+		Silences: alertStore,
+		// 已核对的上游版本同样复用它。这份清单必须有读路径：它是一个
+		// 抑制器，而看不见的抑制器与不留痕的抑制器是同一种病。
+		UpstreamVersionAcks:     alertStore,
 		SavedViews:              savedViewStore,
 		PlatformChannelBindings: channelBindingStore,
 		// 内容发布的五个只读端点。仓储与 Action 用同一份实现，不另开一条

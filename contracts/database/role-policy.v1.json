@@ -681,6 +681,7 @@
       ],
       "table_privileges": {
         "xm_api_runtime": [
+          "DELETE",
           "INSERT",
           "SELECT",
           "UPDATE"

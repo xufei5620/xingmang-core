@@ -79,6 +79,12 @@ type Deps struct {
 	// Silences 是静默窗口的只读列表（XM-SILENCE-LIST）。与 Alerts 同为
 	// *alerts.Store，分成两个字段是因为它们是两个窄接口，见 SilenceLister。
 	Silences SilenceLister
+	// UpstreamVersionAcks 是「已核对的上游版本」的只读列表
+	// （XM-OPS-TRUTH 子片 B 审稿处置）。同为 *alerts.Store 上的第三个窄接口。
+	//
+	// nil 时该端点不挂载——与 RequestLogs 同一条纪律：端点不存在（404）
+	// 比端点存在却一调就 500 诚实。
+	UpstreamVersionAcks UpstreamVersionAckLister
 	// SilenceNow 只为测试而存在：nil 时用 time.Now，生产从不设置它。
 	//
 	// 静默列表的全部内容就是「拿此刻去比起止时间」，跟着真实时钟走的话，
@@ -376,6 +382,9 @@ func NewRouter(d Deps) http.Handler {
 					// 端点而不是新开一条路由：两者权限口径完全一致
 					// （都是 ops.read），而这样跨所有权的改动只有这一行。
 					Jobs: d.Jobs,
+					// 让 failed_jobs 的读库失败留下一条 Warn。没有它，
+					// 「那一格永久瞎着」在生产里绝对不可见。
+					Logger: d.Logger,
 				}))
 			// 数据库变更（XM-READONLY-QUERIES）同样复用 ops.read：迁移版本
 			// 回答「这套部署自己处在什么状态」，与心跳、队列积压、控制平面
@@ -443,6 +452,13 @@ func NewRouter(d Deps) http.Handler {
 			// 仍走 Action（alerts.silence.manage），不在这里开第二条写路径。
 			api.With(RequireScope(alerts.ScopeRead)).
 				Get("/alerts/silences", ListSilencesHandler(d.Silences, d.SilenceNow))
+			// 已核对的上游版本（XM-OPS-TRUTH 子片 B 审稿处置）。同一个 scope：
+			// 它就是「哪几条版本提醒被人主动压住了」，泄漏面小于告警正文。
+			// 撤销仍走 Action（alerts.upstream_version.revoke）。
+			if d.UpstreamVersionAcks != nil {
+				api.With(RequireScope(alerts.ScopeRead)).
+					Get("/alerts/upstream-versions", ListUpstreamVersionAcksHandler(d.UpstreamVersionAcks))
+			}
 			// 内容发布（XM-EXT-PUBLISHING）。五个只读端点共用
 			// publishing.read：草稿正文、素材地址、渠道登记（**只回显
 			// CredentialRef，不是明文**）与发布记录属于同一份内容资产，

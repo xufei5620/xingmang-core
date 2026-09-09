@@ -16,7 +16,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
-// 三个 Action 的稳定 ID。
+// 四个 Action 的稳定 ID。
 const (
 	ActionAcknowledge   = "alerts.alert.acknowledge"
 	ActionSilenceCreate = "alerts.silence.create"
@@ -27,6 +27,14 @@ const (
 	// `<域>.<资源>.<动作>` 至少三段，两段式在 Definition.Validate 里直接被拒，
 	// 进程起不来（cmd/platform-api 的注册返回值会中断启动）。所以取三段式。
 	ActionAcknowledgeUpstreamVersion = "alerts.upstream_version.acknowledge"
+	// ActionRevokeUpstreamVersion：撤销一条已核对记录。
+	//
+	// 它存在的理由不是对称好看，是**已核对版本原本是一个没有解除路径的闩**：
+	// 点错一次，那条「去核对桥接契约与兼容矩阵」的提醒对该版本永久消失，
+	// 而唯一的自动解除条件是上游再升一次版本——那是外部事件，不在操作者
+	// 手里。而且 acknowledge 要求 version 与当轮观测逐字相同，所以连
+	// 「用另一个值覆盖掉」这条路都走不通。
+	ActionRevokeUpstreamVersion = "alerts.upstream_version.revoke"
 
 	actionVersion = "1"
 )
@@ -79,7 +87,7 @@ type ObservationReader interface {
 	Get(ctx context.Context, metricKey, environment string) (ops.Observation, error)
 }
 
-// RegisterActions 把告警的三个写操作注册为 Action（ADR-003：写操作唯一入口）。
+// RegisterActions 把告警的四个写操作注册为 Action（ADR-003：写操作唯一入口）。
 //
 // store 允许为 nil：此时只登记声明而不绑定实际执行体，供「注册表完整性」类
 // 测试与文档生成使用；Handler 被调用时会返回明确错误（照搬 registry 的做法）。
@@ -92,6 +100,9 @@ func RegisterActions(reg *action.Registry, store *Store, observations Observatio
 		{acknowledgeDef(), acknowledgeHandler(store)},
 		{silenceCreateDef(), silenceCreateHandler(store)},
 		{acknowledgeUpstreamVersionDef(), acknowledgeUpstreamVersionHandler(store, observations)},
+		// 撤销与核对**成对注册**：一个能建立永久抑制器的 Action 如果没有
+		// 与它同时上线的解除路径，那个抑制器就只能靠外部事件解除。
+		{revokeUpstreamVersionDef(), revokeUpstreamVersionHandler(store)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {
@@ -350,15 +361,21 @@ func silenceCreateHandler(store *Store) action.Handler {
 
 // acknowledgeUpstreamVersionDef 声明「我核对过这个上游版本了」。
 //
-// **L1，不抬级。** 理由不是「感觉不严重」，是两条硬的：
+// **L1，永久锁定，不抬级。** 理由不是「感觉不严重」，是两条硬的：
 //
-//  1. L2 及以上会把整包 params 原样冻进 core.approval_request.params_json
-//     （迁移 000049），并由 GET /api/v1/approvals 回给每一个能看审批队列的人。
-//     只要参数里能塞自由文本，抬级就等于给凭据开一条展示通道。本 Action 的
-//     两个参数**在形状上装不下凭据**：metric_key 必须过 ops.KnownMetricKey
-//     （一份只增不改的已注册指标清单），version 必须与平台自己观测到的
-//     value_json.version 逐字相同——所以它可以安全地留在 L1，也**只能**
-//     留在 L1。
+//  1. 本 Action 有**三个**参数，其中 note 是 ≤200 字节的自由文本，除长度外
+//     没有任何形态校验——它在形状上**装得下凭据**。而 L2 及以上会把整包
+//     params 原样冻进 core.approval_request.params_json（迁移 000049），
+//     并由 GET /api/v1/approvals 回给每一个能看审批队列的人。所以抬级会给
+//     note 里的东西开一条展示通道，本 Action 因此**必须**留在 L1，
+//     在 action.Schema 支持形状校验（Pattern / Redacted 标记）之前不得抬级。
+//
+//     ⚠️ 这段注释的第一版写的是「本 Action 的两个参数在形状上装不下凭据」
+//     ——它把 note 数漏了，读起来像「所有参数都被约束过，抬级也安全」。
+//     一条把自己的理由说错了的注释，比没有注释更容易被拿去做相反的决定。
+//     另外两个参数确实收得住：metric_key 必须在这个环境下真有观测，
+//     version 必须与平台自己观测到的 value_json.version 逐字相同。
+//
 //  2. 它也确实不该是 L0：L0 的定位是「保存个人视图、低影响偏好」，而这个
 //     动作会让一条规则不再命中、让既有告警在下一轮被解决，是改变系统行为的
 //     写操作，与 alerts.silence.create 同一档。
@@ -376,12 +393,13 @@ func acknowledgeUpstreamVersionDef() action.Definition {
 			// metric_key **不写 Enum**：R6 的判据是「这条观测里有没有
 			// version」而不是指标键叫什么（见 versionChangeFinding），手列一份
 			// 指标键清单会让「将来多一个连接器探测自动被覆盖」这条性质失效。
-			// 存在性校验在 Handler 里走 ops.KnownMetricKey——那份清单是注册出来
-			// 的，不是手抄的。
+			// 存在性校验在 Handler 里，而且用的是**同一个现实**：这个环境下
+			// 这条指标此刻确实观测到了一个版本。
 			{Name: "metric_key", Type: action.FieldString, Required: true},
 			{Name: "version", Type: action.FieldString, Required: true},
 			// note 可选：给「为什么这次升级不用改钉子」留一句话。它进审计，
-			// 不进任何判定。
+			// 不进任何判定。**它是自由文本，装得下凭据**——这就是本 Action
+			// 必须锁在 L1 的那条理由（见上面的声明注释）。
 			{Name: "note", Type: action.FieldString},
 		}},
 		Environments:   allEnvironments,
@@ -402,14 +420,9 @@ func acknowledgeUpstreamVersionHandler(store *Store, observations ObservationRea
 			return nil, err
 		}
 
-		metricKey := strings.TrimSpace(action.StringParam(params, "metric_key"))
-		if !ops.KnownMetricKey(metricKey) {
-			// 拼错的 metric_key 会核对**零条**上游，而执行者以为已经核对了
-			// ——与 rule_key 拼错同一条道理（宪法 12 条），必须当场拒绝并
-			// 告诉他有哪些键。
-			return nil, action.NewError(action.CodeInvalidParams,
-				fmt.Sprintf("metric_key=%q 不是已注册的指标；可选值：%s",
-					metricKey, strings.Join(ops.RegisteredMetricKeys(), " / ")), nil)
+		metricKey, err := ackMetricKeyParam(params)
+		if err != nil {
+			return nil, err
 		}
 
 		version := strings.TrimSpace(action.StringParam(params, "version"))
@@ -431,11 +444,26 @@ func acknowledgeUpstreamVersionHandler(store *Store, observations ObservationRea
 		}
 
 		// 环境取自 Principal，**不取自参数**（宪法 15 条：不许调用方自称身份）。
+		//
+		// 这一步同时是 metric_key 的**存在性判据**，而且是有意换掉
+		// ops.KnownMetricKey 的：R6 的命中范围是**发现出来的**（判据是这条
+		// 观测里有没有 version，不是它的键叫什么，将来多一个连接器探测就
+		// 自动被覆盖），而 KnownMetricKey 读的是一份**手列**的白名单
+		// （ops/freshness.go 的 registeredMetrics）。落库侧只校验
+		// ValidMetricKey，所以一条未注册的指标观测完全可以存在——两个范围
+		// 一旦漂开就会出现「告警响得起来、但按钮点不动」：R6 对某条带 version
+		// 的未注册指标命中，Action 直接拒绝，这条告警又回到本片要消灭的
+		// 那个状态（只能等旧样本被挤出窗口后自己消失）。今天不出事只是因为
+		// 白名单**恰好**覆盖了现有连接器。
+		//
+		// 已注册清单退到**提示文案**里：拼错照样能拿到有用的报错，但它不再
+		// 是准入闸。
 		observed, err := observations.Get(ctx, metricKey, p.Environment)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, action.NewError(action.CodePreconditionFailed,
-					fmt.Sprintf("环境 %s 下还没有指标 %s 的观测，没有可核对的东西", p.Environment, metricKey), nil)
+					fmt.Sprintf("环境 %s 下还没有指标 %s 的观测，没有可核对的东西。已注册的指标：%s",
+						p.Environment, metricKey, strings.Join(ops.RegisteredMetricKeys(), " / ")), nil)
 			}
 			return nil, err
 		}
@@ -472,6 +500,101 @@ func acknowledgeUpstreamVersionHandler(store *Store, observations ObservationRea
 		}
 		action.RecordAfter(ctx, upstreamVersionAckSummary(ack))
 		return ack, nil
+	}
+}
+
+// ackMetricKeyParam 取并**只校验形态**的 metric_key。
+//
+// 存在性不在这里判：那一步由「这个环境下这条指标此刻有没有观测」回答
+// （见 acknowledgeUpstreamVersionHandler 里的长注释）。这里挡住的是连落库
+// 都通不过的形状——库层对 metric_key 有同一条 CHECK，让它在这里就报
+// INVALID_PARAMS 比让它走到查询再报别的码诚实。
+func ackMetricKeyParam(params map[string]any) (string, error) {
+	metricKey := strings.TrimSpace(action.StringParam(params, "metric_key"))
+	if metricKey == "" {
+		return "", action.NewError(action.CodeInvalidParams, "metric_key 不能为空白", nil)
+	}
+	if !ops.ValidMetricKey(metricKey) {
+		return "", action.NewError(action.CodeInvalidParams,
+			fmt.Sprintf("metric_key=%q 须匹配 ^[a-z0-9][a-z0-9_.-]{0,127}$", metricKey), nil)
+	}
+	return metricKey, nil
+}
+
+// --- alerts.upstream_version.revoke（L1：撤销已核对的上游版本）---
+
+// revokeUpstreamVersionDef 声明「刚才那次核对作废」。
+//
+// **与 acknowledge 同一等级、同一权限、同一身份限制。** 撤销的爆炸半径比
+// 核对更小：它只会让一条已经被压住的提醒重新出现，不会让任何东西闭嘴。
+//
+// 参数里**不带 version**：撤销的对象是「这条上游此刻记着的那条核对」。
+// 让调用方再报一次版本号只会多出一种失败形态——「上游已经又升级了，
+// 所以你撤不掉上一次的核对」——而那恰恰是最需要撤销的时刻。
+//
+// reason 必填：撤销是把一条被抑制的告警放回来，事后第一个问题永远是
+// 「当时为什么撤」。它与 alerts.silence.create 的 reason 同一条纪律。
+func revokeUpstreamVersionDef() action.Definition {
+	return action.Definition{
+		ID:         ActionRevokeUpstreamVersion,
+		Version:    actionVersion,
+		RiskLevel:  action.L1,
+		Permission: ScopeAcknowledge,
+		Schema: action.Schema{Fields: []action.Field{
+			{Name: "metric_key", Type: action.FieldString, Required: true},
+			// reason 同样是自由文本，因此本 Action 与 acknowledge 一样
+			// **锁定 L1**（L2+ 会把 params 冻进审批单展示给每个审批人）。
+			{Name: "reason", Type: action.FieldString, Required: true},
+		}},
+		Environments:   allEnvironments,
+		PrincipalTypes: humanOnly,
+	}
+}
+
+func revokeUpstreamVersionHandler(store *Store) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if err := requireStore(store); err != nil {
+			return nil, err
+		}
+		p, err := callerPrincipal(ctx)
+		if err != nil {
+			return nil, err
+		}
+		metricKey, err := ackMetricKeyParam(params)
+		if err != nil {
+			return nil, err
+		}
+		reason := strings.TrimSpace(action.StringParam(params, "reason"))
+		if reason == "" {
+			return nil, action.NewError(action.CodeInvalidParams, "reason 不能为空白", nil)
+		}
+		if len(reason) > maxAckNoteBytes {
+			return nil, action.NewError(action.CodeInvalidParams,
+				fmt.Sprintf("reason 最长 %d 字节", maxAckNoteBytes), nil)
+		}
+
+		// 环境取自 Principal，不取自参数。
+		before, err := store.DeleteUpstreamVersionAck(ctx, p.Environment, metricKey)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, action.NewError(action.CodePreconditionFailed,
+					fmt.Sprintf("环境 %s 下的指标 %s 没有已核对的上游版本，没有可撤销的东西",
+						p.Environment, metricKey), nil)
+			}
+			return nil, domainError(err)
+		}
+
+		action.RecordResource(ctx, resourceUpstreamVerAck, before.Environment+"/"+before.MetricKey)
+		action.RecordBefore(ctx, upstreamVersionAckSummary(before))
+		action.RecordReason(ctx, reason)
+		// 撤销之后这条记录不存在了。**不写一个空对象**：「没有后态」与
+		// 「后态是空的」在审计上不是一回事（同 silenceCreateHandler 对 before
+		// 的处理，方向相反）。
+		return map[string]any{
+			"environment": before.Environment,
+			"metric_key":  before.MetricKey,
+			"revoked":     true,
+		}, nil
 	}
 }
 

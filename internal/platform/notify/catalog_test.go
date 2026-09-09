@@ -90,12 +90,18 @@ func TestCatalogSamplesAreRealRenderings(t *testing.T) {
 	doc := catalog(t)
 	now := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
 
+	firstOpened := time.Date(2026, 9, 6, 7, 55, 0, 0, time.UTC)
+	triggers := int32(1)
 	alertSample := alerts.FormatWeComMarkdown(alerts.Alert{
 		RuleKey: "metric.sync.failed", Title: "指标 " + sampleMetricKey + " 同步失败",
 		Severity: alerts.SeverityCritical, Status: alerts.StatusOpen, Environment: "production",
 		SourceMetricKey: sampleMetricKey, Detail: "来源 sub2api-prod，错误码 timeout。",
-		OpenedAt:   time.Date(2026, 9, 6, 7, 55, 0, 0, time.UTC),
+		OpenedAt:   firstOpened,
 		LastSeenAt: now, FireCount: 4,
+		// 示例要照 000054 之后的真实形态渲染：评估轮数与触发次数是两个数。
+		// 用旧行（两列都是 NULL）当示例的话，目录里会永远挂着一行
+		// 「触发次数：—（未记录）」，而那是过渡期形态，不是稳态。
+		TriggerCount: &triggers, FirstOpenedAt: &firstOpened,
 	})
 	if !strings.Contains(doc, alertSample) {
 		t.Errorf("目录里的告警示例与真实渲染结果不一致，实际渲染是：\n%s", alertSample)

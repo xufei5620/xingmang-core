@@ -26,15 +26,15 @@ func humanCtx(env string) context.Context {
 	})
 }
 
-// TestActionDefinitionsAreValid：三个 Action 的声明本身必须过内核的校验。
+// TestActionDefinitionsAreValid：四个 Action 的声明本身必须过内核的校验。
 func TestActionDefinitionsAreValid(t *testing.T) {
 	reg := action.NewRegistry()
 	if err := RegisterActions(reg, nil, nil); err != nil {
 		t.Fatalf("RegisterActions: %v", err)
 	}
 	defs := reg.List()
-	if len(defs) != 3 {
-		t.Fatalf("应注册 3 个 Action，实际 %d 个", len(defs))
+	if len(defs) != 4 {
+		t.Fatalf("应注册 4 个 Action，实际 %d 个", len(defs))
 	}
 
 	byID := map[string]action.Definition{}
@@ -68,6 +68,29 @@ func TestActionDefinitionsAreValid(t *testing.T) {
 	// 两个权限必须不同：静默的爆炸半径比确认大一个量级。
 	if ack.Permission == silence.Permission {
 		t.Fatal("确认与静默不该共用一个权限")
+	}
+
+	// **核对与撤销必须成对存在。** 一个能建立永久抑制器的 Action，如果没有
+	// 与它同时上线的解除路径，那个抑制器就只能靠外部事件（上游再升一次版本）
+	// 解除——而 acknowledge 要求 version 与当轮观测逐字相同，连「用另一个值
+	// 覆盖掉」这条路都走不通。这正是任务书致命清单里的「无恢复路径的闩」。
+	revoke, ok := byID[ActionRevokeUpstreamVersion]
+	if !ok {
+		t.Fatalf("缺少 %s：已核对版本不能是一个撤不掉的抑制器", ActionRevokeUpstreamVersion)
+	}
+	if revoke.RiskLevel != action.L1 {
+		t.Fatalf("%s 风险等级 = %s, want L1", ActionRevokeUpstreamVersion, revoke.RiskLevel)
+	}
+	if revoke.Permission != ScopeAcknowledge {
+		t.Fatalf("%s 权限 = %s, want %s", ActionRevokeUpstreamVersion, revoke.Permission, ScopeAcknowledge)
+	}
+	// 撤销**不带 version 参数**：让调用方再报一次版本号只会多出一种失败形态
+	// （「上游已经又升级了，所以你撤不掉上一次的核对」），而那恰恰是最需要
+	// 撤销的时刻。
+	for _, f := range revoke.Schema.Fields {
+		if f.Name == "version" {
+			t.Fatal("撤销不该要求 version：撤的是「此刻记着的那条核对」")
+		}
 	}
 
 	for _, d := range defs {
@@ -380,19 +403,98 @@ func TestAcknowledgeUpstreamVersionRejectsCredentialShapedParams(t *testing.T) {
 	}
 }
 
-// TestAcknowledgeUpstreamVersionRejectsUnknownMetricKey：拼错的指标键会核对
-// **零条**上游，而执行者以为已经核对了（宪法 12 条，同 rule_key 那条）。
-func TestAcknowledgeUpstreamVersionRejectsUnknownMetricKey(t *testing.T) {
-	handler := acknowledgeUpstreamVersionHandler(nilPoolStore(),
-		probeReader("sub2api.connector.health", "0.2.3"))
+// TestAcknowledgeUpstreamVersionScopeComesFromObservationsNotAWhitelist：
+// 结束这条告警的范围必须与产生它的范围**同源**。
+//
+// R6 的命中范围是**发现出来的**：判据是这条观测里有没有 version，不是它的
+// 键叫什么——将来多一个连接器探测，它自动就被覆盖。而这个 Action 此前用
+// ops.KnownMetricKey 做准入闸，那是一份**手列**的白名单
+// （ops/freshness.go 的 registeredMetrics），落库侧只校验 ValidMetricKey，
+// 所以一条未注册的指标观测完全可以存在。两个范围一旦漂开就会出现
+// 「告警响得起来、但按钮点不动」——那条告警又回到本片要消灭的状态：
+// 只能等旧样本被挤出窗口后自己消失。
+//
+// 旧实现下这条测试是红的：未注册但确实有观测的那条会拿到 INVALID_PARAMS。
+func TestAcknowledgeUpstreamVersionScopeComesFromObservationsNotAWhitelist(t *testing.T) {
+	const unregistered = "futureconnector.connector.health"
+	if ops.KnownMetricKey(unregistered) {
+		t.Fatalf("用例自身失效：%s 已经被注册进白名单了，换一个键", unregistered)
+	}
+
+	// 未注册，但这个环境下**确实观测到了**一个上游版本 → 必须走得到版本比对。
+	//
+	// 让观测报一个永远对不上的版本，这样合法输入会停在 CONFLICT（准入闸
+	// 之后、写库之前）——既证明这条未注册的指标通过了准入，又不需要真库
+	// （nilPoolStore 一旦写库就会因为没有连接池而 panic）。
+	handler := acknowledgeUpstreamVersionHandler(nilPoolStore(), probeReader(unregistered, "999.999.999"))
 	_, err := handler(humanCtx("production"), map[string]any{
+		"metric_key": unregistered, "version": "0.2.3",
+	})
+	if code := action.ErrorCode(err); code != action.CodeConflict {
+		t.Fatalf("未注册但有观测的指标应走到版本比对（CONFLICT），实际 %s：%v", code, err)
+	}
+
+	// 拼错的键：没有观测 → PRECONDITION_FAILED（「没有可核对的东西」），
+	// 而且文案要把已注册清单当**提示**给出来——拼错照样要拿到有用的报错，
+	// 只是那份清单不再是准入闸。
+	_, err = handler(humanCtx("production"), map[string]any{
 		"metric_key": "sub2api.connector.healt", "version": "0.2.3",
 	})
-	if action.ErrorCode(err) != action.CodeInvalidParams {
-		t.Fatalf("错误码 = %s, want INVALID_PARAMS", action.ErrorCode(err))
+	if action.ErrorCode(err) != action.CodePreconditionFailed {
+		t.Fatalf("错误码 = %s, want PRECONDITION_FAILED", action.ErrorCode(err))
 	}
 	if !strings.Contains(err.Error(), "sub2api.connector.health") {
-		t.Fatalf("错误应列出可选指标键: %v", err)
+		t.Fatalf("错误应把已注册指标当提示列出来: %v", err)
+	}
+
+	// 形态非法仍然是 INVALID_PARAMS：那种键连落库都通不过，不必去查观测。
+	_, err = handler(humanCtx("production"), map[string]any{
+		"metric_key": "Sub2API Connector!", "version": "0.2.3",
+	})
+	if action.ErrorCode(err) != action.CodeInvalidParams {
+		t.Fatalf("形态非法的键应是 INVALID_PARAMS，实际 %s: %v", action.ErrorCode(err), err)
+	}
+}
+
+// TestUpstreamVersionActionsArePinnedToL1BecauseFreeTextParamsExist：
+// 这两个 Action **永久锁定 L1**，理由要说对。
+//
+// 声明注释的第一版写的是「本 Action 的两个参数在形状上装不下凭据」——它把
+// note 数漏了：note 是 ≤200 字节的自由文本，除长度外没有任何形态校验，
+// 形状上**装得下**凭据。L1 这个结论是对的，但理由反了：正因为装得下，
+// 它才**必须**留在 L1（L2+ 会把整包 params 冻进 core.approval_request.
+// params_json 并回给每个审批人）。一条把自己的理由说错了的注释，比没有注释
+// 更容易被拿去做相反的决定。
+func TestUpstreamVersionActionsArePinnedToL1BecauseFreeTextParamsExist(t *testing.T) {
+	cases := map[string]struct {
+		def          action.Definition
+		freeTextName string
+	}{
+		"acknowledge": {acknowledgeUpstreamVersionDef(), "note"},
+		"revoke":      {revokeUpstreamVersionDef(), "reason"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if c.def.RiskLevel != action.L1 {
+				t.Fatalf("风险等级 = %s, want L1（params 里有自由文本，抬级会把它冻进审批单展示给人看）",
+					c.def.RiskLevel)
+			}
+			// 自由文本字段确实存在——这条断言是「为什么锁 L1」的那个前提。
+			// 哪天它被去掉了，这条会红，届时该重新读一遍那段理由再决定，
+			// 而不是让一段过期的理由继续挂着。
+			found := false
+			for _, f := range c.def.Schema.Fields {
+				if f.Name == c.freeTextName {
+					found = true
+					if len(f.Enum) != 0 {
+						t.Fatalf("%s 有枚举约束了？那段「锁 L1」的理由要重写", c.freeTextName)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("Schema 里没有 %s：锁在 L1 的理由要重新写", c.freeTextName)
+			}
+		})
 	}
 }
 

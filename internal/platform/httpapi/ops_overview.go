@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -75,8 +77,29 @@ type OpsOverviewDeps struct {
 	// nil 时那一段回 null（**不是空数组**）——与 ConfigAvailable 同一条
 	// 「不假装有数据」的纪律：空数组读作「查过了，一条失败都没有」，
 	// 而 nil 读作「这个部署没接这份数据源」，两者不能混。
+	// 「没接」与「接了但这次查库失败」也不能混，见 failed_jobs_status。
 	Jobs JobsFailureSummarizer
+	// Logger 用于把「这一格读不到」写进日志。nil 时回落到 slog.Default()。
+	//
+	// 加它是因为这个 handler 此前**一行日志都没有**：failed_jobs 的查询错误
+	// 被 `if err == nil` 静默吞掉，于是「运行保障页那一格永久瞎着」在生产里
+	// 是绝对不可见的。一个不留痕的降级就是下一个「安静地给你一个旧答案」
+	// ——那正是本片立项要治的病。
+	Logger *slog.Logger
 }
+
+// failed_jobs_status 的三个取值。
+//
+// 这一格此前用同一个 JSON 值 null 表达两种完全不同的状态：「这个部署没接
+// jobs 数据源」和「接了，但这次查库失败了」。前端按 handoff 的口径会把 null
+// 渲染成「本部署未接入」——一个良性的永久状态——而真相可能是运行保障页正
+// 瞎着，且日志里一个字都没有。旁边的 database 那格是正确做法的对照：它
+// fail-closed 到 connected:false，字段本身能说出发生了什么。
+const (
+	opsFailedJobsOK          = "ok"
+	opsFailedJobsNotWired    = "not_wired"
+	opsFailedJobsQueryFailed = "query_failed"
+)
 
 // JobsFailureSummarizer 是失败作业摘要的只读能力（*jobs.QueryStore 满足）。
 type JobsFailureSummarizer interface {
@@ -171,9 +194,16 @@ type opsOverviewResponse struct {
 	AlertDelivery   opsAlertDeliveryBody    `json:"alert_delivery"`
 	Retention       opsOverviewMetricBody   `json:"retention"`
 	Database        opsDatabaseBody         `json:"database"`
-	// FailedJobsByKind 为 null 表示这个部署没接 jobs 查询器；空数组表示
-	// 窗口内确实没有失败作业。两者不同，前端要分开渲染。
+	// FailedJobsByKind 为 null 表示这一段没有数据（为什么没有由
+	// FailedJobsStatus 说）；空数组表示窗口内确实没有失败作业。
+	// 两者不同，前端要分开渲染。
 	FailedJobsByKind []opsFailedJobKindBody `json:"failed_jobs_by_kind"`
+	// FailedJobsStatus 是上一段的三态：ok / not_wired / query_failed。
+	//
+	// 有了它，null 才有确定含义。前端应当 switch 这个字段而不是判 null——
+	// query_failed 是一个要人去看的状态（运行保障页这一格正瞎着），
+	// not_wired 是一个良性的部署事实。
+	FailedJobsStatus string `json:"failed_jobs_status"`
 	// FailedJobsWindowHours 是上一段的回看窗口，让前端能把「288 次」说成
 	// 「24 小时内 288 次」而不是一个没有量纲的数。
 	FailedJobsWindowHours int `json:"failed_jobs_window_hours"`
@@ -308,12 +338,30 @@ func OpsOverviewHandler(deps OpsOverviewDeps) http.HandlerFunc {
 
 		// 失败作业摘要：读库失败**不让整个 overview 失败**，与 database
 		// 那一格同一条纪律——这个端点是「控制平面健康」，它自己不该因为
-		// 其中一格读不到就整页 500。读不到时那一段回 null（不是空数组）。
+		// 其中一格读不到就整页 500。
+		//
+		// 但降级必须留痕、而且必须与「没接数据源」分得开：两者都回 null，
+		// 靠 failed_jobs_status 区分，读库失败还会写一条 Warn。日志里的
+		// err_kind 只写错误类型，不写 err.Error()——那可能带库连接串。
 		var failedJobs []opsFailedJobKindBody
+		failedJobsStatus := opsFailedJobsNotWired
 		if deps.Jobs != nil {
 			summaries, err := deps.Jobs.FailedRunSummaryByKind(
 				r.Context(), string(env), time.Now().UTC().Add(-jobs.FailedRunSummaryWindow))
-			if err == nil {
+			switch {
+			case err != nil:
+				failedJobsStatus = opsFailedJobsQueryFailed
+				logger := deps.Logger
+				if logger == nil {
+					logger = slog.Default()
+				}
+				logger.WarnContext(r.Context(), "ops_overview_failed_jobs_unavailable",
+					slog.String("module", "platform.httpapi"),
+					slog.String("environment", string(env)),
+					slog.String("err_kind", fmt.Sprintf("%T", err)),
+				)
+			default:
+				failedJobsStatus = opsFailedJobsOK
 				failedJobs = make([]opsFailedJobKindBody, 0, len(summaries))
 				for _, s := range summaries {
 					item := opsFailedJobKindBody{
@@ -359,6 +407,7 @@ func OpsOverviewHandler(deps OpsOverviewDeps) http.HandlerFunc {
 			Retention:             metricBody(metricPlatformRetentionLast),
 			Database:              opsDatabaseBody{Connected: dbConnected},
 			FailedJobsByKind:      failedJobs,
+			FailedJobsStatus:      failedJobsStatus,
 			FailedJobsWindowHours: int(jobs.FailedRunSummaryWindow / time.Hour),
 		})
 	}

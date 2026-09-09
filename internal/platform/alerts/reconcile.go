@@ -48,14 +48,17 @@ type Result struct {
 	// NotifySkipped 是「有待投递的告警，但一个渠道都没配」的条数。
 	// 它不是失败，但必须可见——见 Reconcile 里那条 warn。
 	NotifySkipped int
-	// HysteresisSuppressed / HysteresisHeld / VersionAckSuppressed 直接来自
-	// EvaluateResult，进 alert_evaluate 的结构化日志。
+	// HysteresisSuppressed / HysteresisHeld / VersionAckSuppressed /
+	// ChronicHeld 直接来自 EvaluateResult，进 alert_evaluate 的结构化日志。
 	//
 	// 它们必须看得见：迟滞与「已核对版本」都是**抑制器**，一个不留痕的
 	// 抑制器就是下一个「安静地给你一个旧答案」——正是本片要治的病。
+	// ChronicHeld 是同一件事的反向形态：一条在采集已恢复的轮次里仍然挂着的
+	// critical，同样要有一个数解释它为什么还在。
 	HysteresisSuppressed int
 	HysteresisHeld       int
 	VersionAckSuppressed int
+	ChronicHeld          int
 	// ThresholdRevision/Source prove which DB-backed runway snapshot this
 	// evaluation consumed. They are zero/empty for legacy evaluators without a
 	// threshold provider and are safe to emit in worker logs.
@@ -146,6 +149,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, environment string) (Result,
 	res.HysteresisSuppressed = evaluated.HysteresisSuppressed
 	res.HysteresisHeld = evaluated.HysteresisHeld
 	res.VersionAckSuppressed = evaluated.VersionAckSuppressed
+	res.ChronicHeld = evaluated.ChronicHeld
 	res.ThresholdRevision, res.ThresholdSource, _ = r.evaluator.LastThresholdSnapshot()
 
 	silences, err := r.store.ListActiveSilences(ctx, environment, now)

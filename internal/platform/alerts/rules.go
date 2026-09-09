@@ -96,8 +96,18 @@ const (
 	//
 	// 语义从「连续 K 次」改成了「窗口内 K 次」（子片 B 任务书第 1 条：
 	// 「连续失败 3 次要升级」的计数改为滑动窗口，不被一次成功清零）。改之前，
-	// 历史上任何一次成功都会把连续串打断，于是 card_sync 那种每轮都失败、
-	// 三天没停过的慢性病**从来没升级过**。
+	// 历史上任何一次成功都会把连续串打断，于是「多数轮失败、偶尔成功一轮」
+	// 这种形态**从来没升级过**——2026-09-08 生产上那三条 NewAPI 指标
+	// （newapi.channels.status / newapi.users.total / newapi.recharge.daily）
+	// 正是这样每 5 分钟翻一次面的。
+	//
+	// ⚠️ **不要拿 card_sync 当例子**（本片的第一版注释、README 与提交消息
+	// c9d4d9a 都错在这里）：R4 读的是 ops.metric_observation_sample，而
+	// card_sync 根本不产出指标观测——ops 的已注册指标白名单里没有任何
+	// card_* 键（internal/platform/ops/freshness.go）。它的失败只存在于
+	// river_job，而 river_job 不进告警引擎。card_sync 那 288 条的合并展示
+	// 在 /ops/overview 的 failed_jobs_by_kind，不在这条规则里——两件事被
+	// 任务书拆成第 1 条与第 4 条，正因为它们不是一回事。
 	//
 	// 为什么 K 是 9 而不是照搬旧的 3：一串完全交替的 F,S,F,S…… 在 W=12 里
 	// 恰好凑出 6 次失败。K 取 3 或 6 的话，R1 的迟滞刚压住的那种翻面抖动会
@@ -466,7 +476,12 @@ func Rules(cfg RuleConfig) []Rule {
 				cfg.ChronicWindowSamples, cfg.ChronicFailureThreshold),
 			For:      time.Duration(cfg.ChronicWindowSamples) * cfg.CollectionInterval,
 			Severity: SeverityCritical,
-			Recovery: fmt.Sprintf("窗口内失败次数回落到 %d 次以下（一次成功不再清零计数）",
+			// 关的判据与开的判据**不是同一条**，这里必须写清：开还要求「当前
+			// 正在失败」，关只看窗口计数。已经开着的这条告警在最新一轮采集
+			// 成功时不会关——否则「一次成功不再清零计数」这句话是假的，
+			// 而它已经被 README 与 notify/CATALOG.md 各抄了一份给运营看。
+			Recovery: fmt.Sprintf(
+				"窗口内失败次数回落到 %d 次以下（中途成功一两轮既不清零计数，也不关闭告警）",
 				cfg.ChronicFailureThreshold),
 			DedupKey:      RuleSyncConsecutiveFailed + ":<environment>:<metric_key>",
 			Channels:      defaultChannels,
@@ -628,6 +643,14 @@ type EvaluateResult struct {
 	// VersionAckSuppressed 是「版本确实变过，但这个版本已经被人核对过，
 	// 因此没有产出 R6」的指标条数。
 	VersionAckSuppressed int
+	// ChronicHeld 是「这一轮最新采集已经成功，但窗口内失败次数仍在阈值之上，
+	// 因此 R4 继续产出」的指标条数。
+	//
+	// 与 HysteresisHeld 是同一件事在另一条规则上的形态，必须同样可见：
+	// R4 的恢复条件写的是「窗口内失败次数回落到 K 次以下」，那意味着它会在
+	// 采集已经恢复的轮次里继续挂着——一个不解释自己为什么还在的告警，
+	// 和一个不解释自己为什么不在的告警一样难查。
+	ChronicHeld int
 }
 
 // Evaluate 跑一轮评估，返回此刻命中的全部规则。
@@ -704,7 +727,9 @@ func (e *Evaluator) Evaluate(
 		// （可能要关）。两者都不成立时一条查询都不发。
 		syncFailedKey := dedupKey(RuleMetricSyncFailed, environment, o.MetricKey)
 		_, syncFailedActive := active[syncFailedKey]
-		if f.State == ops.StateFailed || syncFailedActive {
+		chronicKey := dedupKey(RuleSyncConsecutiveFailed, environment, o.MetricKey)
+		_, chronicActive := active[chronicKey]
+		if f.State == ops.StateFailed || syncFailedActive || chronicActive {
 			samples, _, sampleErr := e.source.ListSamples(
 				ctx, environment, o.MetricKey,
 				now.Add(-failureHistoryLookback), e.failureHistoryLimit())
@@ -730,21 +755,37 @@ func (e *Evaluator) Evaluate(
 				res.HysteresisSuppressed++
 			}
 
-			// R4 仍然只在**当前正在失败**时才判：语义上「这条链路现在是坏的」
-			// 是它的前提，而窗口计数回答的是「坏了多久了」。
-			if f.State == ops.StateFailed {
+			// R4 的开与关是**两条不同的判据**：
+			//
+			//   - 开：当前正在失败，且窗口内失败 ≥ K。「这条链路现在是坏的」
+			//     是新开一条 critical 的前提。
+			//   - 关：只看窗口计数。已经开着的这条告警，在最新一轮采集成功、
+			//     但窗口里还有 K 次失败时**继续产出**。
+			//
+			// 关那一半是这次审稿改出来的。在它之前，R4 只在 f.State ==
+			// StateFailed 时产出 Finding，而 Reconciler 对本轮没再命中的活跃
+			// 告警一律 Resolve——于是任何一轮采集成功都会把 R4 关掉，窗口里
+			// 还有 9 条失败也照关。声明里那句「一次成功不再清零计数」因此是
+			// 假的（README 与 notify/CATALOG.md 各抄了一份给运营看），而且
+			// 行为上 FFFSFFFS…… 这种劣化形态会让 R4 每隔几轮
+			// open→resolved→reopened 一次，每次都是新行、重新投递、critical
+			// ——R1 的迟滞刚压住的抖动，换个 rule_key 从 R4 原样冒出来。
+			if f.State == ops.StateFailed || chronicActive {
 				failures := windowedFailures(samples, e.cfg.ChronicWindowSamples)
 				if failures >= e.cfg.ChronicFailureThreshold {
+					failingNow := f.State == ops.StateFailed
+					if !failingNow {
+						res.ChronicHeld++
+					}
 					findings = append(findings, Finding{
 						RuleKey:  RuleSyncConsecutiveFailed,
-						DedupKey: dedupKey(RuleSyncConsecutiveFailed, environment, o.MetricKey),
+						DedupKey: chronicKey,
 						Severity: SeverityCritical,
 						Title: fmt.Sprintf("指标 %s 长期同步失败（最近 %d 轮里失败 %d 轮）",
 							o.MetricKey, e.cfg.ChronicWindowSamples, failures),
-						Detail: fmt.Sprintf(
-							"最近 %d 条样本里失败 %d 次（阈值 %d，中途成功一两次不清零计数），最新错误码 %s。"+
-								"已经不是一次抖动，请按 Runbook 处置。",
-							e.cfg.ChronicWindowSamples, failures, e.cfg.ChronicFailureThreshold, f.LastErrorCode),
+						Detail: chronicFailureDetail(
+							f, e.cfg.ChronicWindowSamples, failures,
+							e.cfg.ChronicFailureThreshold, failingNow),
 						SourceMetricKey: o.MetricKey,
 					})
 				}
@@ -833,6 +874,25 @@ func syncFailedDetail(o ops.Observation, f ops.Freshness, n, run int, failingNow
 		return head + fmt.Sprintf("已连续 %d 轮失败（门槛 %d 轮）。", run, n)
 	}
 	return head + fmt.Sprintf("最近一轮已恢复，但只连续恢复 %d 轮，需连续 %d 轮恢复才关闭。", run, n)
+}
+
+// chronicFailureDetail 拼 R4 的详情文案。
+//
+// 与 syncFailedDetail 同一条纪律：必须说清此刻处在开的那一半还是关的那一半，
+// 否则「最新一轮明明成功了，它为什么还挂着」只能靠读代码回答。
+// 最新一轮已成功时不写错误码——那时 f.LastErrorCode 说的是上一次失败的事，
+// 把它放在「已恢复」旁边会让人以为现在还在报这个错。
+func chronicFailureDetail(f ops.Freshness, window, failures, threshold int, failingNow bool) string {
+	head := fmt.Sprintf(
+		"最近 %d 条样本里失败 %d 次（阈值 %d，中途成功一两次不清零计数）。",
+		window, failures, threshold)
+	if failingNow {
+		return head + fmt.Sprintf("最新错误码 %s。已经不是一次抖动，请按 Runbook 处置。",
+			f.LastErrorCode)
+	}
+	return head + fmt.Sprintf(
+		"最新一轮采集已经成功，但窗口内的失败次数还没回落到 %d 次以下，"+
+			"这条告警要等它回落才关闭。", threshold)
 }
 
 // runwayFindings 算 R5 的命中：可用天数低于告警档（§10.4 最后一条要求）。
@@ -1005,8 +1065,9 @@ func trailingSameStatusRun(samples []ops.Observation) int {
 //
 // 与它替换掉的 consecutiveFailures 的区别就是这次改动的全部要点：旧实现从
 // 尾部往前数，**第一条非 failed 就 break**——历史上任何一次成功都会把计数
-// 清零。card_sync 那种每 5 分钟失败一次、三天没停过的慢性病因此从来没升级过
-// （2026-09-08 报告 §二）。
+// 清零。2026-09-08 那三条每 5 分钟翻面的 NewAPI 指标因此从来没升级过
+// （报告 §二）。例子是 NewAPI 那三条**指标**而不是 card_sync：后者是
+// river_job 的失败，根本不产出 ops 观测，这条规则看不见它。
 func windowedFailures(samples []ops.Observation, window int) int {
 	if window < 1 || len(samples) == 0 {
 		return 0

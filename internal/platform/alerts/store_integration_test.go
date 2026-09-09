@@ -735,8 +735,12 @@ func TestFirstOpenedAtSurvivesRecurrence(t *testing.T) {
 	if again.Status != alerts.StatusReopened {
 		t.Fatalf("status = %s, want REOPENED", again.Status)
 	}
-	if again.TriggerCount == nil || *again.TriggerCount != 1 {
-		t.Fatalf("复发是这一行的第一次触发，trigger_count = %v", again.TriggerCount)
+	// trigger_count 与 first_opened_at **一起**继承：两个字段回答的是同一段
+	// 时间跨度上的两个问题，前端被告知要把它们并排渲染成「已持续 X，触发 N 次」。
+	// 只继承时刻的话，这一行会说「已持续 2 分钟，触发 1 次」，而它在这 2 分钟
+	// 里真实触发了 2 次——两个数各自都对，合成出来的那句话是假的。
+	if again.TriggerCount == nil || *again.TriggerCount != 2 {
+		t.Fatalf("复发要继承上一条的触发次数并 +1，trigger_count = %v", again.TriggerCount)
 	}
 	if again.FireCount != 1 {
 		t.Fatalf("复发是新的一行，fire_count = %d, want 1", again.FireCount)
@@ -758,6 +762,11 @@ func TestFirstOpenedAtSurvivesRecurrence(t *testing.T) {
 	if third.FirstOpenedAt == nil || !third.FirstOpenedAt.Equal(first.OpenedAt) {
 		t.Fatalf("多次复发仍应从第一次算起: got %v want %v", third.FirstOpenedAt, first.OpenedAt)
 	}
+	// 两个字段跨的必须是**同一段**：这一行讲的故事是「从 first.OpenedAt 起，
+	// 一共触发过 3 次」。
+	if third.TriggerCount == nil || *third.TriggerCount != 3 {
+		t.Fatalf("第三次复发 trigger_count = %v, want 3", third.TriggerCount)
+	}
 
 	// 复发窗口之外（>24h）：那是一件**新事**，不该把昨天以前的时刻拖进来。
 	if _, err := s.Resolve(ctx, third.ID, now.Add(5*time.Minute)); err != nil {
@@ -773,6 +782,54 @@ func TestFirstOpenedAtSurvivesRecurrence(t *testing.T) {
 	}
 	if fresh.FirstOpenedAt == nil || !fresh.FirstOpenedAt.Equal(later) {
 		t.Fatalf("窗口外应重新起算: got %v want %v", fresh.FirstOpenedAt, later)
+	}
+	// 时刻重新起算了，次数也必须重新起算——否则新的一件事会带着上一件事的
+	// 触发次数出场。
+	if fresh.TriggerCount == nil || *fresh.TriggerCount != 1 {
+		t.Fatalf("窗口外是一件新事，trigger_count = %v, want 1", fresh.TriggerCount)
+	}
+}
+
+// TestRecurrenceOfALegacyRowKeepsTheCountUnknown：继承链的上一环是本列上线前
+// 的旧行时，触发次数必须留成「不知道」。
+//
+// 这是「两个字段同进同退」的边界：first_opened_at 仍然能继承（上一行的
+// opened_at 是一个真实发生过的时刻），但触发次数没有任何可继承的东西——
+// 从 1 重新起算会造出一个看起来像真答案的假答案（宪法 12 条）。
+// 界面上那一行会是「已持续 X（估计值），触发 —」，两个空值口径一致。
+func TestRecurrenceOfALegacyRowKeepsTheCountUnknown(t *testing.T) {
+	pool := testPool(t)
+	s := alerts.NewStore(pool)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	first, _, err := s.Upsert(ctx, upsertInput(now))
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// 把它改造成「000054 之前就存在的旧行」：两列都是 NULL。
+	// 直接写库是有意的——这种行没有任何 Go 侧路径造得出来，而它在生产里
+	// 确实存在（迁移明确不回填）。
+	if _, err := pool.Exec(ctx,
+		`UPDATE alerts.alert SET trigger_count = NULL, first_opened_at = NULL WHERE id = $1`,
+		first.ID); err != nil {
+		t.Fatalf("造旧行: %v", err)
+	}
+	if _, err := s.Resolve(ctx, first.ID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	again, created, err := s.Upsert(ctx, upsertInput(now.Add(2*time.Minute)))
+	if err != nil || !created {
+		t.Fatalf("复发应新开一行: err=%v created=%v", err, created)
+	}
+	if again.TriggerCount != nil {
+		t.Fatalf("上一环不知道触发过几次，这一行也不该编一个数: %v", *again.TriggerCount)
+	}
+	// 时刻仍然继承：上一行的 opened_at 是真实发生过的。
+	if again.FirstOpenedAt == nil || !again.FirstOpenedAt.Equal(first.OpenedAt) {
+		t.Fatalf("首开时刻应继承上一行的 opened_at: got %v want %v",
+			again.FirstOpenedAt, first.OpenedAt)
 	}
 }
 

@@ -222,3 +222,104 @@ func TestAcknowledgeUpstreamVersionRejectsMismatchThroughTheKernel(t *testing.T)
 		t.Fatal("被拒绝的核对不该留下任何记录")
 	}
 }
+
+// TestRevokeUpstreamVersionBringsTheAlertBack：已核对版本必须撤得掉。
+//
+// 审稿抓到的是一个「无恢复路径的闩」：核对是永久、不可见、不可撤销的。点错
+// 一次，那条「去核对桥接契约与兼容矩阵」的提醒对该版本永久消失，而唯一的
+// 自动解除条件是上游再升一次版本——那是外部事件，不在操作者手里。而且
+// acknowledge 要求 version 与当轮观测逐字相同，所以连「用另一个值覆盖掉」
+// 这条路都走不通。
+//
+// 这条测试同样穿两段：Action（删库）与规则判定（读库）。
+func TestRevokeUpstreamVersionBringsTheAlertBack(t *testing.T) {
+	f := newVersionAckFixture(t)
+	ctx := context.Background()
+
+	// 先制造一次版本变化并核对掉它。
+	f.probe(t, "0.2.2")
+	f.reconcile(t)
+	f.now = f.now.Add(5 * time.Minute)
+	f.probe(t, "0.2.3")
+	if res := f.reconcile(t); res.Opened != 1 {
+		t.Fatalf("版本变化应开一条告警: %+v", res)
+	}
+	if _, err := f.kernel.Execute(staffCtx(e2eEnv, alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionAcknowledgeUpstreamVersion,
+		ActionVersion: "1",
+		RequestID:     "req-ack-before-revoke",
+		Params:        map[string]any{"metric_key": versionProbeMetric, "version": "0.2.3"},
+	}); err != nil {
+		t.Fatalf("Execute(acknowledge): %v", err)
+	}
+	f.now = f.now.Add(5 * time.Minute)
+	f.probe(t, "0.2.3")
+	if res := f.reconcile(t); res.Resolved != 1 {
+		t.Fatalf("核对之后应解决: %+v", res)
+	}
+
+	// --- 撤销：经真实内核打进来 ---
+	if _, err := f.kernel.Execute(staffCtx(e2eEnv, alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionRevokeUpstreamVersion,
+		ActionVersion: "1",
+		RequestID:     "req-revoke-version-1",
+		Params: map[string]any{
+			"metric_key": versionProbeMetric,
+			"reason":     "核对时看错了行，兼容矩阵其实没覆盖这个版本",
+		},
+	}); err != nil {
+		t.Fatalf("Execute(revoke): %v", err)
+	}
+	if _, err := f.alerts.GetUpstreamVersionAck(ctx, e2eEnv, versionProbeMetric); err == nil {
+		t.Fatal("撤销之后不该还留着记录")
+	}
+
+	// --- 下一轮：那条提醒回来了 ---
+	f.now = f.now.Add(5 * time.Minute)
+	f.probe(t, "0.2.3")
+	res := f.reconcile(t)
+	if res.Opened != 1 {
+		t.Fatalf("撤销之后规则应重新命中: %+v", res)
+	}
+	if res.VersionAckSuppressed != 0 {
+		t.Fatalf("已经撤了，不该再有被抑制的命中: %+v", res)
+	}
+	back, ok := f.versionAlert(t)
+	if !ok || !back.Status.IsActive() {
+		t.Fatalf("应重新有一条活跃的版本告警: %+v", back)
+	}
+
+	// --- 撤一条不存在的：PRECONDITION_FAILED，不是 500 ---
+	_, err := f.kernel.Execute(staffCtx(e2eEnv, alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionRevokeUpstreamVersion,
+		ActionVersion: "1",
+		RequestID:     "req-revoke-version-2",
+		Params:        map[string]any{"metric_key": versionProbeMetric, "reason": "再撤一次"},
+	})
+	if action.ErrorCode(err) != action.CodePreconditionFailed {
+		t.Fatalf("重复撤销的错误码 = %s, want PRECONDITION_FAILED: %v", action.ErrorCode(err), err)
+	}
+	if !strings.Contains(err.Error(), "没有可撤销的东西") {
+		t.Fatalf("文案要说清没有可撤销的东西: %v", err)
+	}
+}
+
+// TestRevokeUpstreamVersionRequiresAReason：撤销是把一条被压住的告警放回来，
+// 事后第一个问题永远是「当时为什么撤」。
+func TestRevokeUpstreamVersionRequiresAReason(t *testing.T) {
+	f := newVersionAckFixture(t)
+	f.probe(t, "0.2.3")
+
+	_, err := f.kernel.Execute(staffCtx(e2eEnv, alerts.ScopeAcknowledge), action.Request{
+		ActionID:      alerts.ActionRevokeUpstreamVersion,
+		ActionVersion: "1",
+		RequestID:     "req-revoke-no-reason",
+		Params:        map[string]any{"metric_key": versionProbeMetric, "reason": "   "},
+	})
+	if action.ErrorCode(err) != action.CodeInvalidParams {
+		t.Fatalf("错误码 = %s, want INVALID_PARAMS: %v", action.ErrorCode(err), err)
+	}
+	if !strings.Contains(err.Error(), "reason 不能为空白") {
+		t.Fatalf("文案不对: %v", err)
+	}
+}

@@ -27,12 +27,18 @@ LIMIT 1;
 -- notify_status 恒为 pending：新告警一律先排队等投递，
 -- 由投递环节决定它变 delivered 还是 failed，这里不预判。
 --
--- trigger_count 同样从 1 起：新开一条告警**就是**一次真正的触发。它与
--- fire_count 在这一刻相等，此后就分道扬镳——fire_count 每轮命中都加，
--- trigger_count 只在状态转换时加（见 TouchAlert）。
+-- trigger_count 与 first_opened_at 都由调用方给，而且**必须一起给**：它们
+-- 回答的是同一段时间跨度上的两个问题（「这个问题从什么时候开始的」与「它
+-- 在这段里真正触发过几次」）。首开一条新告警时是 (now, 1)；复发
+-- （REOPENED）时两个都从上一条继承——first_opened_at 取它的有效首开时刻，
+-- trigger_count 取它的值 +1。
 --
--- first_opened_at 由调用方给（不是 opened_at 的别名）：复发（REOPENED）时它
--- 继承上一次那条的首开时刻，这样「已持续」不会因为中间恢复过一次就归零。
+-- 只继承其中一个的后果，是界面上那行会读成「已持续 4 小时，触发 1 次」，
+-- 而真相是它开关了四轮——与它替换掉的「触发 669 次」是同一类误读，只是
+-- 方向相反（见 store.go insert 的注释）。
+--
+-- trigger_count 允许为 NULL：上一条自己就是本列上线前的旧行时，链上真正
+-- 触发过几次没有人记下来过，继承一个编出来的数比留空更糟。
 INSERT INTO alerts.alert (
     id, rule_key, dedup_key, severity, status, title, detail, environment,
     opened_at, last_seen_at, fire_count, trigger_count, first_opened_at,
@@ -40,7 +46,8 @@ INSERT INTO alerts.alert (
 ) VALUES (
     sqlc.arg(id), sqlc.arg(rule_key), sqlc.arg(dedup_key), sqlc.arg(severity),
     sqlc.arg(status), sqlc.arg(title), sqlc.arg(detail), sqlc.arg(environment),
-    sqlc.arg(opened_at), sqlc.arg(opened_at), 1, 1, sqlc.arg(first_opened_at),
+    sqlc.arg(opened_at), sqlc.arg(opened_at), 1, sqlc.narg(trigger_count),
+    sqlc.arg(first_opened_at),
     sqlc.arg(source_metric_key), 'pending', '', NULL, now(), now()
 )
 RETURNING *;
@@ -212,3 +219,18 @@ WHERE environment = $1 AND metric_key = $2;
 SELECT * FROM alerts.upstream_version_ack
 WHERE environment = $1
 ORDER BY metric_key;
+
+-- name: DeleteUpstreamVersionAck :one
+-- 撤销一条已核对记录（alerts.upstream_version.revoke）。
+--
+-- 这条查询存在的理由是：已核对版本本来是一个**没有解除路径**的抑制器。
+-- 点错一次，「去核对桥接契约与兼容矩阵」那条提醒就对该版本永久消失，
+-- 而唯一的自动解除条件是上游再升一次版本——那是外部事件，不在操作者手里。
+-- 一个引入了就撤不掉的闩，正是本片自己列在致命清单里的东西。
+--
+-- 不带 version 参数：撤销的对象是「这条上游此刻记着的那条核对」，
+-- 让调用方再报一次版本号只会多一种「版本对不上所以撤不掉」的失败形态。
+-- RETURNING 是给审计用的 before 快照。
+DELETE FROM alerts.upstream_version_ack
+WHERE environment = $1 AND metric_key = $2
+RETURNING *;

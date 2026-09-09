@@ -420,7 +420,17 @@ func defaultObjects() []ObjectGrant {
 	// test, and only fail on the day role separation actually ships -- grants
 	// are written for the statement that runs, not for the table that looks
 	// nearest. The worker (alert evaluator) only ever reads it.
-	add("table", "alerts", "upstream_version_ack", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
+	//
+	// DELETE was added by the same slice's review round, for
+	// alerts.upstream_version.revoke. Without it the acknowledgement is a latch
+	// with no release path: a mistaken acknowledgement permanently silences the
+	// "go re-check the bridge contract and compatibility matrix" reminder for
+	// that version, and the only automatic release is the upstream shipping yet
+	// another version -- an external event, not something the operator controls.
+	// Granting DELETE here is deliberately narrower than it looks: the row is
+	// keyed (environment, metric_key) and the handler resolves the environment
+	// from the Principal, never from a parameter.
+	add("table", "alerts", "upstream_version_ack", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE", "DELETE"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	for _, name := range []string{"upstream_account", "token_map", "profit_daily", "proxy_asset", "subscription_cost_batch", "amortization_loss", "balance_history", "platform_channel_binding", "runway_threshold_config", "runway_threshold_history", "runway_threshold_current_verified"} {
 		grants := readAll
 		if name == "upstream_account" {

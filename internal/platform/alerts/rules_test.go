@@ -400,6 +400,19 @@ func TestChronicFailureRuleDeclarationMatchesTheJudgement(t *testing.T) {
 		cfg.ChronicWindowSamples, cfg.ChronicFailureThreshold)) {
 		t.Fatalf("R4 的条件没写窗口口径：%s", r.Condition)
 	}
+	// **正向断言**：恢复条件必须逐字写出那个阈值。
+	//
+	// 上面那条「不含旧短语」是缺席型断言，它在任何措辞下都容易恒真——
+	// 连「最新一轮成功就关闭」这种与判定完全相反的写法都能过。真正驱动一轮
+	// 恢复的是 chronic_recovery_test.go；这里只保证声明里的数字来自常量。
+	if !strings.Contains(r.Recovery, fmt.Sprintf("回落到 %d 次以下", cfg.ChronicFailureThreshold)) {
+		t.Fatalf("R4 的恢复条件没写出阈值：%s", r.Recovery)
+	}
+	// 恢复条件必须说清「中途成功不关闭」——那是它与开的判据不同的地方，
+	// 也是运营读这句话时唯一要拿走的信息。
+	if !strings.Contains(r.Recovery, "也不关闭告警") {
+		t.Fatalf("R4 的恢复条件没说清中途成功不关闭：%s", r.Recovery)
+	}
 }
 
 // TestChronicWindowResistsPureFlapping：一串完全交替的 F,S,F,S…… 不该命中 R4。

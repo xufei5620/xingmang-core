@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/xufei5620/xingmang-platform/internal/platform/dbroles"
 )
 
 // 这个测试补的是一个**今天不存在的闸**。
@@ -190,11 +192,17 @@ func TestAlertsTablePrivilegesAreUnchangedByThisSlice(t *testing.T) {
 			"xm_ops_read":          {"SELECT"},
 			"xm_backup_read":       {"SELECT"},
 		},
-		// 新表：Action 用 ON CONFLICT DO UPDATE 写，所以 api 需要 UPDATE。
+		// 新表：Action 用 ON CONFLICT DO UPDATE 写，所以 api 需要 UPDATE；
+		// 审稿追加的撤销 Action 用 DELETE 删行，所以还需要 DELETE。
 		// 照抄 alert_silence 的 {SELECT, INSERT} 会在角色分离真正上线那天
 		// 才失败——授权要按实际跑的语句给，不按长得最像的那张表抄。
+		//
+		// 这四个权限对应四条真实语句：SetUpstreamVersionAck（INSERT ... ON
+		// CONFLICT DO UPDATE）、GetUpstreamVersionAck / ListUpstreamVersionAcks
+		// （SELECT）、DeleteUpstreamVersionAck（DELETE）。多一个少一个都是
+		// 「本地全绿、红在别人手上」。
 		"upstream_version_ack": {
-			"xm_api_runtime":       {"INSERT", "SELECT", "UPDATE"},
+			"xm_api_runtime":       {"DELETE", "INSERT", "SELECT", "UPDATE"},
 			"xm_worker_runtime":    {"SELECT"},
 			"xm_lifecycle_runtime": {"SELECT"},
 			"xm_ops_read":          {"SELECT"},
@@ -231,4 +239,87 @@ func TestAlertsTablePrivilegesAreUnchangedByThisSlice(t *testing.T) {
 			t.Errorf("策略里缺少 alerts.%s", name)
 		}
 	}
+}
+
+// TestAlertsPolicyGoAndContractAgree：`policy.go` 的 Go 侧默认策略与磁盘上的
+// 策略契约必须说同一件事。
+//
+// 这条是审稿这一轮的变异实测暴露出来的：把 `defaultObjects()` 里
+// `alerts.upstream_version_ack` 的 `xm_api_runtime` 授权从
+// {SELECT,INSERT,UPDATE,DELETE} 改回 {SELECT,INSERT,UPDATE}，而**不动**
+// contracts/database/role-policy.v1.json，`go test ./internal/platform/dbroles`
+// 全绿——两份策略之间没有任何测试。
+//
+// 它们是同一个事实的两份副本：JSON 是漂移门禁（cmd/db-role-verify）真正读的
+// 那一份，Go 侧的 `DefaultPolicyV1()` 是代码里那一份。漂开时不报错，只会让
+// 其中一份安静地给出旧答案——正是本片立项要治的病。
+//
+// 范围仍然只覆盖 alerts（本片拥有的那两张表）：这个文件不该替 dbroles 把
+// 整份策略的对账补上，那是另一片的事，记在交接文档的 follow_ups 里。
+func TestAlertsPolicyGoAndContractAgree(t *testing.T) {
+	inContract := map[string]map[string][]string{}
+	data, err := os.ReadFile(rolePolicyPath(t))
+	if err != nil {
+		t.Fatalf("读策略契约: %v", err)
+	}
+	var doc struct {
+		Objects []struct {
+			policyObject
+			TablePrivileges map[string][]string `json:"table_privileges"`
+		} `json:"objects"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("解析策略契约: %v", err)
+	}
+	for _, o := range doc.Objects {
+		if o.Kind == "table" && o.Schema == "alerts" {
+			inContract[o.Name] = o.TablePrivileges
+		}
+	}
+
+	inCode := map[string]map[string][]string{}
+	for _, g := range dbroles.DefaultPolicyV1().Objects {
+		if g.Kind == "table" && g.Schema == "alerts" {
+			inCode[g.Name] = g.TablePrivileges
+		}
+	}
+
+	if len(inContract) == 0 || len(inCode) == 0 {
+		t.Fatalf("两侧至少要有一张 alerts 表：contract=%d code=%d", len(inContract), len(inCode))
+	}
+	// 表名双向相等。
+	for name := range inContract {
+		if _, ok := inCode[name]; !ok {
+			t.Errorf("策略契约里有 alerts.%s，policy.go 的 defaultObjects() 里没有", name)
+		}
+	}
+	for name := range inCode {
+		if _, ok := inContract[name]; !ok {
+			t.Errorf("policy.go 里有 alerts.%s，策略契约里没有。%s", name, policyDriftFixHint)
+		}
+	}
+	// 逐表逐角色的授权集合相等。
+	for name, want := range inContract {
+		got, ok := inCode[name]
+		if !ok {
+			continue
+		}
+		for role, privs := range want {
+			if normalizedPrivs(got[role]) != normalizedPrivs(privs) {
+				t.Errorf("alerts.%s 对 %s：policy.go 给 %v，策略契约给 %v。%s",
+					name, role, got[role], privs, policyDriftFixHint)
+			}
+		}
+		for role := range got {
+			if _, ok := want[role]; !ok {
+				t.Errorf("alerts.%s：policy.go 多授权了角色 %s", name, role)
+			}
+		}
+	}
+}
+
+func normalizedPrivs(privs []string) string {
+	out := append([]string(nil), privs...)
+	sort.Strings(out)
+	return strings.Join(out, ",")
 }

@@ -1,8 +1,10 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -374,12 +376,23 @@ func TestOpsOverviewBuildInfoReflectsResolvedEnvironment(t *testing.T) {
 // null，而直接构造 Deps 的测试**照样绿**——判定恒真（规则存在≠调用得到）。
 func testRouterWithOpsJobs(t *testing.T, metrics MetricLister, q JobsQuerier) http.Handler {
 	t.Helper()
+	return testRouterWithOpsJobsAndLogger(t, metrics, q, discardLogger())
+}
+
+// testRouterWithOpsJobsAndLogger 同上，但让调用方拿到 handler 写出的日志。
+//
+// 单开一个而不是给上面那个加参数：绝大多数用例不关心日志，多一个参数只会让
+// 它们都得写一个 nil。
+func testRouterWithOpsJobsAndLogger(
+	t *testing.T, metrics MetricLister, q JobsQuerier, logger *slog.Logger,
+) http.Handler {
+	t.Helper()
 	res, err := NewDevHeaderResolver("development")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return NewRouter(Deps{
-		Logger:         discardLogger(),
+		Logger:         logger,
 		Service:        "platform-api",
 		Environment:    "development",
 		DB:             fakePinger{},
@@ -462,44 +475,105 @@ func TestOpsOverviewMergesFailedJobsByKind(t *testing.T) {
 	}
 }
 
-// TestOpsOverviewDistinguishesNoDataSourceFromNoFailures：null 与 [] 不是
-// 一回事。
+// TestOpsOverviewFailedJobsHasThreeDistinctStates：这一格必须自己说清
+// 发生了什么。
 //
-// [] 读作「查过了，窗口内一条失败都没有」；null 读作「这个部署没接这份数据
-// 源」。把前者当后者会让人以为系统坏了，把后者当前者会让人以为一切正常——
-// 后一种更危险（同 ConfigAvailable 那条纪律）。
-func TestOpsOverviewDistinguishesNoDataSourceFromNoFailures(t *testing.T) {
-	var body struct {
-		FailedJobsByKind []struct{} `json:"failed_jobs_by_kind"`
+// 审稿抓到的是一个歧义值：failed_jobs_by_kind 用同一个 JSON null 表达
+// 「这个部署没接 jobs 数据源」和「接了，但这次查库失败了」两种完全不同的
+// 状态，而查询错误还被 `if err == nil` 静默吞掉、整个 handler 一行日志都没有。
+// 前端按 handoff 的口径会把 null 渲染成「本部署未接入」——一个良性的永久
+// 状态——而真相可能是运行保障页正瞎着，没人会去查，因为日志里一个字都没有。
+//
+// 旁边的 database 那格是正确做法的对照：它 fail-closed 到 connected:false，
+// 字段本身能说出发生了什么。
+//
+// 这条测试同时是那两条互相打架的旧测试的替代：
+// TestOpsOverviewDistinguishesNoDataSourceFromNoFailures 把 null 定义成
+// 「没接数据源」，TestOpsOverviewSurvivesFailedJobsQueryError 又要求查库失败
+// 也回 null——两条都绿，而它们说的不是同一件事。
+func TestOpsOverviewFailedJobsHasThreeDistinctStates(t *testing.T) {
+	decode := func(t *testing.T, rec *httptest.ResponseRecorder) (items *[]struct{}, status string) {
+		t.Helper()
+		var body struct {
+			FailedJobsByKind *[]struct{} `json:"failed_jobs_by_kind"`
+			Status           string      `json:"failed_jobs_status"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body.FailedJobsByKind, body.Status
 	}
 
-	// 接了数据源、窗口内没有失败 → []
+	// 1）接了数据源、窗口内没有失败 → [] + ok
 	rec := opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{}, &fakeJobsQuerier{}))
-	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":[]`) {
-		t.Fatalf("没有失败时应是空数组而不是 null: %s", rec.Body.String())
+	items, status := decode(t, rec)
+	if items == nil || len(*items) != 0 || status != "ok" {
+		t.Fatalf("没有失败时应是空数组 + ok: items=%v status=%q body=%s", items, status, rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
+	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":[]`) {
+		t.Fatalf("空数组读作「查过了，一条都没有」，不能是 null: %s", rec.Body.String())
 	}
 
-	// 没接数据源 → null
+	// 2）没接数据源 → null + not_wired
 	rec = opsOverviewGet(t, testRouterWithOpsOverview(t, &fakeMetricLister{}, nil, nil, AlertDeliveryStatus{}))
-	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":null`) {
-		t.Fatalf("没接数据源时应是 null 而不是空数组: %s", rec.Body.String())
+	items, status = decode(t, rec)
+	if items != nil || status != "not_wired" {
+		t.Fatalf("没接数据源应是 null + not_wired: items=%v status=%q", items, status)
+	}
+
+	// 3）接了但读库失败 → null + query_failed（整页仍是 200）
+	rec = opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{},
+		&fakeJobsQuerier{summaryErr: context.DeadlineExceeded}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("这一格读不到不该让整页 500: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	items, status = decode(t, rec)
+	if items != nil || status != "query_failed" {
+		t.Fatalf("读库失败应是 null + query_failed: items=%v status=%q", items, status)
+	}
+
+	// 三态必须**互不相同**：否则前端仍然分不出「没接」与「瞎着」。
+	if "ok" == "not_wired" || "not_wired" == "query_failed" {
+		t.Fatal("三态取值撞了")
 	}
 }
 
-// TestOpsOverviewSurvivesFailedJobsQueryError：这一格读不到不该让整页 500。
+// TestOpsOverviewLogsWhenTheFailedJobsQueryFails：降级必须留痕。
 //
-// 这个端点叫「控制平面健康」，它自己因为其中一格读不到就整页失败，正是
-// 最不该发生的失效形态。
-func TestOpsOverviewSurvivesFailedJobsQueryError(t *testing.T) {
-	q := &fakeJobsQuerier{summaryErr: context.DeadlineExceeded}
-	rec := opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{}, q))
+// 这一格读不到时回 null 是对的（整页不该 500），但如果它同时**什么都不说**，
+// 那就是本片自己写下的纪律的反面：「一个不留痕的抑制器就是下一个『安静地给你
+// 一个旧答案』」。整个 ops_overview.go 此前没有任何 logger。
+//
+// 这条失效有具体的触发路径：角色分离真正上线时，若 xm_api_runtime 对
+// public.river_job 的读权限没跟上，这一格就会从那天起永久说「查不到」，
+// 而没有一行日志能告诉任何人。
+func TestOpsOverviewLogsWhenTheFailedJobsQueryFails(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	rec := opsOverviewGet(t, testRouterWithOpsJobsAndLogger(t, &fakeMetricLister{},
+		&fakeJobsQuerier{summaryErr: context.DeadlineExceeded}, logger))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":null`) {
-		t.Fatalf("读不到时应回 null（不假装没有失败）: %s", rec.Body.String())
+	line := buf.String()
+	if !strings.Contains(line, "ops_overview_failed_jobs_unavailable") {
+		t.Fatalf("读库失败必须写一条 Warn，实际日志：%q", line)
+	}
+	for _, want := range []string{"module=platform.httpapi", "environment=development", "err_kind="} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("日志缺 %q：%q", want, line)
+		}
+	}
+	// 只写错误**类型**，不写 err.Error()——那可能带库连接串。
+	if strings.Contains(line, "deadline exceeded") {
+		t.Fatalf("日志不该带错误原文（可能含连接串）：%q", line)
+	}
+
+	// 成功那一路不该刷日志：每 30 秒一次的健康页刷屏会把真正的 Warn 淹掉。
+	buf.Reset()
+	opsOverviewGet(t, testRouterWithOpsJobsAndLogger(t, &fakeMetricLister{}, &fakeJobsQuerier{}, logger))
+	if buf.Len() != 0 {
+		t.Fatalf("正常路径不该写日志：%q", buf.String())
 	}
 }
