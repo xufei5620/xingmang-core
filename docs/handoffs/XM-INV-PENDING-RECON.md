@@ -158,6 +158,9 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **第一轮复审修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **11:51:42** | **11:59:34** | **7m52s，exit 0，30 包全 ok** |
 | **第一轮复审修复后** agents 模块 vet + test | 11:59:56 | 11:59:59 | 3s |
 | **第一轮复审修复后** `check-no-secrets.ps1` | 11:59:59 | 12:00:00 | 1s，exit 0 |
+| **交付前最后一次** `go vet ./...` | 12:05:35 | 12:05:36 | 1s |
+| **交付前最后一次** `go test -p 1 -count=1 ./...`（backend 全量） | **12:05:36** | **12:13:12** | **7m36s，exit 0，30 包全 ok** |
+| **交付前最后一次** `check-no-secrets.ps1` | 12:13:12 | 12:13:12 | exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
