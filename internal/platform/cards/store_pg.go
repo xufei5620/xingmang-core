@@ -783,6 +783,79 @@ SELECT status FROM cards.infini_card
 	return status, nil
 }
 
+// SetAccountSyncPause 写「按账号暂停同步」的开关（迁移 000055）。
+//
+// 同 (environment, account) 重复调用时覆盖：暂停与恢复本来就是同一行的
+// 两个取值，last-write-wins 正是这个开关该有的语义。
+func (s *PgStore) SetAccountSyncPause(ctx context.Context, p AccountSyncPause) error {
+	now := s.now().UTC()
+	pausedAt := p.PausedAt
+	if pausedAt.IsZero() {
+		pausedAt = now
+	}
+	var expires any
+	if !p.ExpiresAt.IsZero() {
+		expires = p.ExpiresAt.UTC()
+	}
+
+	const upsertSQL = `
+INSERT INTO cards.account_sync_pause (
+    environment, account, paused, reason, paused_by, expires_at, paused_at, updated_at
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (environment, account) DO UPDATE SET
+    paused     = EXCLUDED.paused,
+    reason     = EXCLUDED.reason,
+    paused_by  = EXCLUDED.paused_by,
+    expires_at = EXCLUDED.expires_at,
+    paused_at  = EXCLUDED.paused_at,
+    updated_at = EXCLUDED.updated_at`
+
+	if _, err := s.pool.Exec(ctx, upsertSQL,
+		s.environment, p.Account, p.Paused, p.Reason, p.PausedBy,
+		expires, pausedAt.UTC(), now,
+	); err != nil {
+		return fmt.Errorf("写账号同步开关 %s: %w", p.Account, err)
+	}
+	return nil
+}
+
+// PausedAccounts 返回**当前正暂停**的账号。
+//
+// 只查 paused = true：调用方要的是「现在谁停着」。把恢复过的历史行也返回，
+// 每个调用点都得自己再过滤一遍，而漏过滤的那一处会安静地停掉一个本该同步
+// 的账号——那正是这个切片要消灭的那类沉默。
+func (s *PgStore) PausedAccounts(ctx context.Context) (map[string]AccountSyncPause, error) {
+	const selectSQL = `
+SELECT account, paused, reason, paused_by, expires_at, paused_at
+  FROM cards.account_sync_pause
+ WHERE environment = $1 AND paused
+ ORDER BY account`
+
+	rows, err := s.pool.Query(ctx, selectSQL, s.environment)
+	if err != nil {
+		return nil, fmt.Errorf("查账号同步开关: %w", err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]AccountSyncPause)
+	for rows.Next() {
+		var p AccountSyncPause
+		var expires *time.Time
+		if err := rows.Scan(&p.Account, &p.Paused, &p.Reason, &p.PausedBy, &expires, &p.PausedAt); err != nil {
+			return nil, fmt.Errorf("扫描账号同步开关: %w", err)
+		}
+		if expires != nil {
+			p.ExpiresAt = expires.UTC()
+		}
+		p.PausedAt = p.PausedAt.UTC()
+		out[p.Account] = p
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("读账号同步开关: %w", err)
+	}
+	return out, nil
+}
+
 // CardChallenge 是一次 3DS 验证挑战。
 type CardChallenge struct {
 	Account string

@@ -77,6 +77,10 @@ func RegisterActions(reg *action.Registry, svc *Service) error {
 		{unfreezeDef(accounts), unfreezeHandler(svc)},
 		{deleteDef(accounts), deleteHandler(svc)},
 		{usageSetDef(accounts), usageSetHandler(svc)},
+		// 按账号暂停同步（XM-CARD-VISIBILITY）。声明在 account_sync.go，
+		// 这里只多两行——本文件被多个切片共用。
+		{accountSyncPauseDef(accounts), accountSyncPauseHandler(svc)},
+		{accountSyncResumeDef(accounts), accountSyncResumeHandler(svc)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {

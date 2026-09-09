@@ -1205,7 +1205,7 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 	}
 
 	if cfg.CardSyncEnabled {
-		river.AddWorker(workers, NewCardSyncWorker(cfg.Logger, cfg.CardSyncer))
+		river.AddWorker(workers, newCardSyncWorkerFor(cfg, pool))
 		cardPeriodic, err := newManifestPeriodicJob(
 			CardSyncJobKind, cfg.CardSyncInterval, cfg.CardSyncRunOnStart,
 			func() (river.JobArgs, *river.InsertOpts) {

@@ -284,6 +284,15 @@ var registeredMetrics = struct {
 		// 落在"渠道保障"页签位置（ADMIN-IA CPA 第 4 格，M1.5 徽标）——语义其实是
 		// 账号巡检而非模型路由验证，裁定见 contracts/connectors/cpa.read.v1.md §9。
 		"cpa.accounts.health": {},
+		// 卡片同步的每轮状态（XM-CARD-VISIBILITY，jobs/card_sync.go 的
+		// MetricCardSyncStatus）。写它的是 card_sync 作业，读它的是 alerts 的
+		// cards.sync.failed 规则——与上面 platform.approval.queue 是同一种
+		// 「本平台自己产、本平台自己用」的运维信号，登记方式照搬那一条。
+		//
+		// 不登记的后果不是报错而是**静默**：/metrics/history 会把它判成未注册
+		// 直接 400，而规则的 ListSamples 一条不返回也不报错，于是那条告警
+		// 结构上永远不可能响。
+		"cards.sync.status": {},
 	},
 }
 

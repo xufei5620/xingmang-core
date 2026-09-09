@@ -68,18 +68,28 @@ func TestDoMapsNonZeroCodeToRejected(t *testing.T) {
 	}
 }
 
-// ADR-004 铁律：供应商的原始错误文本不透传给调用方，只进服务端日志。
-func TestDoDoesNotLeakUpstreamMessageIntoErrorText(t *testing.T) {
+// 上游的业务码与 message 必须进对外错误文本（XM-CARD-VISIBILITY）。
+//
+// 这条用例此前叫 TestDoDoesNotLeakUpstreamMessageIntoErrorText，断言的正好
+// 相反。它没有被删掉而是被改写：旧断言是当时那条纪律的载体，直接删等于把
+// 保证一起丢掉；而旧纪律本身比 ADR-004 严了一档——ADR-004 禁的是「原样透传
+// 给**用户**」，本文件此前执行成了「不给**调用方**」，代价是 2026-09-08 那次
+// 三天查不出原因。现在的契约是两层：脱敏后的码 + message 进对外文本，
+// 原始响应体只进 Unwrap 链；「脱敏掉的东西一个字都不许出现」由
+// redact_test.go 的缺席型断言守住。
+func TestDoSurfacesUpstreamCodeAndMessageInErrorText(t *testing.T) {
 	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"code":40001,"message":"secret internal detail","data":null}`))
+		w.Write([]byte(`{"code":40001,"message":"insufficient balance","data":null}`))
 	})
 
 	err := c.do(context.Background(), http.MethodPost, "/v2/cards/apply", []byte(`{}`), nil)
 	if err == nil {
 		t.Fatal("code != 0 必须报错")
 	}
-	if strings.Contains(err.Error(), "secret internal detail") {
-		t.Fatalf("上游原文不该出现在对外错误里: %q", err.Error())
+	for _, want := range []string{"40001", "insufficient balance", "rejected", "/v2/cards/apply"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("对外错误文本应含 %q，实际 %q", want, err.Error())
+		}
 	}
 }
 
@@ -140,8 +150,8 @@ func TestDoSendsSignedHeaders(t *testing.T) {
 	}
 }
 
-// bad_response 必须**可诊断**：对外错误文本仍然不带上游原文（ADR-004），
-// 但 Unwrap 链里要能看到状态码与响应体开头，否则运维拿到一句
+// bad_response 必须**可诊断**：状态码与响应体开头既进对外错误文本
+// （脱敏后），也留在 Unwrap 链里（原样）。否则运维拿到一句
 // "bad_response: infini GET /v2/cards/list" 完全无从下手。
 func TestBadResponseCarriesDiagnosticsInUnwrapChain(t *testing.T) {
 	c, _ := serverClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -154,12 +164,16 @@ func TestBadResponseCarriesDiagnosticsInUnwrapChain(t *testing.T) {
 		t.Fatal("404 必须报错")
 	}
 
-	// 对外文本仍然干净
-	if strings.Contains(err.Error(), "route not found") {
-		t.Fatalf("上游原文不该出现在对外错误里: %q", err.Error())
+	// 对外文本现在**必须**带上这句：它不含卡号也不含凭据，而它正是
+	// 「base path 配错了」与「上游挂了」之间唯一的区分依据。
+	if !strings.Contains(err.Error(), "route not found") {
+		t.Fatalf("对外错误里应看得到上游说了什么: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("对外错误里应看得到状态码: %q", err.Error())
 	}
 
-	// 但链里要有状态码与响应体开头，供服务端日志与排查用
+	// 链里仍要有状态码与响应体开头，供服务端日志与排查用
 	chain := unwrapAll(err)
 	if !strings.Contains(chain, "404") {
 		t.Fatalf("Unwrap 链里要能看到状态码, got %q", chain)

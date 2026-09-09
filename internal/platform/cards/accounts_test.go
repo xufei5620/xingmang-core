@@ -175,7 +175,7 @@ func TestSyncCoversEveryAccount(t *testing.T) {
 	syncer := NewSyncer([]Account{{ID: "main", Client: a}, {ID: "backup", Client: b}},
 		store, SyncOptions{UnknownGrace: 30 * time.Minute, Now: func() time.Time { return issueNow }})
 
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -207,7 +207,7 @@ func TestSyncNeverMatchesCardFromAnotherAccount(t *testing.T) {
 
 	syncer := NewSyncer([]Account{{ID: "main", Client: a}, {ID: "backup", Client: b}},
 		store, SyncOptions{UnknownGrace: 30 * time.Minute, Now: func() time.Time { return issueNow }})
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 

@@ -30,8 +30,17 @@ type envelope struct {
 
 // do 发一次已签名的请求，校验信封，把 data 解进 out（out 为 nil 时丢弃）。
 //
-// 错误一律归到 connector.ErrorKind，供应商原始文本只进 Unwrap 链
-// （ADR-004：不把供应商错误透传给调用方）。
+// 错误一律归到 connector.ErrorKind；上游的**状态码、业务码与脱敏后的
+// message** 进 connector.Error.Detail（因而进对外错误文本与日志），
+// **原始响应体只进 Unwrap 链**。
+//
+// 这是 XM-CARD-VISIBILITY 对既有写法的一次有意放宽：ADR-004 的铁律是
+// 「第三方错误不得原样透传给**用户**」，而本文件此前把它执行成了
+// 「不透传给**调用方**」——严过 ADR 一档。代价是 2026-09-08 的告警风暴里，
+// 一条打了 1724 次的失败在日志与后台上都只写着
+// 「rejected: infini POST /v2/cards/status/batch」，三天答不出为什么。
+// 给用户看的那一层仍然是领域层翻好的中文指引（cards/upstream_error.go），
+// 一个字的上游原文都不到那里。
 func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []byte, out any) error {
 	op := "infini " + method + " " + pathOnly(pathWithQuery)
 
@@ -69,22 +78,27 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 			// 401/403 再细分一次：签名问题与 IP 白名单问题的修法完全不同。
 			kind = kindForUnauthorized(string(raw))
 		}
-		// 状态码 + 体开头都进 cause（只进 Unwrap 链与服务端日志，
-		// 不进对外错误文本）。少了体开头，一个 404 就只剩「bad_response」
+		// 状态码 + 脱敏后的体开头进 Detail（对外文本与日志都看得到），
+		// 原始体进 cause。少了体开头，一个 404 就只剩「bad_response」
 		// 这五个字，运维完全无从下手——那等于没有错误分类。
-		return connector.NewError(kind, op,
-			fmt.Errorf("http %d: %s", resp.StatusCode, bodyPrefix(raw)))
+		detail := fmt.Sprintf("http %d: %s", resp.StatusCode, bodyPrefix(raw))
+		return connector.NewErrorWithDetail(kind, op, detail,
+			fmt.Errorf("http %d: %s", resp.StatusCode, rawBodyPrefix(raw)))
 	}
 
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return connector.NewError(connector.KindBadResponse, op,
-			fmt.Errorf("%w: body=%s", err, bodyPrefix(raw)))
+		return connector.NewErrorWithDetail(connector.KindBadResponse, op,
+			fmt.Sprintf("body=%s", bodyPrefix(raw)),
+			fmt.Errorf("%w: body=%s", err, rawBodyPrefix(raw)))
 	}
 
 	if env.Code != successCode {
-		// 上游的 message 只进 Unwrap 链（服务端日志看得到），不进 Error() 文本。
-		return connector.NewError(kindForBusinessCode(env.Code), op,
+		// **本片最要紧的一行**。HTTP 200 + 非零 code 是卡端点业务失败的
+		// 常规形状（见 kindForBusinessCode），而卡 API 没有错误码表——
+		// message 的文字是此刻唯一存在的证据。把它丢掉就等于把诊断丢掉。
+		return connector.NewErrorWithDetail(kindForBusinessCode(env.Code), op,
+			fmt.Sprintf("upstream code %d: %s", env.Code, safeUpstreamText(env.Message)),
 			fmt.Errorf("upstream code %d: %s", env.Code, env.Message))
 	}
 
@@ -93,9 +107,11 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 	}
 	if err := json.Unmarshal(env.Data, out); err != nil {
 		// data 的形状与我们的结构体对不上时，也要看得到上游给的是什么——
-		// 这是「契约漂移」最常见的暴露方式。
-		return connector.NewError(connector.KindBadResponse, op,
-			fmt.Errorf("%w: data=%s", err, bodyPrefix(env.Data)))
+		// 这是「契约漂移」最常见的暴露方式。data 里最可能装着卡面字段，
+		// 所以进对外文本的那一份必须过脱敏。
+		return connector.NewErrorWithDetail(connector.KindBadResponse, op,
+			fmt.Sprintf("data=%s", bodyPrefix(env.Data)),
+			fmt.Errorf("%w: data=%s", err, rawBodyPrefix(env.Data)))
 	}
 	return nil
 }
@@ -106,14 +122,29 @@ func (c *Client) do(ctx context.Context, method, pathWithQuery string, body []by
 // 又不至于把一整页 HTML 灌进日志。
 const bodyPrefixLimit = 300
 
-// bodyPrefix 截断响应体并压平换行，供错误链使用。
+// bodyPrefix 脱敏、截断响应体并压平换行，供**对外可见**的 Detail 使用。
 //
-// 只进 Unwrap 链（服务端日志看得到），不进 Error() 文本——ADR-004 禁的是
-// 把供应商原文透传给**调用方**，不是禁止运维看见它。
+// 压平与脱敏的先后顺序在 redactUpstreamText 里（它自己压平），这里不能
+// 先压平再交给它：那样看起来一样，但三个 message 入口不经过本函数，
+// 顺序保证就只覆盖了一半的路。要原样的那一份用 rawBodyPrefix。
 func bodyPrefix(raw []byte) string {
-	text := strings.TrimSpace(string(raw))
+	return safeUpstreamText(string(raw))
+}
+
+// rawBodyPrefix 只截断不脱敏，**仅供 Unwrap 链**。
+//
+// 保留它是因为 ADR-004 禁的是原样透传给用户，不是禁止运维在服务端日志里
+// 看见原文；而对外那一份已经由 bodyPrefix 兜住。两个函数刻意同名同形，
+// 调用点上一眼能看出选的是哪一份。
+func rawBodyPrefix(raw []byte) string {
+	return truncateFlat(strings.TrimSpace(string(raw)))
+}
+
+func truncateFlat(text string) string {
 	if len(text) > bodyPrefixLimit {
-		text = text[:bodyPrefixLimit] + "…(截断)"
+		// 按字节切可能切断一个多字节字符；这里只是给人看的诊断串，
+		// 用 ToValidUTF8 把切出来的半个字符抹掉，不让日志里出现乱码。
+		text = strings.ToValidUTF8(text[:bodyPrefixLimit], "") + "…(截断)"
 	}
 	return strings.Join(strings.Fields(text), " ")
 }

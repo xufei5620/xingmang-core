@@ -39,7 +39,7 @@ func TestSyncConvergesUnknownIssueWhenCardFound(t *testing.T) {
 		StartedAt:      issueNow.Add(-time.Minute),
 	}
 
-	if err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
+	if _, err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -68,7 +68,7 @@ func TestSyncEscalatesStaleUnknownWithoutMarkingFailed(t *testing.T) {
 		StartedAt:      issueNow.Add(-31 * time.Minute),
 	}
 
-	if err := newSyncer(infini.NewFake(), store, issueNow).RunOnce(context.Background()); err != nil {
+	if _, err := newSyncer(infini.NewFake(), store, issueNow).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestSyncPollsPendingApplicationToActive(t *testing.T) {
 	}
 
 	fake.Advance(res.CardID, "active")
-	if err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
+	if _, err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -123,9 +123,27 @@ func TestSyncKeepsUnknownIntactWhenUpstreamUnavailable(t *testing.T) {
 	}
 	fake.FailNext(connector.NewError(connector.KindUnavailable, "op", nil))
 
-	err := newSyncer(fake, store, issueNow).RunOnce(context.Background())
-	if err == nil {
-		t.Fatal("上游不可用应作为错误上报，让作业重试")
+	round, err := newSyncer(fake, store, issueNow).RunOnce(context.Background())
+	// XM-CARD-VISIBILITY：这一条此前断言「整轮报错」。现在的契约是
+	// **部分成功不算作业失败**——FailNext 只失败一次，紧接着的发现遍历成功了，
+	// 于是整轮返回 nil。真正被改掉的不变量是「六步里砸一步就整轮报错」，
+	// 不是「失败可以被吞掉」：那一步的失败照样在 RoundResult 里，
+	// 分类也照样是 unavailable（值得重试的那一档）。
+	if err != nil {
+		t.Fatalf("同一轮里发现遍历成功了，不该整轮报错: %v", err)
+	}
+	failures := round.Failures()
+	if len(failures) != 1 || failures[0].Step != StepReconcile {
+		t.Fatalf("对账失败必须留在结果里，实际 %+v", failures)
+	}
+	if failures[0].Kind != connector.KindUnavailable {
+		t.Fatalf("失败分类 = %q, want unavailable", failures[0].Kind)
+	}
+	if !round.Retryable() {
+		t.Fatal("unavailable 是值得重试的那一档，不该被终结")
+	}
+	if round.AllFailed() {
+		t.Fatal("发现遍历成功了，不该算整轮失败")
 	}
 
 	if store.ops["issue-z"].State != StateUnknown {
@@ -149,7 +167,7 @@ func TestSyncSkipsResolvedOperations(t *testing.T) {
 	}
 	fake := &countingClient{CardClient: infini.NewFake()}
 
-	if err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
+	if _, err := newSyncer(fake, store, issueNow).RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if fake.aliasListCalls > 0 {
@@ -208,7 +226,7 @@ func TestRefreshUsesBatchStatusAndOnlyRefetchesChangedCards(t *testing.T) {
 	counter := &batchCountingClient{CardClient: fake}
 	syncer := NewSyncer([]Account{{ID: testAccount, Client: counter}}, store, SyncOptions{})
 
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatalf("同步不该报错: %v", err)
 	}
 
@@ -224,7 +242,7 @@ func TestRefreshUsesBatchStatusAndOnlyRefetchesChangedCards(t *testing.T) {
 	// （批量接口只回 card_id + status，余额之类要单查）。
 	fake.Advance(ids[0], "suspend")
 	counter.batchCalls, counter.statusCalls = 0, 0
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if counter.statusCalls != 1 {
@@ -267,7 +285,7 @@ func TestSyncDiscoversCardsCreatedUpstream(t *testing.T) {
 	store := newMemStore()
 	syncer := newSyncer(fake, store, issueNow)
 
-	if err := syncer.RunOnce(context.Background()); err != nil {
+	if _, err := syncer.RunOnce(context.Background()); err != nil {
 		t.Fatalf("同步失败: %v", err)
 	}
 
@@ -288,7 +306,7 @@ func TestSyncDiscoveryIsIdempotent(t *testing.T) {
 	syncer := newSyncer(fake, store, issueNow)
 
 	for i := 0; i < 3; i++ {
-		if err := syncer.RunOnce(context.Background()); err != nil {
+		if _, err := syncer.RunOnce(context.Background()); err != nil {
 			t.Fatalf("第 %d 轮同步失败: %v", i+1, err)
 		}
 	}

@@ -329,7 +329,16 @@ describe("身份类别：principal.go 里的 Type 都要有中文", () => {
 
 describe("告警：规则键、严重度、状态、投递状态、静默状态都要有中文", () => {
   const alertSource = goSource("internal/platform/alerts/alert.go");
-  const rulesSource = goSource("internal/platform/alerts/rules.go");
+  // 规则声明不只在 rules.go：各切片把自己的规则放在 rules_<片名>.go（XM-CARD-VISIBILITY
+  // 的 rules_cards.go 就是第一个）。范围要走出来、不能手列——只读 rules.go 时，
+  // 新文件里的 Title 永远对不上账，而这条门禁会安静地只对旧的八条说「都对上了」。
+  const rulesFiles = readdirSync(new URL("internal/platform/alerts/", REPO_ROOT))
+    .map(String)
+    .filter((name) => /^rules(_[a-z0-9]+)?\.go$/.test(name))
+    .sort();
+  const rulesSource = rulesFiles
+    .map((name) => goSource(`internal/platform/alerts/${name}`))
+    .join("\n");
   const silenceSource = goSource("internal/platform/httpapi/alert_silences.go");
 
   const ruleKeys = goNamedConsts(rulesSource, /^Rule[A-Z]/).map((c) => c.value);
@@ -338,8 +347,14 @@ describe("告警：规则键、严重度、状态、投递状态、静默状态�
   const notifyStatuses = goTypedConstValues(alertSource, "NotifyStatus");
 
   it("抽取器确实抓到了这四组常量", () => {
-    expect(ruleKeys.length).toBeGreaterThanOrEqual(8);
+    // 规则文件是走目录发现的：至少要有 rules.go 本尊和一个切片文件，
+    // 否则「Title 逐字对上」那条只是在对旧清单自己点头。
+    expect(rulesFiles).toContain("rules.go");
+    expect(rulesFiles).toContain("rules_cards.go");
+    expect(rulesFiles.length).toBeGreaterThanOrEqual(2);
+    expect(ruleKeys.length).toBeGreaterThanOrEqual(9);
     expect(ruleKeys).toContain("approval.pending.too_long");
+    expect(ruleKeys).toContain("cards.sync.failed");
     expect(severities).toEqual(expect.arrayContaining(["info", "warning", "critical"]));
     expect(statuses).toContain("OPEN");
     expect(notifyStatuses).toEqual(expect.arrayContaining(["pending", "delivered", "failed"]));

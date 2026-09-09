@@ -35,6 +35,19 @@ func Redact(m map[string]any, keys ...string) map[string]any {
 	})
 }
 
+// SensitiveKeyFragments 返回内置敏感键名清单的副本。
+//
+// 导出它只为一个用途：让**别处的**脱敏器有办法证明自己不比这一份弱。
+// connectors/infini 有一份自己的清单（它脱的是上游回来的自由文本，不是
+// map 的键，形状不同没法直接复用），那边的 redact_shared_test.go 遍历这个
+// 函数的返回值逐项验证覆盖——这份清单加了一项而那边漏了，测试当场红。
+// 返回副本而不是变量本身：清单是共享状态，被调用方就地改掉会静默削弱脱敏。
+func SensitiveKeyFragments() []string {
+	out := make([]string, len(defaultSensitiveKeys))
+	copy(out, defaultSensitiveKeys)
+	return out
+}
+
 // RedactDefault 用内置敏感键名清单脱敏（子串匹配，覆盖 Access_Token 这类变体）。
 func RedactDefault(m map[string]any) map[string]any {
 	if m == nil {

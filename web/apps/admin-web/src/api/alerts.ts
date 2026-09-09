@@ -362,6 +362,7 @@ export const ALERT_RULES: { key: string; label: string }[] = [
   { key: "upstream.version.changed", label: "上游版本变化" },
   { key: "upstream.runway.low", label: "上游可用天数不足" },
   { key: "approval.pending.too_long", label: "审批单挂太久" },
+  { key: "cards.sync.failed", label: "卡片同步连续失败" },
 ];
 
 /** 把规则键翻成中文名；未知键原样返回。

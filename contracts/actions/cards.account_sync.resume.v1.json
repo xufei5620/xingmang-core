@@ -1,0 +1,27 @@
+{
+  "id": "cards.account_sync.resume",
+  "version": "1",
+  "risk_level": "L1",
+  "permission": "card.manage",
+  "principal_types": [
+    "HUMAN"
+  ],
+  "environments": [
+    "development",
+    "staging",
+    "production"
+  ],
+  "idempotency": "NATURALLY_IDEMPOTENT_LAST_WRITE_WINS",
+  "write_confirmation": "ACTION_RESULT_AND_QUERY_REFETCH",
+  "approval": {
+    "required": false
+  },
+  "compensation_mode": "REWRITE",
+  "params": {
+    "account": {
+      "type": "string",
+      "required": true
+    }
+  },
+  "notes": "XM-CARD-VISIBILITY：把一个被暂停的 Infini 账号放回 card_sync 的循环。风险等级与权限同 cards.account_sync.pause（理由见那份契约的 notes），不重复。**刻意不要 reason**：恢复是回到默认状态，强行要一句理由只会让人填「恢复」两个字，把审计摊薄成噪声；而「上次为什么停过」由 pause 那一次写下的 reason 回答——恢复走的是同一行的覆盖更新（last-write-wins），paused 置假但 reason 与 paused_by 留在库里，正是为了事后还查得到。恢复之后该账号在下一轮同步里就重新参与全部步骤；如果它仍然在被上游拒，cards.sync.failed 会按「同一账号同一步骤连续 N 轮失败」重新开始计数并在 N 轮后再次告警，不会因为中间停过而把暂停两侧的失败接成一条长串。"
+}
