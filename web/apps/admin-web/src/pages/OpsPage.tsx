@@ -176,7 +176,14 @@ const OPS_HEALTH_COLUMNS: DataTableColumn<OpsHealthRow>[] = [
           <Badge tone={state.tone} title={state.hint}>
             {state.label}
           </Badge>
-          {row.note ? <Badge tone={row.noteTone}>{row.note}</Badge> : null}
+          {/* 采集模式那一格可能带一句悬浮说明：「模式未知」四个字自己解释不了
+              「那现在到底在跑哪个模式、我该去哪配」。没有说明时不挂空 title
+              ——一个空的 tooltip 会让人以为鼠标停错了地方。 */}
+          {row.note ? (
+            <Badge tone={row.noteTone} title={row.noteHint || undefined}>
+              {row.note}
+            </Badge>
+          ) : null}
         </div>
       );
     },

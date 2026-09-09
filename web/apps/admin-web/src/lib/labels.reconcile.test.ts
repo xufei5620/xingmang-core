@@ -1376,13 +1376,46 @@ function tsDeclaredFields(source: string): Set<string> {
  *
  *  键是字段名，值是「今天为什么还没接」。写在这里不是为了放行，是为了让「没接」
  *  这件事有一个会被人看见的位置——一个没人记得的缺口与一个被记下来的缺口，
- *  差别是后者会被下一个人补上。 */
-const UNCONSUMED_RESPONSE_FIELDS: Readonly<Record<string, string>> = {
-  // XM-OPS0 建这一段时就没接：界面上「采集链路」那一行只显示 effective_mode，
-  // 而后端明说了「客户端必须渲染 source，不要假设默认值」——mode 为空串时
-  // source 是 unknown 还是 database，今天在界面上分不出来。
-  effective_mode_source: "运行保障页的采集链路行只渲染 effective_mode，来源列还没做",
-};
+ *  差别是后者会被下一个人补上。
+ *
+ *  **今天是空的。** 上一版这里躺着 `effective_mode_source`（XM-OPS0 建那一段时
+ *  就没接），XM-WORKBENCH-WIRE-OPS 把它接上了，于是这一行被删掉——那正是这张
+ *  清单唯一允许的方向。清单空着不代表这一组闸没用了：下面那三条规矩仍然逐条
+ *  验着，见「清单非空时三条规矩都还在」。 */
+const UNCONSUMED_RESPONSE_FIELDS: Readonly<Record<string, string>> = {};
+
+/** 一张豁免清单里所有**站不住脚**的条目。
+ *
+ *  三条规矩，缺一不可：
+ *
+ *  1. 那个字段后端今天还在给（后端删了字段，豁免就该跟着删）；
+ *  2. 写了「为什么还没接」（空注释等于没登记）；
+ *  3. **它今天确实还没被接**——已经补齐却忘了删的豁免，是一个永远不会红的洞，
+ *     而且它会把「这里还有个缺口」这件事一直说下去，直到没人再信这张清单。
+ *
+ *  抽成函数是为了让清单空的时候这三条判据仍然能被验证：拿合成清单喂进来，
+ *  该红的必须红。否则清单一空，三条规矩就只剩注释。 */
+interface ScannedPair {
+  ts: string;
+  go: string;
+  tags: readonly string[];
+  declared: Set<string>;
+}
+
+function unsoundExemptions(
+  scanned: readonly ScannedPair[],
+  exemptions: Readonly<Record<string, string>>,
+): string[] {
+  return Object.entries(exemptions)
+    .map(([field, why]) => {
+      const owner = scanned.find((s) => s.tags.includes(field));
+      if (!owner) return `${field}：后端已经不给这个字段了，豁免该删`;
+      if (why.trim() === "") return `${field}：没写为什么还没接`;
+      if (owner.declared.has(field)) return `${field}：已经接上了，这一行该删`;
+      return "";
+    })
+    .filter((problem) => problem !== "");
+}
 
 describe("响应字段：后端 JSON 里给的，前端类型里要么接了、要么写下了没接", () => {
   // Go 文件 → 消费它的前端 api 文件。这一层配对是手写的（没有别的地方记着
@@ -1422,11 +1455,27 @@ describe("响应字段：后端 JSON 里给的，前端类型里要么接了、�
   });
 
   it("剥注释真的生效：注释里写着的字段名不算「接了」", () => {
-    // api/ops.ts 的注释里逐字写着 effective_mode_source（说明它为什么还没接）。
-    // 少了这一条，下面那条「未接清单」可能只是因为剥注释顺手把正文也剥没了。
+    // 判据走合成源码，不挑真文件里当下恰好只出现在注释里的某个词——那种锚点
+    // 会随下一次接线自己消失（`effective_mode_source` 就是这么消失的：它一被
+    // 接上，这条断言的前提就不成立了）。合成源码里那个「注释里带冒号」的写法
+    // 是关键：不剥注释的话它会被当成一个已声明的字段。
+    const synthetic = [
+      "/** 后端还给了 replica_lag_seconds: number，这里没接。 */",
+      "// 也不算：moon_phase: string",
+      "export interface X { connected: boolean; failed_jobs_status?: string; }",
+    ].join("\n");
+    const declared = tsDeclaredFields(synthetic);
+    expect(declared.has("connected")).toBe(true);
+    // 可选属性（`?:`）也要算「声明了」——本仓好几个字段为了兼容老后端是可选的
+    expect(declared.has("failed_jobs_status")).toBe(true);
+    expect(declared.has("replica_lag_seconds")).toBe(false);
+    expect(declared.has("moon_phase")).toBe(false);
+    // 真文件上的对照：确实有注释被剥掉了（不然上面几条只证明了合成串好使）
     const raw = readFileSync(new URL(PAIRS[0].ts, REPO_ROOT), "utf8");
-    expect(raw).toContain("effective_mode_source");
-    expect(scanned[0]?.declared.has("effective_mode_source")).toBe(false);
+    expect(raw).toContain("/**");
+    expect(raw.length).toBeGreaterThan(
+      raw.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/(?<!:)\/\/[^\n]*/g, "").length,
+    );
   });
 
   it("后端每一个响应字段，前端类型里都声明了", () => {
@@ -1438,19 +1487,41 @@ describe("响应字段：后端 JSON 里给的，前端类型里要么接了、�
     expect(missing).toEqual([]);
   });
 
-  it("未接清单只减不增，而且每一条今天都还需要", () => {
-    // 三条规矩缺一不可（同 fire_count 那张豁免清单的写法）：清单逐字钉死、
-    // 里面的字段后端今天还在给、**并且**它今天确实还没被接。
-    // 第三条最容易漏——一条已经补齐的豁免留在清单里，就是一个永远不会红的洞。
-    // 第三条红了，说明那个字段已经接上了：把清单里那一行删掉即可，那正是这张
-    // 清单唯一允许的方向。
-    expect(Object.keys(UNCONSUMED_RESPONSE_FIELDS)).toEqual(["effective_mode_source"]);
-    for (const [field, why] of Object.entries(UNCONSUMED_RESPONSE_FIELDS)) {
-      expect(why.length).toBeGreaterThan(0);
-      const owner = scanned.find((s) => s.tags.includes(field));
-      expect(owner).toBeDefined();
-      expect(owner?.declared.has(field)).toBe(false);
-    }
+  it("未接清单今天是空的：后端给的每一个字段前端都接上了", () => {
+    // 上一版这里躺着 effective_mode_source，XM-WORKBENCH-WIRE-OPS 把它接上了。
+    // 清单逐字钉死，要往里加就得改这条断言——那是这张清单唯一的加法闸门。
+    expect(UNCONSUMED_RESPONSE_FIELDS).toEqual({});
+  });
+
+  it("清单非空时三条规矩都还在（拿合成清单走同一条判据）", () => {
+    // 清单一空，三条规矩就没有真实数据可验了。**这不等于它们还成立**——
+    // 一个空数组上的 for 循环是恒真的。所以这里喂三份站不住脚的合成豁免，
+    // 逐条确认判据真的会挑出来。
+    expect(unsoundExemptions(scanned, UNCONSUMED_RESPONSE_FIELDS)).toEqual([]);
+    // 规矩一：后端已经不给这个字段了
+    expect(unsoundExemptions(scanned, { moon_phase: "编的" })).toEqual([
+      "moon_phase：后端已经不给这个字段了，豁免该删",
+    ]);
+    // 规矩二：没写为什么
+    expect(unsoundExemptions(scanned, { first_at: "   " })).toEqual([
+      "first_at：没写为什么还没接",
+    ]);
+    // 规矩三（最容易漏的那条）：已经接上了却还留在清单里
+    expect(unsoundExemptions(scanned, { failed_jobs_status: "其实已经接了" })).toEqual([
+      "failed_jobs_status：已经接上了，这一行该删",
+    ]);
+    // 对照组：一条真正站得住的豁免**不该**被挑出来。少了这一条，上面三条也
+    // 可能只是因为判据恒挑。合成一份「后端在给、写了理由、前端确实没接」的
+    // 配对：标签取真的（ops_overview.go 里确实有 first_at），declared 清空。
+    const notYetConsumed: ScannedPair[] = [
+      {
+        ts: "合成/ops.ts",
+        go: PAIRS[0].go,
+        tags: scanned[0]?.tags ?? [],
+        declared: new Set<string>(),
+      },
+    ];
+    expect(unsoundExemptions(notYetConsumed, { first_at: "这一格还没做" })).toEqual([]);
   });
 
   describe("变异验证：后端多一个字段时，对账真的会把它算成缺失", () => {

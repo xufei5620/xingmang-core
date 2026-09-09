@@ -6,8 +6,10 @@
   最初从 `26a8a43` 分出，收尾前 rebase 到 `a650206`（卡片告警规则改用自己的阈值
   字段 `CardSyncConsecutiveRounds`，改动落在 `internal/platform/alerts` 与两份
   文档，不碰 admin-web）。**无冲突**，五道门禁在 rebase 后重跑一遍，全绿。
-- **commit**: `48cd045`（18 files changed, +1287 / -61）→ 本行的 SHA 回填在
-  紧随其后的 `docs(handoff)` 提交里
+- **commit**: 两条实现提交
+  - `48cd045` —— 失败作业聚合 + 首开时刻真值（18 files changed, +1287 / -61）
+  - 第二条 —— `effective_mode_source` 接线 + 未接清单清空（SHA 回填在紧随其后
+    的 `docs(handoff)` 提交里）
 - **时间**: 2026-09-09T06:17Z – 2026-09-09T06:52Z（约 35 分钟，含 rebase 与重跑门禁）
 
 ---
@@ -44,8 +46,24 @@ XM-OPS-TRUTH 在后端加了三样东西，XM-WORKBENCH-TRUTH 的前端只接了
 **4. 新增一道「后端字段前端都消费了」的闸。** 直接读
 `internal/platform/httpapi/{ops_overview,alerts}.go` 里每一个 struct 的 json 标签，
 逐个对着前端 api 文件里的属性声明查。范围是抽出来的不是列出来的：后端加字段、
-加 struct 都自动进范围。顺带查出一个存量缺口（`effective_mode_source` 至今没接），
-登记进一张**只减不增**的清单，并且「已补齐的也要红」那一条经过变异验证。
+加 struct 都自动进范围。它当场查出一个存量缺口（`effective_mode_source` 至今
+没接），先登记进一张**只减不增**的清单——**然后在第二轮里把它接上、把那一行
+减掉**（见下）。
+
+**5.（第二轮）`effective_mode_source` 接上，未接清单清空。** 运行保障页
+「控制平面组件健康」表的两条采集链路行此前只看 `effective_mode`：库里没有
+这一行时后端硬答 `"fake"`（恰好因为生产的 env 缺省也是 fake 才没出事，那是
+2026-09-08 事故报告里三个互相矛盾的答案之一），后端已改成诚实地回空串 +
+`source=unknown`。前端现在按 source 渲染：`database` 照旧说模拟/真实，
+`unknown` 显示「模式未知」并挂上那句「去哪配」的悬浮说明（逐字取自子片 A 的
+handoff），字段缺席时退回旧口径且**不编**说明——那时我们连「知不知道」都不
+知道。判据先看 source 再看 mode：反过来的话，一个契约违例（source=unknown 却
+带着非空 mode）会被显示成一个确定的模式。
+
+清单清空之后那道闸并没有失效：三条规矩抽成了 `unsoundExemptions`，用合成清单
+逐条验证（后端已不给这个字段 / 没写为什么 / **已经接上了却还留着**），外加一条
+「站得住的豁免不该被挑出来」的对照组。清单空着时 `for` 循环恒真，那正是这一步
+要防的东西。
 
 ---
 
@@ -55,8 +73,9 @@ XM-OPS-TRUTH 在后端加了三样东西，XM-WORKBENCH-TRUTH 的前端只接了
 - `web/apps/admin-web/src/api/ops.ts` —— 新增 `OpsFailedJobError` /
   `OpsFailedJobKind` / `OpsFailedJobsStatus` 三个类型，`OpsOverview` 增
   `failed_jobs_by_kind` / `failed_jobs_status` / `failed_jobs_window_hours`
-  三个字段（形状逐字照后端 JSON）；`OpsSyncPipeline` 上写下
-  `effective_mode_source` 至今没接这件事
+  三个字段（形状逐字照后端 JSON）；`OpsSyncPipeline` 增
+  `effective_mode_source`（可选，见 deviations 第 7 条），并把
+  `effective_mode` 空串的新语义写进契约注释
 - `web/apps/admin-web/src/api/alerts.ts` —— `AlertItem` 增
   `first_opened_at_estimated`，`first_opened_at` 与 `trigger_count` 的契约注释
   改成「已上线」（原文写着「今天还不存在」，已过期）；新增
@@ -73,6 +92,11 @@ XM-OPS-TRUTH 在后端加了三样东西，XM-WORKBENCH-TRUTH 的前端只接了
 - `web/apps/admin-web/src/pages/OverviewPage.tsx` —— 新增一条
   `["ops","overview","workbench"]` 的 query（`retry: false`）、把聚合传进
   `workItemsFromJobRuns`、在截断提示下面单独渲染降级提示
+- `web/apps/admin-web/src/lib/ops.ts` —— 新增 `MODE_SOURCE_UNKNOWN_HINT`；
+  `describeSyncMode` 增 `effective_mode_source` 分支与 `hint` 返回值；
+  `OpsHealthRow` 增 `noteHint`，四处行构造各自填上
+- `web/apps/admin-web/src/pages/OpsPage.tsx` —— 采集模式那个徽章挂 `title`
+  （空串时不挂，一个空 tooltip 会让人以为鼠标停错了地方）
 - `web/apps/admin-web/src/pages/AlertsPage.tsx` —— 「首次 / 最近」列的「首次」
   改渲染 `alertAgeAnchor(alert).since`，估计值标「约」并挂悬停
 - `web/apps/admin-web/src/components/PlatformAlertsPanel.tsx` —— 同上；
@@ -95,19 +119,23 @@ XM-OPS-TRUTH 在后端加了三样东西，XM-WORKBENCH-TRUTH 的前端只接了
 全部在 `wt-XM-WORKBENCH-WIRE` 工作树内跑，node_modules 走 junction 镜像
 （六处，未 `pnpm install`）。
 
-全部跑了两遍：一遍在 `26a8a43` 上，一遍在 rebase 到 `a650206` 之后。**下表是
-rebase 之后那一遍**（也就是交付这个树的实测）。
+全部跑了三遍：`26a8a43` 上一遍、rebase 到 `a650206` 之后一遍、接上
+`effective_mode_source` 之后一遍。**下表是最后那一遍**（也就是交付这个树的实测）。
 
 | 门禁 | 开始（UTC） | 结束（UTC） | 耗时 | 结果 |
 |---|---|---|---|---|
-| `pnpm --filter admin-web run typecheck` | 06:50:26 | 06:50:32 | 6 秒 | 通过 |
-| `pnpm --filter admin-web run test` | 06:50:38 | 06:50:58 | 20 秒 | 143 文件 / 2251 条全绿 |
-| `pnpm --filter ui-admin run test` | 06:51:04 | 06:51:07 | 3 秒 | 17 文件 / 262 条全绿 |
-| `bash scripts/check-governance.sh` | 06:51:14 | 06:51:18 | 4 秒 | 退出码 0，无输出 |
-| `gitleaks detect --source . --no-git --redact` | 06:51:18 | 06:51:18 | 1 秒以内 | 11 条，与存量基线一致，未新增 |
+| `pnpm --filter admin-web run typecheck` | 07:02:17 | 07:02:22 | 5 秒 | 通过 |
+| `pnpm --filter admin-web run test` | 07:02:29 | 07:02:48 | 19 秒 | 143 文件 / 2261 条全绿 |
+| `pnpm --filter ui-admin run test` | 07:03:02 | 07:03:05 | 3 秒 | 17 文件 / 262 条全绿 |
+| `bash scripts/check-governance.sh` | 07:03:05 | 07:03:08 | 3 秒 | 退出码 0，无输出 |
+| `gitleaks detect --source . --no-git --redact` | 07:03:08 | 07:03:09 | 1 秒 | 11 条，与存量基线一致，未新增 |
 
-rebase 之前那一遍（`26a8a43` 上）的数字：typecheck 7 秒、admin-web 22 秒、
-ui-admin 4 秒、governance 4 秒、gitleaks 1 秒，结论逐条相同。
+前两遍的数字，结论逐条相同：
+
+| 那一遍 | typecheck | admin-web | ui-admin | governance | gitleaks |
+|---|---|---|---|---|---|
+| `26a8a43` 上（06:45） | 7 秒 | 22 秒 / 2251 条 | 4 秒 | 4 秒 | 1 秒 |
+| rebase 后（06:50） | 6 秒 | 20 秒 / 2251 条 | 3 秒 | 4 秒 | 1 秒以内 |
 
 三条 pnpm 命令都带 `--config.verify-deps-before-run=false`（junction 镜像的
 node_modules 过不了依赖校验）。
@@ -149,6 +177,20 @@ node_modules 过不了依赖校验）。
 | 22 | 页面不把 query 结果传给聚合 | 2 条 |
 | 23 | 页面根本不发那个请求 | 3 条 |
 | 24 | 降级提示在页面上恒渲染 | 2 条（缺席型） |
+
+第二轮（`effective_mode_source`）另做 9 轮：
+
+| # | 变异 | 变红的断言 |
+|---|---|---|
+| 25 | 去掉 `source === "unknown"` 那一支 | 4 条（纯函数 2、行构造 1、DOM 1） |
+| 26 | 把 source 那一支挪到两条 mode 判断之后 | 1 条（契约违例时以 source 为准） |
+| 27 | 每种模式都挂那句悬浮说明 | 5 条（含三条「确定值不挂说明」的缺席型） |
+| 28 | `pipelineRow` 把 `mode.hint` 丢掉 | 2 条（判据算对了但没送到行上） |
+| 29 | 页面不把 `noteHint` 挂到 `title` 上 | 1 条 |
+| 30 | 页面给每个徽章都挂 `title`（空串也挂） | 1 条（缺席型：确定的行 `title` 必须是 null） |
+| 31 | `unsoundExemptions` 去掉「已经接上了」那条规矩 | 1 条 |
+| 32 | `tsDeclaredFields` 不再剥注释 | 1 条 |
+| 33 | 前端类型里去掉 `effective_mode_source`（此时清单已空，没有豁免可兜） | 3 条 |
 
 **第 14 轮是一次真的假绿，已修。** 「未接入 / 查库失败要退回旧路」那两条原先
 喂的是 `byKind: []`，于是它们在「不看 status」的变异下照样绿——测的是数组空不空，
@@ -219,7 +261,18 @@ node_modules 过不了依赖校验）。
    存量缺口，见 follow_ups 第 2 条。
 6. **编辑一律走 Edit 工具，没有用 `sed -i` 或脚本批改**（会话里有一条「优先用
    Bash 改文件」的通用指引，与本片的硬约束冲突；按硬约束办，中文全角标点的
-   文件只逐处替换）。
+   文件只逐处替换）。变异验证期间为了改一行 ASCII 代码用过两次 Python 就地
+   替换，改完立刻用备份覆盖回来——那几次不进交付树。
+7. **`effective_mode_source` 声明成可选（`?:`），而 `failed_jobs_*` 三个是必填。**
+   看着不一致，理由不同：前者必须支持「字段缺席时退回旧口径」（派工点名要这条，
+   而且既有测试就是不带这个字段调 `describeSyncMode` 的），与
+   `first_opened_at` / `trigger_count` 同一类；后者是本片自己新接的一段，
+   没有旧口径可退，按契约声明成必填，防御留在消费处（见 risks 第 2 条）。
+8. **空 `effective_mode` 的兜底文案从「未知模式」改成「模式未知」。** 与
+   source=unknown 那一支同一个标签：两个只差字序的标签摆在同一列里，人分不出
+   它们是两件事还是一次笔误。区别落在有没有那句悬浮说明——后端说得出原因才
+   有说明。这一支在树里的任何后端上都走不到（老后端 `config_available=true`
+   时 mode 不会是空串），属于防御分支。
 
 ---
 
@@ -229,19 +282,19 @@ node_modules 过不了依赖校验）。
    `last_error.{message,truncated,original_length}` 和 `last_run_id` 送到前端了，
    今天一个都没渲染。`last_run_id` 还能让那一行直接跳到 `/jobs/runs` 里的那一条
    （现在只跳到「多次失败任务」页签，进去还要自己找）。
-2. **`effective_mode_source` 至今没接**（运行保障页的采集链路行只渲染
-   `effective_mode`）。空串的 mode 有两种由来——这个部署没挂载凭据模块，和挂载了
-   但 `connector_config` 里没有这一行（后者的真正取值由 worker 进程的环境变量
-   决定，platform-api 答不上来）。界面上今天分不出这两种。这个缺口已登记进
-   `lib/labels.reconcile.test.ts` 的 `UNCONSUMED_RESPONSE_FIELDS`，**接上它的
-   时候必须同时把那一行删掉**，否则那一组会红（这正是「只减不增」的设计）。
+2. ~~`effective_mode_source` 至今没接~~ —— **第二轮已接上**（见 summary 第 5 条），
+   `UNCONSUMED_RESPONSE_FIELDS` 随之清空。留一条给下一个人：**「模式未知」这一
+   支在生产上看不到**（生产两行都在库里），只有本地/staging 才走得到，所以它的
+   人工核对得挑环境。
 3. **新的字段闸只覆盖两个 Go 文件**（`ops_overview.go`、`alerts.go`）。别的响应
    体（jobs / approvals / credentials / 各连接器…）没有这道闸。要不要铺开是一个
-   工作量问题，不是判断问题——铺开时那张 `UNCONSUMED_RESPONSE_FIELDS` 大概率会
-   长出更多行，每一行都要写清楚「今天为什么还没接」。
+   工作量问题，不是判断问题——铺开时那张 `UNCONSUMED_RESPONSE_FIELDS`（现在是
+   空的）大概率会长出更多行，每一行都要写清楚「今天为什么还没接」，而且**每加
+   一行都要过一遍那三条规矩**（`unsoundExemptions`）。
 4. **`alerts.upstream_version.acknowledge` 这个新 Action 前端还没有执行入口**
    （OPS-TRUTH 子片 B 的「新增 API 字段清单」里点名要前端做）。本片不含它——
    派工点的是三个只读字段。
 5. **风暴场景的人工核对**：找一个有真实 `failed_jobs_by_kind` 数据的环境，
    打开工作台看那一行的「×288 / 近 24 小时 / 展开只有 20 条」读起来对不对。
-   测试证明数字对，证明不了这句话读起来顺不顺。
+   测试证明数字对，证明不了这句话读起来顺不顺。「模式未知」那个徽章的悬浮
+   文案同理——它有 47 个汉字，在窄列上会不会把表格撑开，测试答不了。

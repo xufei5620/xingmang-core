@@ -54,14 +54,25 @@ export interface OpsSyncPipeline {
   /** 只有这个部署压根没挂载凭据模块时才是 false——与「挂载了但还没配置」不是一回事,
    *  两者混着显示会让人以为配一下就能用，实际上这个部署没有这个模块。 */
   config_available: boolean;
-  /** "fake" | "real" | ""（仅当 config_available 为 false 时为空）。 */
+  /** "fake" | "real" | ""。
+   *
+   *  **空串是「本进程不知道」，不是「没配置」**（XM-OPS-TRUTH 子片 A 起的语义）。
+   *  为什么不知道，由下一个字段说；不要拿 `=== "fake"` 之类的判断把空串落进
+   *  未定义分支。 */
   effective_mode: string;
-  // 后端还给了 effective_mode_source（"database" | "unknown"），**这里至今没接**。
-  // 空串的 mode 有两种由来：这个部署没挂载凭据模块，和挂载了但 connector_config
-  // 里没有这一行——后者的真正取值由 worker 进程的环境变量决定，platform-api
-  // 答不上来。界面上今天分不出这两种，接上之后才分得出。
-  // 这个缺口登记在 lib/labels.reconcile.test.ts 的 UNCONSUMED_RESPONSE_FIELDS 里，
-  // 那张清单只减不增：补上它的时候要同时把那一行删掉。
+  /** 上一行那个答案是**从哪来的**："database" | "unknown" | ""。
+   *
+   *  - `"database"`：`core.connector_config` 里有这一行，`effective_mode` 是确定值。
+   *  - `"unknown"`：库里没有这一行。那一轮实际按 **worker 进程**的
+   *    `XM_SUB2API_MODE` / `XM_NEWAPI_MODE` 缺省跑，而 platform-api 容器根本没有
+   *    这两个键（它不跑同步），所以它诚实地说「我不知道」而不是猜一个 fake。
+   *  - `""`：`config_available` 为 false，两个字段一起是空的。
+   *
+   *  **永远不会是 `"env"`**：那是 worker 才答得出的来源，这个端点答不出。
+   *
+   *  可选是为了老后端还没有这一列的那段部署窗口——缺席时
+   *  `describeSyncMode` 退回只看 `effective_mode` 的旧口径。 */
+  effective_mode_source?: string;
   config_updated_at: string | null;
   /** 这一行的新鲜度取自哪个指标，例如 "sub2api.channels.status"。 */
   sample_metric_key: string;

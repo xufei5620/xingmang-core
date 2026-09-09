@@ -16,7 +16,18 @@ import type { OpsFreshness, OpsMetricSnapshot, OpsOverview, OpsSyncPipeline } fr
 export interface OpsModeDisplay {
   label: string;
   tone: BadgeTone;
+  /** 悬浮说明；没有可说的就是空串（**不是 undefined**：调用方直接往
+   *  `title` 上挂，两种空值会让那一处多一道判断）。 */
+  hint: string;
 }
+
+/** 后端说「这一行库里没有」时，界面上要说的那句话。
+ *
+ *  逐字取自 XM-OPS-TRUTH 子片 A 的 handoff（api_fields 一节的「渲染规则」）。
+ *  它同时回答了两件事：为什么这里答不出来，以及该去哪把它变成答得出来。 */
+export const MODE_SOURCE_UNKNOWN_HINT =
+  "该平台未在后台配置接入模式，实际按 worker 进程的环境变量缺省运行；" +
+  "到 设置 → 凭据 → 接入模式 显式配置后此处才有确定答案。";
 
 /** 采集链路「有效模式」的展示口径。
  *
@@ -25,22 +36,46 @@ export interface OpsModeDisplay {
  *  就能用，实际上这个部署里根本没有这个模块可配。
  *
  *  fake 不能显示成和 real 一样的语气：fake 模式下渠道数据是模拟出来的，
- *  运营拿它去核对真实告警会得出错误结论。 */
+ *  运营拿它去核对真实告警会得出错误结论。
+ *
+ *  ## 「不知道」不能被显示成一个具体的模式（XM-WORKBENCH-WIRE-OPS）
+ *
+ *  `effective_mode_source === "unknown"` 表示 `core.connector_config` 里没有这一
+ *  行：那一轮实际按 **worker 进程**的环境变量缺省跑，而 platform-api 容器没有
+ *  那两个键（它不跑同步）。这个端点此前在这种情况下硬答 `"fake"`——恰好因为
+ *  生产的 env 缺省也是 fake 才没出事，那是 2026-09-08 事故报告里三个互相矛盾
+ *  的答案之一。后端已经改成诚实地回空串 + `source=unknown`，界面这边就不能
+ *  再把它落进「未知的第三个值」那条兜底分支里默默显示成一个空徽章。
+ *
+ *  **判据先看 source、再看 mode**：source 回答的是「这个答案算不算数」，
+ *  mode 回答的是「答案是什么」。顺序反过来的话，一个契约违例（source=unknown
+ *  却带着非空 mode）会被显示成一个确定的模式。
+ *
+ *  `effective_mode_source` 缺席（老后端还没有这一列）时退回只看 `effective_mode`
+ *  的旧口径：那时我们连「知不知道」都不知道，编一句悬浮说明出来是造假。 */
 export function describeSyncMode(
-  pipeline: Pick<OpsSyncPipeline, "config_available" | "effective_mode">,
+  pipeline: Pick<
+    OpsSyncPipeline,
+    "config_available" | "effective_mode" | "effective_mode_source"
+  >,
 ): OpsModeDisplay {
   if (!pipeline.config_available) {
-    return { label: "凭据模块未挂载", tone: "neutral" };
+    return { label: "凭据模块未挂载", tone: "neutral", hint: "" };
+  }
+  if (pipeline.effective_mode_source === "unknown") {
+    return { label: "模式未知", tone: "warning", hint: MODE_SOURCE_UNKNOWN_HINT };
   }
   if (pipeline.effective_mode === "real") {
-    return { label: "真实对接", tone: "success" };
+    return { label: "真实对接", tone: "success", hint: "" };
   }
   if (pipeline.effective_mode === "fake") {
-    return { label: "模拟数据", tone: "warning" };
+    return { label: "模拟数据", tone: "warning", hint: "" };
   }
-  // 契约里 config_available=true 时 effective_mode 只会是 fake/real 之一；
-  // 真出现第三个值就原样显示，不要假装认识它（未知值不静默吞掉）
-  return { label: pipeline.effective_mode || "未知模式", tone: "warning" };
+  // 契约里 source 为 database 时 effective_mode 只会是 fake/real 之一；
+  // 真出现第三个值就原样显示，不要假装认识它（未知值不静默吞掉）。
+  // 空串走到这里只有一种由来：老后端没有 source 这一列——那时**没有**悬浮
+  // 说明可挂，我们并不知道它为什么是空的。
+  return { label: pipeline.effective_mode || "模式未知", tone: "warning", hint: "" };
 }
 
 export interface ConnectorHealthValue {
@@ -82,6 +117,11 @@ export interface OpsHealthRow {
   /** 状态徽章旁的次要说明（采集模式 / 连接器健康摘要）；没有则为空串。 */
   note: string;
   noteTone: BadgeTone;
+  /** 上一格的悬浮说明；没有则为空串。
+   *
+   *  「模式未知」这四个字自己解释不了任何事——它说的是「库里没这一行」，
+   *  而人看见它想知道的是「那现在到底在跑哪个模式、我该去哪配」。 */
+  noteHint: string;
 }
 
 const NO_DEPENDENCY = "-";
@@ -110,6 +150,7 @@ function pipelineRow(id: string, component: string, environment: string, pipelin
     dependency: pipeline.sample_metric_key || NO_DEPENDENCY,
     note: mode.label,
     noteTone: mode.tone,
+    noteHint: mode.hint,
   };
 }
 
@@ -140,6 +181,9 @@ function connectorHealthRow(
     // 与 true 都不该染成红色——前者是「不知道」，不是「不健康」
     noteTone:
       value.healthy === false ? "danger" : value.supported === false ? "warning" : "neutral",
+    // 这一格的三段话自己就说得清（「健康 · v0.2.1 · 矩阵未声明支持」），
+    // 不需要再解释一遍。
+    noteHint: "",
   };
 }
 
@@ -166,6 +210,7 @@ export function buildOpsHealthRows(data: OpsOverview): OpsHealthRow[] {
       dependency: NO_DEPENDENCY,
       note: "",
       noteTone: "neutral",
+      noteHint: "",
     },
     pipelineRow("sync-sub2api", "sub2api 采集链路", environment, sub2apiPipeline),
     pipelineRow("sync-newapi", "newapi 采集链路", environment, newapiPipeline),
@@ -179,6 +224,7 @@ export function buildOpsHealthRows(data: OpsOverview): OpsHealthRow[] {
       dependency: NO_DEPENDENCY,
       note: "",
       noteTone: "neutral",
+      noteHint: "",
     },
   ];
 }

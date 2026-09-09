@@ -99,8 +99,8 @@ const FIXTURE: OpsOverview = {
   failed_jobs_window_hours: 24,
 };
 
-function renderOps(initialEntry = "/ops") {
-  const fetchImpl = vi.fn(async () => jsonResponse(FIXTURE));
+function renderOps(initialEntry = "/ops", body: unknown = FIXTURE) {
+  const fetchImpl = vi.fn(async () => jsonResponse(body));
   vi.stubGlobal("fetch", fetchImpl);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -183,5 +183,53 @@ describe("OpsPage 子页", () => {
       "/ops?sub=health",
     );
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+// XM-WORKBENCH-WIRE-OPS：纯函数那一层已经把三条分支钉过了，这一组只回答
+// 「那句话真的被渲染到格子上了吗」——判据算得对而没人把它挂上去，单测全绿。
+describe("采集链路的「模式未知」（XM-WORKBENCH-WIRE-OPS）", () => {
+  function withPipelines(pipelines: unknown[]) {
+    return { ...FIXTURE, sync_pipelines: pipelines };
+  }
+  const sub2api = FIXTURE.sync_pipelines[0];
+  const newapi = FIXTURE.sync_pipelines[1];
+
+  it("source=unknown 的那一行显示「模式未知」，悬浮里写着去哪配", async () => {
+    renderOps(
+      "/ops",
+      withPipelines([
+        { ...sub2api, effective_mode: "", effective_mode_source: "unknown" },
+        { ...newapi, effective_mode: "real", effective_mode_source: "database" },
+      ]),
+    );
+    const badge = await screen.findByText("模式未知");
+    expect(badge.getAttribute("title")).toContain("未在后台配置接入模式");
+    expect(badge.getAttribute("title")).toContain("设置 → 凭据 → 接入模式");
+    // 「不知道」没有被显示成一个具体的模式：这一屏上不该出现「模拟数据」
+    // ——后端此前正是在这种情况下硬答 fake 的。
+    expect(screen.queryByText("模拟数据")).toBeNull();
+  });
+
+  it("source=database 的行照常显示模式，且不挂那句悬浮说明", async () => {
+    renderOps(
+      "/ops",
+      withPipelines([
+        { ...sub2api, effective_mode: "real", effective_mode_source: "database" },
+        { ...newapi, effective_mode: "fake", effective_mode_source: "database" },
+      ]),
+    );
+    expect(await screen.findByText("真实对接")).toBeTruthy();
+    expect(screen.getByText("真实对接").getAttribute("title")).toBeNull();
+    expect(screen.getByText("模拟数据").getAttribute("title")).toBeNull();
+    expect(screen.queryByText("模式未知")).toBeNull();
+  });
+
+  it("老后端没有这一列时照旧显示模式，不因为字段缺席就退化成「模式未知」", async () => {
+    // FIXTURE 里那两条本来就不带 effective_mode_source。
+    renderOps();
+    expect(await screen.findByText("真实对接")).toBeTruthy();
+    expect(screen.getByText("模拟数据")).toBeTruthy();
+    expect(screen.queryByText("模式未知")).toBeNull();
   });
 });
