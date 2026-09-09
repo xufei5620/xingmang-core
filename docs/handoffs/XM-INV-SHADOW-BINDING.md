@@ -509,6 +509,45 @@ dry-run 时两行加后缀 `(rolled back; --apply will mint different ids)`；�
 **变异编号 16 的缺口**：15 之后直接跳到 17，中间没有 16 号——那是我编号时跳过的，不是
 漏掉一条变异。为避免再被当成缺失，这里记一笔。
 
+## 4g. 生产实跑打回：9c 的 origin 取法在真机上不成立
+
+RC109 上线后，主控者按 9c 对候选账号跑第一次 dry-run，被工具直接拒了：
+`SUB2API_LOGIN_BASE_URL is not set: ...`。
+
+根因（已复核）：生产 `.env.production` 里**根本没有**
+`SUB2API_LOGIN_BASE_URL` / `NEWAPI_LOGIN_BASE_URL` 这两个键。api 容器里的值来自
+`deploy/docker-compose.prod.yml:259-260` 的
+`${SUB2API_LOGIN_BASE_URL:-https://api.solov.cc}` / `${NEWAPI_LOGIN_BASE_URL:-https://xm.solov.cc}`
+——`:-默认值` 意味着这两个键在 env 文件里是**可选的**。于是 `--env-file` 传进去的是空，
+工具（按设计）拒绝运行。
+
+**这是我第二次犯同一类错误。** 上一次是 issuer 比对集拿 fixture 当真相源（4d 节），
+这一次是拿 `deploy/.env.production.example` 当真相源——例子文件第 113、114 行确实列了
+这两个键，我就据此断定真机上也有。可 compose 里写着 `:-默认值`，那本身就是「这个键
+可以不存在」的声明，我没有读到那一层。**模板里有 ≠ 真机上有。**
+
+改法：origin 从 **api 容器实际生效值**取，那才是「必须与之一致」的那个东西：
+
+```
+S="$(docker exec invoice-system-prod-api-1 printenv SUB2API_LOGIN_BASE_URL)"
+N="$(docker exec invoice-system-prod-api-1 printenv NEWAPI_LOGIN_BASE_URL)"
+docker run ... -e "SUB2API_LOGIN_BASE_URL=$S" -e "NEWAPI_LOGIN_BASE_URL=$N" ...
+```
+
+`--env-file` 按派工保留，无害：`-e` 优先级高于它，显式值总会赢；万一日后有人把这两个
+键写进 env 文件且值不同，赢的仍是从 api 容器取到的实际生效值。命令块里加了一行
+`printf` 把取到的两个值打出来，空串就说明容器名不对或没在跑，先解决再往下走。
+
+**工具的错误信息也改了**（本节唯一的代码改动，纯文案）：原来那句让人去用
+`--env-file`——正是刚刚失败的那个做法，留着会让下一个运维原样再撞一次。现在它给出
+`docker exec ... printenv` 的取法，并明说「不要指望 --env-file，这个键在
+.env.production 里是可选的」。对应测试断言从「消息里含 --env-file」改成「含
+printenv 且含 Do NOT rely on --env-file」。
+
+工具**拒绝运行**这个行为本身是对的、没有改：它挡住了一次会把错 issuer 永久写进
+`invoice_users.oidc_issuer` 的操作，正是 4b 节加它的目的。错的只是它和手册给出的
+补救办法。
+
 ## 5. 偏离与未证实
 
 **偏离**

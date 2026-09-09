@@ -303,9 +303,13 @@ func platformLoginOrigin(platform string) (string, error) {
 	}
 	value := strings.TrimSpace(os.Getenv(variable))
 	if value == "" {
-		return "", fmt.Errorf("%s is not set: pass the api's own environment with "+
-			`docker run --env-file "$PRODUCTION_ENV_FILE", because this value is written `+
-			"permanently into invoice_users.oidc_issuer and no later login repairs it", variable)
+		return "", fmt.Errorf("%s is not set. Copy the value the api actually uses: "+
+			`S="$(docker exec invoice-system-prod-api-1 printenv %s)"`+
+			` then pass -e "%s=$S". Do NOT rely on --env-file: this key is optional in`+
+			" .env.production (compose supplies it as ${%s:-...}), so the env file usually"+
+			" does not contain it at all. This value is written permanently into"+
+			" invoice_users.oidc_issuer and no later login repairs it",
+			variable, variable, variable, variable)
 	}
 	value = strings.TrimRight(value, "/")
 	if !strings.HasPrefix(value, "https://") || strings.ContainsAny(value, " \r\n\t") {
