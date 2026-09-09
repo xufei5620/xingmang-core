@@ -41,7 +41,14 @@
 | `scripts/check-no-secrets.ps1` | 03:11:24 | 03:11:26 | 2s | 0 |
 | `scripts/test-release-image-gate.ps1`（改名后） | 03:13 | 03:13 | 2s | exit 0 |
 | `scripts/verify.ps1` 完整源码门禁（第 3 次，`f151767`） | 03:36:54 | 03:43:24 | 390s | **exit 0，`All local verification gates passed`**（`logs/detached-runs/rc106-gate-20260909T033653Z-afd6`） |
-| 镜像门禁 / 产物校验 / 签名 | 待做 | | | |
+| 镜像门禁（`release/run-rc106-image-gate.ps1`，工作树 `wt-XM-INV-AUTOLOGIN` detach 在 `7efece3`，第 4 次） | 03:49:38 | 03:59:09 | 570s | **exit 42（预期，待金丝雀）**；普通校验 0；严格可传输校验 0；产物目录 `release/0.1.0-rc106-exact3`（66 项） |
+| `ssh-keygen -Y sign` 签 `SHA256SUMS` + bash 重定向验签 | 04:0x | | 1s | `Good "solov-invoice-release-v1" signature for invoice-release@solov.cc` |
+
+镜像门禁前三次没跑起来，都是启动环境：在会话 shell 里直接起，包装脚本比对工作树路径时 git 的
+中文路径被按 OEM 代码页解码（0 秒红）；经 detached runner 起但包装没把 `bash` 指到 WSL（30 秒红，
+同源码门禁的第一条）；用 sed 插 PATH 行时把它吞进了注释（同样 30 秒红）。前两次留下的空产物目录
+`exact1/exact2`（各只有一份 source-verification.log）已删除，免得手册里「逐个校验 exact*」那段撞上。
+签名 tag `v0.1.0-rc106-signed` → `7efece3e`，`git verify-tag` Good。
 
 `verify.ps1` 前两次红，都不是代码问题，都记进了工具与脚本：
 
