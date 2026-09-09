@@ -134,6 +134,12 @@ func (w *AlertEvaluateWorker) Work(ctx context.Context, job *river.Job[AlertEval
 		slog.Int("alerts_opened", res.Opened),
 		slog.Int("alerts_merged", res.Merged),
 		slog.Int("alerts_resolved", res.Resolved),
+		// 三个抑制器计数必须逐轮可见：一个不留痕的抑制器就是下一个
+		// 「安静地给你一个旧答案」。suppressed＝本轮失败但迟滞门槛没到、
+		// held＝本轮已恢复但迟滞还没放手、version_ack＝版本变过但有人核对过。
+		slog.Int("hysteresis_suppressed", res.HysteresisSuppressed),
+		slog.Int("hysteresis_held", res.HysteresisHeld),
+		slog.Int("version_ack_suppressed", res.VersionAckSuppressed),
 		slog.Int("notify_delivered", res.Delivered),
 		slog.Int("notify_failed", res.NotifyFailed),
 		slog.Int("notify_skipped", res.NotifySkipped),

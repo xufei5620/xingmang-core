@@ -413,6 +413,14 @@ func defaultObjects() []ObjectGrant {
 	add("table", "ops", "metric_observation_sample", map[string][]string{"xm_api_runtime": {"SELECT"}, "xm_worker_runtime": {"SELECT", "INSERT", "DELETE"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "alerts", "alert", map[string][]string{"xm_api_runtime": {"SELECT", "UPDATE"}, "xm_worker_runtime": {"SELECT", "INSERT", "UPDATE", "DELETE"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	add("table", "alerts", "alert_silence", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
+	// alerts.upstream_version_ack (migration 000054). The API needs UPDATE in
+	// addition to INSERT: the Action writes with ON CONFLICT DO UPDATE, because
+	// one upstream has exactly one *current* acknowledged version. Copying
+	// alert_silence's {SELECT, INSERT} shape would compile, pass every local
+	// test, and only fail on the day role separation actually ships -- grants
+	// are written for the statement that runs, not for the table that looks
+	// nearest. The worker (alert evaluator) only ever reads it.
+	add("table", "alerts", "upstream_version_ack", map[string][]string{"xm_api_runtime": {"SELECT", "INSERT", "UPDATE"}, "xm_worker_runtime": {"SELECT"}, "xm_lifecycle_runtime": {"SELECT"}, "xm_ops_read": {"SELECT"}, "xm_backup_read": {"SELECT"}})
 	for _, name := range []string{"upstream_account", "token_map", "profit_daily", "proxy_asset", "subscription_cost_batch", "amortization_loss", "balance_history", "platform_channel_binding", "runway_threshold_config", "runway_threshold_history", "runway_threshold_current_verified"} {
 		grants := readAll
 		if name == "upstream_account" {
@@ -491,8 +499,9 @@ func tableColumns(kind, schema, name string) []string {
 		"audit.archive_terminal_receipt":            {"operation_id", "signed_result_bytes", "terminal_result_digest", "optional_artifact_ref_bytes", "recorded_at"},
 		"ops.metric_observation":                    {"id", "metric_key", "source", "environment", "observed_at", "synced_at", "watermark", "status", "is_partial", "last_success", "last_error_code", "staleness_threshold_seconds", "value_json", "updated_at"},
 		"ops.metric_observation_sample":             {"id", "metric_key", "source", "environment", "observed_at", "synced_at", "status", "is_partial", "watermark", "last_error_code", "value_json"},
-		"alerts.alert":                              {"id", "rule_key", "dedup_key", "severity", "status", "title", "detail", "environment", "opened_at", "acknowledged_at", "resolved_at", "last_seen_at", "fire_count", "source_metric_key", "notify_status", "notify_error", "notified_at", "created_at", "updated_at"},
+		"alerts.alert":                              {"id", "rule_key", "dedup_key", "severity", "status", "title", "detail", "environment", "opened_at", "acknowledged_at", "resolved_at", "last_seen_at", "fire_count", "source_metric_key", "notify_status", "notify_error", "notified_at", "created_at", "updated_at", "trigger_count", "first_opened_at"},
 		"alerts.alert_silence":                      {"id", "rule_key", "environment", "reason", "starts_at", "ends_at", "created_by", "created_at"},
+		"alerts.upstream_version_ack":               {"environment", "metric_key", "version", "source", "acknowledged_by", "acknowledged_at", "note"},
 		"finance.upstream_account":                  {"id", "system_type", "access_method", "base_url", "credential_ref", "recharge_ratio", "currency", "business_day_tz", "status", "environment", "created_at", "updated_at", "platform_id", "group_rate", "upstream_name", "upstream_contact", "upstream_group"},
 		"finance.token_map":                         {"upstream_account_id", "upstream_token_id", "own_account_id", "credential_ref", "created_at", "updated_at"},
 		"finance.profit_daily":                      {"upstream_account_id", "business_day", "business_day_tz", "token_id", "account_id", "platform_id", "revenue_minor", "cost_minor", "profit_minor", "currency", "ratio_snapshot", "source", "cost_observed_at", "revenue_observed_at", "updated_at"},

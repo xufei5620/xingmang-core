@@ -23,6 +23,20 @@ type fakeJobsQuerier struct {
 	page      jobs.RunPage
 	listErr   error
 	gotListIn jobs.ListRunsInput
+
+	summaries     []jobs.FailedRunSummary
+	summaryErr    error
+	gotSummaryEnv string
+	// gotSummarySince 让用例能断言窗口是服务端算的、不是调用方传的。
+	gotSummarySince time.Time
+}
+
+func (f *fakeJobsQuerier) FailedRunSummaryByKind(
+	_ context.Context, environment string, since time.Time,
+) ([]jobs.FailedRunSummary, error) {
+	f.gotSummaryEnv = environment
+	f.gotSummarySince = since
+	return f.summaries, f.summaryErr
 }
 
 func (f *fakeJobsQuerier) Overview(_ context.Context, environment string) (jobs.Overview, error) {

@@ -41,14 +41,14 @@ func days(v int) *int { return &v }
 
 func evaluateRunway(t *testing.T, items []finance.UpstreamRunway, cfg RuleConfig) []Finding {
 	t.Helper()
-	findings, err := NewEvaluator(
-		&fakeMetricSource{}, &fakeRunwaySource{items: items}, cfg,
-	).Evaluate(context.Background(), testEnv, time.Now().UTC())
+	res, err := NewEvaluator(
+		&fakeMetricSource{}, &fakeRunwaySource{items: items}, &fakeAckSource{}, cfg,
+	).Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
 	var out []Finding
-	for _, f := range findings {
+	for _, f := range res.Findings {
 		if f.RuleKey == RuleUpstreamRunwayLow {
 			out = append(out, f)
 		}
@@ -166,9 +166,9 @@ func TestRunwayAlertUsesConfiguredThresholds(t *testing.T) {
 	src := &fakeRunwaySource{items: []finance.UpstreamRunway{
 		runwayItem(days(20), finance.AccessUpstreamKey, "sub2api · a"),
 	}}
-	findings, err := NewEvaluator(&fakeMetricSource{}, src,
+	res, err := NewEvaluator(&fakeMetricSource{}, src, &fakeAckSource{},
 		RuleConfig{RunwayThresholds: custom}).
-		Evaluate(context.Background(), testEnv, time.Now().UTC())
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
@@ -176,6 +176,7 @@ func TestRunwayAlertUsesConfiguredThresholds(t *testing.T) {
 		t.Fatalf("传给数据源的阈值 = %+v, want %+v", src.gotThresholds, custom)
 	}
 	// 20 天在默认档下是健康的，在 warn=30 下要报 warning
+	findings := res.Findings
 	var got *Finding
 	for i := range findings {
 		if findings[i].RuleKey == RuleUpstreamRunwayLow {
@@ -197,14 +198,14 @@ func TestRunwayAlertUsesConfiguredThresholds(t *testing.T) {
 // 一次配置手滑变成满屏红。生产 provider 路径不会走这个 fallback，
 // 而是把无效/不可用的 DB 快照整轮 fail closed。
 func TestRunwayThresholdsFallBackWhenInvalid(t *testing.T) {
-	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{
+	e := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, RuleConfig{
 		RunwayThresholds: finance.RunwayThresholds{CriticalDays: 20, WarningDays: 5, SeriousDays: 1},
 	})
 	if got := e.Config().RunwayThresholds; got != finance.DefaultRunwayThresholds() {
 		t.Fatalf("非法阈值应回落默认档, got %+v", got)
 	}
 	// 零值同样（RuleConfig{} 是最常见的构造方式）
-	e = NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, RuleConfig{})
+	e = NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, RuleConfig{})
 	if got := e.Config().RunwayThresholds; got != finance.DefaultRunwayThresholds() {
 		t.Fatalf("零值应回落默认档, got %+v", got)
 	}
@@ -232,15 +233,16 @@ func TestEvaluatorReadsOneThresholdSnapshotPerRoundAndCarriesEvidence(t *testing
 		runwayItem(days(3), finance.AccessUpstreamKey, "a"),
 		runwayItem(days(4), finance.AccessUpstreamKey, "b"),
 	}
-	evaluator := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{items: items}, provider, RuleConfig{})
-	findings, err := evaluator.Evaluate(context.Background(), testEnv, time.Now().UTC())
+	evaluator := NewEvaluatorWithThresholdProvider(
+		&fakeMetricSource{}, &fakeRunwaySource{items: items}, &fakeAckSource{}, provider, RuleConfig{})
+	res, err := evaluator.Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if provider.calls != 1 {
 		t.Fatalf("threshold provider calls=%d want 1", provider.calls)
 	}
-	for _, finding := range findings {
+	for _, finding := range res.Findings {
 		if finding.RuleKey == RuleUpstreamRunwayLow && !strings.Contains(finding.Detail, "threshold_revision=8; critical_days=5; warning_days=10; serious_days=20") {
 			t.Fatalf("missing threshold evidence: %s", finding.Detail)
 		}
@@ -249,8 +251,9 @@ func TestEvaluatorReadsOneThresholdSnapshotPerRoundAndCarriesEvidence(t *testing
 
 func TestEvaluatorThresholdProviderFailureAbortsRound(t *testing.T) {
 	provider := &fakeThresholdProvider{err: errors.New("database unavailable")}
-	_, err := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{}, provider, RuleConfig{}).
-		Evaluate(context.Background(), testEnv, time.Now().UTC())
+	_, err := NewEvaluatorWithThresholdProvider(
+		&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, provider, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err == nil {
 		t.Fatal("threshold provider failure must abort evaluation")
 	}
@@ -260,10 +263,37 @@ func TestEvaluatorThresholdProviderFailureAbortsRound(t *testing.T) {
 //
 // 一条因为装配漏项而永远不响的告警规则，只会在真出事那天才被发现。
 func TestEvaluatorRequiresRunwaySource(t *testing.T) {
-	_, err := NewEvaluator(&fakeMetricSource{}, nil, RuleConfig{}).
-		Evaluate(context.Background(), testEnv, time.Now().UTC())
+	_, err := NewEvaluator(&fakeMetricSource{}, nil, &fakeAckSource{}, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err == nil {
 		t.Fatal("缺可用天数来源必须报错")
+	}
+}
+
+// TestEvaluatorRequiresUpstreamVersionAckSource：同一条纪律用在「已核对的
+// 上游版本」上。
+//
+// 这个来源漏接的失效形态尤其安静：负责人点了「我核对过了」，告警照旧，
+// 而没有任何报错、没有任何痕迹。构造函数把它做成必填参数就是为了让漏接是
+// 编译错误；这条测试守住 Evaluate 里那道 nil 检查不被顺手删掉。
+func TestEvaluatorRequiresUpstreamVersionAckSource(t *testing.T) {
+	_, err := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{}, nil, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
+	if err == nil {
+		t.Fatal("缺已核对上游版本来源必须报错")
+	}
+}
+
+// TestUpstreamVersionAckSourceErrorFailsEvaluation：取数失败让整轮失败。
+//
+// 吞掉它等于「这一轮谁都没核对过」——一次读库故障会把已经处理完的版本告警
+// 重新开出来，而运维只会看到告警自己回来了。
+func TestUpstreamVersionAckSourceErrorFailsEvaluation(t *testing.T) {
+	_, err := NewEvaluator(&fakeMetricSource{}, &fakeRunwaySource{},
+		&fakeAckSource{err: errors.New("库不可达")}, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
+	if err == nil {
+		t.Fatal("已核对版本取数失败必须让整轮评估失败")
 	}
 }
 
@@ -272,8 +302,8 @@ func TestEvaluatorRequiresRunwaySource(t *testing.T) {
 // 吞掉它等于「这一轮没有上游快见底」——一个由故障伪装成的健康信号。
 func TestRunwaySourceErrorFailsEvaluation(t *testing.T) {
 	_, err := NewEvaluator(&fakeMetricSource{},
-		&fakeRunwaySource{err: errors.New("库不可达")}, RuleConfig{}).
-		Evaluate(context.Background(), testEnv, time.Now().UTC())
+		&fakeRunwaySource{err: errors.New("库不可达")}, &fakeAckSource{}, RuleConfig{}).
+		Evaluate(context.Background(), testEnv, time.Now().UTC(), nil)
 	if err == nil {
 		t.Fatal("可用天数取数失败必须让整轮评估失败")
 	}

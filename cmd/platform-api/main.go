@@ -109,8 +109,12 @@ func main() {
 	// 告警的确认与静默是写操作，必须经 Action 内核（宪法 2 条 / ADR-003）。
 	// 注册失败即拒绝启动：一个「告警页有按钮但后端没注册动作」的进程，
 	// 会让运维在真出事的时候才发现确认键点不动。
+	//
+	// 第三个 Action（alerts.upstream_version.acknowledge）还要一个**只读**的
+	// 观测来源：它落库前必须确认「你要核对的版本」与平台自己此刻观测到的
+	// 上游自报版本逐字相同——version 不是「调用方给什么就存什么」。
 	alertStore := alerts.NewStore(pool)
-	if err := alerts.RegisterActions(actionRegistry, alertStore); err != nil {
+	if err := alerts.RegisterActions(actionRegistry, alertStore, ops.NewStore(pool)); err != nil {
 		logger.Error("api_start_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "action_registration_failed"), slog.Any("err", err))
 		os.Exit(1)

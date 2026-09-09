@@ -44,7 +44,8 @@ func testPool(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("Ping 失败: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(ctx, "TRUNCATE alerts.alert, alerts.alert_silence"); err != nil {
+	if _, err := pool.Exec(ctx,
+		"TRUNCATE alerts.alert, alerts.alert_silence, alerts.upstream_version_ack"); err != nil {
 		t.Fatalf("清空告警表失败: %v", err)
 	}
 	return pool
@@ -621,5 +622,200 @@ func TestUnknownEnvironmentIsRejectedByForeignKey(t *testing.T) {
 	in.DedupKey = "x:prod:y"
 	if _, _, err := s.Upsert(ctx, in); err == nil {
 		t.Fatal("不存在的环境应被外键拒绝")
+	}
+}
+
+// TestTriggerCountOnlyMovesOnStateTransition 是子片 B 第 2 条在库层的落点：
+// **fire_count（评估轮数）与 trigger_count（触发次数）是两个量。**
+//
+// 2026-09-08 的现场：界面上「触发 669 次」其实是「持续了 668 分钟」——评估每
+// 60 秒把条件重算一遍，成立就给 fire_count 加 1。两个数分开之后，那条告警的
+// 诚实读法是「触发 1 次、已持续 11 小时」。
+func TestTriggerCountOnlyMovesOnStateTransition(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	first, created, err := s.Upsert(ctx, upsertInput(now))
+	if err != nil || !created {
+		t.Fatalf("Upsert: %v created=%v", err, created)
+	}
+	if first.FireCount != 1 {
+		t.Fatalf("fire_count = %d, want 1", first.FireCount)
+	}
+	if first.TriggerCount == nil || *first.TriggerCount != 1 {
+		t.Fatalf("新开一条就是一次真正的触发，trigger_count = %v", first.TriggerCount)
+	}
+	if first.FirstOpenedAt == nil || !first.FirstOpenedAt.Equal(first.OpenedAt) {
+		t.Fatalf("新开时 first_opened_at 应等于 opened_at: %v vs %v",
+			first.FirstOpenedAt, first.OpenedAt)
+	}
+	if _, estimated := first.EffectiveFirstOpenedAt(); estimated {
+		t.Fatal("新行有真实的 first_opened_at，不该被标成估计值")
+	}
+
+	// --- 持续命中三轮：fire_count 涨，trigger_count 不动 ---
+	for i := 1; i <= 3; i++ {
+		in := upsertInput(now.Add(time.Duration(i) * time.Minute))
+		merged, created, err := s.Upsert(ctx, in)
+		if err != nil || created {
+			t.Fatalf("第 %d 轮应合并: err=%v created=%v", i, err, created)
+		}
+		if merged.FireCount != int32(i+1) {
+			t.Fatalf("第 %d 轮 fire_count = %d, want %d", i, merged.FireCount, i+1)
+		}
+		if merged.TriggerCount == nil || *merged.TriggerCount != 1 {
+			t.Fatalf("持续命中不是新的触发，第 %d 轮 trigger_count = %v", i, merged.TriggerCount)
+		}
+		if merged.FirstOpenedAt == nil || !merged.FirstOpenedAt.Equal(first.OpenedAt) {
+			t.Fatalf("持续命中不该动 first_opened_at: %v", merged.FirstOpenedAt)
+		}
+	}
+
+	// --- OPEN → SILENCED：不是一次新触发（是让它闭嘴，不是又响了一次）---
+	silencedIn := upsertInput(now.Add(4 * time.Minute))
+	silencedIn.Silenced = true
+	silenced, _, err := s.Upsert(ctx, silencedIn)
+	if err != nil {
+		t.Fatalf("Upsert(silenced): %v", err)
+	}
+	if silenced.Status != alerts.StatusSilenced {
+		t.Fatalf("status = %s, want SILENCED", silenced.Status)
+	}
+	if silenced.TriggerCount == nil || *silenced.TriggerCount != 1 {
+		t.Fatalf("转静默不是一次新触发，trigger_count = %v", silenced.TriggerCount)
+	}
+
+	// --- SILENCED → OPEN（窗口过期、条件仍成立）：**是**一次新触发 ---
+	//
+	// 判据复用库里唯一那处「这条告警要重新被投递出去」（TouchAlert 的
+	// reset_notify）。不新发明第二个判据。
+	backIn := upsertInput(now.Add(5 * time.Minute))
+	back, _, err := s.Upsert(ctx, backIn)
+	if err != nil {
+		t.Fatalf("Upsert(back to open): %v", err)
+	}
+	if back.Status != alerts.StatusOpen {
+		t.Fatalf("status = %s, want OPEN", back.Status)
+	}
+	if back.TriggerCount == nil || *back.TriggerCount != 2 {
+		t.Fatalf("静默过期重新投递是一次新触发，trigger_count = %v", back.TriggerCount)
+	}
+	// 既有语义不许被这次改动破坏。
+	if back.NotifyStatus != alerts.NotifyPending {
+		t.Fatalf("窗口过期应推回 pending 重投: %s", back.NotifyStatus)
+	}
+	if back.FirstOpenedAt == nil || !back.FirstOpenedAt.Equal(first.OpenedAt) {
+		t.Fatalf("静默往返不该动 first_opened_at: %v", back.FirstOpenedAt)
+	}
+}
+
+// TestFirstOpenedAtSurvivesRecurrence：「已持续」从**首次开**算，不因抖动归零。
+//
+// 报告 §二的原话：「界面上『已持续 7 分钟』每次恢复都归零，所以你永远看不出
+// 它其实已经这样很久了。」
+func TestFirstOpenedAtSurvivesRecurrence(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	first, _, err := s.Upsert(ctx, upsertInput(now))
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, err := s.Resolve(ctx, first.ID, now.Add(time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	// 复发窗口内（24h）：新行继承最初那次的首开时刻。
+	again, created, err := s.Upsert(ctx, upsertInput(now.Add(2*time.Minute)))
+	if err != nil || !created {
+		t.Fatalf("复发应新开一行: err=%v created=%v", err, created)
+	}
+	if again.Status != alerts.StatusReopened {
+		t.Fatalf("status = %s, want REOPENED", again.Status)
+	}
+	if again.TriggerCount == nil || *again.TriggerCount != 1 {
+		t.Fatalf("复发是这一行的第一次触发，trigger_count = %v", again.TriggerCount)
+	}
+	if again.FireCount != 1 {
+		t.Fatalf("复发是新的一行，fire_count = %d, want 1", again.FireCount)
+	}
+	if again.FirstOpenedAt == nil || !again.FirstOpenedAt.Equal(first.OpenedAt) {
+		t.Fatalf("复发应继承最初的首开时刻: got %v want %v", again.FirstOpenedAt, first.OpenedAt)
+	}
+	if again.OpenedAt.Equal(first.OpenedAt) {
+		t.Fatal("opened_at 仍是这一行自己的开启时刻，不该被继承覆盖")
+	}
+	// 三次复发之后仍然从第一次算起：继承取的是上一行的**有效**首开时刻。
+	if _, err := s.Resolve(ctx, again.ID, now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	third, _, err := s.Upsert(ctx, upsertInput(now.Add(4*time.Minute)))
+	if err != nil {
+		t.Fatalf("第三次: %v", err)
+	}
+	if third.FirstOpenedAt == nil || !third.FirstOpenedAt.Equal(first.OpenedAt) {
+		t.Fatalf("多次复发仍应从第一次算起: got %v want %v", third.FirstOpenedAt, first.OpenedAt)
+	}
+
+	// 复发窗口之外（>24h）：那是一件**新事**，不该把昨天以前的时刻拖进来。
+	if _, err := s.Resolve(ctx, third.ID, now.Add(5*time.Minute)); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	later := now.Add(48 * time.Hour)
+	fresh, created, err := s.Upsert(ctx, upsertInput(later))
+	if err != nil || !created {
+		t.Fatalf("窗口外复发应新开一行: err=%v created=%v", err, created)
+	}
+	if fresh.Status != alerts.StatusOpen {
+		t.Fatalf("超过复发窗口应是 OPEN 而不是 REOPENED: %s", fresh.Status)
+	}
+	if fresh.FirstOpenedAt == nil || !fresh.FirstOpenedAt.Equal(later) {
+		t.Fatalf("窗口外应重新起算: got %v want %v", fresh.FirstOpenedAt, later)
+	}
+}
+
+// TestUpstreamVersionAckIsOnePerUpstream：一条上游只有一个**当前**已核对版本，
+// 新的核对覆盖旧的。
+func TestUpstreamVersionAckIsOnePerUpstream(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	const metric = "sub2api.connector.health"
+
+	if _, err := s.GetUpstreamVersionAck(ctx, intEnv, metric); err == nil {
+		t.Fatal("没核对过时应报 ErrNotFound（否则下面的断言可能恒真）")
+	}
+
+	if _, err := s.SetUpstreamVersionAck(ctx, alerts.UpstreamVersionAck{
+		Environment: intEnv, MetricKey: metric, Version: "0.2.3",
+		Source: "sub2api-prod", AcknowledgedBy: "staff_alice", AcknowledgedAt: now,
+	}); err != nil {
+		t.Fatalf("SetUpstreamVersionAck: %v", err)
+	}
+	// 覆盖而不是新增一行：ON CONFLICT DO UPDATE。
+	after, err := s.SetUpstreamVersionAck(ctx, alerts.UpstreamVersionAck{
+		Environment: intEnv, MetricKey: metric, Version: "0.2.4",
+		Source: "sub2api-prod", AcknowledgedBy: "staff_bob", AcknowledgedAt: now.Add(time.Hour),
+		Note: "第二次升级",
+	})
+	if err != nil {
+		t.Fatalf("覆盖 SetUpstreamVersionAck: %v", err)
+	}
+	if after.Version != "0.2.4" || after.AcknowledgedBy != "staff_bob" || after.Note != "第二次升级" {
+		t.Fatalf("新的核对应覆盖旧的: %+v", after)
+	}
+	all, err := s.ListUpstreamVersionAcks(ctx, intEnv)
+	if err != nil {
+		t.Fatalf("ListUpstreamVersionAcks: %v", err)
+	}
+	if len(all) != 1 || all[metric].Version != "0.2.4" {
+		t.Fatalf("同一条上游只该有一行: %+v", all)
+	}
+
+	// 另一个环境是另一条记录——环境进主键，staging 的核对不该影响生产。
+	if other, err := s.ListUpstreamVersionAcks(ctx, "staging"); err != nil || len(other) != 0 {
+		t.Fatalf("环境应隔离: err=%v got=%+v", err, other)
 	}
 }

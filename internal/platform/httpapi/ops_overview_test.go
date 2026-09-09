@@ -366,3 +366,140 @@ func TestOpsOverviewBuildInfoReflectsResolvedEnvironment(t *testing.T) {
 		t.Fatalf("build.environment = %q, want development (the resolved query environment)", got.Build.Environment)
 	}
 }
+
+// testRouterWithOpsJobs 装一个带 jobs 查询器的路由。
+//
+// 这里必须经 NewRouter 而不是直接构造 OpsOverviewDeps：本片唯一一处跨所有权
+// 的改动就是 router.go 里那行 `Jobs: d.Jobs`，漏掉它的话响应里那一段恒为
+// null，而直接构造 Deps 的测试**照样绿**——判定恒真（规则存在≠调用得到）。
+func testRouterWithOpsJobs(t *testing.T, metrics MetricLister, q JobsQuerier) http.Handler {
+	t.Helper()
+	res, err := NewDevHeaderResolver("development")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewRouter(Deps{
+		Logger:         discardLogger(),
+		Service:        "platform-api",
+		Environment:    "development",
+		DB:             fakePinger{},
+		Resolver:       res,
+		Kernel:         &fakeExecutor{},
+		ActionRegistry: action.NewRegistry(),
+		Metrics:        metrics,
+		Jobs:           q,
+	})
+}
+
+// TestOpsOverviewMergesFailedJobsByKind：待处理清单的取数从「最新 20 条」
+// 变成「按类型合并」。
+//
+// 2026-09-08：288 条 card_sync 把「我的待处理」那一格全占满，真正需要人处理
+// 的东西被挤出首屏。合并之后那 288 条是一行，而且带上了上游到底说了什么。
+func TestOpsOverviewMergesFailedJobsByKind(t *testing.T) {
+	first := time.Date(2026, 9, 5, 10, 27, 0, 0, time.UTC)
+	last := time.Date(2026, 9, 8, 15, 12, 0, 0, time.UTC)
+	q := &fakeJobsQuerier{summaries: []jobs.FailedRunSummary{{
+		Kind: "card_sync", Count: 288, FirstAt: first, LastAt: last, LastRunID: 90210,
+		ErrorCount: 3,
+		LastError: &jobs.RunError{
+			At: last, Message: "rejected: infini POST /v2/cards/status/batch",
+			Truncated: false, OriginalLength: 44,
+		},
+	}}}
+
+	rec := opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{}, q))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		FailedJobsByKind []struct {
+			Kind       string `json:"kind"`
+			Count      int64  `json:"count"`
+			FirstAt    string `json:"first_at"`
+			LastAt     string `json:"last_at"`
+			LastRunID  int64  `json:"last_run_id"`
+			ErrorCount int    `json:"error_count"`
+			LastError  *struct {
+				At             string `json:"at"`
+				Message        string `json:"message"`
+				Truncated      bool   `json:"truncated"`
+				OriginalLength int    `json:"original_length"`
+			} `json:"last_error"`
+		} `json:"failed_jobs_by_kind"`
+		WindowHours int `json:"failed_jobs_window_hours"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.FailedJobsByKind) != 1 {
+		t.Fatalf("failed_jobs_by_kind = %d 行, want 1", len(body.FailedJobsByKind))
+	}
+	got := body.FailedJobsByKind[0]
+	if got.Kind != "card_sync" || got.Count != 288 {
+		t.Fatalf("摘要不对: %+v", got)
+	}
+	if got.FirstAt != "2026-09-05T10:27:00Z" || got.LastAt != "2026-09-08T15:12:00Z" {
+		t.Fatalf("时刻必须是 UTC RFC3339: first=%s last=%s", got.FirstAt, got.LastAt)
+	}
+	if got.LastRunID != 90210 || got.ErrorCount != 3 {
+		t.Fatalf("last_run_id/error_count 不对: %+v", got)
+	}
+	if got.LastError == nil || !strings.Contains(got.LastError.Message, "infini") {
+		t.Fatalf("必须带上游说了什么: %+v", got.LastError)
+	}
+	// 窗口要给出来，否则「288 次」是一个没有量纲的数。
+	if body.WindowHours != int(jobs.FailedRunSummaryWindow/time.Hour) {
+		t.Fatalf("failed_jobs_window_hours = %d", body.WindowHours)
+	}
+	// 环境来自调用者身份，不是参数。
+	if q.gotSummaryEnv != "development" {
+		t.Fatalf("聚合的环境 = %q, want development", q.gotSummaryEnv)
+	}
+	// 窗口是服务端按 now 算的，不是调用方传的。
+	if since := time.Since(q.gotSummarySince); since < jobs.FailedRunSummaryWindow {
+		t.Fatalf("since 应约等于 now-24h，实际距今 %s", since)
+	}
+}
+
+// TestOpsOverviewDistinguishesNoDataSourceFromNoFailures：null 与 [] 不是
+// 一回事。
+//
+// [] 读作「查过了，窗口内一条失败都没有」；null 读作「这个部署没接这份数据
+// 源」。把前者当后者会让人以为系统坏了，把后者当前者会让人以为一切正常——
+// 后一种更危险（同 ConfigAvailable 那条纪律）。
+func TestOpsOverviewDistinguishesNoDataSourceFromNoFailures(t *testing.T) {
+	var body struct {
+		FailedJobsByKind []struct{} `json:"failed_jobs_by_kind"`
+	}
+
+	// 接了数据源、窗口内没有失败 → []
+	rec := opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{}, &fakeJobsQuerier{}))
+	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":[]`) {
+		t.Fatalf("没有失败时应是空数组而不是 null: %s", rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// 没接数据源 → null
+	rec = opsOverviewGet(t, testRouterWithOpsOverview(t, &fakeMetricLister{}, nil, nil, AlertDeliveryStatus{}))
+	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":null`) {
+		t.Fatalf("没接数据源时应是 null 而不是空数组: %s", rec.Body.String())
+	}
+}
+
+// TestOpsOverviewSurvivesFailedJobsQueryError：这一格读不到不该让整页 500。
+//
+// 这个端点叫「控制平面健康」，它自己因为其中一格读不到就整页失败，正是
+// 最不该发生的失效形态。
+func TestOpsOverviewSurvivesFailedJobsQueryError(t *testing.T) {
+	q := &fakeJobsQuerier{summaryErr: context.DeadlineExceeded}
+	rec := opsOverviewGet(t, testRouterWithOpsJobs(t, &fakeMetricLister{}, q))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"failed_jobs_by_kind":null`) {
+		t.Fatalf("读不到时应回 null（不假装没有失败）: %s", rec.Body.String())
+	}
+}

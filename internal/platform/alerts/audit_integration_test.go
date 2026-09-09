@@ -15,6 +15,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
 	"github.com/xufei5620/xingmang-platform/internal/platform/alerts"
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
@@ -62,7 +63,7 @@ func newKernelFixture(t *testing.T) kernelFixture {
 
 	reg := action.NewRegistry()
 	alertStore := alerts.NewStore(pool)
-	if err := alerts.RegisterActions(reg, alertStore); err != nil {
+	if err := alerts.RegisterActions(reg, alertStore, ops.NewStore(pool)); err != nil {
 		t.Fatalf("RegisterActions: %v", err)
 	}
 	auditStore := audit.NewStore(pool)

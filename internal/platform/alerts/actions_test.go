@@ -2,10 +2,14 @@ package alerts
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
@@ -22,15 +26,15 @@ func humanCtx(env string) context.Context {
 	})
 }
 
-// TestActionDefinitionsAreValid：两个 Action 的声明本身必须过内核的校验。
+// TestActionDefinitionsAreValid：三个 Action 的声明本身必须过内核的校验。
 func TestActionDefinitionsAreValid(t *testing.T) {
 	reg := action.NewRegistry()
-	if err := RegisterActions(reg, nil); err != nil {
+	if err := RegisterActions(reg, nil, nil); err != nil {
 		t.Fatalf("RegisterActions: %v", err)
 	}
 	defs := reg.List()
-	if len(defs) != 2 {
-		t.Fatalf("应注册 2 个 Action，实际 %d 个", len(defs))
+	if len(defs) != 3 {
+		t.Fatalf("应注册 3 个 Action，实际 %d 个", len(defs))
 	}
 
 	byID := map[string]action.Definition{}
@@ -241,5 +245,194 @@ func TestAlertSummaryOmitsDetail(t *testing.T) {
 		if _, has := got[key]; !has {
 			t.Fatalf("审计摘要缺少 %s: %v", key, got)
 		}
+	}
+}
+
+// --- alerts.upstream_version.acknowledge ---
+
+// fakeObservationReader 是 Handler 用到的只读观测来源。
+type fakeObservationReader struct {
+	obs map[string]ops.Observation
+	err error
+}
+
+func (f *fakeObservationReader) Get(_ context.Context, metricKey, _ string) (ops.Observation, error) {
+	if f.err != nil {
+		return ops.Observation{}, f.err
+	}
+	o, ok := f.obs[metricKey]
+	if !ok {
+		return ops.Observation{}, pgx.ErrNoRows
+	}
+	return o, nil
+}
+
+func probeReader(metricKey, version string) *fakeObservationReader {
+	return &fakeObservationReader{obs: map[string]ops.Observation{
+		metricKey: {
+			MetricKey: metricKey, Source: "sub2api-prod", Environment: "production",
+			Status: ops.SyncOK, Value: map[string]any{"version": version},
+		},
+	}}
+}
+
+// TestAcknowledgeUpstreamVersionDefinition：等级、权限、身份、Schema 白名单。
+//
+// **L1 不许抬。** L2 及以上会把整包 params 冻进 core.approval_request.params_json
+// 并由 GET /api/v1/approvals 原样回给每一个能看审批队列的人——只要参数里能塞
+// 自由文本，抬级就等于给凭据开一条展示通道。
+func TestAcknowledgeUpstreamVersionDefinition(t *testing.T) {
+	def := acknowledgeUpstreamVersionDef()
+	if def.RiskLevel != action.L1 {
+		t.Fatalf("风险等级 = %s, want L1", def.RiskLevel)
+	}
+	// 复用既有 scope：新增 scope 要同时改 oidcauth/rolemap.go 与前端权限清单
+	// （本片不得改 web/），而它换不来任何实际的信息隔离。
+	if def.Permission != ScopeAcknowledge {
+		t.Fatalf("权限 = %s, want %s", def.Permission, ScopeAcknowledge)
+	}
+	if len(def.PrincipalTypes) != 1 || def.PrincipalTypes[0] != principal.TypeHuman {
+		t.Fatalf("应只允许人类身份，实际 %v", def.PrincipalTypes)
+	}
+	// ID 必须是三段式，否则 action.Definition.Validate 会拒绝注册、进程起不来。
+	if err := def.Validate(); err != nil {
+		t.Fatalf("声明本身不合法（ID 三段式？）: %v", err)
+	}
+	if strings.Count(def.ID, ".") < 2 {
+		t.Fatalf("Action ID 必须是 <域>.<资源>.<动作> 三段式: %s", def.ID)
+	}
+
+	// metric_key **不写 Enum**：R6 的判据是「这条观测里有没有 version」而不是
+	// 指标键叫什么。手列一份键清单会让「将来多一个连接器探测自动被覆盖」
+	// 这条性质失效；存在性校验在 Handler 里走 ops.KnownMetricKey（注册出来的，
+	// 不是手抄的）。
+	for _, f := range def.Schema.Fields {
+		if f.Name == "metric_key" && len(f.Enum) != 0 {
+			t.Fatalf("metric_key 不该写死枚举：%v", f.Enum)
+		}
+	}
+	// 白名单语义：环境只能来自 Principal。
+	if err := def.Schema.Validate(map[string]any{
+		"metric_key": "sub2api.connector.health", "version": "0.2.3", "environment": "production",
+	}); err == nil {
+		t.Fatal("未声明的 environment 字段应被拒绝——环境只能来自 Principal")
+	}
+}
+
+// TestAcknowledgeUpstreamVersionRejectsCredentialShapedParams：参数装不下凭据。
+//
+// 这里断言的是第一道闸（形态）。真正的收口在下一条测试：version 必须与平台
+// 自己观测到的值逐字相同才会落库。两道都要有——只有形态校验的话，一个形态
+// 合法但与观测不符的值会被原样存进库。
+func TestAcknowledgeUpstreamVersionRejectsCredentialShapedParams(t *testing.T) {
+	handler := acknowledgeUpstreamVersionHandler(nilPoolStore(),
+		probeReader("sub2api.connector.health", "0.2.3"))
+
+	cases := []struct {
+		name    string
+		version string
+	}{
+		{"凭据引用", "secret://alerts/telegram-bot"},
+		{"telegram token 形态", "8987654321:AAE2ETESTtokenNOTreal00000000000000000"},
+		{"带空白", "0.2.3 extra"},
+		{"带换行", "0.2.3\nX-Injected: 1"},
+		{"全角字符", "０.２.３"},
+		{"超长", strings.Repeat("1", maxAckVersionBytes+1)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := handler(humanCtx("production"), map[string]any{
+				"metric_key": "sub2api.connector.health", "version": c.version,
+			})
+			if err == nil {
+				t.Fatalf("version=%q 应被拒绝", c.version)
+			}
+			if action.ErrorCode(err) != action.CodeInvalidParams {
+				t.Fatalf("错误码 = %s, want INVALID_PARAMS", action.ErrorCode(err))
+			}
+		})
+	}
+
+	// 超长要写出上限数字——只说「太长了」帮不上忙。
+	_, err := handler(humanCtx("production"), map[string]any{
+		"metric_key": "sub2api.connector.health",
+		"version":    strings.Repeat("1", maxAckVersionBytes+1),
+	})
+	if !strings.Contains(err.Error(), fmt.Sprint(maxAckVersionBytes)) {
+		t.Fatalf("超长的错误文案应写出上限：%v", err)
+	}
+
+	// 形态合法的版本不该被形态闸拦下——否则上面那几条「被拒绝」可能只是因为
+	// 这个 Handler 把**所有**输入都拒了，断言就成了恒真。
+	//
+	// 让观测报一个永远对不上的版本，这样合法输入会停在 CONFLICT（形态闸之后、
+	// 写库之前），既证明形态通过了，又不需要一个真库。
+	neverMatches := acknowledgeUpstreamVersionHandler(nilPoolStore(),
+		probeReader("sub2api.connector.health", "999.999.999"))
+	for _, ok := range []string{"0.2.3", "v0.2.3-rc.1", "1", "0.1.179"} {
+		_, err := neverMatches(humanCtx("production"), map[string]any{
+			"metric_key": "sub2api.connector.health", "version": ok,
+		})
+		if action.ErrorCode(err) != action.CodeConflict {
+			t.Fatalf("version=%q 形态合法，应走到版本比对（CONFLICT），实际 %s：%v",
+				ok, action.ErrorCode(err), err)
+		}
+	}
+}
+
+// TestAcknowledgeUpstreamVersionRejectsUnknownMetricKey：拼错的指标键会核对
+// **零条**上游，而执行者以为已经核对了（宪法 12 条，同 rule_key 那条）。
+func TestAcknowledgeUpstreamVersionRejectsUnknownMetricKey(t *testing.T) {
+	handler := acknowledgeUpstreamVersionHandler(nilPoolStore(),
+		probeReader("sub2api.connector.health", "0.2.3"))
+	_, err := handler(humanCtx("production"), map[string]any{
+		"metric_key": "sub2api.connector.healt", "version": "0.2.3",
+	})
+	if action.ErrorCode(err) != action.CodeInvalidParams {
+		t.Fatalf("错误码 = %s, want INVALID_PARAMS", action.ErrorCode(err))
+	}
+	if !strings.Contains(err.Error(), "sub2api.connector.health") {
+		t.Fatalf("错误应列出可选指标键: %v", err)
+	}
+}
+
+// TestAcknowledgeUpstreamVersionRefusesToStoreWhatTheUpstreamDidNotSay 是
+// 「参数装不下凭据」的**硬理由**：version 不是「调用方给什么就存什么」。
+func TestAcknowledgeUpstreamVersionRefusesToStoreWhatTheUpstreamDidNotSay(t *testing.T) {
+	const key = "sub2api.connector.health"
+
+	// 上游自报 0.2.3，调用方要核对 0.2.2 → CONFLICT，文案逐字给出两个版本。
+	handler := acknowledgeUpstreamVersionHandler(nilPoolStore(), probeReader(key, "0.2.3"))
+	_, err := handler(humanCtx("production"), map[string]any{
+		"metric_key": key, "version": "0.2.2",
+	})
+	if action.ErrorCode(err) != action.CodeConflict {
+		t.Fatalf("错误码 = %s, want CONFLICT", action.ErrorCode(err))
+	}
+	for _, want := range []string{"0.2.3", "0.2.2", "请刷新后再确认"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("CONFLICT 文案缺 %q：%v", want, err)
+		}
+	}
+
+	// 这条指标没有上游自报版本 → PRECONDITION_FAILED，不是 CONFLICT：
+	// 「没有可核对的东西」与「你核对的版本不对」是两件事。
+	noVersion := &fakeObservationReader{obs: map[string]ops.Observation{
+		key: {MetricKey: key, Environment: "production", Status: ops.SyncOK, Value: map[string]any{}},
+	}}
+	_, err = acknowledgeUpstreamVersionHandler(nilPoolStore(), noVersion)(
+		humanCtx("production"), map[string]any{"metric_key": key, "version": "0.2.3"})
+	if action.ErrorCode(err) != action.CodePreconditionFailed {
+		t.Fatalf("错误码 = %s, want PRECONDITION_FAILED", action.ErrorCode(err))
+	}
+	if !strings.Contains(err.Error(), "没有上游自报版本") {
+		t.Fatalf("文案要说清没有可核对的东西：%v", err)
+	}
+
+	// 这个环境下压根没有这条观测 → 同样 PRECONDITION_FAILED，而不是 500。
+	_, err = acknowledgeUpstreamVersionHandler(nilPoolStore(), &fakeObservationReader{})(
+		humanCtx("production"), map[string]any{"metric_key": key, "version": "0.2.3"})
+	if action.ErrorCode(err) != action.CodePreconditionFailed {
+		t.Fatalf("错误码 = %s, want PRECONDITION_FAILED", action.ErrorCode(err))
 	}
 }

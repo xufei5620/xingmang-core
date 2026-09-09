@@ -372,6 +372,10 @@ func NewRouter(d Deps) http.Handler {
 					ConnectorConfigs: d.OpsConnectorConfigs,
 					DB:               d.DB,
 					AlertDelivery:    d.OpsAlertDelivery,
+					// 失败作业按 kind 的聚合（XM-OPS-TRUTH 子片 B）走这个
+					// 端点而不是新开一条路由：两者权限口径完全一致
+					// （都是 ops.read），而这样跨所有权的改动只有这一行。
+					Jobs: d.Jobs,
 				}))
 			// 数据库变更（XM-READONLY-QUERIES）同样复用 ops.read：迁移版本
 			// 回答「这套部署自己处在什么状态」，与心跳、队列积压、控制平面

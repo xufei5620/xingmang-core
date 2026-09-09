@@ -96,10 +96,35 @@ func failingMetric(key string, now time.Time) ops.Observation {
 	return o
 }
 
+// failedRunSamples 造一串「刚刚连续失败了 rounds 轮」的历史样本（升序）。
+func failedRunSamples(key string, now time.Time, rounds int) []ops.Observation {
+	out := make([]ops.Observation, 0, rounds)
+	for i := rounds; i >= 1; i-- {
+		out = append(out, failedSample(key, now.Add(-time.Duration(i)*time.Minute)))
+	}
+	return out
+}
+
+// failingSource 造一条「已经连续失败够 N 轮、迟滞门槛已过」的来源。
+//
+// 加了迟滞之后，只有当前观测失败**不再**足以让 R1 命中——那正是这次改动的
+// 要点。编排层的用例关心的是「命中之后怎么落库、怎么投递、怎么恢复」，
+// 所以这里直接把历史样本喂满门槛让前提成立。「几轮才算数」由
+// hysteresis_rule_test.go 专门守，两件事不混在一处测。
+//
+// N 从 DefaultRuleConfig() 取，测试里不写字面量：那会让 N 有第二处定义。
+func failingSource(key string, now time.Time) *fakeMetricSource {
+	n := DefaultRuleConfig().SyncFailedHysteresisRounds
+	return &fakeMetricSource{
+		observations: []ops.Observation{failingMetric(key, now)},
+		samples:      map[string][]ops.Observation{key: failedRunSamples(key, now, n)},
+	}
+}
+
 func newTestReconciler(store AlertStore, src MetricSource, notifier Notifier, now time.Time) *Reconciler {
 	return NewReconciler(ReconcilerOptions{
 		Store:     store,
-		Evaluator: NewEvaluator(src, &fakeRunwaySource{}, RuleConfig{}),
+		Evaluator: NewEvaluator(src, &fakeRunwaySource{}, &fakeAckSource{}, RuleConfig{}),
 		Notifier:  notifier,
 		Logger:    discardLogger(),
 		Now:       func() time.Time { return now },
@@ -111,7 +136,8 @@ func TestReconcileCarriesThresholdSnapshotMetadata(t *testing.T) {
 	provider := &fakeThresholdProvider{snapshot: finance.RunwayThresholdSnapshot{
 		Thresholds: finance.DefaultRunwayThresholds(), Revision: 11, Source: "database",
 	}}
-	evaluator := NewEvaluatorWithThresholdProvider(&fakeMetricSource{}, &fakeRunwaySource{}, provider, RuleConfig{})
+	evaluator := NewEvaluatorWithThresholdProvider(
+		&fakeMetricSource{}, &fakeRunwaySource{}, &fakeAckSource{}, provider, RuleConfig{})
 	res, err := NewReconciler(ReconcilerOptions{
 		Store: newRecordingStore(), Evaluator: evaluator, Logger: discardLogger(), Now: func() time.Time { return now },
 	}).Reconcile(context.Background(), testEnv)
@@ -128,7 +154,7 @@ func TestReconcileOpensAlertAndDelivers(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
 	notifier := &stubNotifier{name: "stub"}
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 
 	pendingID := uuid.New()
 	store.pending = []Alert{{ID: pendingID, RuleKey: RuleMetricSyncFailed, Status: StatusOpen}}
@@ -152,7 +178,7 @@ func TestReconcileOpensAlertAndDelivers(t *testing.T) {
 func TestReconcileSecondRoundMerges(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 	r := newTestReconciler(store, src, &stubNotifier{}, now)
 
 	if _, err := r.Reconcile(context.Background(), testEnv); err != nil {
@@ -179,7 +205,7 @@ func TestReconcileAutoResolvesAlertsThatStoppedFiring(t *testing.T) {
 		{ID: stillID, RuleKey: RuleMetricSyncFailed,
 			DedupKey: RuleMetricSyncFailed + ":" + testEnv + ":" + revenueMetric, Status: StatusOpen},
 	}
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 
 	res, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv)
 	if err != nil {
@@ -201,7 +227,7 @@ func TestReconcileAutoResolvesAlertsThatStoppedFiring(t *testing.T) {
 func TestReconcileDoesNotResolveAlertsOpenedThisRound(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 
 	res, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv)
 	if err != nil {
@@ -219,7 +245,7 @@ func TestReconcileDoesNotResolveAlertsOpenedThisRound(t *testing.T) {
 // Silenced 为真（真正的状态落库由 store_test.go 对真库验）。
 func TestReconcileMarksSilencedWhenWindowMatches(t *testing.T) {
 	now := time.Now().UTC()
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 
 	t.Run("按规则静默", func(t *testing.T) {
 		store := newRecordingStore()
@@ -342,7 +368,7 @@ func TestReconcileFailsOnStoreWriteError(t *testing.T) {
 	now := time.Now().UTC()
 	store := newRecordingStore()
 	store.upsertErr = errors.New("connection refused")
-	src := &fakeMetricSource{observations: []ops.Observation{failingMetric(revenueMetric, now)}}
+	src := failingSource(revenueMetric, now)
 
 	if _, err := newTestReconciler(store, src, &stubNotifier{}, now).Reconcile(context.Background(), testEnv); err == nil {
 		t.Fatal("写库失败必须让整轮失败——那是唯一需要重试的情况")

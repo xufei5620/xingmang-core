@@ -4,27 +4,49 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/xufei5620/xingmang-platform/internal/platform/action"
+	"github.com/xufei5620/xingmang-platform/internal/platform/ops"
 	"github.com/xufei5620/xingmang-platform/internal/platform/principal"
 )
 
-// ActionAcknowledge / ActionSilenceCreate 是两个 Action 的稳定 ID。
+// 三个 Action 的稳定 ID。
 const (
 	ActionAcknowledge   = "alerts.alert.acknowledge"
 	ActionSilenceCreate = "alerts.silence.create"
-	actionVersion       = "1"
+	// ActionAcknowledgeUpstreamVersion：「这条上游的这个版本我核对过了」。
+	//
+	// 子片 B 任务书里写的是 alerts.acknowledge_upstream_version，那个 ID
+	// **注册时会被拒**：action.actionIDPattern（definition.go）要求
+	// `<域>.<资源>.<动作>` 至少三段，两段式在 Definition.Validate 里直接被拒，
+	// 进程起不来（cmd/platform-api 的注册返回值会中断启动）。所以取三段式。
+	ActionAcknowledgeUpstreamVersion = "alerts.upstream_version.acknowledge"
+
+	actionVersion = "1"
 )
 
 // 审计里的资源类型，与库表同名，便于从审计事件直接定位到行。
 const (
-	resourceAlert   = "alerts.alert"
-	resourceSilence = "alerts.alert_silence"
+	resourceAlert          = "alerts.alert"
+	resourceSilence        = "alerts.alert_silence"
+	resourceUpstreamVerAck = "alerts.upstream_version_ack"
+	maxAckVersionBytes     = 64
+	maxAckNoteBytes        = 200
 )
+
+// ackVersionPattern 是 version 参数允许的形态。
+//
+// **参数不得可装凭据**（子片 B 任务书第 3 条）。这条正则是第一道闸，但它
+// 不是主要的那道——真正的收口在 Handler：version 必须与平台自己从上游观测到
+// 的 value_json.version **逐字相同**才会落库，「调用方给什么就存什么」这条路
+// 根本不存在。正则只是把明显不像版本号的东西挡在前面，让错误文案更有用。
+var ackVersionPattern = regexp.MustCompile(`^v?[0-9]+(\.[0-9]+){0,3}(-[0-9A-Za-z.]{1,32})?$`)
 
 // maxSilenceMinutes 是单个静默窗口的时长上限（7 天）。
 //
@@ -49,17 +71,27 @@ var allEnvironments = []string{"development", "staging", "production"}
 // AI 不拥有生产后门）。
 var humanOnly = []principal.Type{principal.TypeHuman}
 
-// RegisterActions 把告警的两个写操作注册为 Action（ADR-003：写操作唯一入口）。
+// ObservationReader 是核对上游版本时用到的 ops 仓储子集（*ops.Store 满足）。
+//
+// 只声明一个方法：Handler 要问的问题只有一个——「这条指标此刻观测到的
+// 上游版本是什么」。参数里的 version 必须与它逐字相同才会落库。
+type ObservationReader interface {
+	Get(ctx context.Context, metricKey, environment string) (ops.Observation, error)
+}
+
+// RegisterActions 把告警的三个写操作注册为 Action（ADR-003：写操作唯一入口）。
 //
 // store 允许为 nil：此时只登记声明而不绑定实际执行体，供「注册表完整性」类
 // 测试与文档生成使用；Handler 被调用时会返回明确错误（照搬 registry 的做法）。
-func RegisterActions(reg *action.Registry, store *Store) error {
+// observations 同理。
+func RegisterActions(reg *action.Registry, store *Store, observations ObservationReader) error {
 	defs := []struct {
 		def     action.Definition
 		handler action.Handler
 	}{
 		{acknowledgeDef(), acknowledgeHandler(store)},
 		{silenceCreateDef(), silenceCreateHandler(store)},
+		{acknowledgeUpstreamVersionDef(), acknowledgeUpstreamVersionHandler(store, observations)},
 	}
 	for _, d := range defs {
 		if err := reg.Register(d.def, d.handler); err != nil {
@@ -311,6 +343,148 @@ func silenceCreateHandler(store *Store) action.Handler {
 		action.RecordReason(ctx, reason)
 		action.RecordAfter(ctx, silenceSummary(silence))
 		return silence, nil
+	}
+}
+
+// --- alerts.upstream_version.acknowledge（L1：核对上游版本）---
+
+// acknowledgeUpstreamVersionDef 声明「我核对过这个上游版本了」。
+//
+// **L1，不抬级。** 理由不是「感觉不严重」，是两条硬的：
+//
+//  1. L2 及以上会把整包 params 原样冻进 core.approval_request.params_json
+//     （迁移 000049），并由 GET /api/v1/approvals 回给每一个能看审批队列的人。
+//     只要参数里能塞自由文本，抬级就等于给凭据开一条展示通道。本 Action 的
+//     两个参数**在形状上装不下凭据**：metric_key 必须过 ops.KnownMetricKey
+//     （一份只增不改的已注册指标清单），version 必须与平台自己观测到的
+//     value_json.version 逐字相同——所以它可以安全地留在 L1，也**只能**
+//     留在 L1。
+//  2. 它也确实不该是 L0：L0 的定位是「保存个人视图、低影响偏好」，而这个
+//     动作会让一条规则不再命中、让既有告警在下一轮被解决，是改变系统行为的
+//     写操作，与 alerts.silence.create 同一档。
+//
+// 权限复用 ScopeAcknowledge 而不新增 scope：核对上游版本与确认告警是同一类
+// 「我看过了」，爆炸半径远小于静默（它不会让任何**别的**告警闭嘴）。见
+// permissions.go 里那段说明。
+func acknowledgeUpstreamVersionDef() action.Definition {
+	return action.Definition{
+		ID:         ActionAcknowledgeUpstreamVersion,
+		Version:    actionVersion,
+		RiskLevel:  action.L1,
+		Permission: ScopeAcknowledge,
+		Schema: action.Schema{Fields: []action.Field{
+			// metric_key **不写 Enum**：R6 的判据是「这条观测里有没有
+			// version」而不是指标键叫什么（见 versionChangeFinding），手列一份
+			// 指标键清单会让「将来多一个连接器探测自动被覆盖」这条性质失效。
+			// 存在性校验在 Handler 里走 ops.KnownMetricKey——那份清单是注册出来
+			// 的，不是手抄的。
+			{Name: "metric_key", Type: action.FieldString, Required: true},
+			{Name: "version", Type: action.FieldString, Required: true},
+			// note 可选：给「为什么这次升级不用改钉子」留一句话。它进审计，
+			// 不进任何判定。
+			{Name: "note", Type: action.FieldString},
+		}},
+		Environments:   allEnvironments,
+		PrincipalTypes: humanOnly,
+	}
+}
+
+func acknowledgeUpstreamVersionHandler(store *Store, observations ObservationReader) action.Handler {
+	return func(ctx context.Context, params map[string]any) (any, error) {
+		if err := requireStore(store); err != nil {
+			return nil, err
+		}
+		if observations == nil {
+			return nil, fmt.Errorf("alerts 观测来源未绑定：本注册表实例仅用于声明登记")
+		}
+		p, err := callerPrincipal(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		metricKey := strings.TrimSpace(action.StringParam(params, "metric_key"))
+		if !ops.KnownMetricKey(metricKey) {
+			// 拼错的 metric_key 会核对**零条**上游，而执行者以为已经核对了
+			// ——与 rule_key 拼错同一条道理（宪法 12 条），必须当场拒绝并
+			// 告诉他有哪些键。
+			return nil, action.NewError(action.CodeInvalidParams,
+				fmt.Sprintf("metric_key=%q 不是已注册的指标；可选值：%s",
+					metricKey, strings.Join(ops.RegisteredMetricKeys(), " / ")), nil)
+		}
+
+		version := strings.TrimSpace(action.StringParam(params, "version"))
+		if version == "" {
+			return nil, action.NewError(action.CodeInvalidParams, "version 不能为空白", nil)
+		}
+		if len(version) > maxAckVersionBytes {
+			return nil, action.NewError(action.CodeInvalidParams,
+				fmt.Sprintf("version 最长 %d 字节", maxAckVersionBytes), nil)
+		}
+		if !ackVersionPattern.MatchString(version) {
+			return nil, action.NewError(action.CodeInvalidParams,
+				"version 只允许数字、点、连字符与可选的 v 前缀（如 0.2.3 / v0.2.3-rc.1）", nil)
+		}
+		note := strings.TrimSpace(action.StringParam(params, "note"))
+		if len(note) > maxAckNoteBytes {
+			return nil, action.NewError(action.CodeInvalidParams,
+				fmt.Sprintf("note 最长 %d 字节", maxAckNoteBytes), nil)
+		}
+
+		// 环境取自 Principal，**不取自参数**（宪法 15 条：不许调用方自称身份）。
+		observed, err := observations.Get(ctx, metricKey, p.Environment)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, action.NewError(action.CodePreconditionFailed,
+					fmt.Sprintf("环境 %s 下还没有指标 %s 的观测，没有可核对的东西", p.Environment, metricKey), nil)
+			}
+			return nil, err
+		}
+		observedVer := observedVersion(observed.Value)
+		if observedVer == versionChangeUnknown {
+			return nil, action.NewError(action.CodePreconditionFailed,
+				fmt.Sprintf("指标 %s 没有上游自报版本，没有可核对的东西", metricKey), nil)
+		}
+		// 逐字相同才落库。这一条是「参数装不下凭据」的**硬理由**：version 不是
+		// 「调用方给什么就存什么」，它必须等于平台自己刚刚从上游观测到的那个值。
+		if observedVer != version {
+			return nil, action.NewError(action.CodeConflict,
+				fmt.Sprintf("上游现在自报的是 %s，你要核对的是 %s，请刷新后再确认",
+					observedVer, version), nil)
+		}
+
+		ack, err := store.SetUpstreamVersionAck(ctx, UpstreamVersionAck{
+			Environment: p.Environment,
+			MetricKey:   metricKey,
+			Version:     version,
+			// source 从观测里读，不从参数来。
+			Source:         observed.Source,
+			AcknowledgedBy: p.ID,
+			AcknowledgedAt: time.Now().UTC(),
+			Note:           note,
+		})
+		if err != nil {
+			return nil, domainError(err)
+		}
+
+		action.RecordResource(ctx, resourceUpstreamVerAck, ack.Environment+"/"+ack.MetricKey)
+		if note != "" {
+			action.RecordReason(ctx, note)
+		}
+		action.RecordAfter(ctx, upstreamVersionAckSummary(ack))
+		return ack, nil
+	}
+}
+
+// upstreamVersionAckSummary 是进审计链的已核对版本摘要。
+func upstreamVersionAckSummary(a UpstreamVersionAck) map[string]any {
+	return map[string]any{
+		"environment":     a.Environment,
+		"metric_key":      a.MetricKey,
+		"version":         a.Version,
+		"source":          a.Source,
+		"acknowledged_by": a.AcknowledgedBy,
+		"acknowledged_at": a.AcknowledgedAt.UTC().Format(time.RFC3339),
+		"note":            a.Note,
 	}
 }
 

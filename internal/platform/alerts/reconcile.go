@@ -48,6 +48,14 @@ type Result struct {
 	// NotifySkipped 是「有待投递的告警，但一个渠道都没配」的条数。
 	// 它不是失败，但必须可见——见 Reconcile 里那条 warn。
 	NotifySkipped int
+	// HysteresisSuppressed / HysteresisHeld / VersionAckSuppressed 直接来自
+	// EvaluateResult，进 alert_evaluate 的结构化日志。
+	//
+	// 它们必须看得见：迟滞与「已核对版本」都是**抑制器**，一个不留痕的
+	// 抑制器就是下一个「安静地给你一个旧答案」——正是本片要治的病。
+	HysteresisSuppressed int
+	HysteresisHeld       int
+	VersionAckSuppressed int
 	// ThresholdRevision/Source prove which DB-backed runway snapshot this
 	// evaluation consumed. They are zero/empty for legacy evaluators without a
 	// threshold provider and are safe to emit in worker logs.
@@ -57,10 +65,17 @@ type Result struct {
 
 // Reconciler 把一轮评估结果落成库里的告警状态，然后投递。
 //
-// 顺序固定：评估 → 读静默窗口 → 读当前活跃 → 逐条 Upsert → 自动恢复 → 投递。
+// 顺序固定：读当前活跃 → 评估 → 读静默窗口 → 逐条 Upsert → 自动恢复 → 投递。
 //
 // 「读当前活跃」必须在 Upsert **之前**：那份快照是算「哪些告警本轮没再命中」
 // 的基准。放到后面读就会把本轮刚新开的告警也算进候选集，然后立刻把它们解决掉。
+//
+// 从 XM-OPS-TRUTH 子片 B 起它还要更早一步——在 Evaluate **之前**：那份快照
+// 同时是 R1 迟滞「关」那一半的输入（当前不再失败但告警还开着时，要连续 N 轮
+// 恢复才关）。代价要如实写下来：快照的取样时刻因此提前了一个评估耗时，
+// 一条在 Evaluate 期间被人手动确认或解决的告警，本轮仍会被当作「活跃」参与
+// 迟滞判定。后果最多是多保留一轮（60 秒），但它不是原子的，别让下一个人
+// 以为是。
 type Reconciler struct {
 	store     AlertStore
 	evaluator *Evaluator
@@ -111,20 +126,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, environment string) (Result,
 	}
 	now := r.now().UTC()
 
-	findings, err := r.evaluator.Evaluate(ctx, environment, now)
+	// 基准快照：本轮开始时还活着的告警。它有两个用途——算「哪些告警本轮
+	// 没再命中」（下面的自动恢复），以及喂给 Evaluate 做 R1 迟滞「关」那一半。
+	before, err := r.store.ListActive(ctx, environment)
 	if err != nil {
 		return res, err
 	}
+	active := make(map[string]struct{}, len(before))
+	for _, a := range before {
+		active[a.DedupKey] = struct{}{}
+	}
+
+	evaluated, err := r.evaluator.Evaluate(ctx, environment, now, active)
+	if err != nil {
+		return res, err
+	}
+	findings := evaluated.Findings
 	res.Findings = len(findings)
+	res.HysteresisSuppressed = evaluated.HysteresisSuppressed
+	res.HysteresisHeld = evaluated.HysteresisHeld
+	res.VersionAckSuppressed = evaluated.VersionAckSuppressed
 	res.ThresholdRevision, res.ThresholdSource, _ = r.evaluator.LastThresholdSnapshot()
 
 	silences, err := r.store.ListActiveSilences(ctx, environment, now)
-	if err != nil {
-		return res, err
-	}
-
-	// 基准快照：本轮开始时还活着的告警。
-	before, err := r.store.ListActive(ctx, environment)
 	if err != nil {
 		return res, err
 	}

@@ -1094,18 +1094,23 @@ func NewClient(pool *pgxpool.Pool, cfg Config) (*river.Client[pgx.Tx], error) {
 			BalanceThresholdMinorUnits: cfg.AlertBalanceThresholdMinorUnits,
 			RunwayThresholds:           cfg.AlertRunwayThresholds,
 		}
+		// 一个 *alerts.Store 同时是 AlertStore 与 UpstreamVersionAckSource。
+		// 构造两次没有坏处，但会让「评估器读的已核对版本，和 Action 写进去的
+		// 是同一张库表」这件事变得不明显。
+		alertStore := alerts.NewStore(pool)
 		if cfg.RunwayThresholdProvider != nil {
 			evaluator = alerts.NewEvaluatorWithThresholdProvider(
-				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), cfg.RunwayThresholdProvider, ruleConfig)
+				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), alertStore,
+				cfg.RunwayThresholdProvider, ruleConfig)
 		} else {
 			evaluator = alerts.NewEvaluator(
-				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), ruleConfig)
+				ops.NewStore(pool), finance.NewSummaryStore(pool, nil), alertStore, ruleConfig)
 		}
 		addWorker(timeouts, workers, NewAlertEvaluateWorker(AlertEvaluateOptions{
 			Logger:      cfg.Logger,
 			Environment: cfg.Environment,
 			Reconciler: alerts.NewReconciler(alerts.ReconcilerOptions{
-				Store:     alerts.NewStore(pool),
+				Store:     alertStore,
 				Evaluator: evaluator,
 				Notifier:  notifier,
 				Logger:    cfg.Logger,

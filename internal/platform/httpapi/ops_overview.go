@@ -70,6 +70,17 @@ type OpsOverviewDeps struct {
 	// AlertDelivery is computed once at startup, never per-request (no
 	// upstream or config-file read happens in this handler).
 	AlertDelivery AlertDeliveryStatus
+	// Jobs backs failed_jobs_by_kind; *jobs.QueryStore satisfies it.
+	//
+	// nil 时那一段回 null（**不是空数组**）——与 ConfigAvailable 同一条
+	// 「不假装有数据」的纪律：空数组读作「查过了，一条失败都没有」，
+	// 而 nil 读作「这个部署没接这份数据源」，两者不能混。
+	Jobs JobsFailureSummarizer
+}
+
+// JobsFailureSummarizer 是失败作业摘要的只读能力（*jobs.QueryStore 满足）。
+type JobsFailureSummarizer interface {
+	FailedRunSummaryByKind(ctx context.Context, environment string, since time.Time) ([]jobs.FailedRunSummary, error)
 }
 
 type opsOverviewBuildBody struct {
@@ -124,6 +135,34 @@ type opsDatabaseBody struct {
 	Connected bool `json:"connected"`
 }
 
+// opsFailedJobErrorBody 是最近一次失败尝试的错误投影。
+//
+// truncated / original_length 一起给：一条被截断的错误如果不说自己被截断了，
+// 读的人会以为上游就说了这么多。
+type opsFailedJobErrorBody struct {
+	At             string `json:"at"`
+	Message        string `json:"message"`
+	Truncated      bool   `json:"truncated"`
+	OriginalLength int    `json:"original_length"`
+}
+
+// opsFailedJobKindBody 是某一类后台作业在窗口内的失败摘要。
+//
+// 它存在的理由是 2026-09-08 现场那一格：card_sync 24 小时内 288 条
+// discarded，「我的待处理」只取最新 20 条、不合并同类，于是真正要人处理的
+// 东西被挤出首屏。按 kind 合并之后那 288 条是一行。
+type opsFailedJobKindBody struct {
+	Kind    string `json:"kind"`
+	Count   int64  `json:"count"`
+	FirstAt string `json:"first_at"`
+	LastAt  string `json:"last_at"`
+	// LastRunID 让前端能跳到 /jobs/runs 定位那一条。
+	LastRunID int64 `json:"last_run_id"`
+	// ErrorCount 是最近那条作业的尝试次数（不是本类的失败总数，那是 Count）。
+	ErrorCount int                    `json:"error_count"`
+	LastError  *opsFailedJobErrorBody `json:"last_error"`
+}
+
 type opsOverviewResponse struct {
 	Build           opsOverviewBuildBody    `json:"build"`
 	WorkerHeartbeat opsOverviewMetricBody   `json:"worker_heartbeat"`
@@ -132,6 +171,12 @@ type opsOverviewResponse struct {
 	AlertDelivery   opsAlertDeliveryBody    `json:"alert_delivery"`
 	Retention       opsOverviewMetricBody   `json:"retention"`
 	Database        opsDatabaseBody         `json:"database"`
+	// FailedJobsByKind 为 null 表示这个部署没接 jobs 查询器；空数组表示
+	// 窗口内确实没有失败作业。两者不同，前端要分开渲染。
+	FailedJobsByKind []opsFailedJobKindBody `json:"failed_jobs_by_kind"`
+	// FailedJobsWindowHours 是上一段的回看窗口，让前端能把「288 次」说成
+	// 「24 小时内 288 次」而不是一个没有量纲的数。
+	FailedJobsWindowHours int `json:"failed_jobs_window_hours"`
 }
 
 // OpsOverviewHandler serves the "控制平面健康" (control-plane health)
@@ -261,6 +306,37 @@ func OpsOverviewHandler(deps OpsOverviewDeps) http.HandlerFunc {
 			cancel()
 		}
 
+		// 失败作业摘要：读库失败**不让整个 overview 失败**，与 database
+		// 那一格同一条纪律——这个端点是「控制平面健康」，它自己不该因为
+		// 其中一格读不到就整页 500。读不到时那一段回 null（不是空数组）。
+		var failedJobs []opsFailedJobKindBody
+		if deps.Jobs != nil {
+			summaries, err := deps.Jobs.FailedRunSummaryByKind(
+				r.Context(), string(env), time.Now().UTC().Add(-jobs.FailedRunSummaryWindow))
+			if err == nil {
+				failedJobs = make([]opsFailedJobKindBody, 0, len(summaries))
+				for _, s := range summaries {
+					item := opsFailedJobKindBody{
+						Kind:       s.Kind,
+						Count:      s.Count,
+						FirstAt:    s.FirstAt.UTC().Format(time.RFC3339),
+						LastAt:     s.LastAt.UTC().Format(time.RFC3339),
+						LastRunID:  s.LastRunID,
+						ErrorCount: s.ErrorCount,
+					}
+					if s.LastError != nil {
+						item.LastError = &opsFailedJobErrorBody{
+							At:             s.LastError.At.UTC().Format(time.RFC3339),
+							Message:        s.LastError.Message,
+							Truncated:      s.LastError.Truncated,
+							OriginalLength: s.LastError.OriginalLength,
+						}
+					}
+					failedJobs = append(failedJobs, item)
+				}
+			}
+		}
+
 		WriteJSON(w, http.StatusOK, opsOverviewResponse{
 			Build: opsOverviewBuildBody{
 				Version:     buildinfo.Version,
@@ -280,8 +356,10 @@ func OpsOverviewHandler(deps OpsOverviewDeps) http.HandlerFunc {
 				TelegramConfigured: deps.AlertDelivery.TelegramConfigured,
 				WebhookConfigured:  deps.AlertDelivery.WebhookConfigured,
 			},
-			Retention: metricBody(metricPlatformRetentionLast),
-			Database:  opsDatabaseBody{Connected: dbConnected},
+			Retention:             metricBody(metricPlatformRetentionLast),
+			Database:              opsDatabaseBody{Connected: dbConnected},
+			FailedJobsByKind:      failedJobs,
+			FailedJobsWindowHours: int(jobs.FailedRunSummaryWindow / time.Hour),
 		})
 	}
 }

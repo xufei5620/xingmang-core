@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,6 +77,8 @@ func alertFromRow(r gen.AlertsAlert) Alert {
 		ResolvedAt:      fromTSPtr(r.ResolvedAt),
 		LastSeenAt:      fromTS(r.LastSeenAt),
 		FireCount:       r.FireCount,
+		TriggerCount:    r.TriggerCount,
+		FirstOpenedAt:   fromTSPtr(r.FirstOpenedAt),
 		SourceMetricKey: r.SourceMetricKey,
 		NotifyStatus:    NotifyStatus(r.NotifyStatus),
 		NotifyError:     r.NotifyError,
@@ -245,17 +248,28 @@ func (s *Store) touch(ctx context.Context, existing Alert, in UpsertInput, now t
 }
 
 // insert 新开一条告警，并判定它该是 OPEN、REOPENED 还是 SILENCED。
+//
+// first_opened_at 在复发路径上**继承**上一次那条的首开时刻：这就是
+// 「已持续从首次开算，不因抖动归零」的实现（子片 B 任务书第 1 条）。
+// 继承范围天然就是 reopenLookback（24 小时）——超过那个窗口本来就不算
+// 同一件事，不必再发明第二个「多久算同一件事」的常量。
 func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Alert, error) {
 	status := StatusOpen
+	firstOpenedAt := now
 	if in.Silenced {
 		status = StatusSilenced
 	} else {
-		reopened, err := s.recentlyResolved(ctx, in.DedupKey, now)
+		previous, reopened, err := s.recentlyResolved(ctx, in.DedupKey, now)
 		if err != nil {
 			return Alert{}, err
 		}
 		if reopened {
 			status = StatusReopened
+			// 上一条自己也可能是复发链上的一环，所以取它的**有效**首开时刻
+			// 而不是它的 opened_at：三次复发之后，「已持续」仍然从第一次算起。
+			if inherited, _ := previous.EffectiveFirstOpenedAt(); !inherited.IsZero() {
+				firstOpenedAt = inherited
+			}
 		}
 	}
 
@@ -269,6 +283,7 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 		Detail:          in.Detail,
 		Environment:     in.Environment,
 		OpenedAt:        ts(now),
+		FirstOpenedAt:   ts(firstOpenedAt),
 		SourceMetricKey: in.SourceMetricKey,
 	})
 	if err != nil {
@@ -277,18 +292,23 @@ func (s *Store) insert(ctx context.Context, in UpsertInput, now time.Time) (Aler
 	return alertFromRow(row), nil
 }
 
-func (s *Store) recentlyResolved(ctx context.Context, dedupKey string, now time.Time) (bool, error) {
-	_, err := s.q.GetLatestResolvedAlertByDedupKey(ctx, gen.GetLatestResolvedAlertByDedupKeyParams{
+// recentlyResolved 找复发窗口内最近解决的那一条。
+//
+// 返回整行而不是一个布尔：调用方要的不只是「是不是复发」，还要它的首开
+// 时刻。原先只返回布尔时，那一行的其它事实在这里被丢掉了，于是复发的新行
+// 只能从 now 重新起算——界面上「已持续」每复发一次就归零。
+func (s *Store) recentlyResolved(ctx context.Context, dedupKey string, now time.Time) (Alert, bool, error) {
+	row, err := s.q.GetLatestResolvedAlertByDedupKey(ctx, gen.GetLatestResolvedAlertByDedupKeyParams{
 		DedupKey:   dedupKey,
 		ResolvedAt: ts(now.Add(-reopenLookback)),
 	})
 	switch {
 	case err == nil:
-		return true, nil
+		return alertFromRow(row), true, nil
 	case errors.Is(err, pgx.ErrNoRows):
-		return false, nil
+		return Alert{}, false, nil
 	default:
-		return false, fmt.Errorf("lookup resolved alert: %w", err)
+		return Alert{}, false, fmt.Errorf("lookup resolved alert: %w", err)
 	}
 }
 
@@ -537,4 +557,87 @@ func (s *Store) PruneResolved(ctx context.Context, cutoff time.Time, batchSize i
 		Cutoff:    ts(cutoff.UTC()),
 		BatchSize: batchSize,
 	})
+}
+
+func ackFromRow(r gen.AlertsUpstreamVersionAck) UpstreamVersionAck {
+	return UpstreamVersionAck{
+		Environment:    r.Environment,
+		MetricKey:      r.MetricKey,
+		Version:        r.Version,
+		Source:         r.Source,
+		AcknowledgedBy: r.AcknowledgedBy,
+		AcknowledgedAt: fromTS(r.AcknowledgedAt),
+		Note:           r.Note,
+	}
+}
+
+// SetUpstreamVersionAck 记下「这条上游的这个版本我核对过了」，覆盖同一条
+// 上游此前记着的版本。
+//
+// 校验（版本形态、指标键是否已注册、与当轮观测是否逐字相同）全部在 Action
+// Handler 里，不在这里：那些判据要读 ops 观测，而仓储层不该反向依赖 ops。
+// 这里只保证写进去的东西满足库层 CHECK。
+func (s *Store) SetUpstreamVersionAck(ctx context.Context, in UpstreamVersionAck) (UpstreamVersionAck, error) {
+	if in.Environment == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("environment: %w", ErrMissingField)
+	}
+	if !ruleKeyPattern.MatchString(in.MetricKey) {
+		return UpstreamVersionAck{}, fmt.Errorf("metric_key=%q 须匹配 ^[a-z0-9][a-z0-9_.-]{0,127}$: %w",
+			in.MetricKey, ErrInvalidFormat)
+	}
+	if strings.TrimSpace(in.Version) == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("version: %w", ErrMissingField)
+	}
+	if strings.TrimSpace(in.AcknowledgedBy) == "" {
+		return UpstreamVersionAck{}, fmt.Errorf("acknowledged_by: %w", ErrMissingField)
+	}
+	at := in.AcknowledgedAt
+	if at.IsZero() {
+		return UpstreamVersionAck{}, fmt.Errorf("acknowledged_at: %w", ErrMissingField)
+	}
+	row, err := s.q.SetUpstreamVersionAck(ctx, gen.SetUpstreamVersionAckParams{
+		Environment:    in.Environment,
+		MetricKey:      in.MetricKey,
+		Version:        in.Version,
+		Source:         in.Source,
+		AcknowledgedBy: in.AcknowledgedBy,
+		AcknowledgedAt: ts(at),
+		Note:           in.Note,
+	})
+	if err != nil {
+		return UpstreamVersionAck{}, fmt.Errorf("set upstream version ack: %w", err)
+	}
+	return ackFromRow(row), nil
+}
+
+// GetUpstreamVersionAck 取一条已核对记录；不存在返回 ErrNotFound。
+func (s *Store) GetUpstreamVersionAck(ctx context.Context, environment, metricKey string) (UpstreamVersionAck, error) {
+	row, err := s.q.GetUpstreamVersionAck(ctx, gen.GetUpstreamVersionAckParams{
+		Environment: environment,
+		MetricKey:   metricKey,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UpstreamVersionAck{}, fmt.Errorf("upstream_version_ack %s/%s: %w", environment, metricKey, ErrNotFound)
+	}
+	if err != nil {
+		return UpstreamVersionAck{}, fmt.Errorf("get upstream version ack: %w", err)
+	}
+	return ackFromRow(row), nil
+}
+
+// ListUpstreamVersionAcks 返回某环境下的全部已核对记录，键是 metric_key。
+//
+// 返回 map 而不是切片：调用方（评估器）逐条观测查的就是「这条指标核对过
+// 什么版本」，切片会让每条观测再线性扫一遍。
+func (s *Store) ListUpstreamVersionAcks(ctx context.Context, environment string) (map[string]UpstreamVersionAck, error) {
+	rows, err := s.q.ListUpstreamVersionAcks(ctx, environment)
+	if err != nil {
+		return nil, fmt.Errorf("list upstream version acks: %w", err)
+	}
+	out := make(map[string]UpstreamVersionAck, len(rows))
+	for _, r := range rows {
+		ack := ackFromRow(r)
+		out[ack.MetricKey] = ack
+	}
+	return out, nil
 }

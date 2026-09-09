@@ -34,13 +34,13 @@
 
 | 规则键 | 名称 | 数据来源 | 条件 | 持续时间 | 严重度 | 恢复条件 | 去重键 |
 |---|---|---|---|---|---|---|---|
-| `metric.sync.failed` | 指标同步失败 | `ops.metric_observation` | 新鲜度状态为 `failed` | 0（立即） | **critical** | 恢复到非 `failed` | `metric.sync.failed:<env>:<metric_key>` |
+| `metric.sync.failed` | 指标同步失败 | `ops.metric_observation`（当前态）+ `ops.metric_observation_sample`（迟滞判据） | **连续 3 轮**采集失败（少于 3 轮的抖动不报） | 3 个采集周期（默认 900s） | **critical** | **连续 3 轮**不再失败（中间只成功一两轮不算恢复） | `metric.sync.failed:<env>:<metric_key>` |
 | `metric.data.stale` | 指标数据陈旧 | `ops.metric_observation` | 状态为 `stale` 且滞后 ≥ 阈值 + 2 个采集周期 | 2 个采集周期（默认 600s） | warning | `observed_at` 重回阈值内 | `metric.data.stale:<env>:<metric_key>` |
-| `metric.sync.consecutive_failed` | 同步连续失败 | `ops.metric_observation_sample` | 最近 3 条样本连续为 `failed` | 3 个采集周期 | **critical** | 出现任意一条成功样本 | `metric.sync.consecutive_failed:<env>:<metric_key>` |
+| `metric.sync.consecutive_failed` | 同步长期失败 | `ops.metric_observation_sample` | 当前正在失败，且**最近 12 条样本里失败 ≥ 9 次**（滑动窗口，不是连续串） | 12 个采集周期 | **critical** | 窗口内失败次数回落到 9 次以下 | `metric.sync.consecutive_failed:<env>:<metric_key>` |
 | `channel.token.invalid` | 渠道 token 失效 | `sub2api.channels.balance` 的 `channels[].token_valid` | `token_valid` **明确为** `false` | 0 | warning | 恢复为 `true`，或该渠道从上游清单消失 | `channel.token.invalid:<env>:<channel_id>` |
 | `channel.balance.low` | 渠道余额不足 | `sub2api.channels.balance` 的 `channels[].balance_minor_units` | 余额 < 阈值（默认 500000 最小货币单位） | 0 | warning | 余额回到阈值之上，或该渠道消失 | `channel.balance.low:<env>:<channel_id>` |
 | `upstream.runway.low` | 上游可用天数不足 | `finance.balance_history` ÷ `finance.profit_daily`（近 7 个完整业务日的日均消耗，设计稿 §10.4） | 计量型上游的可用天数**算得出来**且 ≤ warning 档（默认 10 天） | 0 | warning（≤ critical 档 5 天升为 **critical**） | 天数回到告警档之上，或不再算得出天数 | `upstream.runway.low:<env>:<upstream_account_id>` |
-| `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致 | 0（立即） | warning | 下一轮不再变化（去重键带新版本，一次变化一条，不会因为版本稳定下来就假装没发生过） | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
+| `upstream.version.changed` | 上游版本变化 | connector probe 观测（`*.connector.health`）的 `version` 与同一指标的历史样本 | 最新观测的版本与历史里最近一个**不同**的版本不一致，且这个版本**没有被人核对过** | 0（立即） | warning | 有人执行 `alerts.upstream_version.acknowledge` 核对了这个版本，或下一轮不再变化 | `upstream.version.changed:<environment>:<metric_key>:<new_version>` |
 
 余下三项（通知渠道 / 静默策略 / 负责人）全部规则相同：
 渠道 = 已配置的 telegram + webhook；静默策略见下一节；负责人 = `platform-ops`。
@@ -111,12 +111,43 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 一列上，不带环境的话 staging 与生产的同一条指标会抢同一行——一个环境的
 评估轮次会改写另一个环境的告警（宪法 15 条）。
 
-**`R1-failed` 与 `R4-consecutive` 会同时活跃。** 一条指标连续失败 ≥3 轮时，
-两条告警都在。它们不是重复：前者说「现在失败」，后者说「已经连续失败三轮，
-不是一次抖动」——同一事实的两个不同持续时间断言，而后者正是决定要不要
-升级处置的信号。Foundation-A **不做抑制**：抑制的正确做法是把低阶告警标记成
-「被抑制」而不是「已恢复」，而 `SILENCED` 这个状态在本档已经被静默窗口占用了。
-补法留给 Foundation-B。
+**`R1-failed` 的迟滞：连续 N 轮才开，连续 N 轮才关（N=3，`rules.go` 的
+`DefaultSyncFailedHysteresisRounds` 是它唯一的定义处）。**
+
+在 2026-09-08 之前，这条规则**没有任何持续时间门槛**：一失败下一分钟就报，
+一成功下一分钟就撤。生产上那三条 NewAPI 指标因此每 5 分钟翻一次面，而界面上
+「已持续 7 分钟」每次恢复都归零，于是没人看得出它其实已经这样很久了
+（见 `docs/handoffs/PLATFORM-ALERT-STORM-2026-09-08.md` §二）。
+
+开与关用**同一个 N**：不对称的迟滞会让人在事后无法用一个数解释这条告警的
+行为（「为什么 15 分钟才报、5 分钟就撤」）。
+
+**代价必须知道**：采集周期 300s 时，N=3 意味着**一次 10 分钟以内的上游读取
+失败从此不再产生告警**。这是有意的取舍——那段降级仍然看得见（运行保障页的
+新鲜度、后台任务页的运行记录都逐轮可见），数据真的停更时 `metric.data.stale`
+会接手。每一轮被迟滞压住或保持的条数都进 `alert_evaluate` 的结构化日志
+（`hysteresis_suppressed` / `hysteresis_held`）——一个不留痕的抑制器就是
+下一个「安静地给你一个旧答案」。
+
+判据是**纯函数**（`foldSyncFailure`），从历史样本折叠出来，不落任何新状态：
+worker 重启、多副本、River 换一个节点跑，答案都一样。
+
+**`R1-failed` 与 `R4-consecutive` 会同时活跃。** 一条链路长期失败时两条告警
+都在。它们不是重复：前者说「现在坏了，而且不是一次抖动」，后者说「这一小时
+里四分之三的采集都是失败的」——同一事实的两个不同时间尺度，而后者正是决定
+要不要升级处置的信号。Foundation-A **不做抑制**：抑制的正确做法是把低阶告警
+标记成「被抑制」而不是「已恢复」，而 `SILENCED` 这个状态在本档已经被静默窗口
+占用了。补法留给 Foundation-B。
+
+**R4 的计数是滑动窗口，不是连续串（K=9 / W=12）。** 旧实现从样本尾部往前数，
+遇到第一条成功就停——于是 card_sync 那种每 5 分钟失败一次、三天没停过的
+慢性病**从来没升级过**。K 取 9 而不是照搬旧的 3 是有理由的：一串完全交替的
+失败/成功在 12 条窗口里恰好凑出 6 次失败，阈值取 3 或 6 的话，R1 的迟滞刚
+压住的那种翻面抖动会原样从 R4 冒出来，而且同样是 critical。
+
+**`metric.sync.consecutive_failed` 这个键名保留不改**，尽管判据已经不是
+「连续」。rule_key 是静默窗口的匹配键与历史告警的分组键，改名等于让已存在的
+静默窗口和历史一起失配——名字略微名不副实是保留键名必须付的代价。
 
 **`R1-failed` 与 `R1-stale` 互斥，不会同时响。** `ops.Observation.Freshness`
 的状态优先级里 `failed` 高于 `stale`，一条记录只会落在其中一个状态上。
@@ -130,8 +161,25 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 是在用过期数据下现在的结论。这两种情况 `R1-failed` 已经以 critical 报出
 「你现在是瞎的」，那才是此刻真正需要处理的事。
 
-**R4 只在当前正在失败时才回看历史样本。** 语义上「连续失败」本就要求最新
-那条是失败的；成本上健康时一条样本查询都不发。
+**历史样本一轮一条指标只查一次，而且只在两种情况下查**：当前正在失败
+（可能要开），或者这条 R1 告警还开着（可能要关）。健康且没有告警的指标一条
+样本查询都不发——评估每 60 秒一轮，无条件给每条指标配一次历史查询是纯浪费。
+R1 的迟滞与 R4 的滑动窗口共用那一次查询的结果。
+
+**「这个上游版本我核对过了」是 R6 唯一正常的结束方式。**
+
+在它之前，`upstream.version.changed` 只能等旧探测样本被挤出回看窗口
+（200 条 ≈ 16h40m）后自己消失。2026-09-08 那条的真实结局是「今晚 20:52 前后
+自己消失，不是因为有人核对了，是因为证据过期了」。
+
+现在有了 `alerts.upstream_version.acknowledge`（L1）：它把
+`(environment, metric_key) → version` 记进 `alerts.upstream_version_ack`，
+规则命中时若观测版本等于已核对版本就不再命中，既有 OPEN 告警在下一轮被
+**通用恢复逻辑**转 `RESOLVED`（不长第二套语义）。
+
+比较是**逐字相等**：核对过 `0.2.2` 不等于核对过 `0.2.3`，核对过 `0.2` 更不等于
+核对过 `0.2.3`。一条上游只有一个**当前**已核对版本，新的核对覆盖旧的，
+历史留在审计链里。
 
 ---
 
@@ -190,7 +238,7 @@ API 会把 revision/source/updated_at 回报给前端，worker 会把 revision �
 | 时长上限 | **7 天**。更长等于永久关掉这条规则，而且没有任何东西会提醒有人去解除它。更长的诉求应走「改规则」或「停用采集」（宪法 26 条的 Kill Switch），那两条路都有变更记录 |
 | `reason` | 非空是**库层 CHECK**。没有理由的静默在事后复盘时与「有人手滑」不可区分。它同时进审计事件的 `reason` 列 |
 | 对已响告警的作用 | 已经 `OPEN` 的告警命中新建的窗口会转 `SILENCED` —— 让正在响的告警闭嘴正是建窗口的目的 |
-| 静默期间 | `fire_count` **照常递增**：那是「这个问题持续了多久」的证据，不该因为没人想听就不记 |
+| 静默期间 | `fire_count` **照常递增**：那是「这个问题持续了多久」的证据（**评估轮数**，不是触发次数），不该因为没人想听就不记。`trigger_count` 在 `OPEN → SILENCED` 这一步**不**递增——让它闭嘴不是「又响了一次」 |
 
 **窗口过期后**：条件仍成立 → 转回 `OPEN`，`notify_status` 推回 `pending`
 重新排队投递。这条转换是 `Store.Upsert` 里唯一会重置投递状态的路径；
@@ -319,6 +367,7 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 | 读静默窗口（`GET /api/v1/alerts/silences`） | `ops.read` | — |
 | 确认告警（`alerts.alert.acknowledge@1`） | `alerts.alert.manage` | L0 |
 | 创建静默窗口（`alerts.silence.create@1`） | `alerts.silence.manage` | L1 |
+| 核对上游版本（`alerts.upstream_version.acknowledge@1`） | `alerts.alert.manage` | L1 |
 
 **读复用 `ops.read`**：告警内容就是运营指标的判读结果——「渠道甲余额只剩
 3000」这条告警泄漏的信息，与 `ops.read` 能直接读到的余额数字完全相同。
@@ -338,12 +387,48 @@ Webhook 那边更严：**整个 URL 可能就是凭据**（Slack / 飞书的 inc
 所以 `acknowledgeHandler` 在读到资源之后显式比对 `alert.Environment`
 与 `Principal.Environment`（宪法 15 条）。
 
+**核对上游版本复用 `alerts.alert.manage`，且必须留在 L1。**
+
+复用而不新增 scope：核对上游版本与确认告警是同一类「我看过了」，爆炸半径远
+小于静默——它只让**这一条**上游的版本提醒停下来，不会让任何别的告警闭嘴。
+
+留在 L1 的理由不是「感觉不严重」，是硬的：L2 及以上会把整包 `params` 原样冻进
+`core.approval_request.params_json`，并由 `GET /api/v1/approvals` 回给每一个能
+看审批队列的人。只要参数里能塞自由文本，抬级就等于给凭据开一条展示通道。
+本 Action 的两个参数**在形状上装不下凭据**：`metric_key` 必须过
+`ops.KnownMetricKey`（注册出来的清单，不是手抄的），`version` 必须与平台自己
+从上游观测到的 `value_json.version` **逐字相同**才会落库——「调用方给什么就存
+什么」这条路根本不存在。`source` 由服务端从观测里读出后写入，不来自参数。
+
+它也确实不该是 L0：L0 的定位是「保存个人视图、低影响偏好」，而这个动作会让
+一条规则不再命中、让既有告警在下一轮被解决，与 `alerts.silence.create` 同一档。
+
 ---
 
 ## 数据模型
 
-`db/migrations/000007_alerts.up.sql`。两张表：`alerts.alert` 与
-`alerts.alert_silence`。几处值得单独说的：
+`db/migrations/000007_alerts.up.sql` 建了 `alerts.alert` 与
+`alerts.alert_silence`；`db/migrations/000054_alerts_trigger_and_version_ack.up.sql`
+给前者加了两列，并新建 `alerts.upstream_version_ack`。几处值得单独说的：
+
+- **`fire_count` 与 `trigger_count` 是两个量。** 前者是**评估轮数**（每 60 秒
+  一轮，条件仍成立就 +1），后者是真正的**触发次数**（新开 +1、静默过期转回
+  `OPEN` 重新投递 +1；持续命中不加）。2026-09-08 界面上那个「触发 669 次」
+  其实是「持续了 668 分钟」——一个数被当成了另一个数在用。
+- **`first_opened_at` 跨 `RESOLVED → REOPENED` 继承**（限 24 小时复发窗口内，
+  与 `reopenLookback` 同一个窗口，不新增第二个「多久算同一件事」的常量），
+  所以「已持续」不会因为中间恢复过一次就归零。超过复发窗口的是一件新事，
+  重新起算。
+- **两列都可空、都不回填。** 本列上线前就存在的行不知道自己被触发过几次，
+  也不知道第一次是什么时候开的。填 0 或 `now()` 会造出一个看起来像真答案的
+  假答案（宪法 12 条）。读取侧的兜底规则只写在 `Alert.EffectiveFirstOpenedAt`
+  一处，HTTP 层调它，不各写一遍。
+- **`alerts.upstream_version_ack` 的主键是 `(environment, metric_key)`**，不含
+  `version`：一条上游只有一个**当前**已核对版本，新的核对覆盖旧的，历史留在
+  审计链里。不复用 `alert_silence`（它是限时窗口、按 `rule_key` 匹配、只挡投递
+  不挡命中——用它实现等于把一件做完的事做成一个 7 天后会复发的提醒），也不
+  挂在 `alerts.alert` 上（那会随保留期清理被删掉，而那个失效没有任何人做错
+  任何事、也不留痕迹）。
 
 - **部分唯一索引覆盖四个活跃状态**（含 `SILENCED`），而不只是
   `OPEN/ACKNOWLEDGED/REOPENED`。这是相对任务书原始描述的一处**有意收紧**：
