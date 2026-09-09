@@ -31,10 +31,15 @@ RC108 的对账中自锁片在影子评估上 not_ready（见 `RELEASE-RC108.md`
 | 源码门禁第三次（并入 `9bb88f6` 收尾文档后，最终树 `9bcf083`；`rc110-gate3`） | 15:22:11 | 15:30:30 | 8m19s | **PASS**（exit 0）—— tag 打在本行之后的记录提交上 |
 | 签名 tag `v0.1.0-rc110-signed` → `277063c`（`git verify-tag` Good） | 15:31 | 15:31 | | OK |
 | 镜像门禁（`wt-XM-INV-AUTOLOGIN` detached 到 `277063c`，`run-rc110-image-gate.ps1`，`rc110-imagegate`）+ 两次产物验证 | 15:31:52 | 15:43:44 | 11m52s | exit 42（唯一预期值）；两次验证 exit 0；`release/0.1.0-rc110-exact1` |
-| `ssh-keygen -Y sign` 签 `SHA256SUMS` | 待签 | | | |
-| 传输 + stage2 | 待做 | | | |
-| **影子评估 A**：`--reproject-all --finalization-window --finalization-window-provable`（不带 reevaluate、不带 lag） | 待跑 | | | 先核 `pending_accounts[].requested_through > finalized_through`；12 出现 `idle_reevaluation:true` 结转证明、matched、→ active；其余不变 |
-| **影子评估 B**：A 的参数 + `--reevaluate-evidence` | 待跑 | | | 无投影错误；34 作业完成、差异可由有符号口径解释；12 在 B 里不退出属预期；34 的合成条数与生产不可比（伪象） |
+| `ssh-keygen -Y sign` 签 `SHA256SUMS` + bash 重定向验签 | 15:44 | 15:44 | 1s | Good；66/66；manifest `source.gitHead` = `277063c…` |
+| 传输包 → `incoming/rc110/`，服务器侧 sha256 三项 OK | 15:44 | 15:47:52 | ~4m | OK |
+| stage2（9 imageId 对清单；tools 含 `invoice-account-bind`；服务器验签 Good、66/66；源码 `releases/277063c…/source`；env 仅改 tag；账本 top 仍 `0032`） | 15:48:22 | 15:48:42 | 20s | OK；记录目录 `deployment-records/rc110-deploy-20260909T154819Z/` |
+| **影子评估 A**（备份 `invoice-20260909T143200Z`；`--reproject-all --finalization-window --finalization-window-provable`，无 lag / 无 reevaluate；rehearsal `20260909T154900Z-3668424`） | 15:48:52 | 15:55:47 | 6m55s | verdict ready、0 错误、0 新冻结原因；**12 未退出：F 前后都是 14:11:03，窗口零宽**——根因是冻结副本上 bound=min_wm−900s 只比 F 高几十秒（四流水位落后约 5 分钟，生产 finalize 已把 F 顶到前沿），(F,bound] 内无周期；生产上 (F,14:32] 有 19 个周期。不是 provable 退化、不是代码缺陷；工具改动（允许负 lag 封顶 min_wm）留下一版 |
+| **影子评估 B**（A 的参数 + `--reevaluate-evidence`；rehearsal `20260909T155639Z-3714182`） | 15:56:39 | 16:05:25 | 8m46s | verdict ready；清掉并重判 **9,101** 条评估、2 轮、**0 投影错误、0 失败账号、0 新冻结原因**；9 个 active 账号状态与 overage 逐字不变，2222 仍 frozen；12 仍 pending（B 里属预期）；**34 的作业停在 `BALANCE_PROOF_PENDING`（2 次尝试，projection_version 未变）——它在冻结副本上没跑到评估**，所以 B 没有直接演到 RC108 那条 FK 路径；该路径由 `fa36478` 的集成用例（逐字复现同一错误串后修复、变异 M37 红）与外部复核的独立复现覆盖 |
+
+**发布判据（负责人 2026-09-10 00:1x 决定今晚上线）**：B 证明评估器改动对全部 9 个 active 账号与 2222 无副作用、无错误；12/34 两个目标账号在冻结副本上分别因零宽窗口与证明待定没有被演到，
+其行为由单测/集成测试与复审推演覆盖，上线后直接观察（12 应在下一个 balances 周期后派生并退出；34 的下两张真实检查点应合成并 matched）。
+残余风险：若 34 的实时路径仍出错，形状是该账号作业 PROJECTION_FAILED → 8 次后 dead → readyz 503（不影响客户流量）；处置是单步回滚 RC109。
 
 ## 顺序
 
