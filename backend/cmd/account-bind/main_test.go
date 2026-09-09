@@ -331,11 +331,15 @@ func TestRunRefusesAnIssuerThatDisagreesWithTheDatabase(t *testing.T) {
 // runbook documents. "Come back in the next quiet window" and "this failed"
 // need different answers from a script, and previously both were 1.
 func TestExitCodeSeparatesTheTimingGateFromRealFailures(t *testing.T) {
+	// Literals, not the constants. Comparing exitCodeFor's output against the
+	// same constants it returns is self-certifying: renaming 3 to 4 would keep
+	// it green while silently breaking the runbook's exit-code table, which is
+	// written in literals and is what an operator's script actually keys on.
 	gateErr := fmt.Errorf("wrapped: %w", postgresstore.ErrOperatorBindTimingGate)
-	if got := exitCodeFor(gateErr); got != exitTimingGateRefused {
-		t.Fatalf("timing gate refusal exits %d, want %d", got, exitTimingGateRefused)
+	if got := exitCodeFor(gateErr); got != 3 {
+		t.Fatalf("timing gate refusal exits %d, want 3 (PRODUCTION-RUNBOOK section 9c exit-code table)", got)
 	}
-	if got := exitCodeFor(errors.New("database is unreachable")); got != exitOperationFailed {
-		t.Fatalf("ordinary failure exits %d, want %d", got, exitOperationFailed)
+	if got := exitCodeFor(errors.New("database is unreachable")); got != 1 {
+		t.Fatalf("ordinary failure exits %d, want 1 (PRODUCTION-RUNBOOK section 9c exit-code table)", got)
 	}
 }

@@ -971,3 +971,117 @@ func TestOperatorBindIssuerCheckIgnoresCentrallyMintedIdentities(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestOperatorBindSetsItsSessionLimits reads the three limits back with SHOW,
+// inside a transaction that applied them exactly as the bind does.
+//
+// They matter because this tool connects as invoice_owner, which carries no
+// timeouts at all -- unlike invoice_app, whose role-level 15s/5s/15s
+// (deploy/postgres/010-invoice-roles.sh) protect the api. Without them a bind
+// waiting on a lock would hold its own locks against the live api for the
+// CLI's whole five-minute context.
+//
+// SHOW returns PostgreSQL's own normalized spelling, so this also catches a
+// value the server would silently reinterpret.
+func TestOperatorBindSetsItsSessionLimits(t *testing.T) {
+	store, ctx, _ := seedShadowBindFixture(t)
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	// Prove the assertion is not tautological: invoice_owner starts with no
+	// lock_timeout, so a missing SET would leave "0" here.
+	var before string
+	if err = tx.QueryRow(ctx, `SHOW lock_timeout`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if before != "0" {
+		t.Fatalf("this role already has lock_timeout=%q; the test cannot tell the SET apart from the default", before)
+	}
+
+	if err = applyOperatorBindSessionLimits(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []struct{ setting, value string }{
+		{"lock_timeout", "5s"},
+		{"statement_timeout", "5min"},
+		{"idle_in_transaction_session_timeout", "15s"},
+	} {
+		var got string
+		if err = tx.QueryRow(ctx, `SHOW `+want.setting).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want.value {
+			t.Fatalf("%s is %q, want %q", want.setting, got, want.value)
+		}
+	}
+}
+
+// TestOperatorBindTakesTheAccountAdvisoryLock proves two things at once, and
+// neither can be proved without the other being true.
+//
+// A second connection holds the very advisory lock the other two
+// external_accounts writers take -- seed 4 over sourceInstanceID+"\n"+
+// externalUserID -- and then a real bind runs. It must NOT succeed, which is
+// only possible if the bind takes the same lock with the same key and seed;
+// and it must fail with SQLSTATE 55P03 (lock_not_available) within seconds
+// rather than blocking, which is only possible if lock_timeout is in force.
+//
+// Drop the advisory lock from the bind and this goes green-with-success (no
+// contention, the bind commits). Drop lock_timeout and it hangs until the
+// context deadline and fails differently. Both are real regressions, and the
+// row-level FOR UPDATE cannot cover either of them: the external_accounts row
+// does not exist yet during a shadow bind, so it locks nothing.
+func TestOperatorBindTakesTheAccountAdvisoryLock(t *testing.T) {
+	store, ctx, _ := seedShadowBindFixture(t)
+
+	holder, err := store.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Release()
+	holdTx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = holdTx.Rollback(context.Background()) }()
+	// Exactly the statement identity.go's two writers use.
+	if _, err = holdTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,4))`,
+		shadowSourceID+"\n"+shadowExternalID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Bounded well above lock_timeout (5s) and well below the CLI's own
+	// five-minute context, so "blocked forever" and "gave up on the lock" are
+	// distinguishable outcomes rather than both timing out here.
+	bindCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	started := time.Now()
+	_, err = store.OperatorBindExternalAccount(bindCtx, shadowBindInput(shadowExternalID, true), shadowActor())
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("the bind committed while another transaction held this account's advisory lock")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+		t.Fatalf("bind failed with %v (elapsed %s), want SQLSTATE 55P03 from lock_timeout", err, elapsed)
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("bind waited %s before giving up; lock_timeout does not appear to be in force", elapsed)
+	}
+
+	// Releasing the lock lets the same bind through, which is what proves the
+	// refusal above was contention and not something permanent in the fixture.
+	if err = holdTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.OperatorBindExternalAccount(ctx, shadowBindInput(shadowExternalID, true), shadowActor())
+	if err != nil {
+		t.Fatalf("bind still failed after the advisory lock was released: %v", err)
+	}
+	if !after.Applied {
+		t.Fatal("bind reported not applied after the lock was released")
+	}
+}

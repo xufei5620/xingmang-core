@@ -135,6 +135,9 @@ dry-run 不写库、apply 端到端。
 | 15 | 关掉 `--external-user-id` 数字校验（复审 E） | 红：四个反例全部落到后面的环境变量检查上，说明校验没在参数阶段拦住 |
 | 17 | 把唤醒 WHERE 里的 `dependency_key_hmac=$2` 换成恒真条件（复审 G 的诱饵） | 红：`released=3 want 2` 与 `released=2 want 1`；加诱饵前这一改是看不出来的 |
 | 18 | issuer 检查删掉 binding_method 过滤（退回上一轮的比对集） | 红：`2 different oidc_issuer values ... refusing to add another until that is explained`，与复审员预测的生产失败一字不差 |
+| 19 | 删掉按账号的 advisory lock | 红：`the bind committed while another transaction held this account's advisory lock` |
+| 20 | `lock_timeout` 由 5s 改 90s | 红两处：`SHOW` 断言直接红；竞争测试也红，但失败方式是 `context deadline exceeded (elapsed 1m30s)` 而非 55P03——两种回归可区分 |
+| 21 | `exitTimingGateRefused` 常量由 3 改 4 | 红：`timing gate refusal exits 4, want 3`（原来的自证写法在这里是绿的） |
 
 变异 7 顺带查出一件对运行手册有用的事：影子用户是按「真登录会铸的同一对
 (issuer, subject)」建的，所以**即使认领分支不存在**，`ResolveOrCreate` 也会找到
@@ -403,6 +406,45 @@ issuer**（不然这个测试什么也没证明），再断言检查通过、`Pl
 
 摘要那一行与手册的措辞同步改成「与该来源上平台登录铸的身份一致」，并写明中心 OIDC
 用户为什么不算矛盾。
+
+## 4e. 终审 PASS 后的三条 minor（仅测试与一处等价抽取）
+
+终审判 PASS，只剩 minor。三条都收了，**没有任何行为改动**。
+
+**1. 退出码测试是自证的。** 原来拿 `exitCodeFor(...)` 的返回值与 `exitTimingGateRefused`
+比，常量改成 4 照样绿——而手册退出码表写的是字面量 3，运维脚本 key 的也是字面量。
+改成直接断言 3 与 1，失败信息里点名手册那张表。变异 21（常量改 4）→ 红。
+
+**2. 三条 `SET LOCAL` 没有测试。** 把它们抽成
+`operatorBindSessionLimits` 表 + `applyOperatorBindSessionLimits`（语句与顺序逐字
+未变，纯抽取），`TestOperatorBindSetsItsSessionLimits` 在事务里 `SHOW` 回来断言
+`5s` / `5min` / `15s`。
+
+测试开头先断言 **`SHOW lock_timeout` 在设置前是 `0`**——invoice_owner 本来就没有这三
+个设置，不先证明这一点的话，「读回来是 5s」在一个本来就有 5s 的角色上恒真。用 `SHOW`
+而不是回读常量，是因为它返回 PostgreSQL 自己规范化后的拼写，能顺带抓到被服务端悄悄
+重新解释的值。变异 20（`lock_timeout` 改 90s）→ 红。
+
+**3. advisory lock 没有测试。** `TestOperatorBindTakesTheAccountAdvisoryLock` 用第二
+条连接先持有那把锁（`pg_advisory_xact_lock(hashtextextended($1,4))`，键
+`sourceInstanceID+"
+"+externalUserID`，与 identity.go 两个写入方逐字一致），再跑
+一次真实 `--apply`。
+
+这一条同时钉住两件事，而且缺一不可：
+
+- 绑定**必须失败**——只有它确实取了同一把锁（同键同种子）才可能失败；
+- 必须在几秒内以 **SQLSTATE 55P03** 失败而不是阻塞——只有 `lock_timeout` 真的生效
+  才可能。
+
+所以变异 19（删掉 advisory lock）→ 红，`the bind committed while another transaction
+held this account's advisory lock`；变异 20（`lock_timeout` 改 90s）在这条测试上也红，
+但**失败方式不同**：`context deadline exceeded (elapsed 1m30s)` 而不是 55P03，两种
+回归因此可区分。最后释放锁再跑一次并断言成功，证明前面的拒绝来自竞争而不是 fixture
+里别的什么。
+
+这也补上了行级 `FOR UPDATE` 覆盖不到的那块：影子绑定时 `external_accounts` 那一行还
+不存在，`FOR UPDATE` 锁不住任何东西。
 
 ## 5. 偏离与未证实
 

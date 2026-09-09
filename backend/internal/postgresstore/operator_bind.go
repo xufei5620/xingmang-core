@@ -216,14 +216,8 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	// and the two apply-*.sh scripts all use 5s); statement_timeout is set to
 	// the CLI's own context deadline so the server gives up at the same moment
 	// the client does instead of grinding on behind an abandoned connection.
-	for _, statement := range []string{
-		`SET LOCAL lock_timeout='5s'`,
-		`SET LOCAL statement_timeout='5min'`,
-		`SET LOCAL idle_in_transaction_session_timeout='15s'`,
-	} {
-		if _, err = tx.Exec(ctx, statement); err != nil {
-			return OperatorBindResult{}, err
-		}
+	if err = applyOperatorBindSessionLimits(ctx, tx); err != nil {
+		return OperatorBindResult{}, err
 	}
 
 	result := OperatorBindResult{}
@@ -389,6 +383,31 @@ func (s *Store) OperatorBindExternalAccount(ctx context.Context, in OperatorBind
 	}
 	result.Applied = true
 	return result, nil
+}
+
+// operatorBindSessionLimits are the three per-transaction limits the shadow
+// bind runs under, as name/value pairs so a test can SHOW each one back.
+// invoice_owner carries none of these by default; invoice_app's role-level
+// settings (deploy/postgres/010-invoice-roles.sh) are the reference for two of
+// the three values.
+var operatorBindSessionLimits = []struct{ Setting, Value string }{
+	{"lock_timeout", "5s"},
+	{"statement_timeout", "5min"},
+	{"idle_in_transaction_session_timeout", "15s"},
+}
+
+// applyOperatorBindSessionLimits sets them with SET LOCAL, so they last
+// exactly as long as the transaction and never leak onto a pooled connection.
+// The values are interpolated from the table above rather than passed as bind
+// parameters because SET does not accept parameters; they are constants in
+// this file, never caller input.
+func applyOperatorBindSessionLimits(ctx context.Context, tx pgx.Tx) error {
+	for _, limit := range operatorBindSessionLimits {
+		if _, err := tx.Exec(ctx, `SET LOCAL `+limit.Setting+` = '`+limit.Value+`'`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checkPlatformIssuerConsistency refuses an issuer that disagrees with the one
