@@ -686,6 +686,7 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 	_, err := tx.Exec(ctx, `
 		WITH targets AS (
 			SELECT eas.external_account_id,eas.finalized_through,
+				eas.eligibility_status,eas.pending_reconciliation_consecutive_matches,
 				GREATEST(eas.cutover_at,$2::timestamptz-
 					make_interval(secs=>eas.finalization_delay_seconds)) AS requested_through
 			FROM source_account_eligibility_state eas
@@ -703,6 +704,35 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				OR EXISTS (SELECT 1 FROM balance_reconciliation_checkpoints b
 					WHERE b.external_account_id=t.external_account_id
 						AND b.as_of>t.finalized_through AND b.as_of<=t.requested_through)
+				-- XM-INV-PENDING-RECON C1: an idle not_invoiceable_pending_reconciliation
+				-- account one matched evaluation short of auto-exit has no facts of its
+				-- own to be enqueued on -- that is exactly its problem. A production
+				-- account reached pending_reconciliation_consecutive_matches=1 and then
+				-- went quiet: no usage, no credit, no payment, and (because the source
+				-- agent only emits balance rows whose units/negative flag/deficit
+				-- actually changed) no further checkpoint either. Every finalization
+				-- pass therefore fell through to the empty-advance UPDATE below, which
+				-- moves finalized_through past the published balances cycles that
+				-- ensureBalanceCarryForwardProofTx could otherwise still have derived an
+				-- idle carry-forward proof from -- burning, once per pass, the very
+				-- evidence the account needs in order to leave the state.
+				--
+				-- Enqueueing here is what stops that: a job row exists, so the
+				-- empty-advance UPDATE's own NOT EXISTS skips this account and the cycle
+				-- survives until the worker (C2's idle branch) can derive from it.
+				-- Deliberately narrow, per the 2026-09-09 ruling on design section 7 D2:
+				-- only accounts already at N-1, so each consecutive-match run produces at
+				-- most one extra proof and one extra evaluation, and the branch switches
+				-- itself off as soon as the account exits or a non-matched item resets
+				-- the counter. The status equality is written first so the EXISTS is
+				-- never evaluated for any other account.
+				OR (t.eligibility_status='not_invoiceable_pending_reconciliation'
+					AND t.pending_reconciliation_consecutive_matches>=$4
+					AND EXISTS (SELECT 1 FROM source_economic_scan_cycles c
+						WHERE c.source_instance_id=$1 AND c.stream_id='balances'
+							AND c.cycle_status='published'
+							AND c.scan_ceiling_at>t.finalized_through
+							AND c.scan_ceiling_at<=t.requested_through))
 			)
 		), held AS (
 			SELECT j.external_account_id FROM eligibility_projection_jobs j
@@ -736,7 +766,8 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				ELSE now()
 			END,
 			updated_at=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.updated_at ELSE now() END`,
-		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds())
+		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds(),
+		pendingReconciliationExitMatches-1)
 	if err != nil {
 		return err
 	}
@@ -3579,6 +3610,85 @@ func finishEligibilityProjectionJobRowTx(ctx context.Context, tx pgx.Tx, account
 	return nil
 }
 
+// carryCandidate is one published balances scan cycle that
+// ensureBalanceCarryForwardProofTx could derive a delta carry-forward proof
+// from for a single account, with the account's own prior real checkpoint
+// (the row the proof must restate verbatim, enforced by migration 0026's
+// trigger) and both exclusion flags already resolved by the candidate query.
+// Package-level rather than function-local since XM-INV-PENDING-RECON, so
+// insertBalanceCarryForwardProofTx can be shared by the fact-driven merge
+// loop and the idle re-evaluation branch instead of the insert being written
+// twice.
+type carryCandidate struct {
+	cycleID, batchID, snapshotID, cursor, revision string
+	priorID, balance                               string
+	priorDeficit                                   *string
+	asOf, watermark, observed                      time.Time
+	snapshotRows, sequence                         int64
+	negative, baselineMember, hasRealCheckpoint    bool
+	// hasStrandedCheckpoint (XM-INV-DEAD-CONTAINMENT A2) marks a cycle
+	// that carries a balance_checkpoint event for this account which is
+	// failed or dead behind an open freeze. See the candidate query and the
+	// pending returns in ensureBalanceCarryForwardProofTx.
+	hasStrandedCheckpoint bool
+}
+
+// insertBalanceCarryForwardProofTx writes one derived carry-forward proof for
+// `item`, or -- when this account already has a proof at that cycle -- verifies
+// that the existing row says exactly the same thing and leaves it alone. It is
+// the single writer both of ensureBalanceCarryForwardProofTx's derivation paths
+// go through: the fact-driven merge loop, and (XM-INV-PENDING-RECON C2) the
+// idle re-evaluation branch, which sets idleReevaluation so the audit row says
+// which path derived it. Callers must have already established that the cycle
+// carries neither a real checkpoint nor a stranded one for this account.
+//
+// A conflicting existing row is domain.ErrConflict, never a silent overwrite:
+// the (external_account_id, scan_cycle_id) uniqueness plus migration 0014's
+// mutually exclusive proof/checkpoint contract make a proof immutable once
+// written, so two different answers for the same cycle is a real inconsistency.
+func insertBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount,
+	item carryCandidate, idleReevaluation bool, actor AuditActor) error {
+	proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
+	proofID := randomUUID()
+	command, err := tx.Exec(ctx, `
+		INSERT INTO balance_carry_forward_proofs(
+			id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
+			scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
+			baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
+			source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::numeric)
+		ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
+		account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
+		item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
+		item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
+		item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC(), item.priorDeficit)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		var existingKey, existingPrior, existingRevision string
+		if err = tx.QueryRow(ctx, `SELECT proof_key,prior_checkpoint_id::text,source_revision_hash
+			FROM balance_carry_forward_proofs
+			WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`,
+			account.ExternalAccountID, item.cycleID).Scan(&existingKey, &existingPrior, &existingRevision); err != nil {
+			return err
+		}
+		if existingKey != proofKey || existingPrior != item.priorID || existingRevision != item.revision {
+			return domain.ErrConflict
+		}
+		return nil
+	}
+	after := map[string]any{
+		"proof_key": proofKey, "scan_cycle_id": item.cycleID,
+		"prior_checkpoint_id": item.priorID, "source_revision": item.revision,
+	}
+	if idleReevaluation {
+		after["idle_reevaluation"] = true
+	}
+	return writeAudit(ctx, tx, actor, "eligibility.balance_carry_forward.derived",
+		"balance_carry_forward_proof", proofID, nil, after)
+}
+
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
 	// XM-INV-PROOF-CONTENTION 2: the caller (processEligibilityProjectionJob)
 	// deliberately does NOT hold the per-account advisory lock or a row lock
@@ -3678,19 +3788,6 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	rows.Close()
 
-	type carryCandidate struct {
-		cycleID, batchID, snapshotID, cursor, revision string
-		priorID, balance                               string
-		priorDeficit                                   *string
-		asOf, watermark, observed                      time.Time
-		snapshotRows, sequence                         int64
-		negative, baselineMember, hasRealCheckpoint    bool
-		// hasStrandedCheckpoint (XM-INV-DEAD-CONTAINMENT A2) marks a cycle
-		// that carries a balance_checkpoint event for this account which is
-		// failed or dead behind an open freeze. See the query below and the
-		// pending return in the merge loop.
-		hasStrandedCheckpoint bool
-	}
 	// XM-INV-PROOF-CONTENTION 4: set-based evaluation, replacing what used to
 	// be up to two queries issued per entry of `visibilities` (each ~42ms on
 	// production, up to ~1,150 checkpoints in the contention incident's
@@ -3869,6 +3966,67 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	}
 	carryRows.Close()
 
+	// XM-INV-PENDING-RECON C2: idle re-evaluation. Everything above derives
+	// proofs only at the visibility instants of real facts -- usage, credits,
+	// cash lots. That is an efficiency rule, not a correctness one: it exists
+	// so an account with nothing happening does not accumulate proofs nobody
+	// needs. For an account sitting in not_invoiceable_pending_reconciliation
+	// it is also the reason the state cannot clear. Exiting needs
+	// pendingReconciliationExitMatches consecutive matched evaluations of real
+	// balance evidence, and an idle account produces neither kind: the source
+	// agent emits no checkpoint while its balance/negative flag/deficit are
+	// unchanged, and with no facts there are no visibilities, so no proof is
+	// derived either. A production account sat at one match short for days.
+	//
+	// So when this account is pending and the window carried no facts at all,
+	// derive exactly one proof from the newest published balances cycle that
+	// can still take one. This does not relax any exit rule: the proof is an
+	// ordinary carry-forward proof (migration 0026's trigger still forces it
+	// to restate the latest real checkpoint verbatim, deficit included), it is
+	// evaluated by the ordinary evaluator, and it counts exactly as much as
+	// any other item. The acceptance ruling of 2026-09-09 (design section 7
+	// D1(a)) accepted that for an idle account the second of the N matches is
+	// a restatement of the first, and recorded that trade explicitly.
+	//
+	// Ordering here is deliberate and is the whole reason this block sits
+	// after the candidate query rather than before it:
+	//
+	//  1. XM-INV-DEAD-CONTAINMENT A2 wins. If the cycle we would derive from
+	//     carries a stranded balance_checkpoint for this account, we wait,
+	//     exactly as the merge loop does -- writing an immutable "no
+	//     checkpoint arrived here" proof would make migration 0014's
+	//     reject_real_checkpoint_after_carry_forward trigger refuse that
+	//     checkpoint forever. An idle account being stuck one more cycle is
+	//     never worth losing a replayable balance fact.
+	//  2. An open eligibility_freezes row suppresses derivation entirely.
+	//     advancePendingReconciliationMatchTx refuses to exit while one is
+	//     open, so a proof derived now could only produce evidence that
+	//     cannot be acted on -- and every proof is immutable and burns its
+	//     cycle's exclusivity permanently. Nothing is lost by waiting: once
+	//     the freeze resolves, the next published cycle derives normally.
+	if len(visibilities) == 0 && account.Status == "not_invoiceable_pending_reconciliation" {
+		for index := len(carryCandidates) - 1; index >= 0; index-- {
+			item := carryCandidates[index]
+			if item.hasRealCheckpoint {
+				continue
+			}
+			if item.hasStrandedCheckpoint {
+				return errBalanceCarryForwardProofPending
+			}
+			var hasOpenFreeze bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(
+				SELECT 1 FROM eligibility_freezes WHERE external_account_id=$1 AND status='open')`,
+				account.ExternalAccountID).Scan(&hasOpenFreeze); err != nil {
+				return err
+			}
+			if hasOpenFreeze {
+				return nil
+			}
+			return insertBalanceCarryForwardProofTx(ctx, tx, account, item, true, actor)
+		}
+		return nil
+	}
+
 	coveredVisibility := account.FinalizedThrough.UTC()
 	realIndex, carryIndex := 0, 0
 	for _, visibility := range visibilities {
@@ -3905,41 +4063,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		if item.hasStrandedCheckpoint {
 			return errBalanceCarryForwardProofPending
 		}
-		proofKey := "carry-forward:" + item.cycleID + ":" + strings.ToLower(account.ExternalAccountID)
-		proofID := randomUUID()
-		command, insertErr := tx.Exec(ctx, `
-			INSERT INTO balance_carry_forward_proofs(
-				id,source_instance_id,external_account_id,proof_key,prior_checkpoint_id,
-				scan_cycle_id,final_batch_id,as_of,balance_service_units,balance_negative,
-				baseline_member,source_snapshot_id,snapshot_row_count,source_sequence,
-				source_cursor,stream_watermark_at,source_revision_hash,observed_at,deficit_service_units)
-			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::numeric,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::numeric)
-			ON CONFLICT(external_account_id,scan_cycle_id) DO NOTHING`, proofID,
-			account.SourceInstanceID, account.ExternalAccountID, proofKey, item.priorID,
-			item.cycleID, item.batchID, item.asOf.UTC(), item.balance, item.negative,
-			item.baselineMember, item.snapshotID, item.snapshotRows, item.sequence,
-			item.cursor, item.watermark.UTC(), item.revision, item.observed.UTC(), item.priorDeficit)
-		if insertErr != nil {
-			return insertErr
-		}
-		if command.RowsAffected() == 0 {
-			var existingKey, existingPrior, existingRevision string
-			if err = tx.QueryRow(ctx, `SELECT proof_key,prior_checkpoint_id::text,source_revision_hash
-				FROM balance_carry_forward_proofs
-				WHERE external_account_id=$1 AND scan_cycle_id=$2::uuid`,
-				account.ExternalAccountID, item.cycleID).Scan(&existingKey, &existingPrior, &existingRevision); err != nil {
-				return err
-			}
-			if existingKey != proofKey || existingPrior != item.priorID || existingRevision != item.revision {
-				return domain.ErrConflict
-			}
-			continue
-		}
-		if err = writeAudit(ctx, tx, actor, "eligibility.balance_carry_forward.derived",
-			"balance_carry_forward_proof", proofID, nil, map[string]any{
-				"proof_key": proofKey, "scan_cycle_id": item.cycleID,
-				"prior_checkpoint_id": item.priorID, "source_revision": item.revision,
-			}); err != nil {
+		if err = insertBalanceCarryForwardProofTx(ctx, tx, account, item, false, actor); err != nil {
 			return err
 		}
 	}
