@@ -40,18 +40,21 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 它是对账信息不是可用额度；真正的可开票金额走 `money()`，那条路不经过这里。
 理由写在 `convertServiceUnits` 的注释里，改回截断之前请先看那段。
 
-**二、NEWAPI_QUOTA 的除数不是「待核实」，是有两处独立证据的。**
-派工单说 500000 是 New API 默认值、主控者核实中。查下来有两处硬证据，
-已写进契约的 description：
+**二、NEWAPI_QUOTA 的除数 500000 已由主控者在生产核实（2026-09-09）。**
+生产 New API 库的 `options` 表里**没有** `QuotaPerUnit` 覆盖，所以生效值就是上游默认的
+500000（= 1 美元）；同次核实 `USDExchangeRate=1`，上游显示没有再折算成别的币种。
+这两条一起把交付时挂着的两条风险都消掉了。契约的 description 按主控者给的措辞写。
+
+另外两处静态证据仍然成立，其中第一条是一道**现成的护栏**，值得留着：
 
 - 本仓库 `contracts/newapi-source-projection-grants.postgresql.sql:116-117`
   （另外两个文件同形）的投影契约在 `QuotaPerUnit ≠ 500000` 时直接拒绝出数。
-  也就是说线上只要还在出数，这个值就是 500000。
+  线上一旦有人改了这个值，**采集会先停**，而不是让显示侧悄悄给出错的数。
+  这一条也一并写进了 description。
 - 上游 `common/constants.go:22` 定义 `QuotaPerUnit = 500 * 1000.0`，
   其前端按 `quota / quotaPerUnit` 显示。
 
-保留了一条注意事项：上游可以再按 `USDExchangeRate` 把显示折算成别的币种，
-本平台只显示 `quota / QuotaPerUnit` 这个基准数，不折算、不带货币符号。
+即便如此，本平台显示的仍然只是 `quota / QuotaPerUnit` 这个基准数，不折算、不带货币符号。
 
 **三、换算只改刻度，不改口径。**
 换算后的数仍然是非现金 / 切点前的源侧余额，不是人民币，所以页面上不带 ¥ 也不带 $，
@@ -122,14 +125,17 @@ description}`；后端 `eligibilitywire` 校验它、把它生成进
 
 ## tests_run
 
-全部在 `K:/发票/wt-XM-INV-UNIT-DISPLAY` 下实测，时间为 UTC。
+全部在 `K:/发票/wt-XM-INV-UNIT-DISPLAY` 下实测，时间为 UTC。下表是
+**NEWAPI_QUOTA description 更新之后的那一轮**（2026-09-09 05:48）；更新前
+05:40 那一轮四条同样全绿，两轮结果一致。退出码是把输出落盘后判的，不经管道
+（管道 + `head` 会因 SIGPIPE 报出与测试结果无关的失败）。
 
 | 门禁 | 开始 | 结束 | 耗时 | 结果 |
 | --- | --- | --- | --- | --- |
-| `cd web && npm run typecheck` | 05:40:34 | 05:40:37 | 3s | 通过 |
-| `cd web && npm test -- --run` | 05:40:37 | 05:40:38 | 1s（vitest 自报 581ms） | 22 文件 / 374 用例全绿 |
-| `cd backend && go vet ./...` | 05:40:49 | 05:40:51 | 2s | exit 0 |
-| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 05:40:57 | 05:41:00 | 3s | 两个包 ok |
+| `cd web && npm run typecheck` | 05:48:13 | 05:48:17 | 4s | exit 0 |
+| `cd web && npm test -- --run` | 05:48:17 | 05:48:18 | 1s（vitest 自报 666ms） | exit 0，22 文件 / 374 用例全绿 |
+| `cd backend && go vet ./...` | 05:48:04 | 05:48:04 | <1s（构建缓存命中；首轮 2s） | exit 0 |
+| `cd backend && go test -p 1 -count=1 ./internal/eligibilitywire/... ./internal/httpapi/...` | 05:48:04 | 05:48:07 | 3s | exit 0，两个包 ok |
 
 Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy go test …`
@@ -168,9 +174,13 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
 
 1. **取舍方向**：派工单建议向下截断，实现用四舍五入。理由见上「判断一」，
    代码注释里也写了。这是唯一一处与明确建议相反的决定。
-2. **NEWAPI_QUOTA 的 description**：派工单给的文案是「除数 = New API 的
-   QuotaPerUnit，主控者核实中」。改成写清两处证据（本仓库投影契约的拒绝条件 +
-   上游常量定义）。除数值 `500000` 未变。
+2. **NEWAPI_QUOTA 的 description**：交付时我把派工单的「主控者核实中」换成了两处静态
+   证据。核实结果回来后（2026-09-09）按主控者给的措辞重写为「除数 = New API 的
+   QuotaPerUnit；生产 options 无覆盖，取默认 500000（2026-09-09 核实）」，
+   **后面多留了两句**：投影契约在 `QuotaPerUnit ≠ 500000` 时拒绝出数这道护栏，
+   以及同次核实的 `USDExchangeRate=1`。多留的两句是为了让「值改了会发生什么」
+   与「上游会不会再折算」在契约里各有一句话可查；要精简就删这两句，
+   主控者给的那一句原样保留着。除数值 `500000` 从头到尾没变过。
 3. **多改了三处手抄点**：派工单在「事实」里列了 `web/src/lib/http-api.ts:694`
    等硬编码点，但「要做的」里只要求后端/代理侧的发现闸。我顺手把
    `types.ts` 的 `unitCode` 联合与 `http-api.ts` 两处 `expectedUnit` 接到了生成表上
@@ -191,11 +201,12 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
    不是「后端先上线一版」时真正会走到的路。要让它真可达，得放宽那两处校验——
    那是**改动钱相关不变量**的决定，不在这次派工范围内，没有动。测试是对导出的纯函数
    与组件直接打的，注释里写明了这一点。
-2. **New API 的除数没有在生产实例上核对过。** 两处证据都是静态的（本仓库 SQL、
-   上游源码），我没有去生产查 `options` 表里 `QuotaPerUnit` 的实际值（不碰生产）。
-   投影契约会在它 ≠ 500000 时拒绝出数，但那条拒绝发生在采集侧，不在显示侧。
-3. **上游可能按 `USDExchangeRate` 折算显示币种。** 若某台 New API 实例开了折算，
-   用户在上游看到的数与本平台显示的基准数会不一样。SUB2_BALANCE_1E8 没有这个问题。
+2. ~~**New API 的除数没有在生产实例上核对过。**~~ **已消除（2026-09-09，主控者核实）**：
+   生产 `options` 表无 `QuotaPerUnit` 覆盖，生效值就是默认 500000。
+3. ~~**上游可能按 `USDExchangeRate` 折算显示币种。**~~ **已消除（同次核实）**：
+   生产 `USDExchangeRate=1`，上游没有折算。若将来有人把它改成别的值，
+   本平台显示的基准数会与上游页面上的数分叉——这不是显示侧能自己发现的，
+   届时要一并调整 display_label 的口径措辞。
 4. **发现闸只扫非测试源码。**
    `backend/internal/postgresstore/source_readiness_integration_test.go:28` 的 fixture
    用了 `NEWAPI_CREDIT_1E6` 这个单位码，没有任何生产路径会发它，契约也没有它。
@@ -220,7 +231,8 @@ Go 测试一律加八个代理变量的 unset 前缀（本机既定坑）：
    消掉 `http-api.ts` 里剩下的两处三元判断。这次没做是因为派工单把条目形状定死了。
 2. 决定 `mapServiceUnitSummary` 的 `UNIT_CONTRACT_MISMATCH` 要不要从抛错改成降级
    （对应 risks 1）。改了这一条，渲染层那条降级才真正在线上有意义。
-3. 在生产 New API 实例上核对 `options.QuotaPerUnit`（对应 risks 2）。
+3. ~~在生产 New API 实例上核对 `options.QuotaPerUnit`~~ —— **已完成（2026-09-09，主控者）**：
+   无覆盖，取默认 500000；`USDExchangeRate=1`。契约 description 与 risks 2/3 已相应更新。
 4. 清掉 `source_readiness_integration_test.go` 里的 `NEWAPI_CREDIT_1E6` fixture，
    或者把测试源码也纳入发现闸的扫描范围（对应 risks 4）。
 5. 起前端看一眼这两格的实际排版（对应 risks 6）。

@@ -166,7 +166,7 @@
       "divisor": "500000",
       "decimals": 2,
       "display_label": "New API 额度",
-      "description": "除数 = New API 的 QuotaPerUnit。两处独立证据：本仓库 contracts/newapi-source-projection-grants.postgresql.sql 的投影契约在 QuotaPerUnit≠500000 时直接拒绝出数，所以只要线上还在出数它就是 500000；上游 common/constants.go 把 QuotaPerUnit 定义为 500*1000，其前端也按 quota/quotaPerUnit 显示。注意上游可再按 USDExchangeRate 把显示折算成别的币种，本平台只显示这个基准数，不折算、不带货币符号。"
+      "description": "除数 = New API 的 QuotaPerUnit；生产 options 无覆盖，取默认 500000（2026-09-09 核实）。另有一道现成的护栏：本仓库 contracts/newapi-source-projection-grants.postgresql.sql 的投影契约在 QuotaPerUnit≠500000 时直接拒绝出数，所以线上一旦有人改了这个值，采集会先停，而不是让这里悄悄显示错的数。同次核实：生产 USDExchangeRate=1，上游显示没有再折算成别的币种。"
     }
   ]
 }
