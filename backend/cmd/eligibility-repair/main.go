@@ -569,8 +569,14 @@ func printProjectionRequeueDeadSummary(out io.Writer, result postgresstore.Proje
 // zero for an apply any check refused.
 func printPendingReevaluateSummary(out io.Writer, result postgresstore.PendingReevaluateRepairResult) {
 	mode := "DRY RUN (nothing was changed)"
-	if result.Applied {
+	switch {
+	case result.Applied:
 		mode = "APPLIED"
+	case result.ApplyRequested:
+		// Never the dry-run banner here: an operator who typed --apply and
+		// read "DRY RUN" would conclude they mistyped the flag, not that the
+		// tool refused them.
+		mode = "REFUSED (--apply was requested; a check below said STOP, nothing was changed)"
 	}
 	fmt.Fprintf(out, "eligibility-repair XM-INV-PENDING-RECON: %s\n\n", mode)
 	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", "ACCOUNT", "STATUS", "MATCHES", "JOB")

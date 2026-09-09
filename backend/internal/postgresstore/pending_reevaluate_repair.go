@@ -63,7 +63,14 @@ type PendingReevaluateCheck struct {
 // PendingReevaluateRepairResult is the tool's whole answer, printable as-is
 // by the CLI in both modes.
 type PendingReevaluateRepairResult struct {
+	// Applied is true only when --apply ran and every check passed.
 	Applied bool
+	// ApplyRequested records that --apply was asked for, whether or not it
+	// went through. Without it a refused apply is indistinguishable from a
+	// dry run in the printed report, and an operator reading
+	// "DRY RUN (nothing was changed)" after typing --apply would reasonably
+	// conclude they had mistyped the flag rather than that the tool refused.
+	ApplyRequested bool
 	// Queued is true only when Apply actually enqueued the job.
 	Queued bool
 	// Found is false when no source_account_eligibility_state row exists for
@@ -147,8 +154,8 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 		return PendingReevaluateRepairResult{}, err
 	}
 
-	result := PendingReevaluateRepairResult{Applied: in.Apply, AccountID: accountID,
-		ExitMatches: pendingReconciliationExitMatches}
+	result := PendingReevaluateRepairResult{Applied: in.Apply, ApplyRequested: in.Apply,
+		AccountID: accountID, ExitMatches: pendingReconciliationExitMatches}
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, false)
 	if err != nil {
 		if errors.Is(err, domain.ErrSourceUnavailable) {

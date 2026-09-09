@@ -110,6 +110,7 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M19 | 自利守卫短路 | 自利用例 | 红 |
 | M20 | `Blocked()` 看不见 blocker | 五条拒绝用例 | 全红 |
 | M21 | 报告重算不再走共用 helper | dry-run 用例 | 红（期望 0 而非 −50） |
+| M22 | 被拒绝的 apply 退回 dry-run 横幅 | 横幅格式用例 | 红 |
 
 M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**，因为检查层先拒绝、语句
 根本没执行到。这属于「闸恰好没被触发」而不是「闸有效」，所以把语句抽成函数并单测它；记在这里
@@ -181,6 +182,12 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
    per-kind 带 filters 的表，给 `ingest-acknowledge-unreplayable` 和 `pending-reevaluate` 各自
    补上它们必填的窄化参数 —— 否则这两种会因为「缺 `--event`/`--account`」而先报错，用例看着绿
    但根本没测到 operator-id 那道闸。
+7. **被拒绝的 apply 单独一个横幅**（设计没写，是实现时发现的输出正确性问题）。兄弟 kind 的
+   横幅只有 `DRY RUN (nothing was changed)` 与 `APPLIED` 两种，而本 kind 会拒绝 apply；沿用
+   两种横幅的话，操作者打了 `--apply` 却看到 `DRY RUN`，最合理的推断是「参数没生效、再打一遍」，
+   而不是去读 STOP 行。所以结果里加了 `ApplyRequested`，横幅第三种为
+   `REFUSED (--apply was requested; a check below said STOP, nothing was changed)`。
+   变异 M22 把它退回 dry-run 横幅即红。
 
 ## 6. 设计稿 §8 未证实前提的处置
 

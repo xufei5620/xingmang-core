@@ -410,6 +410,47 @@ func TestRunPendingReevaluateDryRunAgainstEmptyDatabaseReportsNothing(t *testing
 	}
 }
 
+// TestPrintPendingReevaluateSummaryDistinguishesARefusedApply is a pure
+// formatting check (no database) for the one banner that must never be wrong:
+// a refused --apply reads REFUSED, not DRY RUN. An operator who typed --apply
+// and saw "DRY RUN (nothing was changed)" would reasonably conclude the flag
+// had not registered and run it again, rather than read the STOP line.
+func TestPrintPendingReevaluateSummaryDistinguishesARefusedApply(t *testing.T) {
+	refused := postgresstore.PendingReevaluateRepairResult{
+		ApplyRequested: true, Found: true, AccountID: "30000000-0000-4000-8000-000000000001",
+		Status: "active", ExitMatches: 2,
+		Checks: []postgresstore.PendingReevaluateCheck{{Name: "状态", Detail: "不在待对平", Blocker: true}},
+	}
+	var out bytes.Buffer
+	printPendingReevaluateSummary(&out, refused)
+	printed := out.String()
+	if !strings.Contains(printed, "REFUSED") || strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("a refused apply must not print the dry-run banner: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 0") {
+		t.Fatalf("a refused apply affected nothing: %s", printed)
+	}
+
+	out.Reset()
+	printPendingReevaluateSummary(&out, postgresstore.PendingReevaluateRepairResult{
+		Found: true, AccountID: "30000000-0000-4000-8000-000000000001", ExitMatches: 2})
+	if printed = out.String(); !strings.Contains(printed, "DRY RUN") || strings.Contains(printed, "REFUSED") {
+		t.Fatalf("an ordinary dry run must print the dry-run banner: %s", printed)
+	}
+
+	out.Reset()
+	printPendingReevaluateSummary(&out, postgresstore.PendingReevaluateRepairResult{
+		Applied: true, ApplyRequested: true, Queued: true, Found: true,
+		AccountID: "30000000-0000-4000-8000-000000000001", ExitMatches: 2})
+	printed = out.String()
+	if !strings.Contains(printed, "APPLIED") || strings.Contains(printed, "REFUSED") {
+		t.Fatalf("a successful apply must print APPLIED: %s", printed)
+	}
+	if !strings.Contains(printed, "accounts affected: 1") {
+		t.Fatalf("a successful apply affected one account: %s", printed)
+	}
+}
+
 // TestPrintSummaryFormatsAccountsAndTotals is a pure formatting check
 // (no database) for the table printPreAnchorUsageSummary emits.
 func TestPrintSummaryFormatsAccountsAndTotals(t *testing.T) {

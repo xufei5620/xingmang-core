@@ -164,6 +164,12 @@ func TestPendingReevaluateRefusesAnAccountThatIsNotPending(t *testing.T) {
 	if result.Applied || result.Queued {
 		t.Fatalf("an active account must not be requeued by this tool: %+v", result)
 	}
+	// A refused apply must still report that an apply was asked for -- the
+	// printed banner reads "REFUSED", never "DRY RUN", so an operator who
+	// typed --apply is not left thinking they mistyped the flag.
+	if !result.ApplyRequested {
+		t.Fatalf("a refused apply must still record that --apply was requested: %+v", result)
+	}
 	if check := requireCheck(t, result, "状态"); check.Passed || !check.Blocker {
 		t.Fatalf("the state check must refuse an active account: %+v", check)
 	}
