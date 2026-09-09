@@ -46,8 +46,6 @@
 - `application/service.go`、`application/source_processor.go`、
   `application/crypto.go`：改成调用 `binding_keys.go` 里的导出函数。
 - `backend/Dockerfile`：tools 镜像加 `invoice-account-bind`。
-- `docs/PRODUCTION-RUNBOOK.md` 2186/2250 两处既有的 eligibility-repair 命令：
-  路径与 secret 名本来就是错的，一并改正（见第 4b 节 minor 8）。
 
 ## 3. 三个设计上的判断，以及为什么
 
@@ -203,13 +201,10 @@ issuer 永久写进 `invoice_users.oidc_issuer`，而我自己那条
 身份边界、不导入 application（`auth/doc.go`），并进来要新开一个叶子包，超出本片
 范围——见第 7 节 follow_up。
 
-**minor 8（修了，但结论与复审给的两个分支都不同）**：手册 2186/2250 两处
+**minor 8（当轮改了，下一轮按派工改回，最终交给别的片）**：手册 2186/2250 两处
 `/app/bin/invoice-eligibility-repair` + `/run/secrets/invoice-db-url` +
-`field-keyring.json` **本来就是错的**，不是「docker exec 进 api 容器」的另一种
-语境。`/app/bin` 在整个仓库里只出现在这两处；`backend/Dockerfile` 装到
-`/usr/local/bin`；compose secret 叫 `invoice_owner_database_url` /
-`invoice_field_keyring`；api 镜像里也没有 tools 二进制。所以直接改正，改成与 9c
-相同的 docker run 形状并加注说明。
+`field-keyring.json` 确实是错的（结论与复审给的两个分支都不同），但**本片最终没有
+动它们**——见第 4c 节末与第 7 节 follow_up。
 
 ## 4c. 第一轮第二、三批复审（数据完整性 + 运维实测）修了什么
 
@@ -352,8 +347,15 @@ source_ingest_events；投影写入方不碰 invoice_users，无环。
   `/run/secrets/<secret 名>`，即 `invoice_app_database_url` / `invoice_field_keyring`，
   库里不存在 `invoice-db-url` 或 `field-keyring.json` 这两个名字；api 镜像只有
   `/app/migrations` 与 `/app/qpdf-policy-gate`，没有 `/app/bin`，tools 二进制也不在
-  api 镜像里。也就是说那两段在「docker exec 进 api 容器」语境下同样不成立。与
-  「RC104 跑成功过」的记忆冲突，需要有人去查当时到底跑的是什么。
+  api 镜像里。也就是说那两段在「docker exec 进 api 容器」语境下同样不成立。
+
+  **悬案已由派工方查明（2026-09-09）**：RC104/RC105 生产上实际跑的是
+  `docker run --rm --pull=never --network invoice-system-prod_invoice_db`
+  + 两个 `-v` 挂载 + `--entrypoint /usr/local/bin/invoice-eligibility-repair`
+  + `invoice-system-tools:0.1.0-rc105`，与 9c 的形状**完全一致**。也就是说手册那两段
+  `/app/bin` + `invoice-db-url` 的文本**从来没有被执行过**，是写错的。修正由
+  XM-INV-PENDING-RECON 的 C6 承担（那片已经在手册里补了正确的 docker run 块，并要求
+  补齐 eligibility-repair 的完整命令行），本片不再动。
 
 ## 4d. 复审拿生产数据打回：issuer 检查的比对集选错了
 
@@ -457,8 +459,8 @@ issuer**（不然这个测试什么也没证明），再断言检查通过、`Pl
 - **认领路径拿不到已验证邮箱**（第 4c 节 minor D）。要做到与建号路径同等，需要新写
   一条「按 principalID 直接登记已验证邮箱」的路径，并决定既有 SSO 已验证地址被取代
   时怎么办。影响所有被投影绑定的账号，不只影子账号，值得单独一片。
-- **手册 2186/2250 两处 eligibility-repair 命令的路径与 secret 名对不上任何现有
-  部署**（第 4c 节末）。本片按派工改回原样、未动。核实证据已记在那里，接手的人不必
-  重查，但要去查清 RC104 当时实际跑的到底是什么。
+- ~~手册 2186/2250 两处 eligibility-repair 命令路径与 secret 名有误~~ —— **已由
+  XM-INV-PENDING-RECON 的 C6 处理**，本片不动。结论：那两段文本从未被执行过，
+  RC104/RC105 实际跑的与 9c 形状一致（证据见第 4c 节末）。
 - **`identity_binding` 护栏是全库粒度**，做不到按上游 id（原因见 4c major B）。真要
   按 id，得让工具能从中心 OIDC 那一侧反查，或者让事件带上可关联的非加密标识。
