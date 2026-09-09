@@ -44,7 +44,12 @@
 | 两分支干跑合并 `git merge-tree` | 06:5x | — | — | clean（App.tsx / http-api.ts / types.ts 自动合并） |
 | `scripts/test-release-image-gate.ps1`（改名后） | 07:1x | — | 2s | exit 0 |
 | 合并后全量 `verify.ps1`（第 3 次，`d3b93d5`；detached runner + WSL bash） | 07:36:57 | 07:44:58 | 481s | **exit 0，`All local verification gates passed`**（`logs/detached-runs/rc107-gate-20260909T073657Z-f596`） |
-| 镜像门禁 / 产物校验 / 签名 | 待做 | | | |
+| 镜像门禁（`release/run-rc107-image-gate.ps1`，工作树 `wt-XM-INV-AUTOLOGIN` detach 在 `b3ded69`，detached runner，第 1 次） | 07:45:55 | 07:56:26 | 631s | **exit 42（预期，待金丝雀）**；普通校验 0；严格可传输校验 0；产物 `release/0.1.0-rc107-exact1`（66 项） |
+| `ssh-keygen -Y sign` 签 `SHA256SUMS` + bash 重定向验签 | 07:56:56 | 07:56:57 | 1s | `Good "solov-invoice-release-v1" signature for invoice-release@solov.cc` |
+| 传输包（源码 bundle 4.2MB、证据 3.9MB、9 镜像 641MB、TRANSFER-SHA256SUMS） | 07:56:57 | 07:57:55 | 58s | 本机 `release/transfer-rc107/` 就绪 |
+
+签名 tag `v0.1.0-rc107-signed` → `b3ded699`，`git verify-tag` Good。镜像门禁一次过：包装脚本沿用 RC106 的两条固定做法
+（PATH 前置 System32 让 bash 落到 WSL；经 detached runner 启动保证控制台 UTF-8）。
 
 `verify.ps1` 前两次红，都是隔离 PostgreSQL 容器里「仓库根解析成容器根」这一类：
 
