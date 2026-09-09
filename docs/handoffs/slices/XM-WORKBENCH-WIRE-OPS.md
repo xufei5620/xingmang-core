@@ -1,10 +1,14 @@
 # XM-WORKBENCH-WIRE-OPS：把 OPS-TRUTH 的三样后端事实接进前端
 
 - **status**: ready-for-review（分支内交付，未推 GitHub、未部署）
-- **branch**: `ai/claude/XM-WORKBENCH-WIRE-OPS`（接在集成分支
-  `ai/claude/XM-PLATFORM-INTEGRATION-20260909` 的 `26a8a43` 之上）
-- **commit**: 见文末「提交」一节
-- **时间**: 2026-09-09T06:17Z – 2026-09-09T06:50Z（约 33 分钟）
+- **branch**: `ai/claude/XM-WORKBENCH-WIRE-OPS`
+- **base**: `a650206`（集成分支 `ai/claude/XM-PLATFORM-INTEGRATION-20260909`）。
+  最初从 `26a8a43` 分出，收尾前 rebase 到 `a650206`（卡片告警规则改用自己的阈值
+  字段 `CardSyncConsecutiveRounds`，改动落在 `internal/platform/alerts` 与两份
+  文档，不碰 admin-web）。**无冲突**，五道门禁在 rebase 后重跑一遍，全绿。
+- **commit**: `48cd045`（18 files changed, +1287 / -61）→ 本行的 SHA 回填在
+  紧随其后的 `docs(handoff)` 提交里
+- **时间**: 2026-09-09T06:17Z – 2026-09-09T06:52Z（约 35 分钟，含 rebase 与重跑门禁）
 
 ---
 
@@ -91,16 +95,29 @@ XM-OPS-TRUTH 在后端加了三样东西，XM-WORKBENCH-TRUTH 的前端只接了
 全部在 `wt-XM-WORKBENCH-WIRE` 工作树内跑，node_modules 走 junction 镜像
 （六处，未 `pnpm install`）。
 
+全部跑了两遍：一遍在 `26a8a43` 上，一遍在 rebase 到 `a650206` 之后。**下表是
+rebase 之后那一遍**（也就是交付这个树的实测）。
+
 | 门禁 | 开始（UTC） | 结束（UTC） | 耗时 | 结果 |
 |---|---|---|---|---|
-| `pnpm --filter admin-web run typecheck` | 06:45:23 | 06:45:30 | 7 秒 | 通过 |
-| `pnpm --filter admin-web run test` | 06:45:35 | 06:45:57 | 22 秒 | 143 文件 / 2251 条全绿 |
-| `pnpm --filter ui-admin run test` | 06:46:02 | 06:46:06 | 4 秒 | 17 文件 / 262 条全绿 |
-| `bash scripts/check-governance.sh` | 06:46:11 | 06:46:15 | 4 秒 | 退出码 0，无输出 |
-| `gitleaks detect --source . --no-git --redact` | 06:46:28 | 06:46:29 | 1 秒 | 11 条，与存量基线一致，未新增 |
+| `pnpm --filter admin-web run typecheck` | 06:50:26 | 06:50:32 | 6 秒 | 通过 |
+| `pnpm --filter admin-web run test` | 06:50:38 | 06:50:58 | 20 秒 | 143 文件 / 2251 条全绿 |
+| `pnpm --filter ui-admin run test` | 06:51:04 | 06:51:07 | 3 秒 | 17 文件 / 262 条全绿 |
+| `bash scripts/check-governance.sh` | 06:51:14 | 06:51:18 | 4 秒 | 退出码 0，无输出 |
+| `gitleaks detect --source . --no-git --redact` | 06:51:18 | 06:51:18 | 1 秒以内 | 11 条，与存量基线一致，未新增 |
+
+rebase 之前那一遍（`26a8a43` 上）的数字：typecheck 7 秒、admin-web 22 秒、
+ui-admin 4 秒、governance 4 秒、gitleaks 1 秒，结论逐条相同。
 
 三条 pnpm 命令都带 `--config.verify-deps-before-run=false`（junction 镜像的
 node_modules 过不了依赖校验）。
+
+**rebase 的影响面**：`a650206` 动的是 `internal/platform/alerts/rules.go`、
+`rules_cards.go` 与两份文档。本片新增的字段闸读的是
+`internal/platform/httpapi/{ops_overview,alerts}.go`（另一个包），
+`labels.reconcile` 既有的规则对账读 `alerts/rules.go` 的 `Rules` 声明而不是
+`RuleConfig` 的字段——那条提交只加了一个配置字段、没加规则，所以两处都不受影响。
+门禁重跑是证据，上面这段是它为什么本就该绿的解释。
 
 ### 变异验证
 
