@@ -1,8 +1,10 @@
 package eligibilitywire
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -96,6 +98,223 @@ func override(l *lot, base lot) dto {
 	got := literalValues(scan, LiteralAssignment)
 	if len(got) != 1 || got[0] != "source_unavailable" {
 		t.Fatalf("want exactly the bare literal, got %v", got)
+	}
+}
+
+// TestStatusScanCoversEveryGoFileThatMentionsAStatus is this scan's answer to
+// the hand-listed-scope problem, and it is deliberately the same shape as the
+// unit-code side's coverage probe.
+//
+// The scope used to be {application, postgresstore, httpapi}. Review planted
+// `EligibilityStatus: "zz_probe_status"` in agents/sourceagent and this gate
+// stayed green -- a status the code can introduce, in a package the gate never
+// opened. The scope is discovered now, and this probe checks that claim WITHOUT
+// reusing the discovery: its own walk, matching text rather than parsing.
+//
+// It matches BOTH spellings on purpose. `EligibilityStatus` catches the Go
+// assignments; `eligibility_status` catches SQL text, which is where the
+// COALESCE-default half of this scan gets its values -- a query string can
+// introduce a status in a file that never names the Go field.
+//
+// testdata/ and vendor/ are the discovery's only content exclusions and are
+// checked rather than trusted: a status-mentioning .go file under either fails
+// here instead of quietly leaving the gate.
+func TestStatusScanCoversEveryGoFileThatMentionsAStatus(t *testing.T) {
+	scan, err := ScanStatusLiterals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	visited := Set(scan.ScannedDirs)
+	mentions := regexp.MustCompile(`EligibilityStatus|eligibility_status`)
+	uncovered := []string{}
+	excluded := []string{}
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path != root && (entry.Name() == ".git" || entry.Name() == "node_modules") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if !mentions.Match(body) {
+			return nil
+		}
+		rel, err := filepath.Rel(root, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		dir := filepath.ToSlash(rel)
+		fileRel := dir + "/" + name
+		if strings.Contains("/"+dir+"/", "/testdata/") || strings.Contains("/"+dir+"/", "/vendor/") {
+			excluded = append(excluded, fileRel)
+			return nil
+		}
+		if !visited[dir] {
+			uncovered = append(uncovered, fileRel)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatal(walkErr)
+	}
+	if len(uncovered) > 0 {
+		t.Fatalf("these non-test Go files mention an eligibility_status but live in directories the scan never "+
+			"visited:\n  %s\nthe scan visited %d directories; DiscoverGoPackageDirs is missing them",
+			strings.Join(uncovered, "\n  "), len(scan.ScannedDirs))
+	}
+	if len(excluded) > 0 {
+		t.Fatalf("these files mention an eligibility_status from inside testdata/ or vendor/, which the scan skips "+
+			"by name:\n  %s\neither move them, or decide explicitly that this vocabulary is out of the gate",
+			strings.Join(excluded, "\n  "))
+	}
+	if len(visited) == 0 {
+		t.Fatal("the scan reported visiting no directories at all")
+	}
+}
+
+// TestStatusScanScopeReachesTheAgents is the narrow, named form of the same
+// regression: agents/ is where the review's probe status went, and it is in the
+// gate. Separate from the coverage probe because that probe would still pass if
+// agents/ contained no status-mentioning file at all, and "the agents are
+// covered" is the thing review actually asked for.
+//
+// It asserts against what the SCAN VISITED, not against what
+// DiscoverGoPackageDirs returns. The first version asked the discovery helper,
+// and a mutation that narrowed the scan's own loop while leaving the helper
+// alone sailed straight past it -- the assertion was true, about the wrong
+// subject. The helper is not the gate; the scan is.
+func TestStatusScanScopeReachesTheAgents(t *testing.T) {
+	scan, err := ScanStatusLiterals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	visited := Set(scan.ScannedDirs)
+	agents := []string{}
+	for _, dir := range scan.ScannedDirs {
+		if strings.HasPrefix(dir, "agents/") {
+			agents = append(agents, dir)
+		}
+	}
+	if len(agents) == 0 {
+		t.Fatalf("the status scan visited no agents package; it visited: %v", scan.ScannedDirs)
+	}
+	// The three packages the old hand-written list named are still there, so
+	// this is a widening rather than a swap.
+	for _, needed := range []string{
+		"backend/internal/application",
+		"backend/internal/postgresstore",
+		"backend/internal/httpapi",
+	} {
+		if !visited[needed] {
+			t.Fatalf("the status scan no longer visits %s; it visited: %v", needed, scan.ScannedDirs)
+		}
+	}
+}
+
+// TestScanRefusesACrossPackageStatusSelector closes the hole the unit-code
+// scan's review found on its side of the package. isStatusPassthrough used to
+// look only at the NAME after the dot, so a status read out of ANOTHER package
+// -- whose contents this scan never reads, and whose vocabulary is therefore
+// unknown -- counted as "a copy of another status field" and was skipped
+// silently. Both spellings are refused: the package imported (what real code
+// would look like) and the package not imported at all (what the type checker
+// cannot resolve, which must not be read as "fine").
+func TestScanRefusesACrossPackageStatusSelector(t *testing.T) {
+	for name, source := range map[string]string{
+		"imported package": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = zzelsewhere.EligibilityStatus
+}
+`,
+		"package not imported at all": `package probe
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = zzelsewhere.EligibilityStatus
+}
+`,
+		"cross-package value in a composite literal": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func build() lot {
+	return lot{EligibilityStatus: zzelsewhere.EligibilityStatus}
+}
+`,
+		"cross-package value behind a deref": `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type lot struct{ EligibilityStatus string }
+
+func override(l *lot) {
+	l.EligibilityStatus = *zzelsewhere.EligibilityStatus
+}
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := scanProbePackage(t, source)
+			if err == nil {
+				t.Fatal("a status read out of another package must be refused, not counted as a passthrough")
+			}
+			if !strings.Contains(err.Error(), "probe/probe.go:") {
+				t.Fatalf("the refusal must name file:line, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestScanStillAcceptsInPackageStatusCopies is the control case, and it is the
+// half a careless fix would break. The scan type-checks with stubImporter, so
+// every type reached through an import is invalid; a rule written against the
+// base's TYPE rather than its identity would refuse `item.EligibilityStatus`
+// for an `item` whose struct is declared elsewhere -- which is exactly what
+// application and httpapi do when they copy a store row's status into a DTO.
+func TestScanStillAcceptsInPackageStatusCopies(t *testing.T) {
+	scan, err := scanProbePackage(t, `package probe
+
+import "invoice-system/backend/internal/zzelsewhere"
+
+type dto struct{ EligibilityStatus string }
+
+type lot struct{ EligibilityStatus string }
+
+// item's type comes from an imported package, so the checker cannot type it
+// here. The VALUE still comes from a variable, not from a package.
+func toDTO(item zzelsewhere.Row, l lot, rows []lot) dto {
+	out := dto{EligibilityStatus: item.EligibilityStatus}
+	out.EligibilityStatus = l.EligibilityStatus
+	out.EligibilityStatus = rows[0].EligibilityStatus
+	return out
+}
+`)
+	if err != nil {
+		t.Fatalf("copying a status from an in-package variable must stay a passthrough: %v", err)
+	}
+	if len(literalValues(scan, LiteralAssignment)) != 0 {
+		t.Fatalf("a copy introduces no vocabulary, got %v", literalValues(scan, LiteralAssignment))
 	}
 }
 

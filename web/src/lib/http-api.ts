@@ -28,6 +28,7 @@ import type {
   RefundCaseStatus,
   SourceAccount,
   SourceHealthReport,
+  SourceType,
   UserEligibilitySummary,
   VerificationState,
 } from "../types";
@@ -45,6 +46,7 @@ import {
   summaryReasons,
   summaryStatuses,
   type LotReasonCodeWire as LotReasonCodeWireExact,
+  type ServiceUnitCodeWire,
 } from "./eligibility-wire.generated";
 
 type RequestRole = "user" | "admin";
@@ -601,6 +603,15 @@ const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const serviceUnitsPattern = /^(0|[1-9][0-9]{0,77})$/;
 
+// XM-INV-UNIT-DISPLAY. 哪个来源用哪个单位码，是后端 expectedUnitForSource /
+// unitCodeForSource 的事实；这里只保留「来源 -> 码」这条映射，码本身来自生成的
+// 契约类型，所以契约里改名或删码会在 typecheck 变红，而不是等运行时对不上。
+// 映射本身仍是这份 bundle 的一份判断——真身在后端，Go 侧的发现闸盯着它。
+const expectedUnitBySource: Record<SourceType, ServiceUnitCodeWire> = {
+  sub2api: "SUB2_BALANCE_1E8",
+  newapi: "NEWAPI_QUOTA",
+};
+
 // The half of the key check that must never be relaxed: it is an object, and
 // every key this client reads by name is present. A missing required key means
 // a field would silently read as `undefined` and be validated as such.
@@ -694,7 +705,9 @@ function mapServiceUnitSummary(
     });
   }
   const expectedUnit =
-    source === "sub2api" ? "SUB2_BALANCE_1E8" : "NEWAPI_QUOTA";
+    source === "sub2api"
+      ? expectedUnitBySource.sub2api
+      : expectedUnitBySource.newapi;
   if (value.unit_code === "" && value.service_units === "0") {
     return { serviceUnits: "0", unitCode: null };
   }
@@ -1131,7 +1144,9 @@ function mapAccountLedgerDetail(
     "用户账本期初余额",
   );
   const expectedUnit =
-    value.source_type === "sub2api" ? "SUB2_BALANCE_1E8" : "NEWAPI_QUOTA";
+    value.source_type === "sub2api"
+      ? expectedUnitBySource.sub2api
+      : expectedUnitBySource.newapi;
   if (
     typeof value.opening_balance_units.service_units !== "string" ||
     !serviceUnitsPattern.test(value.opening_balance_units.service_units) ||

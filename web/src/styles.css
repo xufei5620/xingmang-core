@@ -2016,11 +2016,23 @@ td small {
   background: #f7f8fa;
   border-radius: 8px;
 }
+/* XM-INV-UNIT-DISPLAY：这一格显示的从「30,179,629,498 SUB2_BALANCE_1E8」变成了
+   「301.80」，短得多，也是用户真正要读的东西，所以字号从 9px 提到 12px；
+   来源口径压在下面一行，格子从两行变成三行结构（标题 / 数值 / 来源口径）。
+   来源口径那个 .service-unit-origin span **故意不另写规则**：它落在
+   `.eligibility-unit-grid span`（本文件 1987 行）里，颜色字号行高都已经对了。
+   想调它请改那一条，别在这里再抄一份——第一版抄了一份，还顺带引进了一个只用一次
+   的灰色，于是同一个标签有了两个可以各自漂移的来源。 */
 .eligibility-unit-grid strong {
   color: #5f6d83;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 9px;
+  font-size: 12px;
   overflow-wrap: anywhere;
+}
+/* 管理端账本详情里的折合提示，不在 .eligibility-unit-grid 里，所以要自己定颜色。 */
+.service-unit-converted {
+  color: #7f899a;
+  white-space: nowrap;
 }
 .eligibility-reasons {
   display: flex;
