@@ -4186,6 +4186,41 @@ const balanceEvidenceBoundaryTolerance = time.Second
 // forward progress instead of looping.
 const balanceBlipRebaselineCap = 3
 
+// signedExpectedUnits (XM-INV-PENDING-RECON C5, acceptance ruling 2026-09-09
+// on design section 7 D4(a)) is the one balance the evaluator compares an
+// upstream report against: what the ledger expects the account to hold, minus
+// every unit of usage it could not charge to any pool.
+//
+// ExpectedBalance alone is not that number. It is floored at zero, because it
+// is also what the evaluation row's expected_service_units column stores and
+// that column carries a >=0 CHECK. The units below zero live in
+// UnallocatedUnits -- carried cash debts plus non-invoice-eligible shortfalls
+// -- and the source deducted every one of them, so an upstream balance has
+// already absorbed them.
+//
+// XM-INV-NEGATIVE-DEFICIT taught the negative branch to subtract them; the
+// positive branch was left comparing against the floored value, which is two
+// different definitions of "expected" in one function. The consequence is not
+// cosmetic: once an account's pools are exhausted, ExpectedBalance is pinned
+// at zero while UnallocatedUnits keeps growing, so any account that carries a
+// debt and is then topped up with non-cash credit reports a balance the
+// ledger reads as unexplainably high (or, once the sign flips, as case -1)
+// and is parked in pending reconciliation on every checkpoint. A production
+// account did exactly that for days.
+//
+// Every comparison in the evaluator goes through this function -- the first
+// classification, the blip-confirmation rebuild, the boundary rule, and the
+// negative branch -- so the definition is physically in one place and the
+// four cannot drift apart. Accounts with nothing unallocated (nearly all of
+// them) get the identical value they got before.
+func signedExpectedUnits(projection eligibilityProjection) *big.Int {
+	expected := new(big.Int).Set(projection.ExpectedBalance)
+	if projection.UnallocatedUnits != nil {
+		expected.Sub(expected, projection.UnallocatedUnits)
+	}
+	return expected
+}
+
 func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string, through time.Time, actor AuditActor) error {
 	account, err := getEligibilityAccountTx(ctx, tx, accountID, true)
 	if err != nil {
@@ -4366,7 +4401,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 		if projectionErr != nil {
 			return projectionErr
 		}
-		difference := new(big.Int).Sub(new(big.Int).Set(balance), projection.ExpectedBalance)
+		difference := new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(projection))
 
 		if pending != nil {
 			if !item.balanceNegative && difference.Sign() == 1 && difference.Cmp(pending.difference) == 0 {
@@ -4386,7 +4421,7 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				if confirmErr != nil {
 					return confirmErr
 				}
-				confirmDifference := new(big.Int).Sub(new(big.Int).Set(balance), confirmProjection.ExpectedBalance)
+				confirmDifference := new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(confirmProjection))
 				if confirmDifference.Sign() == 0 {
 					// The credit just inserted is dated at or before this
 					// item (pending.intervalStart <= pending.item.asOf <=
@@ -4476,13 +4511,9 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 				if deficitErr != nil {
 					return deficitErr
 				}
-				unallocated := new(big.Int)
-				if projection.UnallocatedUnits != nil {
-					unallocated.Set(projection.UnallocatedUnits)
-				}
 				// Signed arithmetic: the source reports -deficit; the ledger
 				// expects ExpectedBalance minus every unit it could not allocate.
-				expectedSigned := new(big.Int).Sub(new(big.Int).Set(projection.ExpectedBalance), unallocated)
+				expectedSigned := signedExpectedUnits(projection)
 				difference = new(big.Int).Sub(new(big.Int).Neg(deficit), expectedSigned)
 				if difference.Sign() == 0 {
 					status = "matched"
@@ -4502,9 +4533,13 @@ func evaluatePendingBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID 
 			switch difference.Sign() {
 			case -1:
 				status = "negative_frozen"
+				// The signed expectation, not the floored ExpectedBalance, so
+				// the three numbers in the detail stay self-consistent
+				// (balance - expected = difference) and read the same way as
+				// the negative branch's own detail above.
 				detail := fmt.Sprintf("%s %s at %s reported balance %s, expected %s (difference %s)",
 					objectTypeOf(item), item.key, item.asOf.UTC().Format(time.RFC3339Nano),
-					balance.String(), projection.ExpectedBalance.String(), difference.String())
+					balance.String(), signedExpectedUnits(projection).String(), difference.String())
 				if err = enterPendingReconciliationTx(ctx, tx, accountID, "UNKNOWN_NEGATIVE_BALANCE",
 					objectTypeOf(item), item.key, detail, actor); err != nil {
 					return err
@@ -4649,7 +4684,11 @@ func resolveBalanceEvidenceBoundaryUsageTx(ctx context.Context, tx pgx.Tx, accou
 	if err != nil {
 		return nil, err
 	}
-	if new(big.Int).Sub(new(big.Int).Set(balance), adjusted.ExpectedBalance).Sign() != 0 {
+	// Compared against the same signed expectation every other comparison in
+	// the evaluator uses (signedExpectedUnits); the value returned is still
+	// the adjusted ExpectedBalance, because that is what the evaluation row's
+	// expected_service_units column stores and that column has a >=0 CHECK.
+	if new(big.Int).Sub(new(big.Int).Set(balance), signedExpectedUnits(adjusted)).Sign() != 0 {
 		return nil, nil
 	}
 	return adjusted.ExpectedBalance, nil
