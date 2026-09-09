@@ -75,11 +75,14 @@ var PendingReevaluateBlockerCodes = []string{
 	"open_freeze",
 	"job_processing",
 	"job_dead",
+	"unevaluated_checkpoints",
 	"window_empty",
 	"no_derivable_cycle",
+	"cycle_has_real_checkpoint",
 	"cycle_has_proof",
 	"cycle_has_stranded",
 	"prior_unknown_magnitude",
+	"recomputed_not_matched",
 	"self_dealing",
 }
 
@@ -115,7 +118,11 @@ type PendingReevaluateRepairResult struct {
 	JobStatus string
 	// UnevaluatedEvidence counts checkpoints and proofs already waiting for
 	// the evaluator -- the same NOT EXISTS predicate the evaluator selects on.
-	UnevaluatedEvidence int
+	// UnevaluatedCheckpoints is the real-checkpoint half of it, reported
+	// separately because that half is what refuses the apply: the derivation
+	// will not run while the evaluator still owes a verdict on real evidence.
+	UnevaluatedEvidence    int
+	UnevaluatedCheckpoints int
 	// EffectiveRequestedThrough is the requested_through the account's job row
 	// will actually carry after an apply, and therefore the whole window the
 	// worker will then derive over. It is deliberately not finalized_through:
@@ -130,16 +137,16 @@ type PendingReevaluateRepairResult struct {
 	WatermarkStreams int
 	// TargetCycleID/TargetCycleAt describe the published balances scan cycle
 	// an idle derivation would actually take: the newest one inside
-	// [FinalizedThrough, EffectiveRequestedThrough] that does not already
-	// carry a real checkpoint for this account -- ensureBalanceCarryForwardProofTx's
-	// own selection rule, not an approximation of it. Empty when there is none.
+	// [FinalizedThrough, EffectiveRequestedThrough] -- deriveIdlePendingCarryForwardProofTx's
+	// own choice, not an approximation of it. Empty when there is none.
 	TargetCycleID string
 	TargetCycleAt time.Time
-	// SkippedRealCheckpointCycles counts cycles inside the window passed over
-	// because they already carry a real checkpoint for this account, so a
-	// target older than the newest cycle in the window is explained rather
-	// than surprising.
-	SkippedRealCheckpointCycles int
+	// TargetHasRealCheckpoint is true when that newest in-window cycle already
+	// carries a real checkpoint for this account. The derivation stops there
+	// rather than falling back to an older cycle -- backfilling a restatement
+	// of stale numbers below newer evidence releases accounts whose newest
+	// observation disagrees -- so this is a refusal, not a skip.
+	TargetHasRealCheckpoint bool
 	// NewestPublishedCycleAt is the newest published balances cycle for the
 	// source, window or no window. When it sits above the window the account
 	// is simply waiting for the finalization delay to pass, which is the
@@ -230,7 +237,13 @@ func (s *Store) RepairPendingReevaluate(ctx context.Context, in PendingReevaluat
 	if err != nil {
 		return PendingReevaluateRepairResult{}, err
 	}
+	// minor 12: a run that passed every check but wrote no row is not an
+	// apply. Today only the status<>'dead' fallback can produce it (the job
+	// check refuses dead first), but that fallback exists precisely to hold
+	// when the check does not, and APPLIED over a row that never moved would
+	// be the report contradicting itself.
 	result.Queued = queued
+	result.Applied = queued
 	if queued && !written.Equal(result.EffectiveRequestedThrough) {
 		// The report told the operator which window the apply would ask for,
 		// and every judgement above -- which cycle, what the evaluator would
@@ -422,23 +435,28 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 		add("job_ok", "作业", true, true, "投影作业当前状态=%s，重新排队即可", result.JobStatus)
 	}
 
-	// Check 4: evidence already waiting. The worker will get to it on its own
-	// -- the same NOT EXISTS predicate evaluatePendingBalanceEvidenceTx
-	// selects on, so this is the evaluator's own view, not an approximation.
-	if err = tx.QueryRow(ctx, `
-		SELECT (SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
-			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
-			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
-				WHERE evaluation.checkpoint_id=checkpoint.id))
-		+ (SELECT count(*) FROM balance_carry_forward_proofs proof
-			WHERE proof.external_account_id=$1
-			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
-				WHERE evaluation.proof_id=proof.id))`, accountID).Scan(&result.UnevaluatedEvidence); err != nil {
+	// Check 4: evidence already waiting. Counted by the very function the
+	// derivation's own guard uses (countUnevaluatedBalanceEvidenceTx), so the
+	// number printed here and the decision the worker will make are the same
+	// answer to the same question rather than two implementations of it.
+	//
+	// An unevaluated real checkpoint is a refusal, not a note. The evaluator
+	// owes this account a verdict on real evidence, and until it gives one an
+	// idle proof would not be independent of it: XM-INV-BALANCE-BLIP defers a
+	// positive difference and waits for the next independent item, and a proof
+	// restating that same checkpoint against an unmoved projection confirms
+	// itself by construction. An unevaluated proof alone is only a note -- the
+	// worker judges it in this same pass.
+	unevaluatedCheckpoints, unevaluatedProofs, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, accountID)
+	if err != nil {
 		return err
 	}
-	add("unevaluated_evidence", "待评估证据", true, false,
-		"尚未评估的检查点/证明 %d 条；大于 0 说明 worker 自己就会处理，通常不需要本工具",
-		result.UnevaluatedEvidence)
+	result.UnevaluatedCheckpoints = unevaluatedCheckpoints
+	result.UnevaluatedEvidence = unevaluatedCheckpoints + unevaluatedProofs
+	add("unevaluated_checkpoints", "待评估证据", unevaluatedCheckpoints == 0, true,
+		"尚未评估的真实检查点 %d 条、结转证明 %d 条；只要还有未评估的真实检查点，闲置派生就不会发生"+
+			"（评估器必须先对真实证据给出判定），worker 自己会处理，不需要本工具",
+		unevaluatedCheckpoints, unevaluatedProofs)
 
 	// Check 5a: the window an apply will actually ask for. Predicted from the
 	// same SQL the requeue writes, so what the dry run says here is what the
@@ -472,27 +490,29 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 			detail += fmt.Sprintf("；该源最新已发布周期在 %s，还压在 finalization_delay 里，等下一次 finalize 把窗口推上去即可",
 				formatOptionalTime(result.NewestPublishedCycleAt))
 		}
-		if result.SkippedRealCheckpointCycles > 0 {
-			detail += fmt.Sprintf("；窗口内另有 %d 个周期已带该账号的真实检查点，按派生规则跳过",
-				result.SkippedRealCheckpointCycles)
-		}
 		add("no_derivable_cycle", "目标周期", false, true, "%s", detail)
 		return s.addSelfDealingCheck(ctx, tx, account, in, result)
 	}
 	switch {
+	case result.TargetHasRealCheckpoint:
+		// The derivation stops here rather than reaching past it to an older
+		// cycle: a restatement of stale numbers dated below newer evidence is
+		// how an account whose latest observation disagrees gets released.
+		add("cycle_has_real_checkpoint", "目标周期", false, true,
+			"窗口内最新周期 %s（天花板 %s）已带该账号的真实检查点；派生就停在这里，绝不回填到更旧的周期之下",
+			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
 	case result.TargetHasProof:
 		add("cycle_has_proof", "目标周期", false, true,
-			"窗口内可派生的最新周期 %s（天花板 %s）已有该账号的结转证明，重评不会产生新证据",
+			"窗口内最新周期 %s（天花板 %s）已有该账号的结转证明，重评不会产生新证据",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
 	case result.TargetHasStranded:
 		add("cycle_has_stranded", "目标周期", false, true,
-			"窗口内可派生的最新周期 %s（天花板 %s）带着该账号被兜住的失败检查点，派生会被 XM-INV-DEAD-CONTAINMENT 的等待挡住；先处理那条死信",
+			"窗口内最新周期 %s（天花板 %s）带着该账号被兜住的失败检查点，派生会被 XM-INV-DEAD-CONTAINMENT 的等待挡住；先处理那条死信",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt))
 	default:
 		add("cycle_ok", "目标周期", true, true,
-			"窗口内可派生的最新周期 %s（天花板 %s，跳过 %d 个已带真实检查点的周期）可派生，复述的检查点 %s（as_of %s）",
+			"窗口内最新周期 %s（天花板 %s）可派生，复述的检查点 %s（as_of %s）",
 			result.TargetCycleID, formatOptionalTime(result.TargetCycleAt),
-			result.SkippedRealCheckpointCycles,
 			result.PriorCheckpointID, formatOptionalTime(result.PriorAsOf))
 	}
 	if result.PriorNegative && result.PriorDeficit == "" {
@@ -511,8 +531,15 @@ func (s *Store) collectPendingReevaluateChecks(ctx context.Context, tx pgx.Tx,
 	if err = s.recomputePendingReevaluateOutcome(ctx, tx, account, result); err != nil {
 		return err
 	}
-	add("recomputed", "预期评估", result.RecomputedStatus == "matched", false,
-		"按当前账本重算：期望=%s 差值=%s 预期结果=%s",
+	// Not a note: a refusal. Deriving is irreversible -- the proof is
+	// immutable, and migration 0014 then refuses a real checkpoint at that
+	// cycle forever -- so spending a cycle on evidence this run already
+	// computes will not match is a permanent cost for no gain, and it resets
+	// the streak on top. There is deliberately no override flag: an account
+	// whose arithmetic does not reconcile is waiting for a real fact, not for
+	// an operator.
+	add("recomputed_not_matched", "预期评估", result.RecomputedStatus == "matched", true,
+		"按当前账本重算：期望=%s 差值=%s 预期结果=%s；只有 matched 才允许 apply",
 		orDash(result.RecomputedExpected), orDash(result.RecomputedDifference), result.RecomputedStatus)
 
 	return s.addSelfDealingCheck(ctx, tx, account, in, result)
@@ -559,6 +586,15 @@ func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 			prior.id::text,prior.as_of,prior.balance_service_units::text,
 			prior.balance_negative,prior.deficit_service_units::text,
 			EXISTS (
+				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
+				JOIN source_economic_scan_cycle_events mapped
+				  ON mapped.source_instance_id=checkpoint.source_instance_id
+				 AND mapped.stream_id='balances'
+				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
+				 AND mapped.payload_hash=checkpoint.source_revision_hash
+				WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id
+			),
+			EXISTS (
 				SELECT 1 FROM balance_carry_forward_proofs proof
 				WHERE proof.external_account_id=$1 AND proof.scan_cycle_id=cycle.scan_cycle_id
 			),
@@ -591,21 +627,12 @@ func (s *Store) loadPendingReevaluateTarget(ctx context.Context, tx pgx.Tx,
 		WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
 		  AND cycle.cycle_status='published'
 		  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
-		  AND NOT EXISTS (
-			SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
-			JOIN source_economic_scan_cycle_events mapped
-			  ON mapped.source_instance_id=checkpoint.source_instance_id
-			 AND mapped.stream_id='balances'
-			 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-			 AND mapped.payload_hash=checkpoint.source_revision_hash
-			WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id
-		  )
 		ORDER BY cycle.scan_ceiling_at DESC,cycle.first_sequence DESC
 		LIMIT 1`, account.ExternalAccountID, account.SourceInstanceID,
 		account.FinalizedThrough, result.EffectiveRequestedThrough).Scan(
 		&result.TargetCycleID, &result.TargetCycleAt, &result.PriorCheckpointID, &result.PriorAsOf,
 		&result.PriorBalance, &result.PriorNegative, &deficit,
-		&result.TargetHasProof, &result.TargetHasStranded)
+		&result.TargetHasRealCheckpoint, &result.TargetHasProof, &result.TargetHasStranded)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -630,24 +657,10 @@ func (s *Store) loadPendingReevaluateCycleContext(ctx context.Context, tx pgx.Tx
 	account eligibilityAccount, result *PendingReevaluateRepairResult) error {
 	var newest *time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT (SELECT count(*) FROM source_economic_scan_cycles cycle
-			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
-			  AND cycle.cycle_status='published'
-			  AND cycle.scan_ceiling_at>=$3 AND cycle.scan_ceiling_at<=$4
-			  AND EXISTS (
-				SELECT 1 FROM balance_reconciliation_checkpoints checkpoint
-				JOIN source_economic_scan_cycle_events mapped
-				  ON mapped.source_instance_id=checkpoint.source_instance_id
-				 AND mapped.stream_id='balances'
-				 AND mapped.event_id=CASE WHEN checkpoint.external_event_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN checkpoint.external_event_id::uuid END
-				 AND mapped.payload_hash=checkpoint.source_revision_hash
-				WHERE checkpoint.external_account_id=$1 AND mapped.scan_cycle_id=cycle.scan_cycle_id)),
-			(SELECT max(cycle.scan_ceiling_at) FROM source_economic_scan_cycles cycle
-			WHERE cycle.source_instance_id=$2 AND cycle.stream_id='balances'
-			  AND cycle.cycle_status='published')`,
-		account.ExternalAccountID, account.SourceInstanceID,
-		account.FinalizedThrough, result.EffectiveRequestedThrough).Scan(
-		&result.SkippedRealCheckpointCycles, &newest); err != nil {
+		SELECT max(cycle.scan_ceiling_at) FROM source_economic_scan_cycles cycle
+		WHERE cycle.source_instance_id=$1 AND cycle.stream_id='balances'
+		  AND cycle.cycle_status='published'`,
+		account.SourceInstanceID).Scan(&newest); err != nil {
 		return err
 	}
 	if newest != nil {

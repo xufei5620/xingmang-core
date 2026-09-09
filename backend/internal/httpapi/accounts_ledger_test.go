@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +376,39 @@ func TestAccountLedgerDetailHandlerNullsBlockReasonWhenInvoiceable(t *testing.T)
 	}
 	if body.BlockReason != nil {
 		t.Fatalf("expected null block_reason for an invoiceable account, got %q", *body.BlockReason)
+	}
+}
+
+// TestAccountBlockReasonNamesTheEvaluationColumnsForWhatTheyHold is
+// XM-INV-PENDING-RECON's first review, finding m5. The evaluation row stores
+// two numbers that do not form a pair: difference_service_units is measured
+// against the signed expectation (the ledger's pools minus every unit of usage
+// no pool covered), while expected_service_units holds only the pools, floored
+// at zero by that column's own >=0 CHECK. On an account carrying an
+// unallocated debt they disagree by exactly that debt -- reported 300, pools 0,
+// difference 350 -- and the sentence used to print the floored value as 预期,
+// so the same evaluation stated two different expectations to whoever read it.
+func TestAccountBlockReasonNamesTheEvaluationColumnsForWhatTheyHold(t *testing.T) {
+	detail := postgresstore.AccountLedgerDetail{
+		AccountLedgerListEntry: postgresstore.AccountLedgerListEntry{
+			BlockState:       postgresstore.AccountBlockStateNotInvoiceablePendingReconciliation,
+			LastCheckpointAt: time.Date(2026, 9, 6, 11, 29, 30, 0, time.UTC),
+		},
+		OpeningBalanceUnitCode:          "SUB2_BALANCE_1E8",
+		LatestEvaluationKind:            "balance_checkpoint",
+		LatestEvaluationKey:             "ckpt-debt",
+		LatestEvaluationStatus:          "negative_frozen",
+		LatestEvaluationExpectedUnits:   "0",
+		LatestEvaluationDifferenceUnits: "350",
+	}
+	reason := buildAccountBlockReason(detail, domain.MinimumRequestMinor)
+	if !strings.Contains(reason, "上报余额与账面预期相差 350") {
+		t.Fatalf("the difference must be named as a difference against the signed expectation: %q", reason)
+	}
+	if !strings.Contains(reason, "账面剩余池 0") {
+		t.Fatalf("the stored column must be named as the pool total it is: %q", reason)
+	}
+	if strings.Contains(reason, "预期 0") {
+		t.Fatalf("the floored pool total must not be presented as the expectation: %q", reason)
 	}
 }

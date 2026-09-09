@@ -2239,6 +2239,10 @@ elapsed -- the same treatment `BALANCE_PROOF_PENDING` jobs already got. A
 dead job never revives on its own (a new fact for that account advances its
 pending work but leaves it dead); recover it with:
 
+`invoice_eligibility_repair` below is the shell function defined in the next
+section ("Running `invoice-eligibility-repair` in production") -- copy that
+block into the shell first; there is no compose service for this binary.
+
 ```bash
 invoice_eligibility_repair --kind=projection-requeue-dead   # add --apply --operator-id=<admin-uuid> once the dry-run report looks right
 ```
@@ -2287,6 +2291,19 @@ parser for every kind, but only the freeze-resolving kinds decrypt with it;
 Dry run is the default for every kind and writes nothing. `--apply` requires
 `--operator-id=<admin UUID>`, and the tool records that id on every row and
 audit event it writes.
+
+Exit codes -- check them, do not just read the banner:
+
+| code | meaning |
+| ---: | --- |
+| 0 | the run completed: a dry run (which never writes), or an apply that went through |
+| 1 | the run failed -- database, migration check, secret file, or an unexpected error |
+| 2 | the invocation was rejected before touching anything (bad flag combination, non-absolute path, positional argument) |
+| 3 | `--kind=pending-reevaluate --apply` was **refused** by one of its own precondition checks; the report was printed and nothing was written |
+
+Code 3 exists because a refusal is neither success nor failure, and a wrapper
+running under `set -e` would otherwise read REFUSED as done. The other kinds
+do not have preconditions of this shape and never return it.
 
 **Re-evaluating one parked account (XM-INV-PENDING-RECON, 2026-09-09).** An
 account in `not_invoiceable_pending_reconciliation` clears itself once two
@@ -2360,11 +2377,14 @@ Checks marked `STOP` refuse `--apply`:
 | open eligibility freezes > 0 | resolve the freeze first; the exit is blocked by the freeze guard regardless of evidence |
 | the projection job is `processing` | wait; a worker is holding the account right now |
 | the projection job is `dead` | run `--kind=projection-requeue-dead --account=<id>` first; this tool never revives a dead job |
+| the evaluator still owes a verdict on a real checkpoint | nothing -- the worker judges it on its own, and an idle proof derived first would not be independent of it |
 | the requeue window is empty (fewer than four stream watermarks, or it would not rise above `finalized_through`) | the source is not finalizing at all; that is the problem to fix, not this account |
 | no published balances cycle inside the window can be derived from | usually the newest cycles are still inside the finalization delay -- the report prints where they are; wait for the next pass |
+| the newest cycle in the window already carries a real checkpoint | nothing -- the derivation stops there rather than backfilling under newer evidence; that checkpoint is itself the next evaluation |
 | the cycle that would be used already carries a carry-forward proof | it was already derived; wait for the next published cycle |
 | that cycle carries a stranded (dead or failed) balance checkpoint | deal with that dead event first (`--kind=ingest-requeue-dead`); a proof written over it would lose the fact permanently |
 | the checkpoint to be restated reports a negative balance with no magnitude | the re-evaluation could only produce `negative_frozen(unknown)`; nothing to gain |
+| this run's own recomputation does not come out `matched` | nothing -- deriving would burn the cycle permanently (the proof is immutable, and migration 0014 then refuses a real checkpoint there forever) and reset the streak, for evidence already known not to reconcile; there is deliberately no override |
 | `--operator-id` is the account's own invoice user | someone else runs it |
 
 Read the `requeue window` line before applying even when nothing says `STOP`.
@@ -2385,6 +2405,27 @@ the ordinary path, and the two-consecutive-matches rule decides as always. It
 can, though, be the reason an account *does* exit seconds later and becomes
 invoiceable -- so read the recomputed verdict in the report before applying,
 not after.
+
+**After deploying XM-INV-PENDING-RECON, watch for one audit action.**
+`eligibility.balance_blip.rebaselined` means a blip confirmation was attempted
+and the rebuilt projection did not reconcile. With the signed comparison in
+place the arithmetic is exact -- pools plus cash minus usage, nothing floored
+away -- so a credit sized at the deferred difference rebuilds to zero whenever
+it is actually inserted. This row therefore means the insert did not happen
+(most likely a row already occupying that item's synthetic credit id, left by
+an earlier partially-repaired run) or something rarer. **Seeing it is a stop
+signal, not a metric**: read the audit payload, do not clear the state with a
+repair tool.
+
+```bash
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
+  exec -T postgres psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' \
+  -c "SELECT created_at,object_type,object_id,actor_id FROM audit_events
+      WHERE action='eligibility.balance_blip.rebaselined'
+        AND created_at > now() - interval '24 hours'
+      ORDER BY created_at DESC"
+```
+Expected output is empty. Anything else goes to whoever owns the release.
 
 ```bash
 docker compose --env-file deploy/.env.production \

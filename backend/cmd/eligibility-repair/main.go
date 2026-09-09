@@ -144,10 +144,24 @@ func main() {
 	defer cancel()
 	filters := repairFilters{accountID: *accountID, eventID: *eventID, includeBlockedCycles: *includeBlockedCycles}
 	if err := run(ctx, *databaseURLFile, *keyringFile, *migrationsDir, *apply, *operatorID, *kind, filters, os.Stdout); err != nil {
+		// A refused apply is not a failure and not a success: the tool worked,
+		// looked, and declined. It gets its own code so a `set -e` wrapper or
+		// a `$?` check cannot read REFUSED as "done" -- 3 for a refusal, the
+		// same convention the shadow-binding CLI uses for its own gate
+		// refusals, 1 for anything that actually went wrong.
+		if errors.Is(err, errRepairRefused) {
+			slog.Warn("eligibility-repair refused to apply", "error", err)
+			os.Exit(3)
+		}
 		slog.Error("eligibility-repair failed", "error", err)
 		os.Exit(1)
 	}
 }
+
+// errRepairRefused marks the "every check ran and one said stop" outcome. The
+// report has already been printed by the time it is returned, so it carries no
+// detail of its own beyond making the exit code non-zero.
+var errRepairRefused = errors.New("the repair refused to apply: a precondition check said STOP")
 
 // repairFilters groups the narrowing/override flags that only some kinds
 // implement, so adding one does not lengthen run's positional argument list
@@ -395,6 +409,12 @@ func runPendingReevaluate(ctx context.Context, store *postgresstore.Store, apply
 		return fmt.Errorf("repair pending reevaluate: %w", err)
 	}
 	printPendingReevaluateSummary(out, result)
+	// The report is printed either way; only the exit code differs. A dry run
+	// that finds blockers is not a refusal -- it was never going to write
+	// anything -- so only an --apply that was turned away exits non-zero.
+	if apply && !result.Applied {
+		return errRepairRefused
+	}
 	return nil
 }
 
@@ -579,25 +599,36 @@ func printPendingReevaluateSummary(out io.Writer, result postgresstore.PendingRe
 		mode = "REFUSED (--apply was requested; a check below said STOP, nothing was changed)"
 	}
 	fmt.Fprintf(out, "eligibility-repair XM-INV-PENDING-RECON: %s\n\n", mode)
-	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", "ACCOUNT", "STATUS", "MATCHES", "JOB")
-	fmt.Fprintf(out, "%-38s %34s %8s %10s\n", result.AccountID, orNone(result.Status),
-		fmt.Sprintf("%d/%d", result.ConsecutiveMatches, result.ExitMatches), orNone(result.JobStatus))
+	// One field per line rather than a fixed-width table. The status column is
+	// the reason: not_invoiceable_pending_reconciliation is 38 characters and
+	// is the only status this tool ever expects to see, so any column narrow
+	// enough to look like a table is one the normal case overflows. Nothing
+	// here is a repeating row, so there is no table to lose.
+	fmt.Fprintf(out, "account:           %s\n", result.AccountID)
+	fmt.Fprintf(out, "status:            %s\n", orNone(result.Status))
+	fmt.Fprintf(out, "matches:           %d/%d\n", result.ConsecutiveMatches, result.ExitMatches)
+	fmt.Fprintf(out, "job:               %s\n", orNone(result.JobStatus))
+	fmt.Fprintf(out, "unevaluated:       %d checkpoint(s), %d total item(s)\n",
+		result.UnevaluatedCheckpoints, result.UnevaluatedEvidence)
 	// The window line comes before the cycle line on purpose: a cycle is only
 	// meaningful as "the one inside this window", and reading them the other
 	// way round is how an operator ends up believing a cycle the apply cannot
 	// reach is the one it will use.
-	fmt.Fprintf(out, "\nrequeue window:    (%s, %s]  (watermark streams %d/4)\n",
+	fmt.Fprintf(out, "requeue window:    (%s, %s]  (watermark streams %d/4)\n",
 		orNone(formatRepairTime(result.FinalizedThrough)),
 		orNone(formatRepairTime(result.EffectiveRequestedThrough)), result.WatermarkStreams)
-	fmt.Fprintf(out, "target cycle:      %s (ceiling %s, skipped %d already carrying a real checkpoint)\n",
-		orNone(result.TargetCycleID), orNone(formatRepairTime(result.TargetCycleAt)),
-		result.SkippedRealCheckpointCycles)
+	fmt.Fprintf(out, "target cycle:      %s (ceiling %s)\n",
+		orNone(result.TargetCycleID), orNone(formatRepairTime(result.TargetCycleAt)))
 	fmt.Fprintf(out, "newest published:  %s\n", orNone(formatRepairTime(result.NewestPublishedCycleAt)))
 	fmt.Fprintf(out, "prior checkpoint:  %s (as_of %s)\n",
 		orNone(result.PriorCheckpointID), orNone(formatRepairTime(result.PriorAsOf)))
 	fmt.Fprintf(out, "recomputed:        expected=%s difference=%s -> %s\n",
 		orNone(result.RecomputedExpected), orNone(result.RecomputedDifference), orNone(result.RecomputedStatus))
 
+	// Each check on two lines: the verdict and the (Chinese) name, then the
+	// detail indented under it. Padding a CJK name with %-12s pads by bytes,
+	// which lines up nothing -- and the details are long enough that a single
+	// line would wrap in any terminal anyway.
 	fmt.Fprintf(out, "\nCHECKS\n")
 	for _, check := range result.Checks {
 		verdict := "OK  "
@@ -606,7 +637,7 @@ func printPendingReevaluateSummary(out io.Writer, result postgresstore.PendingRe
 		} else if !check.Passed {
 			verdict = "NOTE"
 		}
-		fmt.Fprintf(out, "  [%s] %-12s %s\n", verdict, check.Name, check.Detail)
+		fmt.Fprintf(out, "  [%s] %s\n         %s\n", verdict, check.Name, check.Detail)
 	}
 	if result.Blocked() {
 		fmt.Fprintf(out, "\n以上 STOP 项未通过，apply 已被拒绝。\n")

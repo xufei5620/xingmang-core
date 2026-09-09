@@ -684,7 +684,11 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 	// Accounts with no job row at all are inserted as before: a conflict there
 	// can only be with another concurrent enqueue, which is short-lived.
 	_, err := tx.Exec(ctx, `
-		WITH targets AS (
+		WITH balances_frontier AS (
+			SELECT max(c.scan_ceiling_at) AS newest_published
+			FROM source_economic_scan_cycles c
+			WHERE c.source_instance_id=$1 AND c.stream_id='balances' AND c.cycle_status='published'
+		), targets AS (
 			SELECT eas.external_account_id,eas.finalized_through,
 				eas.eligibility_status,eas.pending_reconciliation_consecutive_matches,
 				GREATEST(eas.cutover_at,$2::timestamptz-
@@ -721,18 +725,36 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 				-- empty-advance UPDATE's own NOT EXISTS skips this account and the cycle
 				-- survives until the worker (C2's idle branch) can derive from it.
 				-- Deliberately narrow, per the 2026-09-09 ruling on design section 7 D2:
-				-- only accounts already at N-1, so each consecutive-match run produces at
-				-- most one extra proof and one extra evaluation, and the branch switches
-				-- itself off as soon as the account exits or a non-matched item resets
-				-- the counter. The status equality is written first so the EXISTS is
-				-- never evaluated for any other account.
+				-- only accounts already at N-1. The same threshold is enforced again
+				-- inside the derivation itself (pendingReconciliationIdleMinMatches) --
+				-- a job has other sources than this predicate, so a gate that lives
+				-- only here is not a gate.
+				--
+				-- The cycle test reads a scalar CTE computed once for the whole pass,
+				-- never a per-account correlated subquery. This statement runs inside
+				-- tryPublishEconomicScanCyclesTx, holding the stream's scan-cycle and
+				-- watermark rows under the runtime role's lock_timeout=5s -- the exact
+				-- position that took the balances stream down for 29 minutes on
+				-- 2026-09-04 (see the note above). source_economic_scan_cycles has no
+				-- index that serves "published cycles of this stream by ceiling": the
+				-- primary key leads with a UUID scan_cycle_id, and the only partial
+				-- index covers cycle_status IN ('receiving','processing'). A correlated
+				-- EXISTS there would re-scan the stream's whole cycle history -- one row
+				-- per source per minute, ~500k rows a year -- once for every pending
+				-- account matched. As a CTE it is one aggregate for the pass. Adding
+				-- the index instead would be a migration, which this release does not
+				-- carry.
+				--
+				-- Only the lower bound is tested. "The newest published cycle is above
+				-- finalized_through" is implied by (and weaker than) "a cycle exists
+				-- inside the window", so this never misses an account the window test
+				-- would have caught; it enqueues a few extra when every published cycle
+				-- is still above requested_through. Those jobs derive nothing (the
+				-- derivation applies the real window), publish finalized_through as any
+				-- job does, and cost one row for the handful of accounts sitting at N-1.
 				OR (t.eligibility_status='not_invoiceable_pending_reconciliation'
 					AND t.pending_reconciliation_consecutive_matches>=$4
-					AND EXISTS (SELECT 1 FROM source_economic_scan_cycles c
-						WHERE c.source_instance_id=$1 AND c.stream_id='balances'
-							AND c.cycle_status='published'
-							AND c.scan_ceiling_at>t.finalized_through
-							AND c.scan_ceiling_at<=t.requested_through))
+					AND (SELECT newest_published FROM balances_frontier)>t.finalized_through)
 			)
 		), held AS (
 			SELECT j.external_account_id FROM eligibility_projection_jobs j
@@ -767,7 +789,7 @@ func finalizeSourceAccountsTx(ctx context.Context, tx pgx.Tx, sourceID string, _
 			END,
 			updated_at=CASE WHEN eligibility_projection_jobs.status IN ('dead','processing') THEN eligibility_projection_jobs.updated_at ELSE now() END`,
 		sourceID, minWatermark, balanceProofPendingRequeueResetWindow.Seconds(),
-		pendingReconciliationExitMatches-1)
+		pendingReconciliationIdleMinMatches)
 	if err != nil {
 		return err
 	}
@@ -3727,6 +3749,127 @@ func insertBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 		"balance_carry_forward_proof", proofID, nil, after)
 }
 
+// pendingReconciliationIdleMinMatches is the consecutive-match streak at which
+// idle re-evaluation becomes allowed: one short of the exit. Both halves of
+// the feature read it -- finalizeSourceAccountsTx's enqueue predicate and
+// deriveIdlePendingCarryForwardProofTx's own gate -- because a threshold that
+// lives only in the enqueue is not a threshold at all. A projection job has
+// several other sources (a real checkpoint landing in the window enqueues one
+// regardless of any streak), and each of them reaches the derivation.
+const pendingReconciliationIdleMinMatches = pendingReconciliationExitMatches - 1
+
+// countUnevaluatedBalanceEvidenceTx counts this account's balance evidence the
+// evaluator has not judged yet, split by kind. It is the same NOT EXISTS
+// predicate evaluatePendingBalanceEvidenceTx selects its work with, and it has
+// exactly two callers on purpose: the idle-derivation guard below, and
+// invoice-eligibility-repair --kind=pending-reevaluate's own report. An
+// operator reading "unevaluated evidence: 0" and the code deciding whether to
+// derive must be answering the same question with the same query, or the
+// report is describing a different tool than the one that runs.
+func countUnevaluatedBalanceEvidenceTx(ctx context.Context, tx pgx.Tx, accountID string) (checkpoints, proofs int, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT (SELECT count(*) FROM balance_reconciliation_checkpoints checkpoint
+			WHERE checkpoint.external_account_id=$1 AND checkpoint.checkpoint_kind='reconciliation'
+			  AND NOT EXISTS (SELECT 1 FROM balance_checkpoint_evaluations evaluation
+				WHERE evaluation.checkpoint_id=checkpoint.id)),
+			(SELECT count(*) FROM balance_carry_forward_proofs proof
+			WHERE proof.external_account_id=$1
+			  AND NOT EXISTS (SELECT 1 FROM balance_carry_forward_evaluations evaluation
+				WHERE evaluation.proof_id=proof.id))`, accountID).Scan(&checkpoints, &proofs)
+	return checkpoints, proofs, err
+}
+
+// deriveIdlePendingCarryForwardProofTx is XM-INV-PENDING-RECON C2: for an
+// account parked in not_invoiceable_pending_reconciliation whose window
+// carried no facts at all, derive one carry-forward proof so the state can
+// clear instead of waiting forever for evidence the source will never send.
+//
+// Every gate below exists because the first review demonstrated the failure it
+// prevents, on a real fixture. They are in this order and none may be skipped:
+//
+//  1. The streak gate. The acceptance ruling of 2026-09-09 (design section 7
+//     D2(a)) narrowed idle re-evaluation to accounts already one match from
+//     exiting; that narrowing was implemented only in the enqueue predicate,
+//     which bounds nothing, because an ordinary real checkpoint landing in the
+//     window enqueues the account whatever its streak is. A zero-streak
+//     account was reaching this code and being released.
+//
+//  2. No unevaluated real checkpoint. This is the one that matters most. A
+//     positive difference the ledger cannot explain is not classified on the
+//     spot: XM-INV-BALANCE-BLIP defers it and waits for the *next independent*
+//     piece of evidence to confirm or disconfirm it. An idle proof is not
+//     independent of that checkpoint -- it restates it, at a later cycle
+//     ceiling, against a projection that by construction has not moved, so the
+//     difference is identical and the confirmation cannot fail. One upstream
+//     observation then confirms itself, synthesizes a credit for the whole
+//     unexplained amount, and releases the account. So: if the evaluator still
+//     owes this account a verdict on real evidence, it gets to give it first.
+//
+//  3. Never below a real checkpoint. The candidates are walked newest-first,
+//     and if the newest one already carries a real checkpoint the derivation
+//     stops rather than falling back to an older empty cycle. Backfilling
+//     under a newer checkpoint dates a restatement of stale numbers below
+//     evidence that disagrees with them; the evaluator reads the stale proof
+//     first, counts it as the exit match, and clears the pending columns --
+//     including pending_reconciliation_since, which enterPendingReconciliationTx
+//     promises to preserve across a re-entry -- before it ever reads the
+//     checkpoint that disagrees. In the durable form of it the newer
+//     checkpoint is not yet finalizable at all, so the account is released to
+//     invoiceable while the newest thing the source said about it sits on file
+//     unevaluated.
+//
+//  4. XM-INV-DEAD-CONTAINMENT A2 wins over deriving. If the cycle carries a
+//     stranded balance_checkpoint for this account, wait: writing an immutable
+//     "no checkpoint arrived here" proof would make migration 0014's
+//     reject_real_checkpoint_after_carry_forward trigger refuse that
+//     checkpoint forever, and an idle account stuck one more cycle is never
+//     worth losing a replayable balance fact.
+//
+//  5. An open eligibility_freezes row suppresses derivation entirely.
+//     advancePendingReconciliationMatchTx refuses to exit while one is open,
+//     so a proof derived now could only produce evidence nobody can act on --
+//     and every proof is immutable and burns its cycle's exclusivity
+//     permanently.
+func deriveIdlePendingCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount,
+	carryCandidates []carryCandidate, actor AuditActor) error {
+	if len(carryCandidates) == 0 {
+		return nil
+	}
+	var matches int
+	if err := tx.QueryRow(ctx, `SELECT pending_reconciliation_consecutive_matches
+		FROM source_account_eligibility_state WHERE external_account_id=$1`,
+		account.ExternalAccountID).Scan(&matches); err != nil {
+		return err
+	}
+	if matches < pendingReconciliationIdleMinMatches {
+		return nil
+	}
+	unevaluatedCheckpoints, _, err := countUnevaluatedBalanceEvidenceTx(ctx, tx, account.ExternalAccountID)
+	if err != nil {
+		return err
+	}
+	if unevaluatedCheckpoints > 0 {
+		return nil
+	}
+	item := carryCandidates[len(carryCandidates)-1]
+	if item.hasRealCheckpoint {
+		return nil
+	}
+	if item.hasStrandedCheckpoint {
+		return errBalanceCarryForwardProofPending
+	}
+	var hasOpenFreeze bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM eligibility_freezes WHERE external_account_id=$1 AND status='open')`,
+		account.ExternalAccountID).Scan(&hasOpenFreeze); err != nil {
+		return err
+	}
+	if hasOpenFreeze {
+		return nil
+	}
+	return insertBalanceCarryForwardProofTx(ctx, tx, account, item, true, actor)
+}
+
 func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account eligibilityAccount, requested time.Time, actor AuditActor) error {
 	// XM-INV-PROOF-CONTENTION 2: the caller (processEligibilityProjectionJob)
 	// deliberately does NOT hold the per-account advisory lock or a row lock
@@ -4043,26 +4186,7 @@ func ensureBalanceCarryForwardProofTx(ctx context.Context, tx pgx.Tx, account el
 	//     cycle's exclusivity permanently. Nothing is lost by waiting: once
 	//     the freeze resolves, the next published cycle derives normally.
 	if len(visibilities) == 0 && account.Status == "not_invoiceable_pending_reconciliation" {
-		for index := len(carryCandidates) - 1; index >= 0; index-- {
-			item := carryCandidates[index]
-			if item.hasRealCheckpoint {
-				continue
-			}
-			if item.hasStrandedCheckpoint {
-				return errBalanceCarryForwardProofPending
-			}
-			var hasOpenFreeze bool
-			if err = tx.QueryRow(ctx, `SELECT EXISTS(
-				SELECT 1 FROM eligibility_freezes WHERE external_account_id=$1 AND status='open')`,
-				account.ExternalAccountID).Scan(&hasOpenFreeze); err != nil {
-				return err
-			}
-			if hasOpenFreeze {
-				return nil
-			}
-			return insertBalanceCarryForwardProofTx(ctx, tx, account, item, true, actor)
-		}
-		return nil
+		return deriveIdlePendingCarryForwardProofTx(ctx, tx, account, carryCandidates, actor)
 	}
 
 	coveredVisibility := account.FinalizedThrough.UTC()

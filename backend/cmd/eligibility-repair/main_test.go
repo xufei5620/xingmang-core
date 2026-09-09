@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -525,5 +526,45 @@ func TestPrintProjectionRequeueDeadSummaryFormatsAccountsAndTotals(t *testing.T)
 		if !strings.Contains(printed, want) {
 			t.Fatalf("summary output missing %q: %s", want, printed)
 		}
+	}
+}
+
+// TestRunPendingReevaluateRefusedApplyIsNotSuccess is the first review's minor
+// finding 8. A refused apply used to return nil, so the process exited 0 and
+// any `set -e` wrapper or `$?` check read REFUSED as "done". The sibling kind
+// ingest-acknowledge-unreplayable already returned an error on refusal; this
+// one now does too, with its own sentinel so main can exit 3 (refused) rather
+// than 1 (something went wrong).
+func TestRunPendingReevaluateRefusedApplyIsNotSuccess(t *testing.T) {
+	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	const operator = "70000000-0000-4000-8000-000000000001"
+	const account = "40000000-0000-4000-8000-000000000001"
+
+	// Against an empty database the account does not exist, so every apply is
+	// refused. The report is still printed -- the operator needs to see why.
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := run(ctx, databaseURLFile, keyringFile, migrationsDir, true, operator, kindPendingReevaluate,
+		repairFilters{accountID: account}, &out)
+	cancel()
+	if !errors.Is(err, errRepairRefused) {
+		t.Fatalf("a refused apply must return the refusal sentinel, got %v", err)
+	}
+	if printed := out.String(); !strings.Contains(printed, "REFUSED") {
+		t.Fatalf("a refused apply must still print its report: %s", printed)
+	}
+
+	// Control: a dry run that finds the same blockers is not a refusal -- it
+	// was never going to write anything -- so it stays exit 0.
+	out.Reset()
+	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+	err = run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "", kindPendingReevaluate,
+		repairFilters{accountID: account}, &out)
+	cancel()
+	if err != nil {
+		t.Fatalf("a dry run must not be a refusal: %v", err)
+	}
+	if printed := out.String(); !strings.Contains(printed, "DRY RUN") {
+		t.Fatalf("dry run banner missing: %s", printed)
 	}
 }

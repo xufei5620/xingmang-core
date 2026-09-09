@@ -91,8 +91,11 @@ func TestPendingReevaluateDryRunReportsAndChangesNothing(t *testing.T) {
 	if !result.NewestPublishedCycleAt.Equal(carryAt.UTC()) {
 		t.Fatalf("report newest published cycle=%s, want %s", result.NewestPublishedCycleAt, carryAt.UTC())
 	}
-	if result.SkippedRealCheckpointCycles != 0 {
-		t.Fatalf("report skipped %d cycles for a real checkpoint, want 0", result.SkippedRealCheckpointCycles)
+	if result.TargetHasRealCheckpoint {
+		t.Fatalf("the in-window cycle must not already carry a real checkpoint: %+v", result)
+	}
+	if result.UnevaluatedCheckpoints != 0 {
+		t.Fatalf("report unevaluated real checkpoints=%d, want 0", result.UnevaluatedCheckpoints)
 	}
 	if result.PriorCheckpointID == "" || !result.PriorNegative || result.PriorDeficit != "50" {
 		t.Fatalf("report must name the checkpoint a proof would restate: %+v", result)
@@ -491,25 +494,48 @@ func TestPendingReevaluateRefusesAnUnknownMagnitudePrior(t *testing.T) {
 	}
 }
 
-// TestPendingReevaluateReportsEvidenceTheWorkerWillHandle is design check 4:
-// when evidence is already waiting for the evaluator, the worker gets to it
-// on its own and the operator does not need this tool. That is a note, not a
-// refusal -- requeueing is harmless, just unnecessary.
-func TestPendingReevaluateReportsEvidenceTheWorkerWillHandle(t *testing.T) {
+// TestPendingReevaluateRefusesWhileARealCheckpointIsUnevaluated is design
+// check 4, corrected by the first review. It used to be a note -- "the worker
+// will get to it, you do not need this tool" -- on the reasoning that
+// requeueing was merely unnecessary. It is not merely unnecessary: while the
+// evaluator still owes a verdict on real evidence the derivation refuses to
+// run at all (an idle proof restating an unjudged checkpoint is not
+// independent of it), so an apply would enqueue a job that cannot do the thing
+// the operator asked for.
+//
+// The count comes from countUnevaluatedBalanceEvidenceTx, the same function
+// the derivation's own guard calls, so the report and the behaviour cannot
+// disagree about what "unevaluated" means.
+func TestPendingReevaluateRefusesWhileARealCheckpointIsUnevaluated(t *testing.T) {
 	f := newIdlePendingFixture(t)
 	pendingAt := f.lastEvidenceAt.Add(idleCycleSpacing)
 	f.observeNegativeCheckpoint(t, "reevaluate-waiting", pendingAt, stringPtr("50"), 6)
 	// Deliberately not projected: the checkpoint sits unevaluated.
 
-	result := f.runReevaluate(t, false, pendingReevaluateOperator)
-	if result.UnevaluatedEvidence != 1 {
-		t.Fatalf("report unevaluated evidence=%d, want 1", result.UnevaluatedEvidence)
+	result := f.runReevaluate(t, true, pendingReevaluateOperator)
+	if result.Applied || result.Queued {
+		t.Fatalf("an apply must be refused while a real checkpoint is unjudged: %+v", result)
+	}
+	if result.UnevaluatedCheckpoints != 1 || result.UnevaluatedEvidence != 1 {
+		t.Fatalf("report unevaluated checkpoints=%d total=%d, want 1/1",
+			result.UnevaluatedCheckpoints, result.UnevaluatedEvidence)
 	}
 	check := requireCheck(t, result, "待评估证据")
-	if check.Blocker {
-		t.Fatalf("evidence already waiting is a note, not a refusal: %+v", check)
+	if check.Passed || !check.Blocker {
+		t.Fatalf("an unevaluated real checkpoint must refuse the apply: %+v", check)
 	}
 	if !strings.Contains(check.Detail, "1") {
-		t.Fatalf("the note must carry the count: %s", check.Detail)
+		t.Fatalf("the refusal must carry the count: %s", check.Detail)
+	}
+
+	// Control: once the worker has judged it, the same check passes -- so the
+	// refusal above is the condition holding, not a check that always blocks.
+	f.project(t, pendingAt.Add(time.Minute))
+	control := f.runReevaluate(t, false, pendingReevaluateOperator)
+	if control.UnevaluatedCheckpoints != 0 {
+		t.Fatalf("control: unevaluated checkpoints=%d, want 0", control.UnevaluatedCheckpoints)
+	}
+	if check := requireCheck(t, control, "待评估证据"); !check.Passed || check.Blocker {
+		t.Fatalf("control: with nothing unevaluated the check must pass: %+v", check)
 	}
 }

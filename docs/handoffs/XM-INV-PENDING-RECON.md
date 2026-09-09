@@ -119,11 +119,22 @@ SERIALIZABLE + 与 `processEligibilityProjectionJob` 同一把
 | M25 | 目标周期不再受窗口约束 | 生产形状用例 | 红（选到窗口外的周期） |
 | M26 | 预测/实写一致性守卫短路 **+** 同时把写入退回窄窗口 | 生产形状用例 | 红（作业行 requested_through 断言） |
 | M27 | 加一个没有手册行的 blocker | 手册同源用例 | 红（11 行 vs 12 个 blocker） |
+| M28 | 去掉「有未评估真实检查点就不派生」守卫 | B1 两条用例 | 红（一次观测放行了账号） |
+| M29 | 去掉派生自身的连击门槛 | M3 用例 | 红（连击 0 也派生） |
+| M30 | 派生回退到更旧的周期（旧 continue） | 直调派生的用例 | 红（回填到真实检查点之下） |
+| M31 | 账本文案退回「预期 %s」 | 文案用例 | 红 |
+| M32 | 被拒绝的 apply 不再返回哨兵错误 | CLI 退出码用例 | 红 |
 
 M26 单独短路守卫是**绿**的：正常路径下预测与实写永远相等，守卫不决定任何事。它的价值是把
 漂移变成一条清楚的错误信息而不是一次静默的错误提交；真正钉住这条性质的是用例里对作业行
 `requested_through` 的断言（配对变异 M26 即红）。记在这里是因为「单独短路是绿的」这件事本身
 容易被下一个人误读成「守卫没用」。
+
+M30 的第一版走公共路径**是绿的**：B1 的守卫先拦住，B2 根本轮不到。而 B1 之后 B2 也确实没有
+可达场景了——真实检查点一旦被评估，账号要么 matched 退出、要么非 matched 把连击清零，两条路
+都不会再进闲置派生。所以 B2 是一道**今天不可达**的第二层防线，按与 `status<>'dead'` 同样的办法
+处理：直接构造候选列表调用 `deriveIdlePendingCarryForwardProofTx`，让它自己有一条用例（并配
+「最新候选可用则确实派生」的对照）。
 
 M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**，因为检查层先拒绝、语句
 根本没执行到。这属于「闸恰好没被触发」而不是「闸有效」，所以把语句抽成函数并单测它；记在这里
@@ -143,6 +154,10 @@ M18 的第一版（只跑 `TestPendingReevaluateRefusesADeadJob`）**是绿的**
 | **`go test -p 1 -count=1 ./...`（backend 全量，四段合入后）** | **10:15:20** | **10:23:17** | **7m57s** |
 | `go vet ./...` + `go test ./...`（agents 模块） | 10:23:31 | 10:23:36 | 5s |
 | `pwsh -NoProfile -File scripts/check-no-secrets.ps1` | 10:23:36 | 10:23:37 | 1s，exit 0 |
+| **第一轮复审修复后** `go vet ./...` | 11:51:42 | 11:51:42 | <1s |
+| **第一轮复审修复后** `go test -p 1 -count=1 ./...`（backend 全量） | **11:51:42** | **11:59:34** | **7m52s，exit 0，30 包全 ok** |
+| **第一轮复审修复后** agents 模块 vet + test | 11:59:56 | 11:59:59 | 3s |
+| **第一轮复审修复后** `check-no-secrets.ps1` | 11:59:59 | 12:00:00 | 1s，exit 0 |
 
 全量里最重的一包是 `internal/postgresstore` 354.5s，其余各包合计约 90s。
 
@@ -194,13 +209,16 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
 | `--finalization-window-lag 1h` | 冻结副本上贴着前沿的事实其水位晚于窗口末端，结转证明在那里永远 pend（生产靠下一次更宽的窗口收敛）；1h 是脚本注释自己给的经验值 |
 | `--finalization-window-provable` | 把每个窗口砍到「窗口内每条事实都已被看见」的那个已发布 balances 天花板，正是 `ensureBalanceCarryForwardProofTx` 需要的 |
 
-**判据一（自动）**：`verdict=ready`、退出码 0。但要知道它只检查三件事
+**判据一（自动，必要不充分）**：`verdict=ready`、退出码 0。但要知道它只检查三件事
 （`eligibility-shadow/report.go` 的 `EvaluateReadiness`）：跑过账号、没有**新出现的冻结原因
 类别**、没有投影错误。它**不**比较 `eligibility_status`，所以 pending→active 不会让它变红；
 它也**不**会发现「SOURCE_GAP 落到了一个原本没有 SOURCE_GAP 的账号上」，只要这个类别在基线里
 已经存在。自动判据是必要条件，不是充分条件。
 
-**判据二（人工，逐账号 diff）**：生产共 12 个账号，基线 active 9、frozen 1（2222）、
+**判据二（人工，逐账号 diff —— 这才是通过判据）**：verdict 只比较冻结原因类别，评估状态的
+变化它根本看不见，所以通过与否由这一步决定。对 `shadow-eval.json` 逐账号列出 before/after 的
+`eligibility_status`、连击、证明数，每一处差异都要能由 `signedExpectedUnits` 或闲置派生解释
+并被评审。生产共 12 个账号，基线 active 9、frozen 1（2222）、
 `not_invoiceable_pending_reconciliation` 2（用户 12、34）。看 `after.accounts[]`，
 **必须恰好只有下面这些变化**：
 
@@ -210,6 +228,28 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
 | 用户 34 `40bd883d-26fa-4938-b8c8-0f51c8b88686` | 正向检查点在有符号口径下改判：合成一条 `UNKNOWN_POSITIVE`（量级 ≈ 09-06 17:18 那笔加款 + 当时 deficit），随后 `matched`；状态 → `active`，或至少连击 ≥1 | C5 |
 | 其余 9 个 active | 状态仍 `active`，不新增 open 冻结 | C5 对 `UnallocatedUnits=0` 的账号逐字节不变；有欠账的账号只会被判得更宽松，不会更严 |
 | 2222（frozen） | 仍 `frozen`，冻结原因不变 | 本切片不碰冻结路径 |
+
+预期会变的账号要在跑之前先列出来，不要跑完再补。用户 12、34 已点名；此外任何
+`UnallocatedUnits>0` 且上游最新余额为正的账号都可能被 C5 改判，清单从副本上取：
+
+```bash
+# 在影子副本上跑（不是生产）：非现金/现金池余额、未分配用量、最新一张检查点的余额
+docker exec -i <shadow-postgres> psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice -At -F '|' -c \
+"SELECT eas.external_account_id, eas.eligibility_status, eas.non_invoiceable_overage_units,
+        c.balance_service_units, c.balance_negative, c.as_of
+ FROM source_account_eligibility_state eas
+ LEFT JOIN LATERAL (
+   SELECT balance_service_units, balance_negative, as_of
+   FROM balance_reconciliation_checkpoints
+   WHERE external_account_id=eas.external_account_id AND checkpoint_kind='reconciliation'
+   ORDER BY as_of DESC LIMIT 1) c ON true
+ WHERE COALESCE(eas.non_invoiceable_overage_units,0) > 0
+ ORDER BY eas.external_account_id"
+```
+
+`non_invoiceable_overage_units` 是账号行上记着的未分配用量（`recordUsageOverageTx` 写的），它
+大于 0 且最新检查点余额为正的账号，就是 C5 会改判的那一批。跑之前把这个清单贴进发布记录，
+跑完逐个对照。
 
 **判据三**：清单之外的任何变化都是 not ready——某个 active 账号进了 pending 或 frozen、某个
 账号多出 `SOURCE_GAP`、`eligibility.balance_blip.rebaselined` 出现在用户 34 以外的账号上、
@@ -361,3 +401,69 @@ AGE_IDENTITY_FILE=/dev/shm/rbk/backup-age-identity.txt \
 - **回滚**：重新部署上一版镜像即可（无迁移）。新代码写下的证明/评估/退出/合成额度在旧代码下
   都是合法行；副作用是 12 不再自动重评（已退出者保持 active），34 会被旧的无符号口径重新判回
   pending。
+
+---
+
+## 8. 风险与 follow_up（第一轮复审之后）
+
+### 8.1 softfail 与 rebaseline 上限基本是死代码，但保留
+
+`signedExpectedUnits` 之后 `E − U ≡ Σcredits + Σcash − Σusage` 是精确记账，插入一笔等于延后
+差值的额度必然让重建对平到 0——**只要那笔额度真的进了投影**。复审员与我各自独立复核，一共列出
+三条仍然可达的路径：
+
+- **A** 合成被 `ON CONFLICT DO NOTHING` 挡住（该项的合成事件 id 上已有行，通常是早先部分修复
+  留下的）。已构造成用例
+  `TestBalanceBlipConfirmationThatCannotSynthesiseIsSoftfailedNotErrored`。
+- **B** 重建时命中 `AmbiguousAt` 提前返回，`confirmDifference` 变成整个余额。很窄：歧义通常已经
+  先把账号冻住了。未构造用例。
+- **C** 理论上 legacy 账号 `anchor_floor=-∞` 时合成额度被投影的 `event_time` 条件排除。未构造出
+  实例。
+
+**处置：代码一律不删。** 理由：C5 把大量原本判 `case −1` 的账号推进了正向防抖路径，而 B1 又
+说明防抖对闲置账号会恒真——softfail 与 `balanceBlipRebaselineCap` 是最后还在兜「重建不对平」
+的东西，正是新形状最需要它们的时候。
+
+本 RC 的最小可见性动作：`eligibility.balance_blip.rebaselined` 从「一条审计行」变成有人看得见
+的信号——手册的部署后观测里给了一条可粘贴 SQL（按 action 查最近 24h），并写明**出现即停**，
+不要用工具清状态。
+
+**follow_up（不在本 RC）**：把这条审计提成告警或就绪面板项；给 B、C 两条路径构造用例，或者
+判定它们不可达并据此决定是否删除 softfail 分支。
+
+### 8.2 finalize 里那条 CTE 的实测代价（M4）
+
+复审建议把 C1 的相关子查询提成一次性 `max(scan_ceiling_at)` CTE，理由是它跑在
+`tryPublishEconomicScanCyclesTx` 已持锁、`lock_timeout=5s` 的那段，而
+`source_economic_scan_cycles` 没有能服务「按天花板取该流已发布周期」的索引。已按 (b) 改。
+
+**但实测结果与预期相反，如实记下。** 造 50 万行周期（其中 balances 12.5 万）后 `EXPLAIN
+(ANALYZE, BUFFERS)`：
+
+| 形状 | 计划 | buffers | 执行 |
+| --- | --- | ---: | ---: |
+| 旧：逐账号相关 EXISTS | Nested Loop Semi Join + **Materialize**，内层 Bitmap Index Scan 走主键前缀，`loops=1` | 1312 | 11.9 ms |
+| 新：一次性 `max()` CTE | InitPlan + Parallel Seq Scan | 9730 | 29.6 ms |
+
+也就是说：旧形状在这个计划里**并没有**逐账号重复求值（规划器加了 Materialize），而新形状因为
+`max()` 必须扫完全部已发布 balances 周期，反而更慢。
+
+仍然选新形状，理由是「一次」这件事从**规划器的选择**变成了**结构上的保证**：Materialize 是代价
+模型决定的，统计信息一变就可能退化成每账号一次；InitPlan 按构造只算一次。29.6 ms 在 5s 预算里
+是安全的，且不随 pending 账号数增长。顺带 m6 那条「AND 各项按书写顺序求值」的假设也随之消失。
+
+两者都随周期历史线性增长，谁都没有上界。**真正的修法是那条部分索引
+`(source_instance_id, stream_id, scan_ceiling_at) WHERE cycle_status='published'`，它需要迁移，
+本 RC 不带 → follow_up。** 届时可以把谓词收回到「窗口内存在」的精确形式。
+
+顺带一提，现在的谓词只测下界（「最新已发布周期高于 finalized_through」），它是原谓词的**超集**，
+不会漏账号，只会在「所有已发布周期都还高于 requested_through」时多排几条作业；那些作业派生
+不到东西、照常推进 finalized_through，代价是停在 N−1 的那几个账号每轮多一行。
+
+### 8.3 minor 9 没有留后门
+
+「重算结果不是 matched 就拒绝 apply」做成了硬 blocker，没有 `--allow-unmatched`。复审给了两个
+选项，选严的那个：派生不可逆（证明不可变，0014 之后该周期的真实检查点被永久拒绝），而重算已经
+说了它不会对平——为一个已知不会成立的结果永久烧掉一个周期，没有值得留的口子。真需要时是等一条
+真实事实，不是等一个操作者。若后续认为过严，加 flag 是个小改动，但要连同「谁批准、审计里怎么
+记」一起设计。

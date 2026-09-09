@@ -186,7 +186,20 @@ func buildPendingReconciliationReason(detail postgresstore.AccountLedgerDetail) 
 			description = "对账评估结果不是已确认对平"
 		}
 		if detail.LatestEvaluationExpectedUnits != "" || detail.LatestEvaluationDifferenceUnits != "" {
-			return fmt.Sprintf("%s（Asia/Shanghai）%s %s 上报余额差额 %s（单位 %s，非人民币元），预期 %s，%s，等待下一次核对",
+			// The two columns are not a pair that reads as "reported minus
+			// expected equals difference", and this sentence used to present
+			// them as one. difference_service_units is measured against the
+			// signed expectation -- the ledger's pools minus every unit of
+			// usage no pool covered (signedExpectedUnits) -- while
+			// expected_service_units stores only the pools, floored at zero
+			// because that column carries a >=0 CHECK. On an account holding
+			// an unallocated debt the two differ by exactly that debt, so the
+			// old wording called the floored value 预期 while the difference
+			// had been computed against a different number entirely: one
+			// evaluation stating two expectations. Naming each column for what
+			// it actually holds is the fix that needs no migration
+			// (XM-INV-PENDING-RECON, first review m5).
+			return fmt.Sprintf("%s（Asia/Shanghai）%s %s 上报余额与账面预期相差 %s（单位 %s，非人民币元），账面剩余池 %s，%s，等待下一次核对",
 				formatShanghai(detail.LastCheckpointAt), detail.LatestEvaluationKind, detail.LatestEvaluationKey,
 				detail.LatestEvaluationDifferenceUnits, detail.OpeningBalanceUnitCode, detail.LatestEvaluationExpectedUnits, description)
 		}
