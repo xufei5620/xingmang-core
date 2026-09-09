@@ -146,11 +146,16 @@ try {
             [pscustomobject]@{ Package = './internal/backupverify'; Failure = 'backup document restore verification PostgreSQL integration tests failed' }
         )
         foreach ($databaseTest in $backendDatabaseTests) {
+            # XM-INV-LOT-REASON-CONTRACT: application 里的资格摘要契约测试经 eligibilitywire.Load()
+            # 读仓库根下的 contracts/invoice-eligibility-wire.v1.json（repoRoot = 源文件往上三级）。
+            # 运行器镜像只带 backend/，根就是容器根，所以要把 contracts/ 只读挂到 /contracts，
+            # 否则那条测试在会话里绿、在这里红（RC106 门禁第一次跑就是这样死的）。
             Invoke-PostgresContainerCommand `
                 -DatabaseContainer $containerName `
                 -RunnerImage $backendRunnerImage `
                 -Environment @("INVOICE_TEST_DATABASE_URL=$databaseUrl") `
                 -Command "go test $($databaseTest.Package) -count=1" `
+                -ContractsPath $contractsPath `
                 -FailureMessage $databaseTest.Failure
         }
 
