@@ -1,4 +1,9 @@
+param([switch]$PlanFixturesOnly)
 $ErrorActionPreference = 'Stop'
+
+& python (Join-Path $PSScriptRoot 'tests/test_readiness_plan.py')
+if ($LASTEXITCODE -ne 0) { throw 'readiness plan behavioral fixtures failed' }
+if ($PlanFixturesOnly) { $global:LASTEXITCODE = 0; return }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $operatorPath = Join-Path $projectRoot 'deploy\postgres\apply-source-readiness-index-concurrently.sh'
