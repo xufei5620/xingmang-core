@@ -345,8 +345,11 @@ expect_failure "post-receive 拒绝可信 CI 脚本哈希不匹配" env \
   POST_RECEIVE_WORK_DIR="$tmp/work-docker-bad-hash" \
   POST_RECEIVE_RELEASE_REF='refs/heads/release/v0.1-launch' \
   POST_RECEIVE_DOCKER_BIN="$fake_docker" \
+  DOCKER_ARGS_PATH="$tmp/bad-hash-docker-args" \
   bash -c 'cd "$1" && printf "%s\n" "$2 $3 refs/heads/release/v0.1-launch" | bash "$4"' _ \
   "$bare_repo" "$zero" "$commit_one" "$post_hook"
+assert_text "哈希负例到达目标校验" '可信 CI 脚本哈希不匹配' "$bad_hash_status/$commit_one.log"
+if [ ! -e "$tmp/bad-hash-docker-args" ]; then ok "坏哈希未启动 Docker"; else bad "坏哈希未启动 Docker"; fi
 
 expect_failure "post-receive 拒绝含空格的状态目录" env \
   POST_RECEIVE_STATUS_DIR="$tmp/status bad" \

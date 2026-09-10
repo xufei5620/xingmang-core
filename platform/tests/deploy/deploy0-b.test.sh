@@ -114,8 +114,7 @@ if [ -x "$deploy_script" ] && [ -n "$release_sha" ]; then
 
   expect_failure "未显式 test-mode 时拒绝临时部署路径" "$deploy_script" staging --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/no-test.audit" --reason no-test
 
-  expect_failure "prod 缺确认拒绝" env PATH="$bin:$PATH" D0B_TRACE="$tmp/prod.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" prod --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/prod.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason missing
-  if [ ! -s "$tmp/prod.trace" ]; then ok "prod 缺确认未执行 Docker"; else bad "prod 缺确认未执行 Docker"; fi
+  expect_success "production 确认判据及合法控制" python3 "$repo_root/tests/deploy/production-confirm.test.py"
 
   printf '%s\n' red > "$status_dir/$release_sha.status"
   expect_failure "red status 拒绝" env PATH="$bin:$PATH" D0B_TRACE="$tmp/red.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/red.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason red
@@ -138,11 +137,15 @@ exit 0
 
   fail_curl="$bin/curl-fail"
   write_executable "$fail_curl" '#!/usr/bin/env bash
-exit 7
+printf "curl %s\n" "$*" >> "${D0B_TRACE:?}"
+case "$*" in */readyz*) exit 7;; esac
+exit 0
 '
   expect_failure "ready 探针失败停止部署" env PATH="$bin:$PATH" D0B_TRACE="$tmp/probe-fail.trace" XM_DEPLOY_TEST_MODE=1 \
     "$deploy_script" staging --test-mode --probe-attempts 1 --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/probe-fail.audit" \
       --docker-bin "$bin/docker" --curl-bin "$fail_curl" --reason probe-fail
+  assert_text "health 控制先通过" 'probe=health result=ok' "$tmp/stdout"
+  assert_text "失败来自 ready 目标" 'probe=ready result=fail' "$tmp/stderr"
   assert_text "探针失败写 red 审计" 'result=red' "$tmp/probe-fail.audit"
   if [ ! -e "$status_dir/.deploy-staging-$release_sha.lock" ]; then ok "正常失败释放部署锁"; else bad "正常失败释放部署锁"; fi
 
