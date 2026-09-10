@@ -316,7 +316,8 @@ fi
 [ -d "$repo_path" ] && [ ! -L "$repo_path" ] || { die "repo checkout 不存在或是符号链接"; exit 1; }
 resolved_repo="$(readlink -f -- "$repo_path" 2>/dev/null || true)"
 [ "$resolved_repo" = "$repo_path" ] || { die "repo 路径解析后越界或不可验证"; exit 1; }
-git -C "$repo_path" rev-parse --show-toplevel >/dev/null 2>&1 || { die "repo 不是 Git checkout"; exit 1; }
+repo_top="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null)" || { die "repo 不是 Git checkout"; exit 1; }
+[ "$(cd -- "$repo_top" 2>/dev/null && pwd -P)" = "$resolved_repo" ] || { die "repo must be the actual Git top-level"; exit 1; }
 git -C "$repo_path" rev-parse --is-shallow-repository 2>/dev/null | grep -qx false || {
   die "拒绝在 shallow checkout 部署"; exit 1;
 }

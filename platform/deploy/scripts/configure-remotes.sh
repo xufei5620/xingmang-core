@@ -98,8 +98,11 @@ validate_path repo "$repo_path" || exit 1
 [ "$(readlink -f -- "$repo_path" 2>/dev/null || true)" = "$repo_path" ] || {
   echo "REMOTES FAIL: repo 路径解析后越界或不可验证" >&2; exit 1;
 }
-git -C "$repo_path" rev-parse --show-toplevel >/dev/null 2>&1 || {
+repo_top="$(git -C "$repo_path" rev-parse --show-toplevel 2>/dev/null)" || {
   echo "REMOTES FAIL: repo 不是 Git checkout" >&2; exit 1;
+}
+[ "$(cd -- "$repo_top" 2>/dev/null && pwd -P)" = "$(readlink -f -- "$repo_path")" ] || {
+  echo "REMOTES FAIL: repo must be the actual Git top-level" >&2; exit 1;
 }
 validate_remote_url server-url "$server_url" || exit 1
 validate_remote_url github-url "$github_url" || exit 1

@@ -1,5 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
+function Resolve-InvoicePhysicalDirectory {
+    param([Parameter(Mandatory)][string]$Path, [int]$LinkDepth = 0)
+    if ($LinkDepth -gt 40) { throw 'Directory link chain cannot be resolved safely' }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $physical = [IO.Path]::GetPathRoot($fullPath)
+    foreach ($part in $fullPath.Substring($physical.Length).Split([char[]]'\/', [StringSplitOptions]::RemoveEmptyEntries)) {
+        $item = Get-Item -LiteralPath (Join-Path $physical $part) -Force
+        if (-not $item.PSIsContainer) { throw 'Pinned upstream path is not a directory' }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            $target = $item.ResolveLinkTarget($true)
+            if ($null -eq $target) { throw 'Pinned upstream directory link cannot be resolved' }
+            $physical = Resolve-InvoicePhysicalDirectory -Path $target.FullName -LinkDepth ($LinkDepth + 1)
+        } else {
+            $physical = $item.FullName
+        }
+    }
+    return [IO.Path]::TrimEndingDirectorySeparator($physical)
+}
+
 function Resolve-InvoiceUpstreamRoot {
     param([Parameter(Mandatory)][string]$ProjectRoot)
 
@@ -61,6 +80,17 @@ foreach ($upstream in $upstreams) {
     # Command-scoped safe.directory handles CI/sandbox ownership without
     # mutating the user's global Git configuration.
     $safePath = $upstream.Path.Replace('\', '/')
+    $topLines = @(& git -c "safe.directory=$safePath" -C $upstream.Path rev-parse --show-toplevel 2>$null)
+    $topExit = $LASTEXITCODE
+    if ($topExit -ne 0 -or $topLines.Count -ne 1 -or -not [IO.Path]::IsPathFullyQualified([string]$topLines[0])) {
+        throw "$($upstream.Name): actual Git top-level could not be resolved (exit $topExit)"
+    }
+    $physicalInput = Resolve-InvoicePhysicalDirectory -Path $upstream.Path
+    $physicalTop = Resolve-InvoicePhysicalDirectory -Path $topLines[0]
+    $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if (-not [string]::Equals($physicalInput, $physicalTop, $comparison)) {
+        throw "$($upstream.Name): pinned directory must be the actual Git top-level"
+    }
     $headLines = @(& git -c "safe.directory=$safePath" -C $upstream.Path rev-parse --verify HEAD 2>$null)
     $headExit = $LASTEXITCODE
     $actualHead = ($headLines | Out-String).Trim()

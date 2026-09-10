@@ -146,8 +146,11 @@ git --git-dir="$repo_path" rev-parse --is-bare-repository 2>/dev/null | grep -qx
 }
 resolved_checkout="$(readlink -f -- "$checkout_path" 2>/dev/null || true)"
 [ "$resolved_checkout" = "$checkout_path" ] || { echo "PROMOTE FAIL: checkout 路径解析后越界或不可验证" >&2; exit 1; }
-git -C "$checkout_path" rev-parse --show-toplevel >/dev/null 2>&1 || {
+checkout_top="$(git -C "$checkout_path" rev-parse --show-toplevel 2>/dev/null)" || {
   echo "PROMOTE FAIL: checkout 不是 Git checkout" >&2; exit 1;
+}
+[ "$(cd -- "$checkout_top" 2>/dev/null && pwd -P)" = "$resolved_checkout" ] || {
+  echo "PROMOTE FAIL: checkout must be the actual Git top-level" >&2; exit 1;
 }
 git -C "$checkout_path" rev-parse --is-shallow-repository 2>/dev/null | grep -qx false || {
   echo "PROMOTE FAIL: 拒绝在 shallow checkout 晋级" >&2; exit 1;
