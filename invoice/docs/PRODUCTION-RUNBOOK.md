@@ -2340,13 +2340,28 @@ Exit codes -- check them, do not just read the banner:
 | code | meaning |
 | ---: | --- |
 | 0 | the run completed: a dry run (which never writes), or an apply that went through |
-| 1 | the run failed -- database, migration check, secret file, or an unexpected error |
-| 2 | the invocation was rejected before touching anything (bad flag combination, non-absolute path, positional argument) |
+| 1 | the run failed -- includes an unknown kind, an incompatible kind/filter combination, a required filter or operator missing, database/migration/secret errors, or an unexpected error |
+| 2 | flag parsing failed (unknown flag or malformed flag value), or the pre-run path/positional check rejected a non-absolute path or extra positional argument |
 | 3 | `--kind=pending-reevaluate --apply` was **refused** by one of its own precondition checks; the report was printed and nothing was written |
 
 Code 3 exists because a refusal is neither success nor failure, and a wrapper
 running under `set -e` would otherwise read REFUSED as done. The other kinds
 do not have preconditions of this shape and never return it.
+
+Concrete invocation-error examples below assume the ordinary absolute path
+arguments from `invoice_eligibility_repair`; they are diagnostic examples, not
+repair requests. A missing operator is checked later in `run`, so exit 1 alone
+does not imply that no database or secret was accessed.
+
+| Additional arguments | Exit |
+| --- | ---: |
+| `--kind=unknown` | 1 |
+| `--kind=projection-requeue-dead --event=event-fixture` | 1 |
+| `--kind=pending-reevaluate` | 1 |
+| `--database-url-file=relative-path` | 2 |
+| `extra-positional-argument` | 2 |
+| `--unknown-flag` | 2 |
+| `--apply=not-a-boolean` | 2 |
 
 **Re-evaluating one parked account (XM-INV-PENDING-RECON, 2026-09-09).** An
 account in `not_invoiceable_pending_reconciliation` clears itself once two
