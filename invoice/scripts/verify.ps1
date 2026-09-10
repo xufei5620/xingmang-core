@@ -48,6 +48,8 @@ if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
 }
 Push-Location $projectRoot
 try {
+    bash scripts/test-deploy-log-markers.sh
+    if ($LASTEXITCODE -ne 0) { throw 'deployment log-marker boundary tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
     bash scripts/test-preserve-source-reader-roles.sh

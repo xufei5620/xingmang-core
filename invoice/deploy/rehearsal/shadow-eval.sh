@@ -343,7 +343,7 @@ done
 # official image's transient bootstrap postmaster before its restart into
 # the final server. Require the init-complete marker plus three consecutive
 # final-server readiness checks.
-until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+until docker logs "$container" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null; do
   (( SECONDS < deadline )) || { echo 'shadow-eval PostgreSQL initialization did not complete' >&2; exit 1; }
   sleep 1
 done

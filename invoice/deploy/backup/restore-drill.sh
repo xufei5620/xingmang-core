@@ -314,7 +314,7 @@ done
 # the final server. A single pg_isready can hit that transient instance and
 # race pg_restore into the restart window. Require the entrypoint's init-complete
 # marker plus three consecutive final-server readiness checks.
-until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+until docker logs "$container" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null; do
   (( SECONDS < deadline )) || { echo 'restore PostgreSQL initialization did not complete' >&2; exit 1; }
   sleep 1
 done

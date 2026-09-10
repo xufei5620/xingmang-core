@@ -107,9 +107,9 @@ docker restart invoice-system-prod-api-1 >/dev/null
 # 120s, not 60s: a cold api on a loaded box has taken over a minute to bind.
 # `--since` widens with the loop so a line printed early is still matched.
 for _ in $(seq 1 60); do
-  docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' && break; sleep 2
+  docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep 'invoice API listening' >/dev/null && break; sleep 2
 done
-docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' || { echo "api did not report listening" >&2; exit 1; }
+docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep 'invoice API listening' >/dev/null || { echo "api did not report listening" >&2; exit 1; }
 restart_ingest_proxy
 trap - EXIT
 echo "==> [6/6] verify"
