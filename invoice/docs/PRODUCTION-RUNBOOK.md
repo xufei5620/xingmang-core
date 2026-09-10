@@ -765,16 +765,19 @@ set must then exactly equal every `*.sql` file in the signed RC39 migration
 directory, including exactly one checksum-bound row for each of 0013 and 0014:
 
 ```bash
+export RC39_POST_MIGRATION_EVIDENCE_DIR="$RECORD_ROOT/<exact-rc39-post-migration-record>"
+(
+set -euo pipefail
 docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools \
   run --rm --pull never migrate
 
-export RC39_POST_MIGRATION_EVIDENCE_DIR="$RECORD_ROOT/<exact-rc39-post-migration-record>"
 install -d -m 0700 "$RC39_POST_MIGRATION_EVIDENCE_DIR"
 (
   cd backend/migrations
   for migration in *.sql; do
-    printf '%s|%s\n' "$migration" "$(sha256sum "$migration" | cut -d' ' -f1)"
+    checksum=$(sha256sum "$migration")
+    printf '%s|%s\n' "$migration" "${checksum%% *}"
   done | LC_ALL=C sort
 ) >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv"
 
@@ -790,6 +793,7 @@ grep -Fx "0013_source_readiness_active_index.sql|$(sha256sum backend/migrations/
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
 grep -Fx "0014_balance_carry_forward_proof.sql|$(sha256sum backend/migrations/0014_balance_carry_forward_proof.sql | cut -d' ' -f1)" \
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+)
 ```
 
 Before API startup, use `invoice_owner` to replay the signed RC39 runtime-role
@@ -799,6 +803,8 @@ grant. Also prove `schema_migrations` remains exact after the permission
 transaction and that `invoice_app` retains SELECT-only access to it:
 
 ```bash
+(
+set -euo pipefail
 docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
@@ -860,6 +866,7 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" \
   >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
 cmp -s "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv" \
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
+)
 ```
 
 Require exactly two lines in each carry-forward privilege evidence file, hash
