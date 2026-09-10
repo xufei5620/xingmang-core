@@ -99,7 +99,15 @@ if [ -x "$deploy_script" ] && [ -n "$release_sha" ]; then
   expect_success "staging green 提交执行部署链" env PATH="$bin:$PATH" D0B_TRACE="$trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --project xingmang-staging --health-url http://127.0.0.1:18088/healthz --ready-url http://127.0.0.1:18088/readyz --reason acceptance
   assert_text "staging 审计写 green" 'result=green' "$audit"
   assert_text "staging 审计含环境" 'environment=staging' "$audit"
-  if [ -f "$trace" ] && grep -Fq config "$trace" && grep -Fq build "$trace" && grep -Fq up "$trace"; then ok "命令顺序含 config/build/up"; else bad "命令顺序含 config/build/up"; fi
+  config_line="$(grep -n ' config ' "$trace" | head -1 | cut -d: -f1)"
+  build_line="$(grep -n ' build ' "$trace" | head -1 | cut -d: -f1)"
+  up_line="$(grep -n ' up ' "$trace" | head -1 | cut -d: -f1)"
+  if [ -n "$config_line" ] && [ -n "$build_line" ] && [ -n "$up_line" ] &&
+     [ "$config_line" -lt "$build_line" ] && [ "$build_line" -lt "$up_line" ]; then
+    ok "命令顺序为 config/build/up"
+  else
+    bad "命令顺序为 config/build/up"
+  fi
   expect_success "既有审计 hash 链可追加" env PATH="$bin:$PATH" D0B_TRACE="$trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --project xingmang-staging --health-url http://127.0.0.1:18088/healthz --ready-url http://127.0.0.1:18088/readyz --reason second-run
   sed -i 's/result=green/result=red/' "$audit"
   expect_failure "篡改审计 hash 链时拒绝追加" env PATH="$bin:$PATH" D0B_TRACE="$tmp/tamper.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason tamper

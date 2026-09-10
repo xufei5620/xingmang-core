@@ -175,7 +175,13 @@ expect_success "test-mode 执行完整本地部署链" env "${common_env[@]}" EN
 
 assert_text "输出含本地部署通过" 'DEPLOY LOCAL PASS' "$tmp/stdout"
 assert_text "Docker context endpoint 已校验" 'context inspect' "$trace"
-assert_text "config 在 build 前" ' config ' "$trace"
+config_line="$(grep -n ' config ' "$trace" | head -1 | cut -d: -f1)"
+build_line="$(grep -n ' build ' "$trace" | head -1 | cut -d: -f1)"
+if [ -n "$config_line" ] && [ -n "$build_line" ] && [ "$config_line" -lt "$build_line" ]; then
+  ok "config 在 build 前"
+else
+  bad "config 在 build 前"
+fi
 assert_not_text "Compose 不覆盖项目目录解析" '--project-directory' "$trace"
 assert_text "build 被执行" ' build ' "$trace"
 assert_text "up 被执行" ' up ' "$trace"

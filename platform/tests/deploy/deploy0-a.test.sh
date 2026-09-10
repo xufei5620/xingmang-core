@@ -4,6 +4,7 @@
 # 这些测试只在临时目录中模拟 receive hook、CI 执行器和安装命令；不会连接
 # 真实服务器、不会修改系统用户，也不会推送到任何远端。
 set -uo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 ci_script="$repo_root/scripts/ci-local.sh"
@@ -385,8 +386,7 @@ if grep -Eq '^---(POST|PRE)' "$installer"; then
 else
   ok "安装脚本内容边界完整"
 fi
-grep -qF 'config xm.ci.script ' "$installer" && ok "安装脚本登记可信 CI 脚本" || bad "安装脚本登记可信 CI 脚本"
-grep -qF 'config receive.denyDeletes true' "$installer" && ok "安装脚本禁止删除分支" || bad "安装脚本禁止删除分支"
+expect_success "安装脚本实际调用可信 CI 与禁止删除配置" python3 "$repo_root/tests/deploy/installer-config.test.py"
 
 if [ "$fail" -eq 0 ]; then
   printf 'DEPLOY0-A-TEST-OK\n'
