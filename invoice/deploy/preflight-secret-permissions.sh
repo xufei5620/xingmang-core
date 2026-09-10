@@ -16,7 +16,7 @@ check_file() {
   expected_mode="$2"
   name="$3"
   path="$SECRETS_DIR/$name"
-  test -f "$path" && test ! -L "$path" && test -s "$path"
+  test -f "$path" && test ! -L "$path" && test -s "$path" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
   actual_uid=$(stat -c '%u' "$path")
   actual_mode=$(stat -c '%a' "$path")
   [[ "$actual_uid" == "$expected_uid" && "$actual_mode" == "$expected_mode" ]] || {
@@ -31,7 +31,7 @@ check_group_file() {
   expected_mode="$3"
   name="$4"
   path="$SECRETS_DIR/$name"
-  test -f "$path" && test ! -L "$path" && test -s "$path"
+  test -f "$path" && test ! -L "$path" && test -s "$path" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
   actual_uid=$(stat -c '%u' "$path")
   actual_gid=$(stat -c '%g' "$path")
   actual_mode=$(stat -c '%a' "$path")

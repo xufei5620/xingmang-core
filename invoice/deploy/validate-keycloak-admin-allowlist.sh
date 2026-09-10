@@ -2,7 +2,7 @@
 set -euo pipefail
 
 path="${1:?usage: validate-keycloak-admin-allowlist.sh PATH}"
-test -f "$path" && test ! -L "$path" && test -s "$path"
+test -f "$path" && test ! -L "$path" && test -s "$path" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 
 python3 - "$path" <<'PY'
 import ipaddress

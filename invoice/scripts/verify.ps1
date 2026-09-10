@@ -60,6 +60,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'roll-forward image-tag boundary tests failed' }
     bash deploy/rehearsal/test-shadow-eval.sh
     if ($LASTEXITCODE -ne 0) { throw 'shadow-eval final-decision tests failed' }
+    bash scripts/test-deploy-file-guards.sh
+    if ($LASTEXITCODE -ne 0) { throw 'deployment file-type guard tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
     bash scripts/test-preserve-source-reader-roles.sh

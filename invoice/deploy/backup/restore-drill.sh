@@ -51,13 +51,13 @@ restore_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"
 docker image inspect "$restore_postgres_image" >/dev/null
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 capacity_validator="$script_dir/validate-restore-postgres-capacity.sh"
-test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
+test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 cleanup_state_helper="$script_dir/docker-cleanup-state.sh"
-test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper"
+test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 # shellcheck source=deploy/backup/docker-cleanup-state.sh
 source "$cleanup_state_helper"
 balance_history_rehearsal="$script_dir/../postgres/rehearse-balance-history-cleanup.sh"
-test -f "$balance_history_rehearsal" && test ! -L "$balance_history_rehearsal" && test -s "$balance_history_rehearsal"
+test -f "$balance_history_rehearsal" && test ! -L "$balance_history_rehearsal" && test -s "$balance_history_rehearsal" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 if [[ "$restore_balance_history_rehearsal" == YES ]]; then
   [[ "$(stat -c '%u:%g:%a' "$balance_history_rehearsal")" == 0:0:700 ]] || {
     echo 'installed balance history rehearsal must be root:root mode 0700' >&2
@@ -74,13 +74,13 @@ restore_postgres_tmpfs_bytes=$(bash "$capacity_validator" "$restore_postgres_tmp
   "$host_available_bytes" "$docker_total_bytes")
 [[ "$restore_postgres_tmpfs_bytes" =~ ^[1-9][0-9]*$ ]]
 for file in "$DATABASE_BACKUP" "$DOCUMENT_BACKUP" "$SOURCE_STATE_BACKUP" "$METADATA_BACKUP" "$BACKUP_MANIFEST" "$BACKUP_SIGNATURE" "$BACKUP_ALLOWED_SIGNERS_FILE" "$AGE_IDENTITY_FILE" "$FIELD_KEYRING_FILE"; do
-  test -f "$file" && test ! -L "$file" && test -s "$file"
+  test -f "$file" && test ! -L "$file" && test -s "$file" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 done
 (( $(stat -c '%s' "$BACKUP_MANIFEST") <= 65536 ))
 (( $(stat -c '%s' "$BACKUP_SIGNATURE") <= 16384 ))
 (( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
 if [[ -n "${KEYCLOAK_BACKUP:-}" ]]; then
-  test -f "$KEYCLOAK_BACKUP" && test ! -L "$KEYCLOAK_BACKUP" && test -s "$KEYCLOAK_BACKUP"
+  test -f "$KEYCLOAK_BACKUP" && test ! -L "$KEYCLOAK_BACKUP" && test -s "$KEYCLOAK_BACKUP" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 fi
 for key in sub2api_payments_spool_key sub2api_identities_spool_key sub2api_usage_spool_key sub2api_credits_spool_key sub2api_balances_spool_key newapi_payments_spool_key newapi_identities_spool_key newapi_usage_spool_key newapi_credits_spool_key newapi_balances_spool_key sub2api_cutover_key newapi_cutover_key sub2api_balance_snapshot_key newapi_balance_snapshot_key; do
   test -s "$SOURCE_SPOOL_KEY_ROOT/$key"

@@ -26,8 +26,8 @@ test -d "$SOURCE_CUTOVER_ROOT"
 state_root=$(cd "$SOURCE_STATE_ROOT" && pwd -P)
 cutover_root=$(cd "$SOURCE_CUTOVER_ROOT" && pwd -P)
 [[ "$cutover_root" == "$state_root/cutover" ]] || { echo 'SOURCE_CUTOVER_ROOT must resolve to SOURCE_STATE_ROOT/cutover for atomic source-state backup' >&2; exit 1; }
-test -f "$BACKUP_SIGNING_KEY_FILE" && test ! -L "$BACKUP_SIGNING_KEY_FILE" && test -s "$BACKUP_SIGNING_KEY_FILE"
-test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE"
+test -f "$BACKUP_SIGNING_KEY_FILE" && test ! -L "$BACKUP_SIGNING_KEY_FILE" && test -s "$BACKUP_SIGNING_KEY_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
+test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 (( $(stat -c '%s' "$BACKUP_SIGNING_KEY_FILE") <= 65536 ))
 (( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
 signing_mode=$(stat -c '%a' "$BACKUP_SIGNING_KEY_FILE")
