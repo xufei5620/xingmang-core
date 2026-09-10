@@ -122,8 +122,13 @@ PY
 
 readonly WRAPPER_PATH="$(realpath -e -- "$0")"
 readonly PROJECT_ROOT="$(realpath -e -- "$(dirname -- "$WRAPPER_PATH")/../..")"
-readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/..")"
-[[ "$PROJECT_ROOT" == "$RELEASE_ROOT/source" ]] || die 'wrapper must run from an installed immutable release tree'
+case "$PROJECT_ROOT" in
+  */source/invoice) readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/../..")" SOURCE_RELATIVE_ROOT=source/invoice ;;
+  */source) readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/..")" SOURCE_RELATIVE_ROOT=source ;;
+  *) die 'wrapper must run from an installed immutable release tree' ;;
+esac
+[[ "$PROJECT_ROOT" == "$RELEASE_ROOT/$SOURCE_RELATIVE_ROOT" ]] || die 'wrapper must run from an installed immutable release tree'
+[[ ! -d "$RELEASE_ROOT/source/deploy" || ! -d "$RELEASE_ROOT/source/invoice/deploy" ]] || die 'ambiguous installed invoice deploy roots'
 readonly OPERATOR="$PROJECT_ROOT/deploy/keycloak/invite-permanent-master-admin.sh"
 readonly RELEASE_MANIFEST="$RELEASE_ROOT/RELEASE-TREE.sha256"
 readonly RELEASE_SIGNATURE="$RELEASE_ROOT/RELEASE-TREE.sha256.sig"
@@ -149,9 +154,9 @@ verify_release_file() {
   [[ "$observed" == "$expected" ]]
 }
 
-verify_release_file 'source/deploy/keycloak/invite-permanent-master-admin.sh' "$OPERATOR" ||
+verify_release_file "$SOURCE_RELATIVE_ROOT/deploy/keycloak/invite-permanent-master-admin.sh" "$OPERATOR" ||
   die 'signed release manifest does not bind the exact operator'
-verify_release_file 'source/deploy/keycloak/run-permanent-master-admin-maintenance.sh' "$WRAPPER_PATH" ||
+verify_release_file "$SOURCE_RELATIVE_ROOT/deploy/keycloak/run-permanent-master-admin-maintenance.sh" "$WRAPPER_PATH" ||
   die 'signed release manifest does not bind the exact maintenance wrapper'
 
 allowlist_is_safe "$ALLOWLIST" || die 'administrator allowlist is unsafe or contains invalid rules'

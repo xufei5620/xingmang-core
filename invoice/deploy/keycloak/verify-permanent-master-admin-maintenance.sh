@@ -63,7 +63,7 @@ cleanup() { rm -rf -- "$SANDBOX"; }
 trap cleanup EXIT HUP INT TERM
 
 RELEASE_ROOT="$SANDBOX/release"
-PROJECT_ROOT="$RELEASE_ROOT/source"
+PROJECT_ROOT="$RELEASE_ROOT/source/invoice"
 WRAPPER="$PROJECT_ROOT/deploy/keycloak/run-permanent-master-admin-maintenance.sh"
 OPERATOR="$PROJECT_ROOT/deploy/keycloak/invite-permanent-master-admin.sh"
 ALLOWLIST="$SANDBOX/nginx/access/auth-admin.solov.cc.allow.conf"
@@ -170,7 +170,7 @@ printf '%s namespaces="solov-invoice-release-v1" %s\n' 'invoice-release@solov.cc
 chmod 0600 "$TRUST_DIR/release-key" "$TRUST_DIR/release-key.pub" "$TRUST_DIR/release-tree-allowed-signers"
 (
   cd "$RELEASE_ROOT"
-  sha256sum source/deploy/keycloak/invite-permanent-master-admin.sh source/deploy/keycloak/run-permanent-master-admin-maintenance.sh >RELEASE-TREE.sha256
+  sha256sum source/invoice/deploy/keycloak/invite-permanent-master-admin.sh source/invoice/deploy/keycloak/run-permanent-master-admin-maintenance.sh >RELEASE-TREE.sha256
 )
 chmod 0600 "$RELEASE_ROOT/RELEASE-TREE.sha256"
 ssh-keygen -Y sign -q -f "$TRUST_DIR/release-key" -n solov-invoice-release-v1 "$RELEASE_ROOT/RELEASE-TREE.sha256" >/dev/null

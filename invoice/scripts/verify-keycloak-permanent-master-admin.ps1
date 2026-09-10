@@ -11,7 +11,7 @@ $required = @(
     "readonly EXPECTED_SOURCE_TAG='v0.1.0-rc38-signed'",
     'RELEASE-TREE.sha256', 'RELEASE-TREE.sha256.sig', 'solov-invoice-release-v1',
     'SOURCE_COMMIT', 'SOURCE_TAG', 'KEYCLOAK_IMAGE', 'SMTP_TRANSPORT',
-    'source/deploy/keycloak/run-permanent-master-admin-maintenance.sh',
+    '$SOURCE_RELATIVE_ROOT/deploy/keycloak/run-permanent-master-admin-maintenance.sh',
     'sha256sum -c RELEASE-TREE.sha256',
     'installed release-tree signature verification failed',
     'fixed Keycloak backup root must be root-owned mode 0700',
@@ -96,6 +96,10 @@ foreach ($item in $wrapperRequired) {
 $bash = Get-Command bash -ErrorAction Stop
 Push-Location $projectRoot
 try {
+    & $bash.Source 'scripts/test-release-deploy-paths.sh'
+    if ($LASTEXITCODE -ne 0) { throw 'installed invoice release path boundary tests failed' }
+    & $bash.Source 'scripts/test-keycloak-release-manifest.sh'
+    if ($LASTEXITCODE -ne 0) { throw 'Keycloak release manifest path tests failed' }
     foreach ($shellScript in @('deploy/keycloak/invite-permanent-master-admin.sh', 'deploy/keycloak/run-permanent-master-admin-maintenance.sh')) {
         & $bash.Source -n $shellScript
         if ($LASTEXITCODE -ne 0) { throw "Keycloak permanent administrator shell syntax failed: $shellScript" }

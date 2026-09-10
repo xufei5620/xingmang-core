@@ -36,7 +36,21 @@ sha=${1:?usage: roll-forward.sh <release-commit-sha>}
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "release sha must be 40 hex chars" >&2; exit 2; }
 root=/root/invoice-system/app/releases/$sha
 env_file=$root/.env.production
-deploy_dir=$root/source/deploy
+if [[ -d "$root/source/deploy" && -d "$root/source/invoice/deploy" ]]; then
+  echo 'release contains ambiguous standalone and monorepo deploy roots' >&2; exit 2
+elif [[ -d "$root/source/invoice/deploy" ]]; then
+  deploy_dir=$root/source/invoice/deploy
+elif [[ -d "$root/source/deploy" ]]; then
+  deploy_dir=$root/source/deploy
+else
+  echo 'release has no supported invoice deploy root' >&2; exit 2
+fi
+[[ "$(realpath -e -- "$deploy_dir")" == "$deploy_dir" ]] || { echo 'release deploy root is not canonical' >&2; exit 2; }
+for asset in docker-compose.prod.yml docker-compose.idp.yml docker-compose.sources.yml \
+  postgres/apply-permissions.sh postgres/harden-runtime-role.sql postgres/010-invoice-roles.sh \
+  keycloak/010-keycloak-app-role.sh clamav-healthcheck.sh nginx/ingest-mtls.conf; do
+  [[ -f "$deploy_dir/$asset" && ! -L "$deploy_dir/$asset" ]] || { echo "release deploy asset missing or unsafe: $asset" >&2; exit 2; }
+done
 backup_max_age=${BACKUP_MAX_AGE_MINUTES:-120}
 readyz_wait=${READYZ_WAIT_SECONDS:-600}
 public_origin=${PUBLIC_ORIGIN:-https://invoice.solov.cc}

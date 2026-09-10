@@ -82,7 +82,11 @@ must never replace an existing signed production tag.
 
 On the server, bundle checkout remains
 `/root/invoice-system/app/releases/<sha>/source`; the executable invoice root
-is `/root/invoice-system/app/releases/<sha>/source/invoice`. The release's
+is `/root/invoice-system/app/releases/<sha>/source/invoice`. Deploy wrappers
+accept this layout or the legacy standalone `source` layout, and reject both
+layouts being present together. Keycloak maintenance derives its two script
+manifest paths from that selected layout; its exact RC38-only identity approval
+still applies, independently of path support. The release's
 `.env.production` remains beside `source`, not under the invoice source tree.
 For example, after a separately approved production source-root switch, the
 entry points relative to the monorepo checkout are `invoice/deploy/roll-forward.sh`,
