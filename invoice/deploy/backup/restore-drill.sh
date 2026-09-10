@@ -261,6 +261,11 @@ for directory in "${source_directories[@]}"; do
     runtime_version=$SUB2API_RUNTIME_VERSION
     balances_signing_key_id=$SUB2API_BALANCES_SIGNING_KEY_ID
     [[ "$source_type" == newapi ]] && runtime_version=$NEWAPI_RUNTIME_VERSION && balances_signing_key_id=$NEWAPI_BALANCES_SIGNING_KEY_ID
+    if [[ "$source_type" == newapi ]]; then
+      cutover_runtime_version=${NEWAPI_CUTOVER_RUNTIME_VERSION:-$runtime_version}
+    else
+      cutover_runtime_version=${SUB2API_CUTOVER_RUNTIME_VERSION:-$runtime_version}
+    fi
     cutover_key_copy="$temporary/$source_type-cutover-key"
     install -m 0400 "$SOURCE_SPOOL_KEY_ROOT/${source_type}_cutover_key" "$cutover_key_copy"
     chown 65532:65532 "$cutover_key_copy"
@@ -270,6 +275,7 @@ for directory in "${source_directories[@]}"; do
     find "$cutover_dir" -type d -exec chmod 0700 {} +
     find "$cutover_dir" -type f -exec chmod 0600 {} +
     docker_args+=(--env SOURCE_SCHEMA_VERSION=3.0 --env "SOURCE_RUNTIME_VERSION=$runtime_version"
+      --env "SOURCE_CUTOVER_RUNTIME_VERSION=$cutover_runtime_version"
       --env "ELIGIBILITY_START_AT=$eligibility_start_at"
       --env "SOURCE_SIGNING_KEY_ID=$balances_signing_key_id"
       --env SOURCE_CUTOVER_MANIFEST_FILE=/cutover/manifest.enc
