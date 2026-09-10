@@ -170,10 +170,12 @@ function Assert-KeycloakDockerfileLiteralBasePins {
             ForEach-Object { $_.TrimStart() }
     )
     $fromLines = @($instructionLines | Where-Object { $_ -match '(?i)^FROM[\t\v\f\r ]+' })
-    if ($fromLines.Count -ne 2 -or
-        $fromLines[0] -cne "FROM $ExpectedBaseReference AS builder" -or
-        $fromLines[1] -cne "FROM $ExpectedBaseReference") {
-        throw 'Keycloak Dockerfile must contain exactly two literal reviewed FROM digest lines'
+    $sourceBuildBase = 'registry.access.redhat.com/ubi9/openjdk-21@sha256:cc8a30e9181b0135e6657ca3b824d7b32e4c7f6a664769ef641d4f7031339564'
+    if ($fromLines.Count -ne 3 -or
+        $fromLines[0] -cne "FROM $sourceBuildBase AS source-build" -or
+        $fromLines[1] -cne "FROM $ExpectedBaseReference AS builder" -or
+        $fromLines[2] -cne "FROM $ExpectedBaseReference") {
+        throw 'Keycloak Dockerfile must contain the exact source builder and two literal reviewed runtime FROM digest lines'
     }
     if (@($instructionLines | Where-Object { $_ -match '(?i)^ARG[\t\v\f\r ]+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' }).Count -gt 0 -or
         @($fromLines | Where-Object { $_ -match '\$' }).Count -gt 0) {

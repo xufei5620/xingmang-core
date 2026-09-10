@@ -21,6 +21,8 @@ if ($MonorepoTestsOnly) {
     return
 }
 
+& (Join-Path $PSScriptRoot 'test-keycloak-source-build.ps1')
+
 $gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
 if ([regex]::Matches($gateSource, "'--timeout', '15m'").Count -lt 4) {
     throw 'release image gate does not apply the reviewed 15-minute Trivy timeout to database updates, scans and SBOM generation'
@@ -672,9 +674,10 @@ if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
 }
 Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
 
-$keycloakLiteralPinFixture = "FROM $keycloakBaseReference AS builder`nFROM $keycloakBaseReference`n"
+$keycloakSourceBuildBaseReference = 'registry.access.redhat.com/ubi9/openjdk-21@sha256:cc8a30e9181b0135e6657ca3b824d7b32e4c7f6a664769ef641d4f7031339564'
+$keycloakLiteralPinFixture = "FROM $keycloakSourceBuildBaseReference AS source-build`nFROM $keycloakBaseReference AS builder`nFROM $keycloakBaseReference`n"
 Test-Task5ARequirement -Label 'literal Keycloak FROM pins with permitted leading whitespace' -Action {
-    $leadingWhitespaceFixture = "  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
+    $leadingWhitespaceFixture = "  FROM $keycloakSourceBuildBaseReference AS source-build`n  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
     Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $leadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
 }
 foreach ($unicodeWhitespaceFixture in @(
@@ -684,6 +687,7 @@ foreach ($unicodeWhitespaceFixture in @(
 )) {
     Test-Task5ARequirement -Label "literal Keycloak FROM pins with $($unicodeWhitespaceFixture.Label) leading whitespace" -Action {
         $unicodeLeadingWhitespaceFixture =
+            $unicodeWhitespaceFixture.Prefix + "FROM $keycloakSourceBuildBaseReference AS source-build`n" +
             $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference AS builder`n" +
             $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference`n"
         Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $unicodeLeadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
@@ -691,7 +695,7 @@ foreach ($unicodeWhitespaceFixture in @(
 }
 foreach ($dockerfileMutation in @(
     [pscustomobject]@{
-        Label = 'indented mixed-case third FROM'
+        Label = 'indented mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + "  fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
@@ -703,19 +707,19 @@ foreach ($dockerfileMutation in @(
         Text = $keycloakLiteralPinFixture + '  FROM ${KEYCLOAK_BASE_IMAGE} AS bypass' + "`n"
     },
     [pscustomobject]@{
-        Label = 'vertical-tab-prefixed mixed-case third FROM'
+        Label = 'vertical-tab-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x000B + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'form-feed-prefixed mixed-case third FROM'
+        Label = 'form-feed-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x000C + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'NBSP-prefixed mixed-case third FROM'
+        Label = 'NBSP-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x00A0 + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'vertical-tab-separated mixed-case third FROM'
+        Label = 'vertical-tab-separated mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + 'fRoM' + [string][char]0x000B + "scratch AS bypass`n"
     },
     [pscustomobject]@{
@@ -731,7 +735,7 @@ foreach ($dockerfileMutation in @(
 $verifySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
 if (-not $verifySource.Contains('Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase', [StringComparison]::Ordinal) -or
     $verifySource -match 'KEYCLOAK_BASE_IMAGE') {
-    throw 'verify.ps1 does not enforce the literal-only two-stage Keycloak base pin contract'
+    throw 'verify.ps1 does not enforce the literal-only source-builder and runtime Keycloak base pin contract'
 }
 
 $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
