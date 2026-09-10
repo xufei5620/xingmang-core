@@ -952,6 +952,20 @@ non-zero identity/eligibility/carry/job state.
 
 ## 4. Host directories and secrets
 
+For the server commands in sections 4 through 7, use the approved invoice
+project root (`releases/<sha>/source/invoice` for a monorepo release, or
+`releases/<sha>/source` for a legacy standalone release). In the same shell,
+select the existing release-level environment file before any host command:
+
+```bash
+export PRODUCTION_ENV_FILE='/root/invoice-system/app/releases/<approved-release-sha>/.env.production'
+case "$PRODUCTION_ENV_FILE" in /*) ;; *) echo 'release env path must be absolute' >&2; exit 1 ;; esac
+test -s "$PRODUCTION_ENV_FILE" || { echo 'reviewed release environment is missing' >&2; exit 1; }
+```
+
+Keep this value for every Compose, provisioning and readability check below.
+Do not create a second environment file inside `source` or `source/invoice`.
+
 **Production change approval.** Create a new directory; do not reuse an
 upstream deployment directory:
 
@@ -1036,7 +1050,7 @@ stat -c '%u:%g %a %n' /root/invoice-system/secrets/*
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \
   bash deploy/preflight-secret-permissions.sh
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \
-PRODUCTION_ENV_FILE=/root/invoice-system/app/deploy/.env.production \
+PRODUCTION_ENV_FILE="$PRODUCTION_ENV_FILE" \
 CHECK_CONTAINER_READABILITY=true bash deploy/preflight-secret-permissions.sh
 ```
 
@@ -1049,7 +1063,7 @@ umask 027
 openssl rand -hex 32 >/root/invoice-system/secrets/invoice_pdf_scanner_capability
 chown root:10000 /root/invoice-system/secrets/invoice_pdf_scanner_capability
 chmod 0440 /root/invoice-system/secrets/invoice_pdf_scanner_capability
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   up -d --no-build --force-recreate pdf-scanner api
 ```
 
@@ -1218,9 +1232,9 @@ bootstrap administrator environment variable or secret. For first initialization
 only, start it with `deploy/docker-compose.idp.bootstrap.yml`:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml up -d --no-build keycloak-postgres
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml \
   -f deploy/docker-compose.idp.bootstrap.yml up -d --no-build keycloak
 ```
@@ -1396,12 +1410,12 @@ password file, remove its username from the host environment, and restart with
 the base file only:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml \
   -f deploy/docker-compose.idp.bootstrap.yml stop keycloak
 rm -f -- /root/invoice-system/secrets/keycloak_bootstrap_admin_password
 unset KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml up -d --no-build --force-recreate keycloak
 ```
 
@@ -1498,7 +1512,7 @@ After DNS/TLS and the provider metadata are live, but before starting the
 invoice API, run the provider contract gate:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools \
   run --rm --pull never --no-deps oidc-preflight
 ```
@@ -1530,7 +1544,7 @@ addresses as exceptions.
 ## 6. Invoice database, migrations and initial settings
 
 **Production change approval.** Verify every explicit network in
-`deploy/.env.production` (`INVOICE_EDGE/DB/APP`, ClamAV/OIDC egress,
+the release-level `.env.production` selected by `PRODUCTION_ENV_FILE` (`INVOICE_EDGE/DB/APP`, ClamAV/OIDC egress,
 proxy/ingest, both projection networks, and Keycloak DB/edge) against every
 existing Docker network. Never let Compose auto-allocate one of these bridges.
 Set `INVOICE_PROXY_GATEWAY_IP` to one usable address inside the proxy subnet
@@ -1540,15 +1554,15 @@ positive `gw_priority`; static verification compares all three, and the API
 rejects subnets, multiple trusted proxies and every non-host prefix.
 
 Put the immutable release value exactly once in the root-owned
-`deploy/.env.production` (do not merely assign a non-exported shell variable),
+the release-level `.env.production` selected by `PRODUCTION_ENV_FILE` (do not merely assign a non-exported shell variable),
 keep that file mode `0600`, then prove Compose reads the same value:
 
 ```bash
-# deploy/.env.production contains this exact line:
+# "$PRODUCTION_ENV_FILE" contains this exact line:
 # ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00
-test "$(stat -c '%a' deploy/.env.production)" = 600
-test "$(grep -Fxc 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00' deploy/.env.production)" -eq 1
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+test "$(stat -c '%a' "$PRODUCTION_ENV_FILE")" = 600
+test "$(grep -Fxc 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00' "$PRODUCTION_ENV_FILE")" -eq 1
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   config --environment | grep -Fx 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00'
 ```
 
@@ -1675,22 +1689,22 @@ discard that fact and requires explicit financial approval.
 Run in this exact order while the old API/ingest remain stopped:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build postgres clamav pdf-scanner
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never migrate
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never permissions
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-settings
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-sources
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml exec -T postgres psql -X -v ON_ERROR_STOP=1 \
   -U invoice_owner -d invoice -At -F '|' -c \
   "SELECT to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1"
@@ -1744,7 +1758,7 @@ env file, verifies any pre-existing network before reuse, and refuses a wrong
 alias:
 
 ```bash
-PRODUCTION_ENV_FILE=deploy/.env.production \
+PRODUCTION_ENV_FILE="$PRODUCTION_ENV_FILE" \
   bash deploy/provision-projection-networks.sh
 ```
 
@@ -1938,9 +1952,9 @@ Each of the ten `deploy/docker-compose.sources.yml` services (project
 the container every time `source-agent-prod run` exits. Check restart counts:
 
 ```bash
-docker compose -f deploy/docker-compose.sources.yml ps -a
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml ps -a
 docker inspect -f '{{.Name}}: {{.RestartCount}}' \
-  $(docker compose -f deploy/docker-compose.sources.yml ps -aq)
+  $(docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml ps -aq)
 ```
 
 A restart count that keeps climbing on one agent, together with
