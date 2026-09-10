@@ -2484,12 +2484,16 @@ rejected, so the event burns another retry round and dies again.
 
 > **`blocked` does not mean "try again later".** Nothing about waiting changes
 > a cycle's status. A dead event bound to a blocked cycle **cannot be
-> recovered by requeueing at all**, now or later. The options are to resolve
-> the cycle itself first, or to accept that this event's data is lost and
-> resolve its eligibility freeze through the normal path
-> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
-> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
-> "to see" costs a retry round and leaves everything exactly as it was.
+> recovered by requeueing at all**, now or later. Follow the earlier contained-dead
+> procedure. For an individually reviewed event confirmed unreplayable, first run
+> `invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<event-uuid>`
+> and review the dry-run report. Only after the owner approves writing off that fact,
+> run `invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<event-uuid> --apply --operator-id=<admin-uuid>`.
+> Check success before using `POST /api/v1/admin/eligibility-freezes/{id}/resolve`;
+> the ordinary projection/freshness/latest-matched-evidence conditions in
+> `docs/ELIGIBILITY-OPERATIONS.md` still apply. A correlated row still in `dead`
+> is refused with `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED`; accepting the loss in a
+> ticket alone cannot clear that guard. Requeueing "to see" only burns retries.
 
 **As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
 the repair against production found all three dead events bound to blocked
