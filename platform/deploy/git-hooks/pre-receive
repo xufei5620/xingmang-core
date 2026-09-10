@@ -16,7 +16,9 @@ initial_git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
   exit 1
 }
 export GIT_NO_REPLACE_OBJECTS=1
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR \
+# Git receive stores newly uploaded commits in its quarantine object directory.
+# Keep that receive-owned object context until pre-receive has validated them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
   GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_SSH_COMMAND GIT_PROXY_COMMAND GIT_ASKPASS
 unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
   NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
