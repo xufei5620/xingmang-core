@@ -62,6 +62,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'shadow-eval final-decision tests failed' }
     bash scripts/test-deploy-file-guards.sh
     if ($LASTEXITCODE -ne 0) { throw 'deployment file-type guard tests failed' }
+    bash scripts/test-backup-mount-identity.sh
+    if ($LASTEXITCODE -ne 0) { throw 'backup resource identity boundary tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
     bash scripts/test-preserve-source-reader-roles.sh

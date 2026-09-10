@@ -3196,11 +3196,20 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.y
 The backup command below owns the final write freeze and waits for the API and
 all source-agent health checks before returning them to service:
 
+First set `SOURCE_STATE_ROOT` to the reviewed current generation and
+`SOURCE_CUTOVER_ROOT` to that generation's `cutover` directory, using the same
+`PRODUCTION_ENV_FILE` and Compose project as the installed services. Do not
+substitute the retired unversioned source-state path. Before freezing writers,
+the script matches all ten source `/state` mounts, all eight economic-source
+`/cutover` mounts, and the API `/data/documents` volume against the supplied
+resources. Missing, ambiguous or mismatched container identities are rejected;
+stopped containers are inspected but are not started by this preflight.
+
 ```bash
 BACKUP_DIR=/root/invoice-system/backups \
 AGE_RECIPIENT_FILE=/root/invoice-system/config/backup-recipients.txt \
-SOURCE_STATE_ROOT=/root/invoice-system/source-state \
-SOURCE_CUTOVER_ROOT=/root/invoice-system/source-state/cutover \
+SOURCE_STATE_ROOT="${SOURCE_STATE_ROOT:?set the reviewed current source-state generation}" \
+SOURCE_CUTOVER_ROOT="${SOURCE_CUTOVER_ROOT:?set the generation cutover directory}" \
 BACKUP_SIGNING_KEY_FILE=/mnt/offline-signing/invoice-backup-signing-2026 \
 BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
 PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<sha>/.env.production \
