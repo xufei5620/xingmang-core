@@ -226,8 +226,8 @@ function New-DetachedRun {
     $wrapperText = New-DetachedRunWrapperScriptText -ScriptPath $ScriptPath -ScriptArguments $ScriptArguments `
         -WorkingDirectory $WorkingDirectory -TranscriptPath $transcriptPath -ExitCodePath $exitCodePath
     # UTF-8 WITH a BOM, deliberately, unlike this repo's usual Write-Utf8NoBom
-    # artifacts: this file can embed non-ASCII paths (e.g. this repo's own
-    # "K:\发票\..." worktrees), and an unmarked UTF-8 file is exactly the
+    # artifacts: this file can embed non-ASCII paths (e.g. the fictional
+    # "G:\xingmang\09-wt\发票-toolchain-fixture\..." worktree), and an unmarked UTF-8 file is exactly the
     # ambiguous-encoding shape that lets a GBK-locale console misread it --
     # the same class of bug this script exists to route around. A BOM makes
     # pwsh's file-encoding detection unambiguous regardless of the system

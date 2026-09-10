@@ -626,7 +626,7 @@ export DOCKER_CONFIG="$docker_config"
 
 # 不传 --project-directory：Compose 应以 launch.yaml 所在的
 # deploy/compose 目录解析 build.context=../..。显式把项目目录设成仓库根会在
-# Windows Docker Desktop 上把上下文错误解析成盘符根目录（例如 K:\deploy）。
+# Windows Docker Desktop 上把上下文错误解析成盘符根目录（例如 G:\deploy）。
 compose_args=(compose --project-name xingmang-launch --file "$compose_file")
 [ -n "$override_file" ] && compose_args+=(--file "$override_file")
 compose_args+=(--env-file "$env_file")

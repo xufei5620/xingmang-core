@@ -1,38 +1,29 @@
-# monorepo 迁移：把两个工作仓库并成一个文件夹
+# Monorepo 迁移与发布链边界
 
-负责人 2026-09-10 决定：GitHub 与本地都只要一个仓库/一个文件夹。本文记录现状、要改的东西与顺序。
+负责人于 2026-09-10 确认使用一个 monorepo 保存平台与开票系统。工作区主仓库为 `G:\xingmang\01-core`；本次切根候选位于 `G:\xingmang\09-wt\core-mono-cutover`，分支 `ai/codex/XM-MONO-CUTOVER`。逐步验收结果见 [切根交接单](handoffs/MONOREPO-CUTOVER.md)。
 
-## 现状（2026-09-10）
+## 生产真相源仍待负责人决定切换
 
-- 本仓库已含两条生产线的完整历史（`platform/` 1005 个提交、`invoice/` 530 个提交，经 `git subtree add`）。
-- 原仓库仍是两条发布链的真相源：平台 `K:/星芒统一控制平台/acceptance/xingmang-platform`（服务器裸仓库 `/srv/git/xingmang-platform.git`），
-  开票 `K:/发票/invoice-system`（发布经 tag 上的 git bundle 传到服务器 `/root/invoice-system/app/releases/<sha>/source`）。
-- 签名 tag 不随 subtree 进来（`v0.1.0-rc107/108/109/110-signed` 仍在原开票仓库）。
+本仓库已通过 subtree 纳入两套系统的历史与源码，但未因此改变服务器生产真相源。平台仍以原服务器裸仓库 `/srv/git/xingmang-platform.git` 及生产 checkout 为准；开票原生产身份为 `v0.1.0-rc110-signed`，提交前缀 `277063c`。本次签名演练标签、传包和镜像加载均不表示部署上线。
 
-## 切换前必须改的（按子系统）
+原开票签名 tag 没有随 subtree 导入。不得将旧仓库提交号或生产标签假定为 monorepo 中可直接使用的引用。新发布清单的 `source.gitHeadScope=monorepo`，`source.gitHead` 与签名标签共同绑定完整 monorepo 提交。
 
-### invoice/
-1. `scripts/verify.ps1`、`release-image-gate*.ps1`、`verify-release-image-artifacts.ps1`：所有「仓库根」推导（`$PSScriptRoot\..`）本身仍成立，但
-   `git rev-parse --show-toplevel`、`gitDirty`、`source.gitHead` 取的是 monorepo 根；镜像门禁包装里的「worktree/tag/HEAD 绑定」要按 monorepo 路径比。
-2. 发布 bundle 与服务器 stage2：bundle 变成整个 monorepo 的 tag；服务器展开后源码根是 `…/source/invoice`，`roll-forward.sh`、
-   `backup.sh`、`rehearsal/shadow-eval.sh` 的调用路径与手册第 3/9/11/12 节相应加 `invoice/` 前缀；`.env.production` 位置不变。
-3. `test-release-image-gate.ps1` 对 `docs/PRODUCTION-RUNBOOK.md` 的逐行静态扫描路径改为 `invoice/docs/…`（或保持相对 `$projectRoot`）。
-4. tag 命名：开票继续用 `v0.1.0-rcN-signed`，平台若也打 tag 用 `platform/v…` 前缀，避免撞名。
+## 已适配的目录约定
 
-### platform/
-1. 服务器裸仓库与 `/srv/deploy/xingmang-platform` 检出：改为 monorepo（`deploy-local.sh` 的 compose/override 路径加 `platform/` 前缀，或在服务器上用
-   `git sparse-checkout set platform` 并把工作目录指到 `platform/`）。
-2. `.githooks/commit-msg`（`Acceptance-Line: claude` trailer）、`scripts/check-governance.sh`、gitleaks 基线：路径前缀。
-3. pnpm workspace（`web/pnpm-workspace.yaml`）与 `go.mod` 都在 `platform/` 下，不受根目录影响；CI/门禁命令在 `platform/` 内执行。
+- `invoice/` 为开票项目根。PowerShell 脚本从自身目录推导项目根；Git 脏树判断只覆盖 `invoice/`，发布提交号仍取整个 monorepo。
+- 钉版上游根为 `G:\xingmang\06-upstream\pinned`，也可由 `INVOICE_UPSTREAM_ROOT` 显式指定。未能可靠解析时拒绝继续；`06-upstream/` 中跟随最新版本的镜像不可代替钉版树。
+- 开票发布 bundle 包含签名 monorepo 标签。服务器新布局的源码项目根为 `releases/<sha>/source/invoice`；演练目录为 `releases/<sha>-rehearsal/source/invoice`。部署、备份、影子评估脚本的文档路径随此前缀调整，生产配置位置不随之自动移动。
+- `platform/` 为平台项目根。`deploy-local.sh` 的 `repo_path` 是 Git 顶层，`project_path` 是其下的 `platform/`，compose/env/override、self-update 和相关脚本引用从项目根解析。
+- 平台正式 checkout 名称 `xingmang-platform`、既有 origin 白名单及 `release/v0.1-launch` 分支常量保持。服务器 sparse 切换步骤由负责人执行，见切根交接单；本次不改变生产 checkout 或裸仓库。
+- 两套 Go module 与 pnpm workspace 保持独立，命令分别在各自子目录执行。平台规定的 Go 测试使用 `-race -p 1`；开票既有源码门禁内部的 `go test -race ./...` 保持原样。
+- 开票签名标签继续使用 `v0.1.0-rcN-signed`；平台如使用发布标签，应采用 `platform/v…` 前缀。
 
-### 通用
-- `.gitignore`：两份各在子目录，根目录不需要。
-- 所有 worktree（`wt-XM-*`）都是原仓库的；迁移后新工作树从本仓库开，路径写进各自 handoff。
-- 两次演练后再切：平台 `deploy-local.sh` 干跑一次、开票走一次完整 RC（源码门禁 → 镜像门禁 → bundle → stage2 → 影子评估）。
+## 门禁与手册
 
-## 顺序
+开票源码门禁、签名标签验证、九镜像门禁、普通与严格产物验证以及服务器验签/展开/加载的证据分别记录，镜像门禁预期退出码 `42` 表示应用镜像合格、生产上线仍受待完成 canary 阻止。严格传输就绪不等于生产放行。
 
-1. 本仓库推到 GitHub（私有），作为唯一远端。
-2. 原仓库冻结（不再开新分支），新工作只在本仓库。
-3. 先改开票发布链并跑一次 RC 演练（不上线），再改平台部署链并干跑；两条都过后把服务器真相源切过来。
-4. 公开前按 `docs/PUBLIC-RELEASE-CHECKLIST.md`（待写）清洗运营数据；公开的是清洗后的快照。
+平台服务器干跑须使用包含新脚本的精确提交，保留正式身份和路径约束。本次可用新 release 内的隔离 checkout 和合成 staging 配置进行演练；它不证明生产配置、Compose 实际展开、迁移或容器运行态。
+
+平台 Git hooks 是 `platform/deploy/git-hooks/{pre-receive,post-receive}`，由服务器裸仓库侧安装与强制；本仓库不存在此前说明中的 `.githooks/commit-msg`。服务器真相源转换时须另行核对这些 hooks 的项目路径。
+
+已知限制：`npm audit` 依赖外部服务；其旧标签/旧路径豁免分支尚不能直接用于 monorepo，服务故障时应记录失败并等待恢复，不放宽门禁。公开或发布到 GitHub、合并 main、服务器生产切换、备份、影子评估、roll-forward 和容器重启均不因本次切根自动获得授权。
