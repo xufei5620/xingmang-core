@@ -99,10 +99,20 @@ echo "==> [4/6] restart api (worker self-heal)"
 # next 27 minutes posting to an address the api no longer had.
 restart_ingest_proxy() {
   echo "==> [5/6] restart ingest-proxy (immediate re-resolve; the config also re-resolves at request time)"
-  docker restart invoice-system-prod-ingest-proxy-1 >/dev/null || true
+  docker restart invoice-system-prod-ingest-proxy-1 >/dev/null || return $?
   sleep 5
 }
-trap restart_ingest_proxy EXIT
+recover_ingest_proxy_on_exit() {
+  local original_status=$?
+  trap - EXIT
+  if restart_ingest_proxy; then
+    :
+  elif (( original_status == 0 )); then
+    original_status=1
+  fi
+  exit "$original_status"
+}
+trap recover_ingest_proxy_on_exit EXIT
 docker restart invoice-system-prod-api-1 >/dev/null
 # 120s, not 60s: a cold api on a loaded box has taken over a minute to bind.
 # `--since` widens with the loop so a line printed early is still matched.
