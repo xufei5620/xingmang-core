@@ -8,7 +8,7 @@
 
 前提:③④ 已被 CR-0004 取代——星芒后台用自带账号登录(XM-LOGIN,`XM_AUTH_MODE=local`),不再需要 Keycloak。
 
-`.env` 改动(服务器 `/srv/deploy/xingmang-platform/deploy/compose/.env`,改前先 `cp -p .env .env.bak-staging-<时间>`):
+`.env` 改动(服务器 `/srv/deploy/xingmang-platform/platform/deploy/compose/.env`,改前先 `cp -p .env .env.bak-staging-<时间>`):
 ```
 ENVIRONMENT=production
 XM_AUTH_MODE=local
@@ -35,7 +35,7 @@ BUILD_VERSION=production
 
 部署(每次生产部署都要带覆盖文件且必须是绝对路径,否则会回到 launch.yaml 的 staging 默认):
 ```
-cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.sh --override-file /srv/deploy/xingmang-platform/deploy/compose/server-prod.yaml
+cd /srv/deploy/xingmang-platform && nice -n 10 bash platform/deploy/scripts/deploy-local.sh --override-file /srv/deploy/xingmang-platform/platform/deploy/compose/server-prod.yaml
 ```
 演示登记服务 `bootstrap` 在 prod 覆盖下属于 staging profile,脚本打印 `bootstrap=skipped reason=service-not-in-profile`;
 `runway-threshold-bootstrap` 照常跑,会给 production 环境登记默认可用天数阈值。

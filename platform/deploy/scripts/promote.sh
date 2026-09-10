@@ -213,7 +213,9 @@ git --git-dir="$repo_path" config --get receive.denyNonFastForwards | grep -qx t
 git --git-dir="$repo_path" config --get receive.denyDeletes | grep -qx true || {
   echo "PROMOTE FAIL: bare repo 未启用 denyDeletes" >&2; exit 1;
 }
-trusted_hook="$checkout_path/deploy/git-hooks/pre-receive"
+project_path="$checkout_path"
+[ ! -d "$checkout_path/platform/deploy/git-hooks" ] || project_path="$checkout_path/platform"
+trusted_hook="$project_path/deploy/git-hooks/pre-receive"
 [ -f "$trusted_hook" ] && [ ! -L "$trusted_hook" ] && [ -x "$trusted_hook" ] || {
   echo "PROMOTE FAIL: checkout 缺少版本化 pre-receive hook" >&2; exit 1;
 }

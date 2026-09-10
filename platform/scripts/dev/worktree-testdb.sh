@@ -237,7 +237,7 @@ cmd_ensure() {
   # 迁移只连本机已发布端口的真实 Postgres，不需要外部网络；这里仍然主动
   # unset 本机常见的转发代理变量，避免个别机器上代理抖动影响 go run 编译
   # cmd/migrate 时的模块解析（纯防御性操作，模块已在缓存时完全没有副作用）。
-  ( cd "$worktree_root" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+  ( cd "$project_root" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
       -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
       "$go_bin" run ./cmd/migrate -database "$migrate_url" -path db/migrations up ) \
     || die "迁移失败：$dbname"
@@ -262,6 +262,8 @@ main() {
   parse_args "$@"
   pg_admin_url="${pg_url_override:-$default_pg_admin_url}"
   worktree_root="$(find_worktree_root)"
+  project_root="$worktree_root"
+  [ ! -f "$worktree_root/platform/go.mod" ] || project_root="$worktree_root/platform"
   dbname="$(derive_db_name "$worktree_root")"
   case "$dbname" in
     xm_test_*) ;;

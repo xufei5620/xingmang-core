@@ -114,7 +114,7 @@ backup 直连降级会兜住用户请求，不会中断服务，但那几秒内�
 
 ## 第 6 步：平台切到 file 模式
 
-编辑平台部署机器上的 `.env`（例如 `/srv/deploy/xingmang-platform/deploy/compose/.env`，
+编辑平台部署机器上的 `.env`（例如 `/srv/deploy/xingmang-platform/platform/deploy/compose/.env`，
 改前先 `cp -p .env .env.bak-reqlog-$(date +%Y%m%d)`）：
 
 ```dotenv
@@ -125,7 +125,7 @@ XM_REQLOG_MODE=file
 ```
 
 `XM_REQLOG_DATA_DIR`/`XM_REQLOG_TOKENMAP`（容器内路径）不需要改，
-`deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
+`platform/deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
 
 > CR-0008 新增的 `tokenmap.v2.json`（上游用户 ID）也在这一步一起覆盖：
 > `server-prod.yaml` 现在带 `XM_REQLOG_TOKENMAP_V2` 与对称的只读挂载，
@@ -140,12 +140,14 @@ XM_REQLOG_MODE=file
 采用的流程执行）：
 
 ```bash
+# 以下命令从 Git 顶层执行；服务器 monorepo 切换和配置迁移须已获批准。
+cd /srv/deploy/xingmang-platform
 # 方式一：受控 checkout 上的部署脚本（DEPLOY.md §3 描述的正式流程）
-deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION --reason "XM-REQLOG-MERGE cutover"
+platform/deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION --reason "XM-REQLOG-MERGE cutover"
 
 # 方式二：本机覆盖文件方式（GO-LIVE-CHECKLIST.md 记录的实际操作）
-cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.sh \
-  --override-file /srv/deploy/xingmang-platform/deploy/compose/server-prod.yaml
+cd /srv/deploy/xingmang-platform && nice -n 10 bash platform/deploy/scripts/deploy-local.sh \
+  --override-file /srv/deploy/xingmang-platform/platform/deploy/compose/server-prod.yaml
 ```
 
 这一步只重启 `platform-api`（`.env` 改动不影响 `platform-worker`/`web` 的行为），
@@ -216,7 +218,7 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
 
 **容器化 `platform-api` 的接入现状**：`cmd/platform-api` 读环境变量
 `XM_REQLOG_TOKENMAP_V2`（容器内路径）传给 `FileConfig.TokenMapV2Path`，与
-既有 `XM_REQLOG_TOKENMAP` 同一条模式；`deploy/compose/server-prod.yaml`
+既有 `XM_REQLOG_TOKENMAP` 同一条模式；`platform/deploy/compose/server-prod.yaml`
 现在也带上了这个变量与对称的只读绑定挂载（XM-REQLOG-TOKENMAP-V2-MOUNT）：
 
 ```yaml

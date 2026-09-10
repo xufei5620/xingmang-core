@@ -209,37 +209,44 @@ if [ -z "$project_name" ]; then
   if [ "$env_name" = "staging" ]; then project_name="xingmang-staging"; else project_name="xingmang-prod"; fi
 fi
 
+project_path="$repo_path"
+asset_prefix=""
+if [ -d "$repo_path/platform/deploy/compose" ]; then
+  project_path="$repo_path/platform"
+  asset_prefix="platform/"
+fi
+
 case "$env_name" in
   staging)
     branch_name="release/v0.1-launch"
     ref_name="refs/heads/release/v0.1-launch"
     default_port=18088
-    [ -n "$override_file" ] || override_file="$repo_path/deploy/compose/server-staging.yaml"
+    [ -n "$override_file" ] || override_file="$project_path/deploy/compose/server-staging.yaml"
     ;;
   prod)
     branch_name="main"
     ref_name="refs/heads/main"
     default_port=18089
-    [ -n "$override_file" ] || override_file="$repo_path/deploy/compose/server-prod.yaml"
+    [ -n "$override_file" ] || override_file="$project_path/deploy/compose/server-prod.yaml"
     ;;
 esac
-[ -n "$compose_file" ] || compose_file="$repo_path/deploy/compose/launch.yaml"
+[ -n "$compose_file" ] || compose_file="$project_path/deploy/compose/launch.yaml"
 [ -n "$env_file" ] || {
-  if [ -f "$repo_path/deploy/compose/.env" ]; then env_file="$repo_path/deploy/compose/.env"; fi
+  if [ -f "$project_path/deploy/compose/.env" ]; then env_file="$project_path/deploy/compose/.env"; fi
 }
 [ -n "$health_url" ] || health_url="http://127.0.0.1:$default_port/healthz"
 [ -n "$ready_url" ] || ready_url="http://127.0.0.1:$default_port/readyz"
 
 if [ "$test_mode" -eq 0 ]; then
-  [ "$compose_file" = "$repo_path/deploy/compose/launch.yaml" ] || {
+  [ "$compose_file" = "$project_path/deploy/compose/launch.yaml" ] || {
     die "compose-file 只能使用仓库内 launch.yaml"; exit 1;
   }
-  expected_override="$repo_path/deploy/compose/server-$env_name.yaml"
+  expected_override="$project_path/deploy/compose/server-$env_name.yaml"
   [ "$override_file" = "$expected_override" ] || {
     die "override-file 只能使用当前环境的服务器覆盖"; exit 1;
   }
   if [ -n "$env_file" ]; then
-    [ "$env_file" = "$repo_path/deploy/compose/.env" ] || {
+    [ "$env_file" = "$project_path/deploy/compose/.env" ] || {
       die "env-file 只能使用受控 Compose .env"; exit 1;
     }
   else
@@ -344,7 +351,7 @@ if [ -n "$env_file" ]; then
   fi
 fi
 
-compose_args=(compose --project-name "$project_name" --project-directory "$repo_path"
+compose_args=(compose --project-name "$project_name" --project-directory "$(dirname -- "$compose_file")"
   --file "$compose_file" --file "$override_file")
 [ -n "$env_file" ] && compose_args+=(--env-file "$env_file")
 [ "$env_name" = "staging" ] && compose_args+=(--profile staging)
@@ -511,8 +518,8 @@ main() {
   # 或仓库外文件替换部署定义。
   compose_rel="${compose_file#"$repo_path/"}"
   override_rel="${override_file#"$repo_path/"}"
-  case "$compose_rel" in deploy/compose/*) ;; *) return 1 ;; esac
-  case "$override_rel" in deploy/compose/*) ;; *) return 1 ;; esac
+  case "$compose_rel" in "${asset_prefix}deploy/compose/"*) ;; *) return 1 ;; esac
+  case "$override_rel" in "${asset_prefix}deploy/compose/"*) ;; *) return 1 ;; esac
   [ "$compose_rel" != "$compose_file" ] || return 1
   [ "$override_rel" != "$override_file" ] || return 1
   git -C "$repo_path" cat-file -e "$target_sha:$compose_rel" || return 1

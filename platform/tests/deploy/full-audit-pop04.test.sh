@@ -8,6 +8,7 @@ sed -n '/^main() {$/,/^}$/p' "$script" > "$work/main.sh"
 sed -n '/^cleanup_deploy_lock() {$/,/^}$/p' "$script" > "$work/cleanup.sh"
 run_deploy() (
   source "$work/main.sh"; source "$work/cleanup.sh"
+  asset_prefix=""
   dry_run=0 reason=fixture repo_path="$work/checkout" status_dir="$work/status"
   env_name=staging remote_name=origin ref_name=refs/heads/release/v0.1-launch branch_name=release/v0.1-launch
   compose_file="$repo_path/deploy/compose/launch.yaml"; override_file="$repo_path/deploy/compose/server-staging.yaml"

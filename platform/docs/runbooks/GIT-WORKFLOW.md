@@ -3,6 +3,10 @@
 本文件是 GitHub Actions 停摆期间的当前操作口径。服务器裸仓库承载开发、门禁
 和发布闭环；GitHub 只保存镜像，不承担放行判断。
 
+命令块默认从 monorepo Git 顶层执行；平台脚本位于 `platform/`。
+测试库名称仍按 Git worktree 根派生，迁移命令在 `platform/` Go 项目执行。
+旧独立布局使用相同脚本时省略路径中的 `platform/`；不据此改变服务器 remote 或历史。
+
 ## 1. Remote 约定
 
 每个本地 checkout 最终应有两条 remote：
@@ -15,7 +19,7 @@
 不要手工删除未知 remote 或覆盖已有 `pushurl`。先用 dry-run 检查：
 
 ```bash
-deploy/scripts/configure-remotes.sh \
+platform/deploy/scripts/configure-remotes.sh \
   --server-url /srv/git/xingmang-platform.git \
   --github-url git@github.com:xufei5620/xingmang-platform.git \
   --dry-run
@@ -24,7 +28,7 @@ deploy/scripts/configure-remotes.sh \
 确认输出中的现有 origin 确实是旧 GitHub 地址后，再执行一次显式写入：
 
 ```bash
-deploy/scripts/configure-remotes.sh \
+platform/deploy/scripts/configure-remotes.sh \
   --server-url /srv/git/xingmang-platform.git \
   --github-url git@github.com:xufei5620/xingmang-platform.git \
   --confirm CONFIGURE-REMOTES
@@ -50,7 +54,7 @@ deploy/scripts/configure-remotes.sh \
 合入或发布后，由授权操作者显式运行一次：
 
 ```bash
-deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
+platform/deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
 ```
 
 镜像脚本只允许 `github` remote，执行一次 `git push --mirror github`，不自动重试。
@@ -59,8 +63,8 @@ deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
 
 ## 4. 发布与审计
 
-服务器发布使用 `deploy/scripts/deploy.sh staging|prod`，晋级 main 使用
-`deploy/scripts/promote.sh`；具体生产确认和 Compose 档见 `DEPLOY.md`。所有生产
+服务器发布使用 `platform/deploy/scripts/deploy.sh staging|prod`，晋级 main 使用
+`platform/deploy/scripts/promote.sh`；具体生产确认和 Compose 档见 `DEPLOY.md`。所有生产
 动作必须由产品负责人提供二次确认、reason 和审计记录，AI 不自动执行。
 
 ## 5. GitHub Actions / PR 的历史边界
@@ -82,30 +86,30 @@ deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
 敏感"的耦合，根上是多个 worktree/包共用同一个库；每个 worktree 拿到自己独立
 的库就不会再撞。
 
-**用法**（`scripts/dev/worktree-testdb.sh`，POSIX bash，Windows 下用 Git Bash
+**用法**（`platform/scripts/dev/worktree-testdb.sh`，POSIX bash，Windows 下用 Git Bash
 跑；PowerShell 用户可用同目录的 `worktree-testdb.ps1`，参数一一对应，行为
 逐字一致）：
 
 ```bash
 # 默认动作：库不存在就建、灌迁移到最新版本，打印 export 语句
 # （本仓库脚本不靠可执行位分发，一律显式 bash 前缀，同 check-governance.sh）
-bash scripts/dev/worktree-testdb.sh
+bash platform/scripts/dev/worktree-testdb.sh
 # 直接让当前 shell 生效：
-testdb_exports=$(bash scripts/dev/worktree-testdb.sh) || { echo 'test database provisioning failed' >&2; exit 1; }
+testdb_exports=$(bash platform/scripts/dev/worktree-testdb.sh) || { echo 'test database provisioning failed' >&2; exit 1; }
 [[ -n "$testdb_exports" ]] || { echo 'test database environment is empty' >&2; exit 1; }
 eval "$testdb_exports"
 # 或只取连接串自己赋值（--print-url 只打印 URL，不带 export 前缀）：
-testdb_url=$(bash scripts/dev/worktree-testdb.sh --print-url) || { echo 'test database provisioning failed' >&2; exit 1; }
+testdb_url=$(bash platform/scripts/dev/worktree-testdb.sh --print-url) || { echo 'test database provisioning failed' >&2; exit 1; }
 [[ -n "$testdb_url" ]] || { echo 'test database URL is empty' >&2; exit 1; }
 export XM_TEST_DATABASE_URL="$testdb_url"
 
 # 列出所有 xm_test_* 测试库及大小
-bash scripts/dev/worktree-testdb.sh --list
+bash platform/scripts/dev/worktree-testdb.sh --list
 ```
 
 ```powershell
-$env:XM_TEST_DATABASE_URL = & scripts\dev\worktree-testdb.ps1 -PrintUrl
-scripts\dev\worktree-testdb.ps1 -ListDatabases
+$env:XM_TEST_DATABASE_URL = & platform\scripts\dev\worktree-testdb.ps1 -PrintUrl
+platform\scripts\dev\worktree-testdb.ps1 -ListDatabases
 ```
 
 库名由当前 Git worktree 完整路径派生：basename 规整成 `[a-z0-9_]`，加
@@ -118,7 +122,7 @@ scripts\dev\worktree-testdb.ps1 -ListDatabases
 **清理**：任务结束、移除 worktree 前跑一次
 
 ```bash
-bash scripts/dev/worktree-testdb.sh --drop
+bash platform/scripts/dev/worktree-testdb.sh --drop
 ```
 
 删除当前 worktree 专属的测试库（含终止其残留连接）；不会碰其他 worktree 的库
