@@ -54,10 +54,15 @@ XM_NEWAPI_CREDENTIAL_REF=secret://newapi/readonly-token
 XM_NEWAPI_TOKEN=<你的管理员 access token>
 ```
 
-`.env` 已被 gitignore(根 `.gitignore` 的 `.env`/`.env.*`),不会入库。重启 worker:
+下面仅适用于已批准的 `xingmang-launch` 生产栈：从 monorepo 的 `platform/` 目录运行，
+沿用本次部署的 `.env`（显式 `ENVIRONMENT=production`）与 `server-prod.yaml`。
+生产重建不可省略 override，否则会丢失请求记录器的只读挂载。其他部署流程须沿用
+其已批准的项目、base/override 和 env 参数；独立 staging 演示栈使用自己的配置。
+仅修改后台动态接入配置不需要重建；确需重建 worker 时由获批操作员执行：
 
 ```bash
-docker compose -p xingmang-launch -f deploy/compose/launch.yaml --env-file deploy/compose/.env up -d platform-worker
+docker compose -p xingmang-launch -f deploy/compose/launch.yaml \
+  -f deploy/compose/server-prod.yaml --env-file deploy/compose/.env up -d platform-worker
 ```
 
 ## 方式 B:本机演示(你把 endpoint+token 贴给我,我配本机栈验证)
