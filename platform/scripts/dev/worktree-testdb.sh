@@ -5,7 +5,7 @@
 # 撞过一次——credentials 包的 DB 集成测试往 core.connector_config 写
 # (sub2api/newapi, staging) 这两行且不清理，与 jobs 包的同库测试撞了唯一键
 # （XM-DBTEST-FIX0 记录的三处夹具漂移之一）。本脚本让每个 worktree 拿到自己
-# 独立的 xm_test_<worktree 目录名> 库，从根上消除这类"跑测顺序/并发敏感"的
+# 独立的 xm_test_<短名>_<完整路径哈希> 库，从根上消除这类"跑测顺序/并发敏感"的
 # 耦合，而不是逐个包打补丁。
 #
 # 用法（默认动作）：
@@ -49,22 +49,28 @@ sanitize_name() {
   printf '%s' "$out"
 }
 
-# derive_db_name：worktree 目录路径（或直接是名字）-> xm_test_ 前缀的库名，
-# 总长度不超过 63（Postgres 标识符上限）。超长时截断 sanitize 后的名字并补
-# 一段短哈希消歧——只截断不消歧会让两个不同的长 worktree 名悄悄撞成同一个
-# 库名，正好违背"每个 worktree 独立测试库"这件事本身。
+# derive_db_name：为 Git 返回的完整工作树路径始终附加 SHA-256 前 16 位，
+# 再截断可读短名，保证总长度不超过 63。词法清理 ./、../、重复斜杠；
+# 相对名字按当前目录展开，不访问目录内容。旧的 basename-only 库不会被选中。
 derive_db_name() {
-  local raw="$1" base sanitized prefix full max hash keep
-  base="$(basename -- "$raw")"
+  local raw="$1" identity base sanitized prefix max hash keep part
+  local -a parts=() cleaned=()
+  case "$raw" in /*|[a-zA-Z]:/*) ;; *) raw="$PWD/$raw" ;; esac
+  IFS=/ read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) if [ "${#cleaned[@]}" -gt 0 ]; then unset 'cleaned[${#cleaned[@]}-1]'; fi ;;
+      *) cleaned+=("$part") ;;
+    esac
+  done
+  identity="$(IFS=/; printf '%s' "${cleaned[*]}")"
+  case "$raw" in /*) identity="/$identity" ;; esac
+  base="$(basename -- "$identity")"
   sanitized="$(sanitize_name "$base")"
   prefix="xm_test_"
-  full="${prefix}${sanitized}"
   max=63
-  if [ "${#full}" -le "$max" ]; then
-    printf '%s' "$full"
-    return 0
-  fi
-  hash="$(printf '%s' "$sanitized" | sha256sum | cut -c1-8)"
+  hash="$(printf '%s' "$identity" | sha256sum | cut -c1-16)"
   keep=$((max - ${#prefix} - ${#hash} - 1))
   printf '%s%s_%s' "$prefix" "${sanitized:0:$keep}" "$hash"
 }

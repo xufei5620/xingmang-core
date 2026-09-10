@@ -67,9 +67,14 @@ integration test that resets the `public` schema (`backend/internal/
 postgresstore`, `oidcretention`, `auth`, `adminsettings`, and one `migrate`
 test -- see `backend/internal/testdb`'s package doc) automatically
 redirects to a database named after the current git worktree
-(`invoice_test_<sanitized worktree directory name>`), creating it on first
-use, so two worktrees testing at the same time never race each other's
-schema resets. Point `INVOICE_TEST_DATABASE_URL` at any other, explicit
+(`invoice_test_<sanitized name>_<16 hex SHA-256 characters of the cleaned full
+worktree path>`), creating it on first use. Equal basenames and names that
+sanitize identically retain distinct path identities; the readable part is
+truncated to keep the database name within PostgreSQL's 63-byte limit.
+Legacy basename-only databases are neither reused automatically nor deleted
+or renamed; keep them until their owner reviews any separate cleanup. Moving
+a checkout changes its derived database identity. Point
+`INVOICE_TEST_DATABASE_URL` at any other, explicit
 database name (e.g. `invoice_test_mytask`) to opt out of that redirection
 and use exactly that database.
 

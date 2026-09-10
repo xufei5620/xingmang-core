@@ -24,7 +24,7 @@
 // URL, below, makes that workaround automatic and permanent: when
 // INVOICE_TEST_DATABASE_URL names exactly the shared default database
 // "invoice_test", it is rewritten to a name derived from the current git
-// worktree ("invoice_test_<sanitized worktree directory name>"), which is
+// worktree ("invoice_test_<sanitized name>_<full-path hash>"), which is
 // created on first use if it does not already exist. A URL that already
 // names any other, explicit database (e.g. a hand-picked
 // "invoice_test_backoff", as both handoffs above used) is returned
@@ -153,21 +153,17 @@ func rewriteURLForWorktree(rawURL, worktreeDir string) (resolvedURL, dbName stri
 }
 
 // perWorktreeDatabaseName derives a valid, worktree-distinct PostgreSQL
-// database name from a worktree directory path. Two different worktree
-// directories always derive different names.
+// database name from the full worktree path resolved by worktreeRoot. Hash
+// every cleaned path, including short names, so basename/normalization does
+// not discard identity. Legacy basename-only databases are left untouched.
 func perWorktreeDatabaseName(worktreeDir string) string {
-	base := filepath.Base(filepath.Clean(worktreeDir))
+	identity := filepath.Clean(worktreeDir)
+	base := filepath.Base(identity)
 	suffix := sanitizeIdentifierPart(base)
-	name := perWorktreeDatabasePrefix + suffix
-	if len(name) <= postgresIdentifierMaxBytes {
-		return name
-	}
-	// A worktree directory name long enough to overflow PostgreSQL's
-	// 63-byte identifier limit is truncated, with a short hash of the full
-	// (untruncated) name appended so two long names that only differ near
-	// the end don't collide after truncation.
-	sum := sha256.Sum256([]byte(base))
-	shortHash := hex.EncodeToString(sum[:])[:8]
+	// Reserve 64 bits of SHA-256 for identity before truncating the readable
+	// label to PostgreSQL's 63-byte identifier limit.
+	sum := sha256.Sum256([]byte(identity))
+	shortHash := hex.EncodeToString(sum[:])[:16]
 	keep := postgresIdentifierMaxBytes - len(perWorktreeDatabasePrefix) - len(shortHash) - 1
 	if keep < 0 {
 		keep = 0
@@ -213,7 +209,7 @@ func sanitizeIdentifierPart(name string) string {
 // if git is not on PATH. A worktree's root has a ".git" file (a "gitdir:
 // ..." pointer); the main checkout's root has a ".git" directory -- either
 // satisfies os.Stat and is treated the same way here, since only the
-// directory name is used (to name the per-worktree database), never the
+// full directory path is used (to name the per-worktree database), never the
 // pointer contents.
 func worktreeRoot() (string, error) {
 	_, file, _, ok := runtime.Caller(0)

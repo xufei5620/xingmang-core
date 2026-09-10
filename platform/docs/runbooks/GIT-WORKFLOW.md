@@ -108,8 +108,10 @@ $env:XM_TEST_DATABASE_URL = & scripts\dev\worktree-testdb.ps1 -PrintUrl
 scripts\dev\worktree-testdb.ps1 -ListDatabases
 ```
 
-库名由当前 worktree 目录名派生：取 basename，规整成 `[a-z0-9_]`，加
-`xm_test_` 前缀（例如 worktree 目录 `wt-wtdb` 得到 `xm_test_wt_wtdb`）。管理
+库名由当前 Git worktree 完整路径派生：basename 规整成 `[a-z0-9_]`，加
+`xm_test_` 前缀，并始终附加规范路径 SHA-256 的前 16 位十六进制摘要。
+可读短名按需截断，总长不超过 63 字节；同 basename、大小写/符号规整相同
+的不同路径可区分。迁移工作树位置会派生新库。管理
 连接默认是本机 `invoice-test-pg` 容器（`127.0.0.1:55432`，superuser
 `postgres`），可用 `--pg-url` 覆盖。
 
@@ -120,4 +122,5 @@ bash scripts/dev/worktree-testdb.sh --drop
 ```
 
 删除当前 worktree 专属的测试库（含终止其残留连接）；不会碰其他 worktree 的库
-或旧的共享 `xm_test` 库，后者仍可手工按既有约定使用/清理。
+或旧的共享 `xm_test` 库。旧版 `xm_test_<basename>` 库不会自动重用、删除或
+重命名；保留原库，只有核对所有者和用途后再单独决定是否清理。
