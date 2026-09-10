@@ -94,9 +94,12 @@ validate_path audit-log "$audit_log" || exit 1
 [[ "$remote_name" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "PROMOTE FAIL: remote 非法" >&2; exit 1; }
 if [ "$test_mode" -eq 1 ]; then
   [ "${XM_DEPLOY_TEST_MODE:-0}" = "1" ] || { echo "PROMOTE FAIL: --test-mode 需要 XM_DEPLOY_TEST_MODE=1" >&2; exit 1; }
-  case "$repo_path:$checkout_path:$status_dir:$audit_log" in
-    /srv/*) echo "PROMOTE FAIL: test-mode 禁止使用 /srv 路径" >&2; exit 1 ;;
-  esac
+  for test_path in "$repo_path" "$checkout_path" "$status_dir" "$audit_log"; do
+    protected_path="$(readlink -m -- "$test_path" 2>/dev/null)" || exit 1
+    case "$protected_path" in
+      /srv|/srv/*) echo "PROMOTE FAIL: test-mode 禁止使用 /srv 路径" >&2; exit 1 ;;
+    esac
+  done
 fi
 if [ "$test_mode" -eq 0 ]; then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
