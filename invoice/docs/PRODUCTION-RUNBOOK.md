@@ -139,10 +139,11 @@ This cutover rehearsal does not execute those production operations.
 > 拿当前 release 目录。
 >
 > 另外两条不算"落差"但同样咬人的实测细节：验 `SHA256SUMS` 签名时，
-> `Get-Content -Raw | ssh-keygen`（本节已禁）与 `cmd /c "… < file"`（本节推荐）
+> `Get-Content -Raw | ssh-keygen`（本节已禁）与旧的 `cmd /c "… < file"` 写法
 > **在本仓库的 `发票` 中文路径段上都会假报失败**，前者报
 > `incorrect signature`、后者报「文件名、目录名或卷标语法不正确」；
-> **用 bash 的重定向一次就过**。以及 `verify.ps1` 在新建工作树里会因为
+> **用 bash 的重定向一次就过**；下方 PowerShell 命令现用原始文件流直送验证进程 stdin，
+> 不再跨 CMD 引号/环境变量边界。以及 `verify.ps1` 在新建工作树里会因为
 > 前端依赖没装而死在 `vitest not recognized`，先 `npm ci`。
 
 Run locally from the exact RC100 candidate worktree
@@ -534,9 +535,29 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -Path
 # 2026-09-06：**不要用 `Get-Content -Raw | ssh-keygen`**。签名算的是磁盘上的原始
 # 字节，而 PowerShell 把内容送进原生命令的管道时会重新编码，于是必然报
 # `Signature verification failed: incorrect signature`——签名其实是好的，坏的是
-# 验证方式。用重定向把原始字节喂进去（实测于 RC101 发布当天）：
-& cmd /c "ssh-keygen -Y verify -f \"%RELEASE_ALLOWED_SIGNERS%\" -I invoice-release@solov.cc -n solov-invoice-release-v1 -s \"%RELEASE_SIGNATURE%\" < \"%CHECKSUM_MANIFEST%\""
-if ($LASTEXITCODE -ne 0) { throw 'release artifact SHA256SUMS signature verification failed' }
+# 验证方式。把原始文件流直送 stdin，参数逐项传递；路径含空格/引号也不经 shell 拆分。
+$ErrorActionPreference = 'Stop'
+$verifyStart = [Diagnostics.ProcessStartInfo]::new()
+$verifyStart.FileName = (Get-Command ssh-keygen -ErrorAction Stop).Source
+$verifyStart.UseShellExecute = $false
+$verifyStart.RedirectStandardInput = $true
+foreach ($argument in @('-Y','verify','-f',$releaseAllowedSigners,'-I','invoice-release@solov.cc','-n','solov-invoice-release-v1','-s',$releaseSignature)) {
+    $verifyStart.ArgumentList.Add($argument)
+}
+$manifestInput = [IO.File]::OpenRead($checksumManifest)
+try {
+    $verifier = [Diagnostics.Process]::Start($verifyStart)
+    try {
+        $manifestInput.CopyTo($verifier.StandardInput.BaseStream)
+        $verifier.StandardInput.Close()
+        $verifier.WaitForExit()
+        if ($verifier.ExitCode -ne 0) { throw 'release artifact SHA256SUMS signature verification failed' }
+    } finally {
+        $verifier.Dispose()
+    }
+} finally {
+    $manifestInput.Dispose()
+}
 ```
 
 Only after this signature and its verification pass may the exact signed source
