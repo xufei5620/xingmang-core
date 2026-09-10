@@ -407,4 +407,4 @@ if [[ "$restore_balance_history_rehearsal" == YES ]]; then
   "$balance_history_rehearsal" "$container" "$rehearsal_evidence"
 fi
 
-printf 'restore drill passed: public_tables=%s; source_states=4; database/document/source metadata matched; encrypted document samples verified\n' "$table_count"
+printf 'restore drill passed: public_tables=%s; source_states=%s; database/document/source metadata matched; encrypted document samples verified\n' "$table_count" "${#source_directories[@]}"
