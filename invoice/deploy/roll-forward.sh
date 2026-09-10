@@ -45,6 +45,12 @@ test -d "$root/source" || { echo "release source missing: $root/source" >&2; exi
 test -f "$env_file" || { echo "release env missing: $env_file" >&2; exit 2; }
 tag=$(sed -n 's/^INVOICE_IMAGE_TAG=//p' "$env_file")
 [[ "$tag" =~ ^0\.1\.0-rc[0-9]+$ ]] || { echo "INVOICE_IMAGE_TAG in $env_file is not an rc tag: '$tag'" >&2; exit 2; }
+if [[ ${INVOICE_IMAGE_TAG+x} && "$INVOICE_IMAGE_TAG" != "$tag" ]]; then
+  echo 'exported INVOICE_IMAGE_TAG conflicts with the approved release env' >&2
+  exit 2
+fi
+# Bind every Compose invocation to the same tag that the preflight inspected.
+export INVOICE_IMAGE_TAG=$tag
 for image in invoice-system-api invoice-system-pdf-scanner invoice-system-tools invoice-system-web \
              invoice-source-agent invoice-postgres invoice-clamav invoice-ingest-proxy invoice-keycloak; do
   docker image inspect "$image:$tag" >/dev/null 2>&1 || { echo "image not loaded: $image:$tag" >&2; exit 2; }
