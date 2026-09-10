@@ -37,6 +37,9 @@ if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 & (Join-Path $PSScriptRoot 'test-untracked-git-state.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'configured untracked Git state fixtures failed' }
 
+& (Join-Path $PSScriptRoot 'test-hidden-release-artifacts.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'hidden release artifact fixtures failed' }
+
 & (Join-Path $PSScriptRoot 'test-verify-postgres.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 container-network static fixtures failed' }
 

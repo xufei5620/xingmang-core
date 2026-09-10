@@ -1119,7 +1119,7 @@ function Write-Sha256Sums {
     Assert-NoReleaseReparsePoints -ReleaseDirectory $fullRoot | Out-Null
     $sumPath = Join-Path $fullRoot 'SHA256SUMS'
     $lines = @(
-        Get-ChildItem -LiteralPath $fullRoot -Recurse -File |
+        Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force |
             Where-Object FullName -ne $sumPath |
             ForEach-Object {
                 "$(Get-FileSha256Lower -Path $_.FullName)  $(Get-ReleaseRelativePath -BasePath $fullRoot -Path $_.FullName)"
@@ -1154,7 +1154,7 @@ function Assert-Sha256Sums {
     }
 
     $actualFiles = @(
-        Get-ChildItem -LiteralPath $fullRoot -Recurse -File |
+        Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force |
             Where-Object FullName -ne $sumPath |
             ForEach-Object { Get-ReleaseRelativePath -BasePath $fullRoot -Path $_.FullName }
     )
