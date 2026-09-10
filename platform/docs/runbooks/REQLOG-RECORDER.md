@@ -235,33 +235,37 @@ XM_REQLOG_TOKENMAP_V2: ${XM_REQLOG_TOKENMAP_V2:-/var/lib/xm/reqlog-tokenmap-v2.j
 挂载本身缺席时的行为不变：读侧把"文件缺失/解析失败"与"映射不到"视作
 同一件事，`User` 恒为 `nil`，不影响 `Username` 与其余字段。
 
-### 验收标准第 1 条的服务器验证命令（本次实现未跑，留给能连服务器的会话）
+### tokenmap 形状检查与真实读侧验收（本次未执行服务器验证）
 
-CR-0008 验收标准第 1 条要求"服务器上产出一份 `tokenmap.v2.json` 后，
-抽样核对：前缀命中的记录中至少 99% 能解出非空 `User`"。本次实现在开发
-机上跑不了（没有到生产服务器的连接），需要在完成第 1～5 步升级、记录
-代理至少刷新过一轮之后，在服务器上执行（只读，不改任何数据）：
+CR-0008 原验收标准保持：前缀命中的记录中至少 99% 能解出非空 `User`。
+下面的 jq **只检查 tokenmap 文件形状和条目中 user_id 的填充比例**，
+分母是映射条目数，不是实际请求记录数；即使结果为 100%，读侧仍可能全部
+返回 `User=nil`。因此它不能作为真实读侧 99% 通过证据。
+
+完成第 1～5 步且记录代理刷新后，获批操作员可运行以下只读形状检查。
+真正验收仍须保留目标版本、时间窗口、实际读侧结果及分子/分母的可复核证据；
+采样范围和生产取证由负责人批准，本段不新增采样 API 或改变既有标准。
 
 ```bash
 # 1) 确认 v2 文件已产出且形状合法
 sudo test -s /root/reqlog/tokenmap.v2.json && \
   sudo jq -e '.schema_version == 2 and (.entries | type == "object")' /root/reqlog/tokenmap.v2.json
 
-# 2) 抽样核对：v2 里有多少条目携带非空 user_id（分母是 v2 总条目数，
-#    不是全部 tokenmap 条目数——前缀命中但 v2 未登记的条目本身就不该计入
-#    这条"能否解出非空 User"的比例）
+# 2) 映射条目填充率，仅作形状诊断，不证明请求记录已解析为 User。
 sudo jq '
   (.entries | length) as $total |
   ([.entries[] | select(.user_id != null and .user_id != "")] | length) as $with_id |
-  {total: $total, with_id: $with_id,
+  {evidence_kind: "tokenmap_shape_only", proves_user_resolution: false,
+   total: $total, with_id: $with_id,
    pct: (if $total == 0 then 0 else ($with_id * 100.0 / $total) end)}
 ' /root/reqlog/tokenmap.v2.json
 ```
 
-`pct` 应 `>= 99`。若明显偏低，先核对两条导出 SQL 是否确实带上了新增的
+`pct` 仅表示映射条目填充率，不是验收通过标记；实际读侧证据缺失时必须记为未验证。
+若填充率偏低，核对两条导出 SQL 是否确实带上了新增的
 `u.id` 列（`docker exec postgres psql -c "..."`/`docker exec
 sub2api-mig-postgres sh -c '...'`，SQL 原文见 `tokenmap.go` 的
-`newapiTokenMapQuery`/`sub2apiTokenMapQuery` 常量），而不是先怀疑读侧。
+`newapiTokenMapQuery`/`sub2apiTokenMapQuery` 常量）。形状合格后仍要核对挂载、权限及实际读侧结果。
 
 ## 已知限制（不在本次收编范围内）
 
