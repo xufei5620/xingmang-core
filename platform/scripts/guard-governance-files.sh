@@ -26,6 +26,7 @@ protected_globs=(
   'scripts/check-governance.sh'
   'scripts/check-versions.py'
   'scripts/check-compose.py'
+  'scripts/check-compose-env.py'
   'scripts/guard-governance-files.sh'
   'scripts/ci-local.sh'
   'deploy/git-hooks/'
@@ -57,8 +58,12 @@ changed="$(git diff --name-only "$base_sha" "$HEAD_SHA")" || {
 touched=""
 while IFS= read -r f; do
   [ -n "$f" ] || continue
+  # Git diff emits repository-relative paths even when invoked in platform/.
+  # Keep root workflow protection and the historical standalone layout too.
+  relative="$f"
+  case "$relative" in platform/*) relative="${relative#platform/}" ;; esac
   for g in "${protected_globs[@]}"; do
-    case "$f" in "$g"*) touched="${touched}${f}"$'\n'; break ;; esac
+    case "$relative" in "$g"*) touched="${touched}${f}"$'\n'; break ;; esac
   done
 done <<< "$changed"
 
