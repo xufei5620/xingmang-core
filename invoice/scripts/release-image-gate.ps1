@@ -183,6 +183,7 @@ if ($releaseRoot.TrimEnd([IO.Path]::DirectorySeparatorChar).Equals($allowedRelea
     -not ($releaseRoot + [IO.Path]::DirectorySeparatorChar).StartsWith($allowedReleaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'ReleaseDirectory must be a child of the project release directory'
 }
+Assert-NoReleasePathReparsePoints -Path $releaseRoot | Out-Null
 if (Test-Path -LiteralPath $releaseRoot) {
     if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'ReleaseDirectory cannot be a symlink/reparse point'

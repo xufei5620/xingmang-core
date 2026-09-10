@@ -1069,9 +1069,32 @@ function Resolve-ReleaseArtifactPath {
     return $path
 }
 
+function Assert-NoReleasePathReparsePoints {
+    param([Parameter(Mandatory)][string]$Path)
+
+    # Check ancestors even when the output leaf does not exist yet. A lexical
+    # release/ prefix cannot contain writes if any parent redirects elsewhere.
+    $current = [IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrEmpty($current)) {
+        $item = $null
+        try {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        } catch [Management.Automation.ItemNotFoundException] {
+            # Producers may create missing directories, after all existing
+            # ancestors have been checked. Other lookup failures must propagate.
+        }
+        if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "release directory path contains a symlink/reparse point: $current"
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+    return $true
+}
+
 function Assert-NoReleaseReparsePoints {
     param([Parameter(Mandatory)][string]$ReleaseDirectory)
 
+    Assert-NoReleasePathReparsePoints -Path $ReleaseDirectory | Out-Null
     $rootItem = Get-Item -LiteralPath $ReleaseDirectory -Force
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "release directory contains a symlink/reparse point: $($rootItem.FullName)"
