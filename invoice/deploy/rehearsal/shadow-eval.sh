@@ -499,6 +499,14 @@ if [[ "$verdict" != "$tool_verdict" ]]; then
   exit 1
 fi
 
+# A complete report does not make Docker/tool execution failure successful.
+# Only the documented ready(0)/not_ready(3) process status may agree with the
+# independently recomputed result. Keep execution failure distinct (1).
+if (( tool_exit != recomputed_exit )); then
+  echo "shadow-eval: tool exit $tool_exit disagrees with verdict exit $recomputed_exit" >&2
+  exit 1
+fi
+
 echo "shadow-eval: report written to $report_json"
 echo "shadow-eval: summary written to $summary_txt"
 echo "shadow-eval: verdict=$verdict (independently recomputed; tool process exit was $tool_exit)"
