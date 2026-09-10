@@ -104,7 +104,7 @@ try {
         & $bash.Source -n $shellScript
         if ($LASTEXITCODE -ne 0) { throw "Keycloak permanent administrator shell syntax failed: $shellScript" }
     }
-    & $bash.Source 'deploy/keycloak/verify-permanent-master-admin-maintenance.sh'
+    & (Join-Path $PSScriptRoot 'test-posix-permissions.ps1') -RelativeTestPath 'deploy/keycloak/verify-permanent-master-admin-maintenance.sh' -ProjectRoot $projectRoot
     if ($LASTEXITCODE -ne 0) { throw 'Keycloak maintenance wrapper dynamic negative fixtures failed' }
 } finally { Pop-Location }
 

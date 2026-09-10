@@ -70,7 +70,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'backup resource identity boundary tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
-    bash scripts/test-preserve-source-reader-roles.sh
+    & (Join-Path $PSScriptRoot 'test-posix-permissions-dispatch.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'POSIX permission dispatcher fixtures failed' }
+    & (Join-Path $PSScriptRoot 'test-posix-permissions.ps1') -RelativeTestPath 'scripts/test-preserve-source-reader-roles.sh' -ProjectRoot $projectRoot
     if ($LASTEXITCODE -ne 0) { throw 'source reader role-verifier envelope tests failed' }
 } finally {
     Pop-Location
