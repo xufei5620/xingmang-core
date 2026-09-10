@@ -65,13 +65,13 @@ else
 fi
 
 fixture="$tmp/xingmang-platform"
-mkdir -p "$fixture/deploy/compose"
-cp "$repo_root/deploy/compose/launch.yaml" "$fixture/deploy/compose/launch.yaml"
-printf 'ENVIRONMENT=staging\nPOSTGRES_DB=xingmang\nPOSTGRES_USER=xingmang\nDATABASE_PASSWORD=test-only.invalid\n' > "$fixture/deploy/compose/.env"
+mkdir -p "$fixture/platform/deploy/compose"
+cp "$repo_root/deploy/compose/launch.yaml" "$fixture/platform/deploy/compose/launch.yaml"
+printf 'ENVIRONMENT=staging\nPOSTGRES_DB=xingmang\nPOSTGRES_USER=xingmang\nDATABASE_PASSWORD=test-only.invalid\n' > "$fixture/platform/deploy/compose/.env"
 git -C "$fixture" init -q
 git -C "$fixture" config user.email test@example.invalid
 git -C "$fixture" config user.name deploy-local-test
-git -C "$fixture" add deploy/compose
+git -C "$fixture" add platform/deploy/compose
 git -C "$fixture" commit -qm seed
 git -C "$fixture" branch -M release/v0.1-launch
 git -C "$fixture" remote add origin https://github.com/xufei5620/xingmang-platform.git
@@ -169,8 +169,8 @@ common_env=(
 
 : > "$trace"
 expect_success "test-mode 执行完整本地部署链" env "${common_env[@]}" ENVIRONMENT=production WEB_BIND=0.0.0.0 WEB_PORT=9999 BUILD_VERSION=evil BUILD_COMMIT=evil XM_SUB2API_MODE=real DATABASE_PASSWORD=DO_NOT_LEAK FAKE_REQUIRE_LOCAL_ENV=1 FAKE_REQUIRE_DOCKER_CONFIG=1 FAKE_REQUIRE_NOPROXY=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" \
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" \
   --probe-attempts 1
 
 assert_text "输出含本地部署通过" 'DEPLOY LOCAL PASS' "$tmp/stdout"
@@ -200,20 +200,20 @@ assert_text "烟测带 ops.read" 'ops.read' "$trace"
 
 : > "$trace"
 expect_success "dry-run 不调用 Docker/Git" env "${common_env[@]}" \
-  "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha"
+  "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha"
 if [ ! -s "$trace" ]; then ok "dry-run 无外部命令副作用"; else bad "dry-run 无外部命令副作用"; fi
 
 printf 'dirty\n' > "$fixture/dirty.txt"
 expect_failure "脏工作树拒绝部署" env "${common_env[@]}" \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 rm -f -- "$fixture/dirty.txt"
 
 : > "$trace"
 expect_failure "bootstrap 失败立即停止" env "${common_env[@]}" FAKE_DOCKER_FAIL_BOOTSTRAP=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 if grep -Fq '/healthz' "$trace" || grep -Fq '/api/v1/services' "$trace"; then
   bad "bootstrap 失败未继续探针/烟测"
 else
@@ -222,8 +222,8 @@ fi
 
 : > "$trace"
 expect_failure "runway 阈值 bootstrap 失败立即停止" env "${common_env[@]}" FAKE_DOCKER_FAIL_RUNWAY_BOOTSTRAP=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 if grep -Fq ' up -d platform-api platform-worker web' "$trace" || grep -Fq '/healthz' "$trace"; then
   bad "runway bootstrap 失败仍启动 API/worker 或探针"
 else
@@ -241,8 +241,8 @@ exec \"$real_git\" \"\$@\"
 "
 : > "$trace"
 expect_success "本地精确 SHA 不被不可达镜像阻断" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace" \
-  "$deploy_script" --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 assert_text "镜像不可达被明确标注" 'git-fetch=unavailable local-sha-verified' "$tmp/stderr"
 
 # fetch 成功时必须从 feature checkout 切到 release，并快进到 FETCH_HEAD，不能
@@ -263,20 +263,20 @@ git -C "$remote_seed" push -q origin HEAD:refs/heads/release/v0.1-launch
 remote_sha="$("$real_git" -C "$remote_seed" rev-parse HEAD 2>/dev/null || git -C "$remote_seed" rev-parse HEAD)"
 git -C "$fixture" checkout -qb feature
 : > "$trace"
-expect_success "fetch 后切换 release 并快进到最新远端" env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_SKIP_GIT=0 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" --compose-file "$fixture/deploy/compose/launch.yaml" --probe-attempts 1
+expect_success "fetch 后切换 release 并快进到最新远端" env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_SKIP_GIT=0 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" --compose-file "$fixture/platform/deploy/compose/launch.yaml" --probe-attempts 1
 assert_text "部署目标为 fetch 后的 release SHA" "sha=$remote_sha" "$tmp/stdout"
 fixture_sha="$remote_sha"
 git -C "$fixture" checkout -q release/v0.1-launch
 
 expect_failure "正式模式固定 Web 端口" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace" \
-  "$deploy_script" --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --web-url http://127.0.0.1:9999 \
+  "$deploy_script" --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --web-url http://127.0.0.1:9999 \
   --sha "$fixture_sha" --probe-attempts 1
 
 : > "$trace"
 expect_failure "缺少 staging 演示登记时 smoke 失败" env "${common_env[@]}" FAKE_CURL_NO_SEED=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 if grep -Fq '/api/v1/metrics' "$trace" || grep -Fq '/api/v1/alerts' "$trace"; then
   bad "services seed 缺失未阻止后续 smoke"
 else
@@ -285,14 +285,14 @@ fi
 
 : > "$trace"
 expect_success "worker 运行状态被纳入部署验证" env "${common_env[@]}" \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 assert_text "部署后确认 worker 仍运行" 'ps -q --status running platform-worker' "$trace"
 
 : > "$trace"
 expect_success "已有栈先完成健康与 smoke 基线" env "${common_env[@]}" FAKE_DOCKER_BASELINE=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 build_line="$(grep -n ' build ' "$trace" | head -n 1 | cut -d: -f1)"
 baseline_health_line="$(grep -n '/healthz' "$trace" | head -n 1 | cut -d: -f1)"
 baseline_services_line="$(grep -n '/api/v1/services' "$trace" | head -n 1 | cut -d: -f1)"
@@ -309,8 +309,8 @@ fi
 
 : > "$trace"
 expect_failure "worker 已退出时部署失败" env "${common_env[@]}" FAKE_DOCKER_WORKER_DOWN=1 \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha" --probe-attempts 1
 if grep -Fq '/healthz' "$trace" || grep -Fq '/api/v1/services' "$trace"; then
   bad "worker 退出未阻止后续探针/烟测"
 else
@@ -320,22 +320,22 @@ fi
 assert_not_text "脚本不含 down -v" 'down -v' "$deploy_script"
 assert_not_text "脚本不含 reset --hard" 'reset --hard' "$deploy_script"
 
-expect_failure "override-file 只允许 server-staging/server-prod" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace"   "$deploy_script" --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/launch.yaml"   --sha "$fixture_sha" --probe-attempts 1
+expect_failure "override-file 只允许 server-staging/server-prod" env PATH="$fake_bin:$PATH" DEPLOY_LOCAL_TRACE="$trace"   "$deploy_script" --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env"   --compose-file "$fixture/platform/deploy/compose/launch.yaml" --override-file "$fixture/platform/deploy/compose/launch.yaml"   --sha "$fixture_sha" --probe-attempts 1
 grep -q -- '--override-file' "$deploy_script" && ok "脚本提供 --override-file" || bad "脚本缺少 --override-file"
 
 # 生产闸门：只有 server-prod.yaml 覆盖才允许（且要求）ENVIRONMENT=production。
-cp "$repo_root/deploy/compose/server-prod.yaml" "$fixture/deploy/compose/server-prod.yaml"
+cp "$repo_root/deploy/compose/server-prod.yaml" "$fixture/platform/deploy/compose/server-prod.yaml"
 printf 'ENVIRONMENT=production
 POSTGRES_DB=xingmang
 POSTGRES_USER=xingmang
 DATABASE_PASSWORD=test-only.invalid
 ' > "$tmp/env.prod"
-git -C "$fixture" add deploy/compose/server-prod.yaml
+git -C "$fixture" add platform/deploy/compose/server-prod.yaml
 git -C "$fixture" commit -qm prod-override
 fixture_sha="$(git -C "$fixture" rev-parse HEAD)"
-expect_success "server-prod 覆盖接受 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
-expect_failure "不带 server-prod 覆盖时拒绝 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/deploy/compose/launch.yaml" --sha "$fixture_sha"
-expect_failure "server-prod 覆盖要求 env-file 显式 production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/deploy/compose/.env"   --compose-file "$fixture/deploy/compose/launch.yaml" --override-file "$fixture/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
+expect_success "server-prod 覆盖接受 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/platform/deploy/compose/launch.yaml" --override-file "$fixture/platform/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
+expect_failure "不带 server-prod 覆盖时拒绝 ENVIRONMENT=production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$tmp/env.prod"   --compose-file "$fixture/platform/deploy/compose/launch.yaml" --sha "$fixture_sha"
+expect_failure "server-prod 覆盖要求 env-file 显式 production" env "${common_env[@]}"   "$deploy_script" --test-mode --dry-run --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env"   --compose-file "$fixture/platform/deploy/compose/launch.yaml" --override-file "$fixture/platform/deploy/compose/server-prod.yaml" --sha "$fixture_sha"
 grep -q 'export ENVIRONMENT="$expected_environment"' "$deploy_script" && ok "Compose 插值环境随覆盖文件" || bad "Compose 插值环境仍钉死 staging"
 grep -q 'bootstrap=skipped reason=service-not-in-profile' "$deploy_script" && ok "bootstrap 按 profile 存在性跳过" || bad "bootstrap 未按 profile 跳过"
 
@@ -352,8 +352,8 @@ chmod +x "$under_test"
 : > "$trace"
 expect_success "运行中途脚本文件被改写仍完成本次部署" env "${common_env[@]}" \
   FAKE_DOCKER_CORRUPT_SCRIPT_PATH="$under_test" \
-  "$under_test" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --probe-attempts 1
+  "$under_test" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --probe-attempts 1
 assert_text "改写后仍输出本地部署通过" 'DEPLOY LOCAL PASS' "$tmp/stdout"
 assert_text "改写后仍继续到 up" ' up -d platform-api platform-worker web' "$trace"
 assert_text "改写后仍继续到探针" '/healthz' "$trace"
@@ -386,8 +386,8 @@ git -C "$selfupdate_divergent_seed" push -q origin HEAD:refs/heads/release/v0.1-
 behind_stdout="$tmp/behind.stdout"
 behind_stderr="$tmp/behind.stderr"
 env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" \
-  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/deploy/compose/.env" \
-  --compose-file "$fixture/deploy/compose/launch.yaml" --probe-attempts 1 \
+  "$deploy_script" --test-mode --repo "$fixture" --env-file "$fixture/platform/deploy/compose/.env" \
+  --compose-file "$fixture/platform/deploy/compose/launch.yaml" --probe-attempts 1 \
   >"$behind_stdout" 2>"$behind_stderr"
 behind_rc=$?
 if [ "$behind_rc" -eq 3 ]; then
@@ -410,15 +410,15 @@ fi
 # deploy-local.sh」的独立 checkout，让 --repo 的默认值（脚本自身所在目录）
 # 与被 self-update 改写的目录重合。
 selfupdate_repo="$tmp/selfupdate-checkout"
-mkdir -p "$selfupdate_repo/deploy/compose" "$selfupdate_repo/deploy/scripts"
-cp "$repo_root/deploy/compose/launch.yaml" "$selfupdate_repo/deploy/compose/launch.yaml"
-printf 'ENVIRONMENT=staging\nPOSTGRES_DB=xingmang\nPOSTGRES_USER=xingmang\nDATABASE_PASSWORD=test-only.invalid\n' > "$selfupdate_repo/deploy/compose/.env"
-cp "$deploy_script" "$selfupdate_repo/deploy/scripts/deploy-local.sh"
-chmod +x "$selfupdate_repo/deploy/scripts/deploy-local.sh"
+mkdir -p "$selfupdate_repo/platform/deploy/compose" "$selfupdate_repo/platform/deploy/scripts"
+cp "$repo_root/deploy/compose/launch.yaml" "$selfupdate_repo/platform/deploy/compose/launch.yaml"
+printf 'ENVIRONMENT=staging\nPOSTGRES_DB=xingmang\nPOSTGRES_USER=xingmang\nDATABASE_PASSWORD=test-only.invalid\n' > "$selfupdate_repo/platform/deploy/compose/.env"
+cp "$deploy_script" "$selfupdate_repo/platform/deploy/scripts/deploy-local.sh"
+chmod +x "$selfupdate_repo/platform/deploy/scripts/deploy-local.sh"
 git -C "$selfupdate_repo" init -q
 git -C "$selfupdate_repo" config user.email test@example.invalid
 git -C "$selfupdate_repo" config user.name deploy-local-test
-git -C "$selfupdate_repo" add deploy
+git -C "$selfupdate_repo" add platform/deploy
 git -C "$selfupdate_repo" commit -qm seed-v1
 git -C "$selfupdate_repo" branch -M release/v0.1-launch
 
@@ -432,19 +432,19 @@ selfupdate_v2_seed="$tmp/selfupdate-v2-seed"
 git clone -q --branch release/v0.1-launch "$selfupdate_remote" "$selfupdate_v2_seed"
 git -C "$selfupdate_v2_seed" config user.email deploy-local-test@example.invalid
 git -C "$selfupdate_v2_seed" config user.name deploy-local-test
-sed -i '/^main() {$/a echo SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/deploy/scripts/deploy-local.sh"
-if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/deploy/scripts/deploy-local.sh"; then
+sed -i '/^main() {$/a echo SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/platform/deploy/scripts/deploy-local.sh"
+if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_v2_seed/platform/deploy/scripts/deploy-local.sh"; then
   ok "re-exec 测试的 v2 脚本已注入可观测标记"
 else
   bad "re-exec 测试的 v2 脚本已注入可观测标记"
 fi
-git -C "$selfupdate_v2_seed" add deploy/scripts/deploy-local.sh
+git -C "$selfupdate_v2_seed" add platform/deploy/scripts/deploy-local.sh
 git -C "$selfupdate_v2_seed" commit -qm v2-marker
 git -C "$selfupdate_v2_seed" push -q origin HEAD:refs/heads/release/v0.1-launch
 
 : > "$trace"
 expect_success "self-update 成功后 re-exec 到刚更新的脚本" env XM_DEPLOY_LOCAL_TEST_MODE=1 XM_DEPLOY_LOCAL_DOCKER_BIN="$fake_bin/docker" XM_DEPLOY_LOCAL_CURL_BIN="$fake_bin/curl" DEPLOY_LOCAL_TRACE="$trace" \
-  "$selfupdate_repo/deploy/scripts/deploy-local.sh" --test-mode --probe-attempts 1
+  "$selfupdate_repo/platform/deploy/scripts/deploy-local.sh" --test-mode --probe-attempts 1
 assert_text "输出记录 self-update 已应用" 'self-update=applied' "$tmp/stdout"
 assert_text "re-exec 后的新版本脚本真的执行了" 'SELFUPDATE-TEST-V2-MARKER' "$tmp/stdout"
 assert_text "re-exec 后仍完成部署" 'DEPLOY LOCAL PASS' "$tmp/stdout"
@@ -454,7 +454,7 @@ if [ "$build_calls" = "1" ]; then
 else
   bad "re-exec 未导致部署步骤重复执行（build 出现 ${build_calls} 次）"
 fi
-if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_repo/deploy/scripts/deploy-local.sh"; then
+if grep -Fq 'SELFUPDATE-TEST-V2-MARKER' "$selfupdate_repo/platform/deploy/scripts/deploy-local.sh"; then
   ok "checkout 磁盘上的脚本已快进到 v2"
 else
   bad "checkout 磁盘上的脚本已快进到 v2"

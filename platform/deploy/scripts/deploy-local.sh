@@ -182,7 +182,9 @@ done < <(compgen -v | grep -E '^(XM_|POSTGRES_|DATABASE_|BUILD_|WEB_|COMPOSE_|DO
 export GIT_TERMINAL_PROMPT=0
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-default_repo="$(cd -- "$script_dir/../.." && pwd -P)"
+# The checkout may contain only the platform sparse subtree. Git owns
+# the checkout root; Compose and lifecycle assets belong to platform.
+default_repo="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || true)"
 self_path="$script_dir/$(basename -- "${BASH_SOURCE[0]}")"
 EXIT_CHECKOUT_BEHIND=3
 
@@ -201,9 +203,9 @@ usage() {
   --service NAME            追加一个构建服务（可重复）
   --probe-attempts N        每个探针最多重试次数（默认 12，范围 1..30）
   --repo PATH               本地 Git checkout（默认脚本所在仓库）
-  --env-file PATH           Compose .env（默认 <repo>/deploy/compose/.env）
-  --compose-file PATH       Compose 定义（默认 <repo>/deploy/compose/launch.yaml）
-  --override-file PATH      叠加的环境覆盖文件（仅允许仓库内 server-staging.yaml / server-prod.yaml）
+  --env-file PATH           Compose .env（默认 <repo>/platform/deploy/compose/.env）
+  --compose-file PATH       Compose 定义（默认 <repo>/platform/deploy/compose/launch.yaml）
+  --override-file PATH      叠加的环境覆盖文件（仅允许 <repo>/platform/deploy/compose 下 server-staging.yaml / server-prod.yaml）
   --web-url URL             Web loopback 地址（默认 http://127.0.0.1:8088）
   --no-fetch                仅允许显式 test-mode，用于离线契约测试
   --test-mode               仅允许 XM_DEPLOY_LOCAL_TEST_MODE=1
@@ -411,9 +413,10 @@ repo_path="$(normalize_path "$repo_path")"
 validate_abs_path repo "$repo_path"
 [ -d "$repo_path" ] && [ ! -L "$repo_path" ] || die "repo 不存在或是符号链接"
 repo_path="$(cd -- "$repo_path" && pwd -P)"
+project_path="$repo_path/platform"
 
-[ -n "$compose_file" ] || compose_file="$repo_path/deploy/compose/launch.yaml"
-[ -n "$env_file" ] || env_file="$repo_path/deploy/compose/.env"
+[ -n "$compose_file" ] || compose_file="$project_path/deploy/compose/launch.yaml"
+[ -n "$env_file" ] || env_file="$project_path/deploy/compose/.env"
 compose_file="$(normalize_path "$compose_file")"
 env_file="$(normalize_path "$env_file")"
 validate_abs_path compose-file "$compose_file"
@@ -442,8 +445,8 @@ if [ -n "$override_file" ] && [ "$(basename -- "$override_file")" = "server-prod
   expected_environment=production
 fi
 if [ "$test_mode" -eq 0 ]; then
-  [ "$compose_file" = "$repo_path/deploy/compose/launch.yaml" ] || die "compose-file 必须使用仓库内 launch.yaml"
-  [ "$env_file" = "$repo_path/deploy/compose/.env" ] || die "env-file 必须使用仓库内 .env"
+  [ "$compose_file" = "$project_path/deploy/compose/launch.yaml" ] || die "compose-file 必须使用仓库内 launch.yaml"
+  [ "$env_file" = "$project_path/deploy/compose/.env" ] || die "env-file 必须使用仓库内 .env"
 fi
 
 # Compose .env 只能提供应用配置，不能偷偷改变 Docker/Compose/Git 控制面。
@@ -572,7 +575,7 @@ target_sha="$current_sha"
 # 别的 checkout 时，本进程当前执行的字节从未被这次 git 操作动过，继续用
 # 已解析在内存里的逻辑即可。用 XM_DEPLOY_LOCAL_REEXEC 保证最多 re-exec 一次。
 if [ "$skip_git" -eq 0 ] && [ "$target_sha" != "$pre_fetch_sha" ]; then
-  self_in_repo="$repo_path/deploy/scripts/$(basename -- "$self_path")"
+  self_in_repo="$project_path/deploy/scripts/$(basename -- "$self_path")"
   if [ "$self_in_repo" = "$self_path" ]; then
     if [ "${XM_DEPLOY_LOCAL_REEXEC:-0}" != "1" ]; then
       echo "self-update=applied from=$pre_fetch_sha to=$target_sha action=reexec"
@@ -796,7 +799,7 @@ if [ "$expected_environment" = "production" ] && [ "$cpa_mode_value" = "file" ];
     || die "$phase: cannot extract the commit-bound snapshot binary"
   chmod 0700 "$snapshot_binary" || die "$phase: cannot protect extracted snapshot binary"
   snapshot_install_log="$tmp_dir/cpa-snapshot-install.log"
-  if ! bash "$repo_path/deploy/scripts/install-cpa-snapshot.sh" "$snapshot_binary" "$target_sha" >"$snapshot_install_log" 2>&1; then
+  if ! bash "$project_path/deploy/scripts/install-cpa-snapshot.sh" "$snapshot_binary" "$target_sha" >"$snapshot_install_log" 2>&1; then
     die "$phase: initial snapshot/install failed; API/worker were not started"
   fi
   snapshot_summary="$(grep -F 'CPA SNAPSHOT INSTALL PASS:' "$snapshot_install_log" | tail -n 1 || true)"
