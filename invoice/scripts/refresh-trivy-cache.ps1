@@ -277,11 +277,11 @@ try {
                 Write-Host "    reusing a previously downloaded, digest-verified blob: $blobPath"
             } else {
                 Invoke-TrivyCacheRangedDownload -Url $blobUrl -Size $layer.Size -PartCount $ParallelDownloads `
-                    -BearerToken $token -ProxyUrl $ProxyUrl -PartsDirectory $partsDirectory -DestinationPath $blobPath | Out-Null
+                    -BearerToken $token -ProxyUrl $ProxyUrl -PartsDirectory $partsDirectory -DestinationPath $blobPath -ExpectedDigest $layer.Digest | Out-Null
                 $actualHex = Get-Sha256HexOfFile -Path $blobPath
                 Assert-OciDigestMatches -ActualHex $actualHex -ExpectedDigest $layer.Digest -Description "$($component.Name) blob" | Out-Null
                 Write-Host "    digest verified: $($layer.Digest)"
-                Remove-Item -LiteralPath $partsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+                # Keep digest-bound and rejected part sets as resumable/audit evidence.
             }
 
             $extractDirectory = Join-Path $componentWorkDirectory 'extracted'

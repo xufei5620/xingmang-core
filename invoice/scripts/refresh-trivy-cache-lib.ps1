@@ -338,8 +338,22 @@ function Invoke-TrivyCacheRangedDownload {
         [Parameter(Mandatory)][string]$BearerToken,
         [AllowEmptyString()][string]$ProxyUrl = '',
         [Parameter(Mandatory)][string]$PartsDirectory,
-        [Parameter(Mandatory)][string]$DestinationPath
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [string]$ExpectedDigest = ''
     )
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDigest)) {
+        Assert-SafeOciDigestForShell -Digest $ExpectedDigest
+        # A completed range is reusable only for this blob and range plan.
+        # Keep legacy and rejected attempts intact for diagnosis.
+        $identity = "$Url`n$ExpectedDigest`n$Size`n$PartCount"
+        $identityHex = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+        $identityRoot = Join-Path $PartsDirectory $identityHex
+        $attempt = 0
+        do {
+            $PartsDirectory = Join-Path $identityRoot "attempt-$attempt"
+            $attempt++
+        } while (Test-Path -LiteralPath (Join-Path $PartsDirectory 'digest-rejected.txt'))
+    }
     New-Item -ItemType Directory -Path $PartsDirectory -Force | Out-Null
     # @(...) at every call site here is deliberate, not decorative: a
     # PowerShell function's return value collapses from an array to a bare
@@ -373,8 +387,8 @@ function Invoke-TrivyCacheRangedDownload {
         }
     }
 
-    if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Force }
-    $destinationStream = [IO.File]::Create($DestinationPath)
+    $assembledPath = Join-Path $PartsDirectory 'assembled.tar.gz'
+    $destinationStream = [IO.File]::Create($assembledPath)
     try {
         foreach ($partPath in $partPaths) {
             $partStream = [IO.File]::OpenRead($partPath)
@@ -383,6 +397,20 @@ function Invoke-TrivyCacheRangedDownload {
     } finally {
         $destinationStream.Dispose()
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDigest)) {
+        try {
+            Assert-OciDigestMatches -ActualHex (Get-Sha256HexOfFile -Path $assembledPath) -ExpectedDigest $ExpectedDigest -Description 'ranged download' | Out-Null
+        } catch {
+            [IO.File]::WriteAllText((Join-Path $PartsDirectory 'digest-rejected.txt'), "Digest verification failed; retained attempt is excluded from future resumes.`n")
+            throw
+        }
+    }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        $existingHex = Get-Sha256HexOfFile -Path $DestinationPath
+        if ($existingHex -ceq (Get-Sha256HexOfFile -Path $assembledPath)) { return $DestinationPath }
+        Move-Item -LiteralPath $DestinationPath -Destination "$DestinationPath.retained-$([Guid]::NewGuid().ToString('N'))"
+    }
+    Copy-Item -LiteralPath $assembledPath -Destination $DestinationPath
     return $DestinationPath
 }
 
