@@ -203,29 +203,29 @@ if (-not $gateSource.Contains('Get-ReleaseGateBlockedExitCode', [StringCompariso
     throw 'release image gate does not reserve exit 42 for the sole pending-canary state'
 }
 
-foreach ($validStrictDirectory in @('release\0.1.0-rc110-exact1', 'release\0.1.0-rc110-exact99')) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-rc110' | Out-Null
+foreach ($validStrictDirectory in @('release\0.1.0-mono-rehearsal1-exact1', 'release\0.1.0-mono-rehearsal1-exact99')) {
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $validStrictDirectory -ExpectedReleaseName '0.1.0-mono-rehearsal1' | Out-Null
 }
 foreach ($invalidStrictDirectory in @(
     'release\0.1.0-rc52-exact1',
-    'release\0.1.0-RC110-exact1',
-    'release\0.1.0-rc110-exact0',
-    'release\0.1.0-rc110-exact100',
+    'release\0.1.0-MONO-REHEARSAL1-exact1',
+    'release\0.1.0-mono-rehearsal1-exact0',
+    'release\0.1.0-mono-rehearsal1-exact100',
     'release\rc100-exact1'
 )) {
     Assert-ThrowsLike `
-        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-rc110' | Out-Null } `
+        -Action { Assert-StrictReleaseDirectoryName -ReleaseDirectory $invalidStrictDirectory -ExpectedReleaseName '0.1.0-mono-rehearsal1' | Out-Null } `
         -ExpectedMessagePattern 'strict transfer release directory' `
         -FailureMessage "strict transfer accepted invalid release directory $invalidStrictDirectory"
 }
 
-$validStrictManifestJson = '{"releaseName":"0.1.0-rc110","images":[{"name":"api","reference":"invoice-system-api:0.1.0-rc110"}]}'
+$validStrictManifestJson = '{"releaseName":"0.1.0-mono-rehearsal1","images":[{"name":"api","reference":"invoice-system-api:0.1.0-mono-rehearsal1"}]}'
 Assert-JsonHasNoDuplicateProperties -JsonText $validStrictManifestJson | Out-Null
 foreach ($duplicateJsonFixture in @(
-    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","releaseName":"0.1.0-rc110"}' },
-    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","ReleaseName":"0.1.0-rc110"}' },
-    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","reference":"invoice-system-api:0.1.0-rc110"}]}' },
-    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","Reference":"invoice-system-api:0.1.0-rc110"}]}' }
+    [pscustomobject]@{ Label = 'same-case top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","releaseName":"0.1.0-mono-rehearsal1"}' },
+    [pscustomobject]@{ Label = 'case-drifted top-level releaseName'; Json = '{"releaseName":"0.1.0-rc52","ReleaseName":"0.1.0-mono-rehearsal1"}' },
+    [pscustomobject]@{ Label = 'same-case nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","reference":"invoice-system-api:0.1.0-mono-rehearsal1"}]}' },
+    [pscustomobject]@{ Label = 'case-drifted nested image reference'; Json = '{"images":[{"reference":"invoice-system-api:0.1.0-rc52","Reference":"invoice-system-api:0.1.0-mono-rehearsal1"}]}' }
 )) {
     Assert-ThrowsLike `
         -Action { Assert-JsonHasNoDuplicateProperties -JsonText $duplicateJsonFixture.Json | Out-Null } `
@@ -1040,7 +1040,7 @@ if ($artifactVerifierSource -notmatch '\[switch\]\$RequireTransferReady' -or
     $artifactVerifierSource -notmatch '(?ms)if \(\$RequireTransferReady\) \{\s*Assert-TransferReadyManifest -Manifest \$manifest -ExpectedGitHead \$signedTagCommit\s*\| Out-Null\s*\}') {
     throw 'independent artifact verifier is missing the strict signed-tag transfer-ready source contract'
 }
-if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-rc110'", [StringComparison]::Ordinal)) {
+if (-not $artifactVerifierSource.Contains("Assert-StrictReleaseDirectoryName -ReleaseDirectory `$releaseRoot -ExpectedReleaseName '0.1.0-mono-rehearsal1'", [StringComparison]::Ordinal)) {
     throw 'independent artifact verifier does not bind strict transfer to an RC100 exactN directory leaf'
 }
 Test-Task5ARequirement -Label 'artifact verifier rejects raw duplicate JSON properties before object conversion' -Action {
@@ -1072,8 +1072,8 @@ Test-Task5ARequirement -Label 'fully qualified signed tag ref is used for every 
     }
 }
 Test-Task5ARequirement -Label 'exact RC100 tag name maps to the fully qualified tag ref' -Action {
-    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'v0.1.0-rc110-signed'
-    if ($resolvedTagRef -cne 'refs/tags/v0.1.0-rc110-signed') {
+    $resolvedTagRef = Get-StrictSignedReleaseTagRef -SignedReleaseTag 'rehearsal/mono-20260910-signed'
+    if ($resolvedTagRef -cne 'refs/tags/rehearsal/mono-20260910-signed') {
         throw "unexpected resolved tag ref: $resolvedTagRef"
     }
 }
@@ -1082,9 +1082,9 @@ foreach ($invalidTagName in @(
     'v0.1.0-rc50-signed',
     'v0.1.0-rc51-signed',
     'v0.1.0-rc52-signed',
-    'v0.1.0-rc110-signed-sibling',
-    'refs/heads/v0.1.0-rc110-signed',
-    'refs/tags/v0.1.0-rc110-signed'
+    'rehearsal/mono-20260910-signed-sibling',
+    'refs/heads/rehearsal/mono-20260910-signed',
+    'refs/tags/rehearsal/mono-20260910-signed'
 )) {
     Test-Task5AMutationRejected -Label "non-exact signed tag input $invalidTagName" -Action {
         Get-StrictSignedReleaseTagRef -SignedReleaseTag $invalidTagName | Out-Null
@@ -1093,7 +1093,7 @@ foreach ($invalidTagName in @(
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
 Test-Task5ARequirement -Label 'production runbook invokes the exact RC100 strict transfer-ready verifier parameters' -Action {
     if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
-        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc110-signed', [StringComparison]::Ordinal) -or
+        -not $productionRunbook.Contains('-SignedReleaseTag rehearsal/mono-20260910-signed', [StringComparison]::Ordinal) -or
         $productionRunbook -match '\bRC(?:32|38)\b') {
         throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
     }
@@ -1550,18 +1550,18 @@ try {
 }
 
 $transferReadyManifest = [pscustomobject]@{
-    releaseName = '0.1.0-rc110'
+    releaseName = '0.1.0-mono-rehearsal1'
     source = [pscustomobject]@{ gitDirty = $false; gitHead = '0123456789abcdef0123456789abcdef01234567' }
     images = @(
-        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-rc110' },
-        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-rc110' }
+        [pscustomobject]@{ name = 'api'; reference = 'invoice-system-api:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'pdf-scanner'; reference = 'invoice-system-pdf-scanner:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'tools'; reference = 'invoice-system-tools:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'web'; reference = 'invoice-system-web:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'source-agent'; reference = 'invoice-source-agent:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'postgres-runtime'; reference = 'invoice-postgres:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'clamav-runtime'; reference = 'invoice-clamav:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'ingest-proxy'; reference = 'invoice-ingest-proxy:0.1.0-mono-rehearsal1' },
+        [pscustomobject]@{ name = 'keycloak'; reference = 'invoice-keycloak:0.1.0-mono-rehearsal1' }
     )
     decisions = [pscustomobject]@{
         applicationImageGate = 'passed'
@@ -1591,17 +1591,17 @@ Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.sou
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.source.gitHead = '1123456789abcdef0123456789abcdef01234567' } -ExpectedMessagePattern 'signed tag commit' -FailureMessage 'strict transfer mode accepted a source commit different from the signed tag'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.applicationImageGate = 'failed' } -ExpectedMessagePattern 'applicationImageGate=passed' -FailureMessage 'strict transfer mode accepted a failed application image gate'
 Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.decisions.productionLaunch = 'approved' } -ExpectedMessagePattern 'productionLaunch=blocked' -FailureMessage 'strict transfer mode accepted a non-blocked production launch decision'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc110' -FailureMessage 'strict transfer mode accepted the failed RC52 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc110-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc110' -FailureMessage 'strict transfer mode accepted a sibling RC100 release name'
-Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-RC110' } -ExpectedMessagePattern 'releaseName=0\.1\.0-rc110' -FailureMessage 'strict transfer mode accepted a case-drifted RC100 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-rc52' } -ExpectedMessagePattern 'releaseName=0\.1\.0-mono-rehearsal1' -FailureMessage 'strict transfer mode accepted the failed RC52 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-mono-rehearsal1-sibling' } -ExpectedMessagePattern 'releaseName=0\.1\.0-mono-rehearsal1' -FailureMessage 'strict transfer mode accepted a sibling RC100 release name'
+Assert-TransferManifestMutationRejected -Mutate { param($manifest) $manifest.releaseName = '0.1.0-MONO-REHEARSAL1' } -ExpectedMessagePattern 'releaseName=0\.1\.0-mono-rehearsal1' -FailureMessage 'strict transfer mode accepted a case-drifted RC100 release name'
 foreach ($invalidReleaseNameFixture in @(
     [pscustomobject]@{ Label = 'null'; Value = $null },
     [pscustomobject]@{ Label = 'Boolean'; Value = $false },
-    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-rc110') }
+    [pscustomobject]@{ Label = 'singleton array'; Value = [string[]]@('0.1.0-mono-rehearsal1') }
 )) {
     Assert-TransferManifestMutationRejected `
         -Mutate { param($manifest) $manifest.releaseName = $invalidReleaseNameFixture.Value } `
-        -ExpectedMessagePattern 'releaseName=0\.1\.0-rc110' `
+        -ExpectedMessagePattern 'releaseName=0\.1\.0-mono-rehearsal1' `
         -FailureMessage "strict transfer mode accepted $($invalidReleaseNameFixture.Label) releaseName"
 }
 
@@ -1609,7 +1609,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.PSObject.Properties.Remove('releaseName')
-        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-rc110'
+        $manifest | Add-Member -NotePropertyName 'ReleaseName' -NotePropertyValue '0.1.0-mono-rehearsal1'
     } `
     -ExpectedMessagePattern 'exact property releaseName' `
     -FailureMessage 'strict transfer mode accepted case-drifted ReleaseName'
@@ -1625,7 +1625,7 @@ Assert-TransferManifestMutationRejected `
     -Mutate {
         param($manifest)
         $manifest.images[0].PSObject.Properties.Remove('reference')
-        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-rc110'
+        $manifest.images[0] | Add-Member -NotePropertyName 'Reference' -NotePropertyValue 'invoice-system-api:0.1.0-mono-rehearsal1'
     } `
     -ExpectedMessagePattern 'exact property reference' `
     -FailureMessage 'strict transfer mode accepted case-drifted image Reference'
@@ -1637,7 +1637,7 @@ $missingReleaseNameManifest = $transferReadyManifest | ConvertTo-Json -Depth 10 
 $missingReleaseNameManifest.PSObject.Properties.Remove('releaseName')
 Assert-ThrowsLike `
     -Action { Assert-TransferReadyManifest -Manifest $missingReleaseNameManifest -ExpectedGitHead '0123456789abcdef0123456789abcdef01234567' | Out-Null } `
-    -ExpectedMessagePattern 'releaseName=0\.1\.0-rc110' `
+    -ExpectedMessagePattern 'releaseName=0\.1\.0-mono-rehearsal1' `
     -FailureMessage 'strict transfer mode accepted a missing releaseName'
 
 foreach ($inventoryMutation in @(
@@ -1659,7 +1659,7 @@ foreach ($inventoryMutation in @(
     [pscustomobject]@{
         Label = 'non-array images value'
         Expected = 'exact RC100 image inventory'
-        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-rc110' }
+        Mutate = { param($manifest) $manifest.images = 'invoice-system-api:0.1.0-mono-rehearsal1' }
     },
     [pscustomobject]@{
         Label = 'eight-image inventory'
@@ -1673,7 +1673,7 @@ foreach ($inventoryMutation in @(
             param($manifest)
             $manifest.images = @($manifest.images) + [pscustomobject]@{
                 name = 'unexpected'
-                reference = 'invoice-unexpected:0.1.0-rc110'
+                reference = 'invoice-unexpected:0.1.0-mono-rehearsal1'
             }
         }
     },
@@ -1700,7 +1700,7 @@ foreach ($inventoryMutation in @(
     [pscustomobject]@{
         Label = 'case-drifted image reference value'
         Expected = 'exact RC100 image inventory'
-        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-rc110' }
+        Mutate = { param($manifest) $manifest.images[0].reference = 'Invoice-system-api:0.1.0-mono-rehearsal1' }
     }
 )) {
     Assert-TransferManifestMutationRejected `
@@ -1710,7 +1710,7 @@ foreach ($inventoryMutation in @(
 }
 
 foreach ($imageStringField in @('name', 'reference')) {
-    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-rc110' }
+    $validSingletonValue = if ($imageStringField -ceq 'name') { 'api' } else { 'invoice-system-api:0.1.0-mono-rehearsal1' }
     foreach ($invalidImageStringFixture in @(
         [pscustomobject]@{ Label = 'null'; Value = $null },
         [pscustomobject]@{ Label = 'Boolean'; Value = $false },
@@ -1724,12 +1724,12 @@ foreach ($imageStringField in @('name', 'reference')) {
 }
 
 foreach ($expectedImage in @($transferReadyManifest.images)) {
-    foreach ($wrongTag in @('0.1.0-rc52', '0.1.0-rc110-sibling')) {
+    foreach ($wrongTag in @('0.1.0-rc52', '0.1.0-mono-rehearsal1-sibling')) {
         Assert-TransferManifestMutationRejected `
             -Mutate {
                 param($manifest)
                 $record = @($manifest.images | Where-Object { [string]$_.name -ceq [string]$expectedImage.name })
-                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-rc110$', ":$wrongTag"
+                $record[0].reference = ([string]$record[0].reference) -replace ':0\.1\.0-mono-rehearsal1$', ":$wrongTag"
             } `
             -ExpectedMessagePattern 'exact RC100 image inventory' `
             -FailureMessage "strict transfer mode accepted $($expectedImage.name) image tag $wrongTag"

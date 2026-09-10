@@ -53,7 +53,7 @@ if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttrib
     throw 'release artifact directory cannot be a symlink/reparse point'
 }
 if ($RequireTransferReady) {
-    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-rc110' | Out-Null
+    Assert-StrictReleaseDirectoryName -ReleaseDirectory $releaseRoot -ExpectedReleaseName '0.1.0-mono-rehearsal1' | Out-Null
 }
 
 Assert-Sha256Sums -ReleaseDirectory $releaseRoot | Out-Null
