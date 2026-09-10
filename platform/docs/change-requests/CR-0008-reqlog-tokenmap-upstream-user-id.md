@@ -1,5 +1,14 @@
 # CR-0008：reqlog tokenmap 导出补选上游用户 ID（稳定 UserRef 的数据前提）
 
+## 历史状态摘要（本地记录核对截至 2026-09-10T20:11:23Z）
+
+历史实现状态：[实现交接](../handoffs/slices/XM-REQLOG-TOKENMAP-V2.md)及[验收日志](../handoffs/ACCEPTANCE-LOG.md)记录实现 `6eba823` 已合入，并先后记有 2026-09-03 tokenmap 的 `3593/3593` 条非空 ID、后补索引匹配 `6116/6116` 的统计。原文 `implemented-pending-verification` 与 `implemented-verified` 是不同阶段的旧摘要；这些文件形状/索引匹配统计不能替代真实读侧 `RequestLogSummary.User` 的 ≥99% 验收。按[现有运行手册的证据边界](../runbooks/REQLOG-RECORDER.md)，本次未找到足以证明该运行时指标的本地原始验收产物，该项尚未核实；不据旧标签推断当前生产已通过。
+
+本摘要仅核对本地记录；当前生产状态未重新核实，不构成本次执行或上线授权。
+
+## 原始历史记录（原文保留）
+以下全部原文（包括状态、确认、执行顺序、回滚命令与旧工作树路径）均为当时的历史快照；各条记录按原日期理解，不作为当前状态或本次执行指令。
+
 > 状态：**implemented-verified（2026-09-03，tokenmap.v2.json 3593/3593 解析出 user_id）**；（2026-09-03，分支
 > `ai/claude/XM-REQLOG-TOKENMAP-V2`）。优先级 P2（解除 platform-user-read-v2 设计文档 Task 8 的数据
 > 前提；不阻塞发布）。
