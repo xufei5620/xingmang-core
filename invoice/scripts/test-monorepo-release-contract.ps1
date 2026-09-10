@@ -173,7 +173,15 @@ try {
             $notRepository = Join-Path $fixture.Workspace 'not-a-repository'
             $null = New-Item -ItemType Directory -Path $notRepository
             $env:INVOICE_UPSTREAM_ROOT = $null
-            Assert-ContractThrows -Action { Resolve-InvoiceUpstreamRoot -ProjectRoot $notRepository } -Pattern '(?i)git.*(exit|failed|resolve|common)'
+            $previousGitCeiling = $env:GIT_CEILING_DIRECTORIES
+            try {
+                # The default fixture lives inside the real monorepo. Stop Git
+                # discovery at this fixture instead of finding that parent repo.
+                $env:GIT_CEILING_DIRECTORIES = $fixture.Workspace
+                Assert-ContractThrows -Action { Resolve-InvoiceUpstreamRoot -ProjectRoot $notRepository } -Pattern '(?i)git.*(exit|failed|resolve|common)'
+            } finally {
+                $env:GIT_CEILING_DIRECTORIES = $previousGitCeiling
+            }
         }
     }
 
