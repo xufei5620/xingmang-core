@@ -153,7 +153,11 @@ env >> '$tmp/notify.env'
     XM_DEPLOY_TEST_MODE=1 SECRET_SENTINEL=must-not-cross "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" \
       --audit-log "$tmp/notify.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --notify-hook "$notify" --reason notify
   assert_text "通知 payload 含环境" 'environment=staging' "$tmp/notify.payload"
-  assert_not_text "通知环境不含调用者秘密" 'SECRET_SENTINEL=must-not-cross' "$tmp/notify.payload"
+  if [ -s "$tmp/notify.env" ] && ! grep -Fq 'SECRET_SENTINEL=must-not-cross' "$tmp/notify.env"; then
+    ok "通知环境已捕获且不含调用者秘密"
+  else
+    bad "通知环境已捕获且不含调用者秘密"
+  fi
 fi
 
 staging_yaml="$repo_root/deploy/compose/server-staging.yaml"
