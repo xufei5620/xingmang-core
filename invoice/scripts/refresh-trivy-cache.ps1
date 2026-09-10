@@ -38,21 +38,21 @@ param(
     # as the "throwaway container" that copies extracted files into the cache
     # volume, rather than introducing and having to track a second pinned
     # utility image just for this.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$SeedImage = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
 
     # Must match scripts/release-image-gate.ps1's own $trivyImage pin exactly
     # -- the mandatory post-seed self-check below runs this same Trivy
     # build against a staging volume, so it needs to be the same version
     # the real release gate will actually use.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$TrivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969',
 
     # A small image already present in the local Docker image store, scanned
     # by the mandatory post-seed self-check below. Defaults to -SeedImage
     # itself (already required, already pinned by digest, already present)
     # rather than introduce a second pinned-image dependency just for this.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$SelfCheckImageReference = $SeedImage,
 
     [AllowEmptyString()]
