@@ -24,7 +24,32 @@
 > GET/HEAD、拒重定向、按 allowlist 锁主机——机械上碰不到任何写端点(四道只读闸)。
 > 但凭据本身的权限平台管不了,**建议后续找 Sub2API 加只读投影**。
 
-## 方式 A:你在服务器自配(推荐,key 不经过 AI)
+## 方式 A：后台正式切换（推荐，凭据不经过 AI）
+
+在目标环境的「设置 → 凭据管理」登记引用，再在对应平台的接入模式卡中设置
+real、endpoint、target_allowlist 和 credential_ref，保存时走既有
+`connector.config.set@1` Action。环境与操作者来自已登录身份，不写进参数。
+下面是该 Action 的参数形状示例，实例域名须替换为已批准的真实目标；不是直接写库命令：
+
+```json
+{
+  "platform": "sub2api",
+  "mode": "real",
+  "endpoint": "https://replace.invalid",
+  "target_allowlist": "replace.invalid",
+  "credential_ref": "secret://sub2api-prod/read-token"
+}
+```
+
+这会更新 `core.connector_config`；worker 在后续轮次读取生效配置，不需为单纯的
+后台模式修改重启。已存在的数据库行优先于 env 缺省，改 `.env` 不能覆盖它。
+按此正式路径验收时，生效日志应为 real/database，版本应对应刚保存的配置。
+
+### legacy env 缺省（仅没有该平台/环境数据库行时）
+
+下面只为已有 env-only 环境保留：它不会创建数据库配置行，也不等于后台登记。
+只有确认没有数据库行时才按 env 缺省生效，验收日志此时应是 real/env，不能要求
+config_source=database。生产停止采集使用同步开关，不能用 fake 冒充真实数据。
 
 编辑 `deploy/compose/.env`(或你的部署环境变量),加:
 
@@ -54,7 +79,7 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml \
 
 ## 验证(切换后 5 分钟内)
 
-1. **worker 日志**看**本轮生效模式**,不是启动缺省:
+1. **worker 日志**看**本轮生效模式**,不是启动缺省。以下 database 预期适用于正式后台路径；legacy 无数据库行时两处来源均应为 env：
    ```bash
    docker logs --since 6m xingmang-launch-platform-worker-1 \
      | grep -E 'connector_config_applied|"job_kind":"sub2api_sync"' | tail -3
@@ -91,4 +116,8 @@ docker compose -p xingmang-launch -f deploy/compose/launch.yaml \
 
 ## 回退
 
-把 `XM_SUB2API_MODE` 改回 `fake` 重启 worker 即可,历史样本保留。
+非生产环境需要回到 fake 时，在同一后台接入卡经 `connector.config.set@1`
+把 mode 改为 fake；仅在没有数据库行的 legacy 环境，才由 `XM_SUB2API_MODE=fake`
+缺省生效。生产停止采集应由获批操作员设置 `XM_SUB2API_SYNC_ENABLED=false`
+并沿用前文完整生产部署参数重建；保留历史数据。仅改 env MODE 不能覆盖已存在的
+real 数据库行，fake 也不是生产回退方式。
