@@ -3,9 +3,7 @@
   "version": "1",
   "risk_level": "L1",
   "permission": "sms.purchase",
-  "principal_types": [
-    "HUMAN"
-  ],
+  "principal_types": ["HUMAN", "SERVICE"],
   "environments": [
     "development",
     "staging",
@@ -39,5 +37,5 @@
       "required": false
     }
   },
-  "notes": "XM-SMS2（ADR-022 决策 3）「要号」：服务 + 国家 + 数量（+ 可选指定供应商）→ 按路由规则选供应商 → 买 → 落资源。**花真钱且不可退**，与 sms.number.purchase 同一档权限（sms.purchase，不给 admin）；区别是这里默认不选供应商，由 sms.routing_rule 选，人只在想指定时才选。回落：第一家**明确失败**（上游明确拒绝、关着、没验证、翻译不了、超单价上限）就试规则里的下一家，**每家最多试一次**；结果 unknown 就停——钱可能已经花了，再试下一家就是双倍花钱，结果里 needs_review=true 交人工核对（sms.operation.resolve）。request_id 由调用方稳定生成，是幂等键：每家的尝试用 UUIDv5(request_id, provider) 作台账 ID，重试带同一个 request_id 就是**回放**——先查台账，试过的家不再打上游，成功的回同一批号码；同一 request_id 还在进行中回 CONFLICT。两家对「服务」的理解不同：Hero 原样传 service、country 转数字 ID（不是数字就跳过这家并说明）、上限作 maxPrice 交给上游；62 只有商品——按商品名包含匹配服务（纯数字当平台 ID 匹配商品 ID 第一段）、按国家匹配、有货、单价在上限内、取最便宜的，没有价格的商品不自动下单。country 必须具体，不接受通配 *；数量 1–200（62 官方单次上限）。结果带每一次尝试（供应商、台账 ID、状态、上游引用、原因、是否回放）与赢家的 resource_ids；**不带号码**，号码走 /sms/resources 且受 sms.reveal 把守。自动取码由页面驱动（每 15 秒），这个 Action 不轮询。今天只给人；XM-SMS4 放开 MACHINE 并按 principal 计配额。"
+  "notes": "XM-SMS2（ADR-022 决策 3）「要号」：服务 + 国家 + 数量（+ 可选指定供应商）→ 按路由规则选供应商 → 买 → 落资源。**花真钱且不可退**，与 sms.number.purchase 同一档权限（sms.purchase，不给 admin）；区别是这里默认不选供应商，由 sms.routing_rule 选，人只在想指定时才选。回落：第一家**明确失败**（上游明确拒绝、关着、没验证、翻译不了、超单价上限）就试规则里的下一家，**每家最多试一次**；结果 unknown 就停——钱可能已经花了，再试下一家就是双倍花钱，结果里 needs_review=true 交人工核对（sms.operation.resolve）。request_id 由调用方稳定生成，是幂等键：每家的尝试用 UUIDv5(request_id, provider) 作台账 ID，重试带同一个 request_id 就是**回放**——先查台账，试过的家不再打上游，成功的回同一批号码；同一 request_id 还在进行中回 CONFLICT。两家对「服务」的理解不同：Hero 原样传 service、country 转数字 ID（不是数字就跳过这家并说明）、上限作 maxPrice 交给上游；62 只有商品——按商品名包含匹配服务（纯数字当平台 ID 匹配商品 ID 第一段）、按国家匹配、有货、单价在上限内、取最便宜的，没有价格的商品不自动下单。country 必须具体，不接受通配 *；数量 1–200（62 官方单次上限）。结果带每一次尝试（供应商、台账 ID、状态、上游引用、原因、是否回放）与赢家的 resource_ids；**不带号码**，号码走 /sms/resources 且受 sms.reveal 把守。自动取码由页面驱动（每 15 秒），这个 Action 不轮询。XM-SMS4 已允许 HUMAN 与 SERVICE；SERVICE 要号按 principal 计配额，未登记即拒绝。 XM-SMS4 的此动作定义允许 HUMAN 与 SERVICE，AI 与 SERVER_AGENT 仍不允许；这不代表已经开通生产机器身份入口，实际身份接入仍遵守独立部署前置。"
 }
