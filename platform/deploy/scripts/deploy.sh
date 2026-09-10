@@ -481,6 +481,15 @@ main() {
   fi
 
   [ -n "$reason" ] || return 1
+  # The checkout and FETCH_HEAD are shared across environments and candidates.
+  # Use its Git metadata directory (also works for linked worktrees), not a SHA lock.
+  lock_dir="$(git -C "$repo_path" rev-parse --path-format=absolute --git-path xm-deploy.lock)" || return 1
+  [ -n "$lock_dir" ] || return 1
+  if ! mkdir -- "$lock_dir" 2>/dev/null; then
+    echo "DEPLOY FAIL: checkout 正在被另一个部署占用（锁未取得）" >&2
+    return 75
+  fi
+  lock_owned=1
   git -C "$repo_path" diff --quiet --exit-code || return 1
   git -C "$repo_path" diff --cached --quiet --exit-code || return 1
   worktree_status=""
@@ -510,13 +519,6 @@ main() {
   [ "$(git -C "$repo_path" cat-file -t "$target_sha:$compose_rel" 2>/dev/null)" = blob ] || return 1
   [ "$(git -C "$repo_path" cat-file -t "$target_sha:$override_rel" 2>/dev/null)" = blob ] || return 1
 
-  # 安全地串行化同一环境/提交；异常退出会留下锁，需人工核对后清理。
-  lock_dir="$status_dir/.deploy-$env_name-$target_sha.lock"
-  if ! mkdir -- "$lock_dir" 2>/dev/null; then
-    echo "DEPLOY FAIL: 已有同一环境/提交在部署（锁未取得）" >&2
-    return 75
-  fi
-  lock_owned=1
   read_green_status || return 1
 
   git -C "$repo_path" checkout --detach "$target_sha" >/dev/null 2>&1 || return 1
