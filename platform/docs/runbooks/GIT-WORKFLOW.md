@@ -91,9 +91,13 @@ deploy/scripts/mirror-github.sh --reason "release mirror XM-…"
 # （本仓库脚本不靠可执行位分发，一律显式 bash 前缀，同 check-governance.sh）
 bash scripts/dev/worktree-testdb.sh
 # 直接让当前 shell 生效：
-eval "$(bash scripts/dev/worktree-testdb.sh)"
+testdb_exports=$(bash scripts/dev/worktree-testdb.sh) || { echo 'test database provisioning failed' >&2; exit 1; }
+[[ -n "$testdb_exports" ]] || { echo 'test database environment is empty' >&2; exit 1; }
+eval "$testdb_exports"
 # 或只取连接串自己赋值（--print-url 只打印 URL，不带 export 前缀）：
-export XM_TEST_DATABASE_URL=$(bash scripts/dev/worktree-testdb.sh --print-url)
+testdb_url=$(bash scripts/dev/worktree-testdb.sh --print-url) || { echo 'test database provisioning failed' >&2; exit 1; }
+[[ -n "$testdb_url" ]] || { echo 'test database URL is empty' >&2; exit 1; }
+export XM_TEST_DATABASE_URL="$testdb_url"
 
 # 列出所有 xm_test_* 测试库及大小
 bash scripts/dev/worktree-testdb.sh --list

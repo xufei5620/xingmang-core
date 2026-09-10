@@ -11,14 +11,18 @@
 # 用法（默认动作）：
 #   scripts/dev/worktree-testdb.sh              # 建库（如不存在）+ 灌迁移，
 #                                                # 打印 export XM_TEST_DATABASE_URL=...
-#   eval "$(scripts/dev/worktree-testdb.sh)"     # 直接令当前 shell 生效
-#   export XM_TEST_DATABASE_URL=$(scripts/dev/worktree-testdb.sh --print-url)
+#   testdb_exports=$(bash scripts/dev/worktree-testdb.sh) || { echo 'test database provisioning failed' >&2; exit 1; }
+#   [[ -n "$testdb_exports" ]] || { echo 'test database environment is empty' >&2; exit 1; }
+#   eval "$testdb_exports"
+#   testdb_url=$(bash scripts/dev/worktree-testdb.sh --print-url) || { echo 'test database provisioning failed' >&2; exit 1; }
+#   [[ -n "$testdb_url" ]] || { echo 'test database URL is empty' >&2; exit 1; }
+#   export XM_TEST_DATABASE_URL="$testdb_url"
 #   scripts/dev/worktree-testdb.sh --list        # 列出所有 xm_test_* 库及大小
 #   scripts/dev/worktree-testdb.sh --drop        # 删除当前 worktree 的专属库
 #
 # 约定：本脚本对外只有两种输出通道——诊断/进度信息一律写 stderr；stdout 只在
 # 默认动作（含 --print-url）时输出那一行连接串/export 语句，--list 时输出查询
-# 结果表格。这样 `export X=$(... --print-url)` 之类的捕获不会被进度信息污染。
+# 结果表格。捕获时先独立赋值并检查退出码和非空，再 export/eval，避免掩盖建库失败。
 #
 # 可被 source：本文件把纯函数（sanitize_name / derive_db_name / build_db_url）
 # 和参数解析（parse_args）都写成不依赖数据库的普通函数，配合文件末尾的
