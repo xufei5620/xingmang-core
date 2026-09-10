@@ -153,7 +153,12 @@ if ($observedSub2Version -ne $ExpectedSub2Version) {
     throw "Sub2API runtime drift: expected $ExpectedSub2Version, got $observedSub2Version"
 }
 $newAPIContainer = $containers | Where-Object { $_ -like 'new-api|*' } | Select-Object -First 1
-if (-not $newAPIContainer -or $newAPIContainer -notmatch [regex]::Escape($ExpectedNewAPIImageVersion)) {
+$newAPIFields = @($newAPIContainer -split '\|')
+if ($newAPIFields.Count -ne 4) { throw "New API image drift: malformed container metadata" }
+# Inspect only the image field. An optional digest pins the same tag; neither
+# a longer tag nor a version string in the status/ports field is a match.
+$newAPIImageMatch = [regex]::Match($newAPIFields[1], '^[^\s|@]+:(?<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})(?:@sha256:[0-9a-fA-F]{64})?$')
+if (-not $newAPIImageMatch.Success -or $newAPIImageMatch.Groups['tag'].Value -cne $ExpectedNewAPIImageVersion) {
     throw "New API image drift: expected $ExpectedNewAPIImageVersion"
 }
 

@@ -33,7 +33,15 @@ $cases = @(
     @{ Name='net-overlap'; Exit=1; Message='overlaps Docker network' },
     @{ Name='net-builtins'; Exit=0; Message='Read-only production preflight passed' },
     @{ Name='net-ipv6'; Exit=0; Message='Read-only production preflight passed' },
-    @{ Name='net-approved'; Exit=0; Message='Read-only production preflight passed' }
+    @{ Name='net-approved'; Exit=0; Message='Read-only production preflight passed' },
+    @{ Name='version-prefix'; Exit=1; Message='New API image drift' },
+    @{ Name='version-wrong'; Exit=1; Message='New API image drift' },
+    @{ Name='version-digest'; Exit=0; Message='Read-only production preflight passed' },
+    @{ Name='version-registry-port'; Exit=0; Message='Read-only production preflight passed' },
+    @{ Name='version-status'; Exit=1; Message='New API image drift' },
+    @{ Name='version-no-tag'; Exit=1; Message='New API image drift' },
+    @{ Name='version-case'; Exit=1; Message='New API image drift' },
+    @{ Name='version-bad-digest'; Exit=1; Message='New API image drift' }
 )
 if ($OnlyCase) { $cases = @($cases | Where-Object Name -eq $OnlyCase) }
 if ($cases.Count -eq 0) { throw 'no preflight fixture cases selected' }

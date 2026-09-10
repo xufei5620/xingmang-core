@@ -16,8 +16,20 @@ function global:ssh {
     $global:PreflightFixtureCalls++
     $global:LASTEXITCODE = 0
     if ($command -like 'docker ps --format*') {
+        $image = 'fixture/new-api:v1.0.0-rc.25'
+        $status = 'Up'
+        switch ($global:PreflightFixtureCase) {
+            'version-prefix' { $image = 'fixture/new-api:v1.0.0-rc.250' }
+            'version-wrong' { $image = 'fixture/new-api:v0.0.0' }
+            'version-digest' { $image += '@sha256:' + ('a' * 64) }
+            'version-registry-port' { $image = 'registry.example:5000/new-api:v1.0.0-rc.25' }
+            'version-status' { $image = 'fixture/new-api:v0.0.0'; $status = 'Up v1.0.0-rc.25' }
+            'version-no-tag' { $image = 'fixture/v1.0.0-rc.25' }
+            'version-case' { $image = 'fixture/new-api:V1.0.0-RC.25' }
+            'version-bad-digest' { $image += '@sha256:invalid' }
+        }
         return @('sub2api-mig|fixture/sub2api:0.1.179|Up|', 'sub2api-mig-postgres|fixture/postgres:18|Up|',
-            'new-api|fixture/new-api:v1.0.0-rc.25|Up|', 'postgres|fixture/postgres:18|Up|')
+            ("new-api|$image|$status|"), 'postgres|fixture/postgres:18|Up|')
     }
     if ($command -eq 'cat /www/server/panel/vhost/nginx/0.cloudflare.conf') {
         return @('set_real_ip_from 203.0.113.0/24;', 'real_ip_header CF-Connecting-IP;', 'real_ip_recursive on;')
