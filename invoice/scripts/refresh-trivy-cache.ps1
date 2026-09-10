@@ -259,6 +259,7 @@ try {
             }
 
             if ($currentState.Digest -ceq $layer.Digest) {
+                Assert-TrivyCacheComponentCurrent -State $currentState -SubPath $component.SubPath
                 Write-Host '    already up to date (seeded digest matches upstream); skipping download and reseed'
                 $metadata = Read-TrivyDbMetadataText -JsonText $currentState.MetadataText
                 $summaries.Add([pscustomobject]@{ Name = $component.Name; UpdatedAt = $metadata.UpdatedAt; NextUpdate = $metadata.NextUpdate; Action = 'unchanged' })
@@ -325,7 +326,7 @@ try {
             })
         }
 
-        if ($pendingComponents.Count -gt 0) {
+        if ($pendingComponents.Count -gt 0 -or $summaries.Count -gt 0) {
             $pendingNames = ($pendingComponents | ForEach-Object { $_.Component.Name }) -join ', '
             if ($PSCmdlet.ShouldProcess($TrivyCacheVolume, "Stage, self-check, then seed: $pendingNames")) {
                 $stagingVolume = "$TrivyCacheVolume-staging-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"

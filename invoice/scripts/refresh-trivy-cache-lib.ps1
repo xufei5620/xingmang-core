@@ -183,6 +183,21 @@ function Read-TrivyDbMetadataText {
     }
 }
 
+function Assert-TrivyCacheComponentCurrent {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$SubPath)
+    if (-not $State.DatabasePresent) { throw "$SubPath cache database is missing or empty; refresh cannot report unchanged" }
+    $metadata = $State.MetadataText | ConvertFrom-Json -DateKind String
+    $now = [DateTimeOffset]::UtcNow
+    $updated = [DateTimeOffset]::Parse([string]$metadata.UpdatedAt)
+    $next = [DateTimeOffset]::Parse([string]$metadata.NextUpdate)
+    $downloaded = [DateTimeOffset]::Parse([string]$metadata.DownloadedAt)
+    $maximumAge = if ($SubPath -eq 'java-db') { [TimeSpan]::FromHours(96) } else { [TimeSpan]::FromHours(48) }
+    if ($now - $updated -gt $maximumAge -or $updated -gt $now.AddMinutes(5) -or $next -le $now -or
+        $downloaded -le [DateTimeOffset]::MinValue.AddDays(1) -or $downloaded -gt $now.AddMinutes(5)) {
+        throw "$SubPath cache metadata is stale or invalid; refresh cannot report unchanged"
+    }
+}
+
 # Test-CandidateMetadataIsAcceptable implements "refuse to replace a cache
 # newer than the download": a freshly downloaded database is only allowed to
 # replace what is already seeded if it is not older. CurrentUpdatedAt of
@@ -503,8 +518,10 @@ function Get-TrivyCacheVolumeComponentState {
         [Parameter(Mandatory)][string]$SeedImage
     )
     Assert-SafeTrivyCacheSubPath -SubPath $SubPath
+    $databaseFile = if ($SubPath -eq 'java-db') { 'trivy-java.db' } else { 'trivy.db' }
     $script = "if [ -f /cache/$SubPath/.source-digest ]; then echo DIGEST_BEGIN; cat /cache/$SubPath/.source-digest; echo; echo DIGEST_END; fi; " +
-        "if [ -f /cache/$SubPath/metadata.json ]; then echo METADATA_BEGIN; cat /cache/$SubPath/metadata.json; echo; echo METADATA_END; fi; exit 0"
+        "if [ -f /cache/$SubPath/metadata.json ]; then echo METADATA_BEGIN; cat /cache/$SubPath/metadata.json; echo; echo METADATA_END; fi; " +
+        "if [ -s /cache/$SubPath/$databaseFile ]; then echo DATABASE_PRESENT; fi; exit 0"
     $dockerArguments = @('run', '--rm', '-v', "${Volume}:/cache:ro", $SeedImage, 'sh', '-c', $script)
     $output = & docker @dockerArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -516,7 +533,7 @@ function Get-TrivyCacheVolumeComponentState {
     if ($text -match '(?s)DIGEST_BEGIN\r?\n(.*?)\r?\nDIGEST_END') { $digest = $Matches[1].Trim() }
     $metadataText = $null
     if ($text -match '(?s)METADATA_BEGIN\r?\n(.*?)\r?\nMETADATA_END') { $metadataText = $Matches[1].Trim() }
-    return [pscustomobject]@{ Digest = $digest; MetadataText = $metadataText }
+    return [pscustomobject]@{ Digest = $digest; MetadataText = $metadataText; DatabasePresent = ($text -match '(?m)^DATABASE_PRESENT\r?$') }
 }
 
 # Publish-TrivyCacheComponentToVolume copies FileNames from

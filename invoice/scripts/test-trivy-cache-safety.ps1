@@ -136,5 +136,31 @@ if ($Case -eq 'image-parameters') {
         $token='fixture'; $ProxyUrl=''; $partsDirectory='fixture'; $blobPath='fixture'
         & ([scriptblock]::Create($callText)) | Out-Null
     } $call.Extent.Text
+} elseif ($Case -eq 'unchanged-cache') {
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceDirectory 'refresh-trivy-cache.ps1'),[ref]$tokens,[ref]$errors)
+    # Execute the real sidecar fast path inside a loop, without CLI setup.
+    $branch=$ast.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -eq '$currentState.Digest -ceq $layer.Digest'},$true)
+    $fastPath=[scriptblock]::Create('param($currentState,$layer,$component) $summaries=[Collections.Generic.List[object]]::new(); foreach($iteration in @(1)) { '+$branch.Extent.Text+' }; $summaries.Count')
+    $now=[DateTimeOffset]::UtcNow
+    $valid=@{Version=2;UpdatedAt=$now.AddHours(-1).ToString('o');NextUpdate=$now.AddHours(5).ToString('o');DownloadedAt=$now.AddMinutes(-5).ToString('o')}
+    $layer=[pscustomobject]@{Digest=('sha256:'+('a'*64))};$component=[pscustomobject]@{Name='trivy-db';SubPath='db'}
+    foreach($scenario in @('missing-db','expired','zero-downloaded','future','valid')) {
+        $meta=$valid.Clone();$present=$true
+        switch($scenario){'missing-db'{$present=$false};'expired'{$meta.NextUpdate=$now.AddDays(-1).ToString('o')};'zero-downloaded'{$meta.DownloadedAt='0001-01-01T00:00:00Z'};'future'{$meta.UpdatedAt=$now.AddDays(1).ToString('o')}}
+        $state=[pscustomobject]@{Digest=$layer.Digest;MetadataText=($meta|ConvertTo-Json -Compress);DatabasePresent=$present}
+        $failure=$null;$count=0
+        try{$count=& $fastPath $state $layer $component}catch{$failure=$_}
+        if($scenario -eq 'valid') {if($failure -or $count -ne 1){throw 'unchanged-cache: valid cache was rejected'}}
+        elseif($null -eq $failure){throw "unchanged-cache: invalid $scenario state was reported unchanged"}
+    }
+    # The real staging condition must admit an unchanged-only cache so corrupt
+    # database bytes still go through the existing Trivy self-check chain.
+    $condition=$ast.Find({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text.StartsWith('$pendingComponents.Count -gt 0')},$true).Clauses[0].Item1.Extent.Text
+    $pendingComponents=@();$summaries=@([pscustomobject]@{Action='unchanged'})
+    if(-not (& ([scriptblock]::Create($condition)))){throw 'unchanged-cache: unchanged-only cache bypasses staging self-checks'}
+    $script:readOutput='';function docker { $global:LASTEXITCODE=0; $script:readOutput }
+    $state=Get-TrivyCacheVolumeComponentState -Volume 'fixture' -SubPath 'db' -SeedImage 'fixture'
+    if($state.PSObject.Properties.Name -notcontains 'DatabasePresent' -or $state.DatabasePresent){throw 'unchanged-cache: state reader did not report missing database'}
 } else { throw "unknown safety case: $Case" }
 Write-Host "TRIVY-SAFETY-PASS: $Case"
