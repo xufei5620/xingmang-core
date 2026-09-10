@@ -44,6 +44,45 @@ if($Case -eq 'meta'){
     if($survivors.Count){throw "registration-meta: existing tests missed behavioral mutants: $($survivors -join ',')"}
     Write-Host 'REGISTRATION-META-PASS';return
 }
+if($Case -eq 'lookup'){
+    foreach($scenario in @('denied','unavailable','unexpected-notfound','terminating','notfound','register-fails','update-fails')){
+        & {
+            param($scenario,$wrapper,$root)
+            $calls=[Collections.Generic.List[string]]::new()
+            function Get-ScheduledTask {
+                [CmdletBinding()] param($TaskName,$TaskPath)
+                switch($scenario){
+                    'denied'{Write-Error 'fixture lookup denied' -Category PermissionDenied;return}
+                    'unavailable'{Write-Error 'fixture lookup unavailable' -Category ResourceUnavailable;return}
+                    'unexpected-notfound'{Write-Error 'fixture unrelated missing resource' -Category ObjectNotFound -ErrorId UnrelatedResource;return}
+                    'terminating'{throw 'fixture provider failure'}
+                    'notfound'{Write-Error 'fixture task does not exist' -Category ObjectNotFound -ErrorId CmdletizationQuery_NotFound_TaskName;return}
+                    'update-fails'{[pscustomobject]@{TaskName=$TaskName;TaskPath=$TaskPath};return}
+                }
+            }
+            function Register-ScheduledTask {
+                [CmdletBinding()] param($TaskName,$TaskPath,$Action,$Trigger,$Settings,$Principal,$Description,[switch]$Force)
+                $calls.Add('Register')
+                if($Force){throw 'registration-lookup: creation must not force overwrite'}
+                if($scenario -eq 'register-fails'){Write-Error 'fixture register failed' -Category WriteError}
+            }
+            function Set-ScheduledTask {
+                [CmdletBinding()] param($TaskName,$TaskPath,$Action,$Trigger,$Settings,$Principal)
+                $calls.Add('Set');Write-Error 'fixture update failed' -Category WriteError
+            }
+            $scripts=Join-Path $root 'scripts';[IO.Directory]::CreateDirectory($scripts)|Out-Null
+            [IO.File]::WriteAllText((Join-Path $scripts 'refresh-trivy-cache.ps1'),"throw 'registration-lookup: refresh invocation forbidden'")
+            $failure=$null
+            try{& $wrapper -RepoRoot $root -UserId 'fixture\operator' -Confirm:$false | Out-Null}catch{$failure=$_}
+            if($scenario -eq 'notfound'){
+                if($failure -or ($calls -join ',') -cne 'Register'){throw "registration-lookup: recognized task absence did not create safely: $failure"}
+            } elseif($scenario -in @('register-fails','update-fails')){
+                if($null -eq $failure -or $calls.Count -ne 1){throw "registration-lookup: $scenario did not propagate the service write failure"}
+            } elseif($null -eq $failure -or $calls.Count -ne 0){throw "registration-lookup: $scenario was treated as task absence or caused a write"}
+        } $scenario (Join-Path $SourceDirectory 'register-trivy-refresh-task.ps1') (Join-Path $FixtureRoot $scenario)
+    }
+    Write-Host 'REGISTRATION-BEHAVIOR-PASS: lookup';return
+}
 if($Case -ne 'wiring'){throw "unknown registration case: $Case"}
 $wrapper=Join-Path $SourceDirectory 'register-trivy-refresh-task.ps1'
 foreach($scenario in @('absent','existing','whatif-absent','whatif-existing')){

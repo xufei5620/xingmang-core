@@ -226,12 +226,7 @@ if (-not $registerScriptSource.Contains('-RunLevel', [StringComparison]::Ordinal
 if ($registerScriptSource -notmatch "TaskName\s*=\s*'InvoiceTrivyCacheRefresh'") {
     throw 'register-trivy-refresh-task.ps1 does not default TaskName to InvoiceTrivyCacheRefresh'
 }
-if (-not $registerScriptSource.Contains('Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue', [StringComparison]::Ordinal) -or
-    -not $registerScriptSource.Contains('Register-ScheduledTask', [StringComparison]::Ordinal) -or
-    -not $registerScriptSource.Contains('Set-ScheduledTask', [StringComparison]::Ordinal)) {
-    throw 'register-trivy-refresh-task.ps1 does not register when absent and update in place when the task already exists'
-}
-
 & (Join-Path $scriptsRoot 'test-register-trivy-refresh-behavior.ps1') -Case wiring
+& (Join-Path $scriptsRoot 'test-register-trivy-refresh-behavior.ps1') -Case lookup
 
 Write-Host 'All register-trivy-refresh-task fixtures passed.'

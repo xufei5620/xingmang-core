@@ -117,14 +117,24 @@ Write-Host "  Trigger:          daily at $StartTime local time (recurrence DaysI
 Write-Host "  Principal:        $($definition.Principal.UserId), LogonType=$($definition.Principal.LogonType), RunLevel=$($definition.Principal.RunLevel)"
 Write-Host "  Settings:         StartWhenAvailable=$($definition.Settings.StartWhenAvailable), RestartCount=$($definition.Settings.RestartCount), RestartInterval=$($definition.Settings.RestartInterval)"
 
-$existingTask = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
+$existingTask = $null
+try {
+    $existingTask = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction Stop
+} catch {
+    # A provider error is not proof of absence. Only the generated CIM query's
+    # explicit not-found error permits creating a new task.
+    if ($_.CategoryInfo.Category -ne [Management.Automation.ErrorCategory]::ObjectNotFound -or
+        $_.FullyQualifiedErrorId -notlike 'CmdletizationQuery_NotFound*') {
+        throw
+    }
+}
 $taskDescription = 'Refreshes the invoice-release-gate-trivy-0-74-0 Docker volume via scripts/refresh-trivy-cache.ps1. Registered by scripts/register-trivy-refresh-task.ps1; see docs/PRODUCTION-RUNBOOK.md.'
 
 if ($null -eq $existingTask) {
     if ($PSCmdlet.ShouldProcess($taskFullName, 'Register daily Trivy cache refresh Scheduled Task')) {
         Register-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath `
             -Action $definition.Action -Trigger $definition.Trigger -Settings $definition.Settings -Principal $definition.Principal `
-            -Description $taskDescription -Force `
+            -Description $taskDescription `
             | Out-Null
         Write-Host "Registered Scheduled Task '$taskFullName'."
     }
