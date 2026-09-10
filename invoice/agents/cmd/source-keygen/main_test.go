@@ -94,11 +94,19 @@ func TestKeygenRefusesOverwriteWithoutChangingEitherFile(t *testing.T) {
 
 func TestKeygenRejectsInvalidOrAliasedPaths(t *testing.T) {
 	directory := t.TempDir()
-	path := filepath.Join(directory, "same")
-	if err := generate(keygenConfig{KeyID: "bad id", PrivatePath: path, PublicPath: path}); err == nil {
-		t.Fatal("invalid key ID and aliased outputs were accepted")
+	privatePath := filepath.Join(directory, "private-output")
+	publicPath := filepath.Join(directory, "public-output")
+	// Distinct, absent outputs make the invalid identifier the only bad input.
+	err := generate(keygenConfig{KeyID: "bad id", PrivatePath: privatePath, PublicPath: publicPath})
+	if err == nil || !strings.Contains(err.Error(), "signing key id must match") {
+		t.Fatalf("expected signing key ID rejection before generation, got %v", err)
 	}
-	if err := generate(keygenConfig{KeyID: "key-1", PrivatePath: path, PublicPath: path}); err == nil {
+	for _, path := range []string{privatePath, publicPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("invalid signing key ID created output")
+		}
+	}
+	if err := generate(keygenConfig{KeyID: "key-1", PrivatePath: privatePath, PublicPath: privatePath}); err == nil {
 		t.Fatal("aliased outputs were accepted")
 	}
 }
