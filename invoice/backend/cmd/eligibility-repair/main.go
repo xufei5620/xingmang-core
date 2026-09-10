@@ -333,7 +333,25 @@ func runBalanceBlip(ctx context.Context, store *postgresstore.Store, apply bool,
 	return nil
 }
 
-func runQueueNarrow(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
+// repairBatchStore is the result boundary for repairs that continue after
+// a per-item transaction fails. It does not alter their transaction policy.
+type repairBatchStore interface {
+	RepairQueueNarrowEligibility(context.Context, postgresstore.QueueNarrowRepairInput, postgresstore.AuditActor) (postgresstore.QueueNarrowRepairResult, error)
+	RepairProjectionRequeueDead(context.Context, postgresstore.ProjectionRequeueDeadRepairInput, postgresstore.AuditActor) (postgresstore.ProjectionRequeueDeadRepairResult, error)
+	RepairIngestRequeueDead(context.Context, postgresstore.IngestRequeueDeadRepairInput, postgresstore.AuditActor) (postgresstore.IngestRequeueDeadRepairResult, error)
+	RepairPolicyStartReanchorEligibility(context.Context, postgresstore.PolicyStartReanchorRepairInput, postgresstore.AuditActor) (postgresstore.PolicyStartReanchorRepairResult, error)
+}
+
+// The report retains successful items and each failure. A nonzero exit tells
+// wrappers that some requested work remains, without changing store isolation.
+func repairItemErrors(count int) error {
+	if count > 0 {
+		return fmt.Errorf("repair completed with %d item error(s); see the report", count)
+	}
+	return nil
+}
+
+func runQueueNarrow(ctx context.Context, store repairBatchStore, apply bool, operatorID string, keyring securefields.Keyring, out io.Writer) error {
 	in := postgresstore.QueueNarrowRepairInput{Apply: apply, OperatorID: operatorID}
 	if apply {
 		hash, evidenceCiphertext, noteCiphertext, encErr := encryptFixedResolution(keyring,
@@ -350,10 +368,10 @@ func runQueueNarrow(ctx context.Context, store *postgresstore.Store, apply bool,
 		return fmt.Errorf("repair queue narrow eligibility: %w", err)
 	}
 	printQueueNarrowSummary(out, result)
-	return nil
+	return repairItemErrors(len(result.Errors))
 }
 
-func runProjectionRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID, accountID string, out io.Writer) error {
+func runProjectionRequeueDead(ctx context.Context, store repairBatchStore, apply bool, operatorID, accountID string, out io.Writer) error {
 	// Unlike the freeze-resolution repairs, this one never resolves an
 	// eligibility_freezes row, so there is no encrypted resolution note or
 	// evidence to prepare here -- same reasoning as policy-start-reanchor.
@@ -364,10 +382,10 @@ func runProjectionRequeueDead(ctx context.Context, store *postgresstore.Store, a
 		return fmt.Errorf("repair projection requeue dead: %w", err)
 	}
 	printProjectionRequeueDeadSummary(out, result)
-	return nil
+	return repairItemErrors(len(result.Errors))
 }
 
-func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, filters repairFilters, out io.Writer) error {
+func runIngestRequeueDead(ctx context.Context, store repairBatchStore, apply bool, operatorID string, filters repairFilters, out io.Writer) error {
 	// Like projection-requeue-dead, this repair resolves no freeze, so there
 	// is no encrypted resolution note or evidence to prepare here. Unlike it,
 	// that is not merely "nothing to resolve": see
@@ -383,7 +401,7 @@ func runIngestRequeueDead(ctx context.Context, store *postgresstore.Store, apply
 		return fmt.Errorf("repair ingest requeue dead: %w", err)
 	}
 	printIngestRequeueDeadSummary(out, result)
-	return nil
+	return repairItemErrors(len(result.Errors))
 }
 
 func runIngestAcknowledgeUnreplayable(ctx context.Context, store *postgresstore.Store, apply bool,
@@ -427,7 +445,7 @@ func runPendingReevaluate(ctx context.Context, store *postgresstore.Store, apply
 	return nil
 }
 
-func runPolicyStartReanchor(ctx context.Context, store *postgresstore.Store, apply bool, operatorID string, out io.Writer) error {
+func runPolicyStartReanchor(ctx context.Context, store repairBatchStore, apply bool, operatorID string, out io.Writer) error {
 	// Unlike the other three kinds, this repair never resolves an
 	// eligibility_freezes row (a POLICY_ANCHOR account's cutover boundary is
 	// not gated behind one), so there is no encrypted resolution note or
@@ -439,7 +457,7 @@ func runPolicyStartReanchor(ctx context.Context, store *postgresstore.Store, app
 		return fmt.Errorf("repair policy start reanchor eligibility: %w", err)
 	}
 	printPolicyStartReanchorSummary(out, result)
-	return nil
+	return repairItemErrors(len(result.Errors))
 }
 
 // encryptFixedResolution encrypts the same fixed note text under two AAD
