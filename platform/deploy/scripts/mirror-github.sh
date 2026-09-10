@@ -128,7 +128,9 @@ case "$remote_name" in
 esac
 case "$git_bin" in
   */*) validate_path git-bin "$git_bin"; [ -x "$git_bin" ] || die "git-bin 不可执行" ;;
-  *) command -v "$git_bin" >/dev/null 2>&1 || die "git-bin 不可执行" ;;
+  *)
+    git_bin="$(type -P -- "$git_bin" 2>/dev/null || true)"
+    [ -n "$git_bin" ] && [ -x "$git_bin" ] || die "git-bin 不可执行" ;;
 esac
 
 if [ "$test_mode" -eq 0 ]; then
