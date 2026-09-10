@@ -755,7 +755,7 @@ function Get-ReleaseGitProvenance {
 
     # HEAD identifies the complete monorepo; the pathspec limits dirtiness to
     # the invoice project passed by the release gate, including untracked files.
-    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 -- . 2>$null)
+    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 --untracked-files=all -- . 2>$null)
     $statusExitCode = $LASTEXITCODE
     if ($statusExitCode -ne 0) {
         throw "git status failed with exit $statusExitCode while capturing release provenance"

@@ -67,7 +67,7 @@ foreach ($upstream in $upstreams) {
     if ($headExit -ne 0 -or $actualHead -cnotmatch '^[0-9a-f]{40}$') {
         throw "$($upstream.Name): git HEAD failed with exit $headExit"
     }
-    $changes = @(& git -c "safe.directory=$safePath" -C $upstream.Path status --porcelain=v1 2>$null)
+    $changes = @(& git -c "safe.directory=$safePath" -C $upstream.Path status --porcelain=v1 --untracked-files=all 2>$null)
     $statusExit = $LASTEXITCODE
     if ($statusExit -ne 0) {
         throw "$($upstream.Name): git status failed with exit $statusExit"

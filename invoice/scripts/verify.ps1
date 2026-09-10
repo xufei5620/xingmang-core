@@ -28,6 +28,9 @@ if ($LASTEXITCODE -ne 0) { throw 'balance history cleanup operator/rehearsal gat
 & (Join-Path $PSScriptRoot 'test-release-image-gate.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 
+& (Join-Path $PSScriptRoot 'test-untracked-git-state.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'configured untracked Git state fixtures failed' }
+
 & (Join-Path $PSScriptRoot 'test-verify-postgres.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 container-network static fixtures failed' }
 
