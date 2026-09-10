@@ -508,9 +508,10 @@ pre_fetch_branch="$current_branch"
 pre_fetch_sha="$current_sha"
 
 if [ "$dry_run" -eq 1 ]; then
+  [ "$current_branch" = release/v0.1-launch ] || die "dry-run 需要 release/v0.1-launch；actual=${current_branch:-detached}"
   [ -z "$expected_sha" ] || [ "${current_sha,,}" = "${expected_sha,,}" ] || die "dry-run 的 sha 与当前 release 不一致"
   echo "DEPLOY LOCAL DRY-RUN"
-  echo "project=xingmang-launch web=$web_url branch=release/v0.1-launch sha=${expected_sha:-$current_sha}"
+  echo "project=xingmang-launch web=$web_url branch=$current_branch sha=${expected_sha:-$current_sha}"
   echo "services=$(IFS=,; echo "${build_services[*]}") bootstrap=enabled smoke=services,metrics,alerts"
   exit 0
 fi
