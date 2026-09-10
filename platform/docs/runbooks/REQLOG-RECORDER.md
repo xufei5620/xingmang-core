@@ -156,10 +156,15 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
 
 1. **容器能读到挂载**：
    ```bash
-   docker compose -p xingmang-prod exec platform-api sh -c \
-     'ls /var/lib/xm/reqlog | tail -3 && cat /var/lib/xm/reqlog-tokenmap.json | head -c 200'
+   # 先设置为第 7 步实际部署的项目：方式一 xingmang-prod；方式二 xingmang-launch。
+   case "${XM_DEPLOY_PROJECT:-}" in
+     xingmang-prod|xingmang-launch) ;;
+     *) echo "请先设置 XM_DEPLOY_PROJECT 为第 7 步已部署的项目" >&2; exit 1 ;;
+   esac
+   docker exec "${XM_DEPLOY_PROJECT}-platform-api-1" sh -c \
+     'test -d /var/lib/xm/reqlog && test -r /var/lib/xm/reqlog-tokenmap.json'
    ```
-   应该能看到按天命名的目录与 tokenmap 的 JSON 内容（只读，容器内改不了）。
+   退出 0 表示指定容器能读取目录和映射文件；不输出映射内容。非零先核对项目、容器和挂载，不据此宣称 file 数据已验证。
 2. **API 能列出真实请求**（需要一个持有 `request.read` scope 的身份）：
    ```
    GET /api/v1/platforms/sub2api/requests?limit=5
