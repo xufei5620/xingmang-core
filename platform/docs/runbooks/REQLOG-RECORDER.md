@@ -61,13 +61,18 @@ sudo chmod -R g+rX /root/reqlog/data
 
 `g+rX`（大写 X）只给目录和已有执行位的文件加执行权限，不会把数据文件
 变成可执行——这是标准的"批量放开同组读权限"写法。这一步只需要做一次；
-`tokenmap.json` 会在下一次记录代理刷新时自动以新权限重写，不需要手动处理，
-但如果想立刻验证也可以顺手跑一遍：
+`tokenmap.json` 的刷新使用 `os.WriteFile`，既有文件的 mode 会保留；后续改属组
+不会自动补上组读权限。历史 `0600` 文件仍需核对可读性，不能把下次刷新视为修复。
+确认文件已存在、读组仍是获批的 GID `10001`，并取得这次权限迁移批准后，
+由操作员执行以下既有读组适配；任一步失败立即停止并排查，不吞掉错误：
 
 ```bash
-sudo chgrp 10001 /root/reqlog/tokenmap.json 2>/dev/null || true
-sudo chmod g+r /root/reqlog/tokenmap.json 2>/dev/null || true
+sudo chgrp 10001 /root/reqlog/tokenmap.json &&
+  sudo chmod g+r /root/reqlog/tokenmap.json
 ```
+
+本步骤不授权自动修改真实文件，也不改变记录代理运行时权限策略；未完成批准或
+文件尚未产出时，保留此项为待验证，不宣称容器已经可读。
 
 ## 第 4 步：替换 systemd 单元
 
