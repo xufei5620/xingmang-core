@@ -909,7 +909,12 @@ request_json readyz "$web_url/readyz" '"status"[[:space:]]*:[[:space:]]*"ready"'
 phase="smoke"
 # XM-LOGIN：local 登录模式下开发头被拒是正确行为，烟测改为验证鉴权闸门本身（未登录必须 401/403）。
 auth_mode_local=0
-grep -qE '^[[:space:]]*XM_AUTH_MODE=local[[:space:]]*$' "$env_file" 2>/dev/null && auth_mode_local=1
+auth_mode_value="$(read_env_value XM_AUTH_MODE 2>/dev/null || true)"
+# server-prod.yaml already defaults empty/unset auth mode to local.
+if [ -z "$auth_mode_value" ] && [ "$expected_environment" = production ]; then
+  auth_mode_value=local
+fi
+[ "$auth_mode_value" != local ] || auth_mode_local=1
 if [ "$auth_mode_local" -eq 1 ]; then
   gate_status="$("$curl_bin" -sS --noproxy '*' --max-time 15 -o /dev/null -w '%{http_code}' "$web_url/api/v1/auth/me" 2>/dev/null || true)"
   case "$gate_status" in
