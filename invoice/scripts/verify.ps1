@@ -181,8 +181,10 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     try {
         $shellScripts = @(rg --files deploy scripts | Where-Object { $_ -like '*.sh' })
         $scriptsForBash = @($shellScripts | ForEach-Object { $_.Replace('\', '/') })
-        bash -n @scriptsForBash
-        if ($LASTEXITCODE -ne 0) { throw 'production shell syntax validation failed' }
+        foreach ($shellScript in $scriptsForBash) {
+            bash -n $shellScript
+            if ($LASTEXITCODE -ne 0) { throw "production shell syntax validation failed: $shellScript" }
+        }
 
         bash deploy/validate-keycloak-admin-allowlist.sh deploy/nginx/auth-admin.solov.cc.allow.conf.example
         if ($LASTEXITCODE -ne 0) { throw 'Keycloak admin allowlist example failed exact-host validation' }

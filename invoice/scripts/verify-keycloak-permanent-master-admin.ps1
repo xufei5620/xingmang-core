@@ -96,8 +96,10 @@ foreach ($item in $wrapperRequired) {
 $bash = Get-Command bash -ErrorAction Stop
 Push-Location $projectRoot
 try {
-    & $bash.Source -n 'deploy/keycloak/invite-permanent-master-admin.sh' 'deploy/keycloak/run-permanent-master-admin-maintenance.sh'
-    if ($LASTEXITCODE -ne 0) { throw 'Keycloak permanent administrator shell syntax failed' }
+    foreach ($shellScript in @('deploy/keycloak/invite-permanent-master-admin.sh', 'deploy/keycloak/run-permanent-master-admin-maintenance.sh')) {
+        & $bash.Source -n $shellScript
+        if ($LASTEXITCODE -ne 0) { throw "Keycloak permanent administrator shell syntax failed: $shellScript" }
+    }
     & $bash.Source 'deploy/keycloak/verify-permanent-master-admin-maintenance.sh'
     if ($LASTEXITCODE -ne 0) { throw 'Keycloak maintenance wrapper dynamic negative fixtures failed' }
 } finally { Pop-Location }

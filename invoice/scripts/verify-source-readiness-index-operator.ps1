@@ -279,8 +279,10 @@ foreach ($path in @($operatorPath, $verifierPath)) {
 $bash = Get-Command bash -ErrorAction Stop
 Push-Location $projectRoot
 try {
-    & $bash.Source -n 'deploy/postgres/apply-source-readiness-index-concurrently.sh' 'deploy/postgres/verify-source-readiness-index.sh'
-    if ($LASTEXITCODE -ne 0) { throw 'RC39 readiness index shell syntax failed' }
+    foreach ($shellScript in @('deploy/postgres/apply-source-readiness-index-concurrently.sh', 'deploy/postgres/verify-source-readiness-index.sh')) {
+        & $bash.Source -n $shellScript
+        if ($LASTEXITCODE -ne 0) { throw "RC39 readiness index shell syntax failed: $shellScript" }
+    }
 } finally {
     Pop-Location
 }
