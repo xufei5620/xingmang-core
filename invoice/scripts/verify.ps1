@@ -622,6 +622,9 @@ if ($v3Schema.additionalProperties -ne $false -or (@($v3Schema.properties.stream
 }
 if ($v3Example.schema_version -ne '3.0' -or $v3Example.stream_id -ne 'usage' -or $v3Example.scan_complete -ne $false -or $v3Example.records[0].entity_type -ne 'usage_event') { throw 'v3 fixed example drifted' }
 
+& (Join-Path $PSScriptRoot 'verify-source-agent-contracts.ps1') -ProjectRoot $projectRoot
+& (Join-Path $PSScriptRoot 'test-source-agent-contracts.ps1') -ProjectRoot $projectRoot
+
 if (-not $SkipPostgres) {
     & (Join-Path $PSScriptRoot 'test-upstream-projection-maintenance.ps1') `
         -PostgresImage $postgresCompatibilityFixtureImage
