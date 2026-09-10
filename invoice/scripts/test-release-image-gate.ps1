@@ -1095,11 +1095,51 @@ foreach ($invalidTagName in @(
     }
 }
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
+function Assert-RunbookStrictTransferCommands {
+    param([Parameter(Mandatory)][string]$Text)
+    $strictCount = 0
+    # Historical RC38 maintenance warnings are separate from these executable
+    # verifier calls. Validate actual parameters, not words anywhere in the book.
+    $invocations = [regex]::Matches($Text, '(?m)^[ \t]*pwsh[ \t]+[^\r\n]*-File[ \t]+\.\\scripts\\verify-release-image-artifacts\.ps1[^\r\n]*$')
+    foreach ($invocation in $invocations) {
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($invocation.Value, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) { throw 'production runbook verifier command has invalid PowerShell syntax' }
+        $command = $ast.Find({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'pwsh' }, $true)
+        $elements = @($command.CommandElements)
+        $ready = @($elements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'RequireTransferReady' })
+        $tag = @($elements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'SignedReleaseTag' })
+        if ($ready.Count -eq 0 -and $tag.Count -eq 0) { continue } # Ordinary diagnostic verification remains legal.
+        $strictCount++
+        if ($ready.Count -ne 1 -or $tag.Count -ne 1 -or
+            ($ready[0].Argument -and $ready[0].Argument.Extent.Text -cne '$true')) {
+            throw 'production runbook strict verifier must enable transfer readiness and bind one signed tag'
+        }
+        $tagValue = $tag[0].Argument
+        if ($null -eq $tagValue) { $tagValue = $elements[[Array]::IndexOf($elements, $tag[0]) + 1] }
+        if ($tagValue -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $tagValue.Value -cne 'v0.1.0-rc110-signed') {
+            throw 'production runbook strict verifier must use the exact current signed release tag'
+        }
+    }
+    # Both the post-image-gate check and the pre-signing candidate check are mandatory.
+    if ($strictCount -ne 2) { throw 'production runbook must retain both strict transfer-ready verifier calls' }
+}
 Test-Task5ARequirement -Label 'production runbook invokes the exact RC100 strict transfer-ready verifier parameters' -Action {
-    if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
-        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc110-signed', [StringComparison]::Ordinal) -or
-        $productionRunbook -match '\bRC(?:32|38)\b') {
-        throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
+    Assert-RunbookStrictTransferCommands -Text $productionRunbook
+}
+foreach ($runbookStrictMutation in @(
+    @{ Label='missing transfer-ready switch'; Text=$productionRunbook.Replace(' -RequireTransferReady', '') }
+    @{ Label='missing signed tag parameter'; Text=$productionRunbook.Replace(' -SignedReleaseTag v0.1.0-rc110-signed', '') }
+    @{ Label='disabled transfer-ready switch'; Text=$productionRunbook.Replace('-RequireTransferReady', '-RequireTransferReady:$false') }
+    @{ Label='duplicate transfer-ready switch'; Text=$productionRunbook.Replace('-RequireTransferReady', '-RequireTransferReady -RequireTransferReady') }
+    @{ Label='duplicate signed tag parameter'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc110-signed -SignedReleaseTag v0.1.0-rc110-signed') }
+    @{ Label='old RC38 verifier tag'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc38-signed') }
+    @{ Label='old RC32 verifier tag'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc32-signed') }
+    @{ Label='ordinary mode substituted for both strict calls'; Text=$productionRunbook.Replace(' -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed', '') }
+    @{ Label='post-image strict call removed'; Text=$productionRunbook.Replace('pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc100ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed', '') }
+)) {
+    Test-Task5AMutationRejected -Label $runbookStrictMutation.Label -Action {
+        Assert-RunbookStrictTransferCommands -Text $runbookStrictMutation.Text
     }
 }
 
