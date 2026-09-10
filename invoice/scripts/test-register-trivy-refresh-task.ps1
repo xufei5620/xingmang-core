@@ -1,13 +1,9 @@
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Static fixtures for scripts/register-trivy-refresh-task.ps1's task-
-# definition builder. Dot-sources only register-trivy-refresh-task-lib.ps1
-# (never register-trivy-refresh-task.ps1 itself, and never Get-/Register-/
-# Set-/Unregister-ScheduledTask) so this file never touches the real Task
-# Scheduler, mirroring test-release-image-gate.ps1's and test-refresh-trivy-
-# cache.ps1's own split between a pure -lib.ps1 file and the executable
-# script that wraps it.
+# Builder fixtures plus executable behavior behind local scheduler fakes.
+# The wrapper is tested against a synthetic refresh sentinel, never the real
+# refresh script or the Task Scheduler service.
 
 $scriptsRoot = $PSScriptRoot
 . (Join-Path $scriptsRoot 'register-trivy-refresh-task-lib.ps1')
@@ -235,5 +231,7 @@ if (-not $registerScriptSource.Contains('Get-ScheduledTask -TaskName $TaskName -
     -not $registerScriptSource.Contains('Set-ScheduledTask', [StringComparison]::Ordinal)) {
     throw 'register-trivy-refresh-task.ps1 does not register when absent and update in place when the task already exists'
 }
+
+& (Join-Path $scriptsRoot 'test-register-trivy-refresh-behavior.ps1') -Case wiring
 
 Write-Host 'All register-trivy-refresh-task fixtures passed.'
