@@ -572,7 +572,7 @@ done
 ssh-keygen -Y verify -f "$OFFSITE_ALLOWED_SIGNERS_FILE" -I "$OFFSITE_SIGNER_IDENTITY" \
   -n "$OFFSITE_SIGNATURE_NAMESPACE" -s "$offsite_ack_signature" <"$offsite_ack" >/dev/null ||
   die 'off-site acknowledgement signature verification failed'
-jq -Rn --arg record "$record_id" --arg manifest "$backup_manifest_hash" '
+jq -eRn --arg record "$record_id" --arg manifest "$backup_manifest_hash" '
   [inputs] as $lines |
   ($lines | length == 3) and
   ($lines[0] == ("record_id=" + $record)) and
