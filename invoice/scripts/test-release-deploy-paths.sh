@@ -6,7 +6,7 @@ trap 'rm -rf -- "$temporary"' EXIT
 failures=0
 asset_names=(docker-compose.prod.yml docker-compose.idp.yml docker-compose.sources.yml postgres/apply-permissions.sh postgres/harden-runtime-role.sql postgres/010-invoice-roles.sh keycloak/010-keycloak-app-role.sh clamav-healthcheck.sh nginx/ingest-mtls.conf)
 for component in roll-forward wrapper operator; do
-  for layout in standalone monorepo ambiguous wrong noncanonical "${asset_names[@]/#/missing-}"; do
+  for layout in standalone monorepo ambiguous wrong noncanonical "${asset_names[@]/#/missing-}" "${asset_names[@]/#/directory-}" "${asset_names[@]/#/symlink-}"; do
     if [[ "$layout" != standalone && "$layout" != monorepo && "$layout" != ambiguous && "$layout" != wrong && "$component" != roll-forward ]]; then continue; fi
     label=$component-$layout
     [[ -z "${RELEASE_PATH_CASE:-}" || "$RELEASE_PATH_CASE" == "$label" ]] || continue
@@ -16,9 +16,19 @@ for component in roll-forward wrapper operator; do
     mkdir -p "$deploy/keycloak" "$deploy/postgres" "$deploy/nginx" "$release/source"
     if [[ "$layout" == ambiguous ]]; then mkdir -p "$release/source/deploy"; fi
     printf 'fixture only\n' >"$release/.env.production"
+    printf 'fixture public asset\n' >"$release/asset-target"
     for name in "${asset_names[@]}"; do
       [[ "$layout" != "missing-$name" ]] || continue
-      printf 'fixture only\n' >"$deploy/$name"
+      if [[ "$layout" == "directory-$name" ]]; then
+        mkdir -p "$deploy/$name"
+      elif [[ "$layout" == "symlink-$name" ]]; then
+        # MSYS .lnk symlinks need no Windows symlink privilege; Bash -L and -f
+        # still observe a real symbolic link. Native Unix ln ignores MSYS.
+        MSYS=winsymlinks:lnk ln -s "$release/asset-target" "$deploy/$name"
+        [[ -L "$deploy/$name" && -f "$deploy/$name" ]] || { echo 'fixture symlink creation failed' >&2; exit 2; }
+      else
+        printf 'fixture only\n' >"$deploy/$name"
+      fi
     done
     if [[ "$component" == roll-forward ]]; then
       probe="$deploy/path-probe.sh"

@@ -40,6 +40,10 @@ if ($LASTEXITCODE -ne 0) { throw 'configured untracked Git state fixtures failed
 & (Join-Path $PSScriptRoot 'test-hidden-release-artifacts.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'hidden release artifact fixtures failed' }
 
+$auditPwsh = (Get-Process -Id $PID).Path
+& $auditPwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'test-full-audit.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'full-audit regression gate failed' }
+
 & (Join-Path $PSScriptRoot 'test-verify-postgres.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 container-network static fixtures failed' }
 

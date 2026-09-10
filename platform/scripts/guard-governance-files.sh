@@ -38,6 +38,11 @@ protected_globs=(
   'deploy/compose/'
   'deploy/nginx/'
   'tests/security/'
+  'tests/runbooks/'
+  'scripts/test-database-roles.test.ps1'
+  'scripts/test-runway-threshold-db.test.ps1'
+  'scripts/dev/test-worktree-testdb.sh'
+  'scripts/dev/test-worktree-testdb-identity.sh'
   'tests/deploy/'
 )
 
