@@ -1,3 +1,187 @@
+# 全量审查与修复 — 阶段二交付状态
+
+实测快照 UTC `2026-09-10T19:45:44.014591+00:00`。修复分支 `ai/codex/XM-FULL-AUDIT-20260911`，HEAD `b201754f70911b18944bab0b5de17bea5e297b66`；main `9d430fb284e5e9b91327089ae39cef207c42f482`。
+
+90 条原始 finding 顺序不变；86 条在本轮修复范围。目前已提交 86 条，已集成 86 条。完整门禁状态：**已通过（10/10）**。本表的“已修”仅指提交与集成，验收必须同时看完整门禁。
+
+[逐条提交映射](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/COMMITS.txt>) · [完整命令、UTC 与退出码索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
+
+| 排序 / ID | 问题 | 已修 | 未修 | 待拍板 | 集成提交 |
+|---|---|---|---|---|---|
+| 1 / PT-03 | P0 — 治理安全测试用 git checkout 还原迁移，会丢弃运行前未提交的用户改动 | 已集成；门禁见下表 | — | — | `f13cccc978427327f8fcbcc4d6d256729bee18bc` |
+| 2 / POP-06 | P0 — decrypt-secrets 的 heredoc 抢占 YAML 输入，清空输出后没有生成凭据 | 已集成；门禁见下表 | — | — | `f799a7a8a7249777721f7b4a72e99f54dbfaa651` |
+| 3 / IDEP-002 | P0 — backup 接受错误的现存 state generation，且恢复服务时会把该路径交给 Compose | 已集成；门禁见下表 | — | — | `3d420f5cb256fd182412a2800f9bc1548552ae82` |
+| 4 / IT-CLI-01 | P0 — Whitespace-only narrowing filters silently become a bulk dead-row repair | 已集成；门禁见下表 | — | — | `49b8ca5a102caf07e09ef23a51c5fec11790b411` |
+| 5 / POP-04 | P0 — deploy 按 SHA 加锁允许两次部署同时改同一 checkout | 已集成；门禁见下表 | — | — | `43c789c2348be69c01eb1b472dae6b9cbf582f5a` |
+| 6 / POP-05 | P0 — Git 安装器接受解析为根目录的目标并会修改根目录权限 | 已集成；门禁见下表 | — | — | `df9d5284a12ccf4adf6ab6db4c1f71f56d7f4096` |
+| 7 / F4 | P0 — F4：roll-forward 与 Keycloak 维护入口仍绑定旧 source 根/清单路径 | 已集成；门禁见下表 | — | — | `4c0ce3742f176753cdf6f3a56f7e6a8d52ae374d` |
+| 8 / POP-01 | P0 — 平台服务器/本地工具及对应手册混淆Git根与platform项目根 | 已集成；门禁见下表 | — | — | `cf4f4cc8402e6a8204256129a0b384f2fb83969e` |
+| 9 / POP-02 | P0 — pre-receive 清除了新提交所在的 Git quarantine 上下文 | 已集成；门禁见下表 | — | — | `9fec5f15b493e3260e4290b9925251df03e1f96d` |
+| 10 / POP-03 | P0 — promote 完成后留下 pid/sha 文件，后续晋级永久锁死 | 已集成；门禁见下表 | — | — | `f3154a2ca641a472b6cfc1e1df94e7c44f39a4f4` |
+| 11 / IDEP-003 | P0 — restore-drill 未转发 cutover runtime，源 runtime 升级后的合法备份无法验证 | 已集成；门禁见下表 | — | — | `95825f7a17e66b86d38aa197732a31b2466522d9` |
+| 12 / IDEP-004 | P0 — roll-forward 检查 env 文件的 tag，Compose 却可使用外层导出的另一 tag | 已集成；门禁见下表 | — | — | `b0ad5e6afcff0a9d27910de989c5ee42e9edcda7` |
+| 13 / IDEP-008 | P0 — pipefail 下用 grep -q 匹配大段 Docker 日志，可把真实启动 marker 判成启动失败 | 已集成；门禁见下表 | — | — | `54f9d045c96c835bfa50526b41d7d4d3acb27347` |
+| 14 / INV-AUX-002 | P0 — 投影网络重跑从 network inspect EndpointResource 读取不存在的 Aliases 字段 | 已集成；门禁见下表 | — | — | `acbfe3bf160fbc3d3faafba5780008fd49669435` |
+| 15 / INV-DOC-01 | P0 — 资格运维表格列出的两个 repair kind 不被当前工具接受 | 已集成；门禁见下表 | — | — | `c43eb77ca03c1316a1becc11e7be3ecac8e55c30` |
+| 16 / OPS-04 | P0 — 两份 real 切换卡直接 up worker 会丢弃当前生产 override | 已集成；门禁见下表 | — | — | `a0b9881cd51436378f56991dd968d575e606a235` |
+| 17 / PDOC-03 | P0 — DEPLOY prod 手册/探针要求18089，Compose默认却发布8088 | 已集成；门禁见下表 | — | — | `dfde38bb8179588bc8505c891519ea755d118a72` |
+| 18 / POP-07 | P0 — deploy-local 对 local 鉴权配置的识别与 Compose 解析/生产默认不一致 | 已集成；门禁见下表 | — | — | `9385e2043162fa408d73cfdca22ee39b70e2ce29` |
+| 19 / POP-08 | P0 — mirror-github 默认 git 参数必定被自己的生产白名单拒绝 | 已集成；门禁见下表 | — | — | `d7b3768b101231a67f1d7045b2587e6b82cf4267` |
+| 20 / PT-02 | P0 — 两套测试数据库名称均可能碰撞，跨工作树隔离与删除边界失效 | 已集成；门禁见下表 | — | — | `bf40dc6b25decc195a2211c21461ff28cb4a0dc1` |
+| 21 / RUNEARLY-01 | P0 — Artifact signature verification uses unset CMD variables and PowerShell-invalid quote escaping | 已集成；门禁见下表 | — | — | `a045a76243be10c6944008c393bfa445973aa122` |
+| 22 / RUNEARLY-02 | P0 — Host command blocks still select deploy/.env.production after the release env moved beside source | 已集成；门禁见下表 | — | — | `b2aca068fa4d64ecaeb9ee2d0dd92df00aec074c` |
+| 23 / TRIVY-01 | P0 — 续传分片不绑定 OCI digest，上游变化后反复复用旧分片导致刷新无法恢复 | 已集成；门禁见下表 | — | — | `dba5ea622a389632bfbc121b9d22f8771ca579bf` |
+| 24 / TRIVY-04 | P0 — 镜像参数校验拒绝脚本自己的合法 tag+digest 默认值 | 已集成；门禁见下表 | — | — | `5c0e1dd16152a73949672c4b624964de6a73c17d` |
+| 25 / AGT-TEST-001 | P1 — Schedule persistence test never seeds or asserts published sequence history | 已集成；门禁见下表 | — | — | `c7b50c60b3b57d8036c18396ee244ef627359d92` |
+| 26 / AGT-TEST-002 | P1 — Partial reconciliation test checks absence of tombstone but not unchanged miss counters | 已集成；门禁见下表 | — | — | `31613e09e90f3d6c7aa80b562a12df550c644972` |
+| 27 / AGT-TEST-003 | P1 — Invalid keygen KeyID test also supplies aliased outputs, masking removed KeyID guard | 已集成；门禁见下表 | — | — | `2493a55f296ccacf64e8893acd1d469fcb69c9a6` |
+| 28 / CONTRACT-AUTH-01 | P1 — 签发端所谓独立验签测试复用生产 wireClaims 与 ACR 常量，单边改字段或域值仍通过 | 已集成；门禁见下表 | — | — | `74d399987668a8cc226494699c6de7ce906e344a` |
+| 29 / F-PT-WEB-01 | P1 — 开票断言集成测试只检查 iframe URL，断言投递与重签发接线断开仍全绿 | 已集成；门禁见下表 | — | — | `a6a4407b84a672e1088a811006ab450b464d64a3` |
+| 30 / F-PT-WEB-02 | P1 — “不从 Vite 回落开票来源”测试未提供待排除来源，增加违约回落仍通过 | 已集成；门禁见下表 | — | — | `569bfda3e34b02181c28bf611088debf60946cf1` |
+| 31 / F1 | P1 — 输入目录并非实际Git仓库根仍通过：钉版树与平台Git操作入口 | 已集成；门禁见下表 | — | — | `761c91f31c3f16e19626d0262c662fe32a70c94f` |
+| 32 / F2 | P1 — Git配置隐藏未跟踪文件时，invoice及pinned脏树检查漏判 | 已集成；门禁见下表 | — | — | `2097f84093a4477ca8ae3b51b82fb7aef4880061` |
+| 33 / F3 | P1 — 错误分支的dry-run仍成功并输出固定release分支名 | 已集成；门禁见下表 | — | — | `152360f78dbddc2df35c80129f728eea9f5ed48e` |
+| 34 / HYG-01 | P1 — 当前入口文档仍给出旧独立仓库路径与已过期的切根状态 | 已集成；门禁见下表 | — | — | `29f72160963fd77ddd02b89a5ee25bab06318c1f` |
+| 35 / IDEP-005 | P1 — shadow-eval 完整 ready 报告会覆盖工具非零退出码；静态套件测不到最终退出判据 | 已集成；门禁见下表 | — | — | `4586b954ead888d68c1e6238c9ddd771e14f9197` |
+| 36 / IDEP-006 | P1 — cleanup 把可达 Docker daemon 的任何 inspect 错误当资源不存在 | 已集成；门禁见下表 | — | — | `8fb5968ab77e630a029bb56a31f9543369d6274d` |
+| 37 / IDEP-007 | P1 — roll-forward 忽略 ingest-proxy 重启失败并继续成功路径 | 已集成；门禁见下表 | — | — | `9ac7d91930d114167476b19f10d8a03371395f12` |
+| 38 / INT-TEST-02 | P1 — Keyfile strict-JSON tests pass when unknown-field and trailing-JSON rejection are removed | 已集成；门禁见下表 | — | — | `86279894c7c5deb58b85db98bbbe2e50e726353c` |
+| 39 / INT-TEST-03 | P1 — Traversal test passes with all LocalStore.OpenAuthorized path guards removed | 已集成；门禁见下表 | — | — | `22eff546ea17c904fb155863dc5350fa9091b0e3` |
+| 40 / INV-AUX-003 | P1 — export/eval掩盖命令替换失败：Keycloak启动与测试DB环境捕获 | 已集成；门禁见下表 | — | — | `ab3332db309642d7bccd2171437a8d6500afb21b` |
+| 41 / INV-AUX-004 | P1 — spool 与投影网络成员门禁丢失进程替换生产者退出码 | 已集成；门禁见下表 | — | — | `15f5fbcab0d20dd1d44b1238c04e93ba133bbd03` |
+| 42 / INV-AUX-005 | P1 — 文件类型的 AND 列表不 fail-closed：secret 目录及备份/恢复/helper symlink guard 均可继续 | 已集成；门禁见下表 | — | — | `33751067eba2c8c1c8781b000f8730c813cf634d` |
+| 43 / INV-AUX-006 | P1 — 管理员邀请的异地 ACK 内容不匹配仍通过，现有测试不覆盖消费端 | 已集成；门禁见下表 | — | — | `ddfd603fb82b89d3142775a20f6afa16e9a253d5` |
+| 44 / INV-AUX-007 | P1 — 当前 runbook 要求 RC100 管理员安装，但操作器固定拒绝非 RC38 身份 | 已集成；门禁见下表 | — | — | `61b59850d91421a3c38239849d5e8e4e0e201c52` |
+| 45 / INV-DOC-03 | P1 — blocked-cycle 处置段仍引导跳过 acknowledge 直接解冻 | 已集成；门禁见下表 | — | — | `ec2ac2aadb233ae3948cd188418487128e76cb7c` |
+| 46 / INV-DOC-04 | P1 — 影子评估计划模板要求先于 tag，与本手册已加载签名候选镜像流程相冲突 | 已集成；门禁见下表 | — | — | `a1b2cb5a25cfb731e69afcfdfcb29847a8463688` |
+| 47 / INV-PG-001 | P1 — Concurrent-index finalizer returns success when mandatory evidence writes fail | 已集成；门禁见下表 | — | — | `51c27671fb7b91a8cee58f5e47da2da9b6976756` |
+| 48 / INV-PG-002 | P1 — Multi-file bash -n gates parse only the first shell script | 已集成；门禁见下表 | — | — | `27440a650ad59df80131ae772d1cda70652a385e` |
+| 49 / INV-PG-003 | P1 — Readiness plan guard can be bypassed while its static contract gate stays green | 已集成；门禁见下表 | — | — | `ab239c57f90c3c337cd7d375f4f12616a3af8ca9` |
+| 50 / INV-WIRE-01 | P1 — V3 JSON Schema 契约门禁未验证示例符合 schema，事件名变异后仍通过 | 已集成；门禁见下表 | — | — | `7989ce7ff56de1eaef1b2327f07fb8abf271f569` |
+| 51 / INV-WIRE-02 | P1 — 真实批次接收器接受必填 array/boolean 为 null，违反 V3 契约并静默变成空批/false | 已集成；门禁见下表 | — | — | `8e1d335238ddc87ff649832ef2c2ba73016fdc41` |
+| 52 / IT-CLI-02 | P1 — Per-account/event repair failures print APPLIED and exit 0 | 已集成；门禁见下表 | — | — | `3ab778d9515341d69988be1b807c668309acd06e` |
+| 53 / IT-CLI-03 | P1 — Acknowledge repair account-flag rejection test is masked by the missing-event guard | 已集成；门禁见下表 | — | — | `0d4a021dbd586c2e1e6f00ed4ee9fceff05f7e5d` |
+| 54 / ITR-REG-01 | P1 — Unexpected task lookup errors are mistaken for absence before forced registration | 已集成；门禁见下表 | — | — | `704f338cae1318b56a7b6c0b49eb1026b4d608b5` |
+| 55 / ITR-REG-02 | P1 — Registration wiring source-text assertions miss branch, WhatIf and refresh-invocation regressions | 已集成；门禁见下表 | — | — | `073e7e08a75f9df880f59e70e0a3203959b166d7` |
+| 56 / OPS-02 | P1 — REQLOG 容器验证没有 Compose 文件且固定了错误的项目名 | 已集成；门禁见下表 | — | — | `0343c644de199605063ca7c322f9a30114123336` |
+| 57 / OPS-03 | P1 — NewAPI/Sub2API 切换卡仍把 env 缺省当作生效配置 | 已集成；门禁见下表 | — | — | `b43217a4e616afdfc45478bfc685d9edb0d55cc0` |
+| 58 / OPS-05 | P1 — SHADOW-COMPARE 用 go run 抹平文档要求的退出码 1 与 2 | 已集成；门禁见下表 | — | — | `7ade292b9c5c6576a8a0caf383bf0c45c5cdfe3c` |
+| 59 / OPS-06 | P1 — 审计归档 fixture 的 teardown 缺少必需的 env 文件变量 | 已集成；门禁见下表 | — | — | `70ca23e6fd1ecc2e9f1ed2f169c66033b4cd3dec` |
+| 60 / OPS-07 | P1 — REQLOG 声称历史 tokenmap 会自动获得新权限，但 WriteFile 保留旧 mode | 已集成；门禁见下表 | — | — | `1e449daf74b97b26c25a750bab80833f7d7845a1` |
+| 61 / OPS-08 | P1 — REQLOG 的 99% 验收只数 tokenmap 字段，无法检出读侧完全失效 | 已集成；门禁见下表 | — | — | `60549c60198efa9864a53d59ff2b413c230ad4ae` |
+| 62 / OPS-09 | P1 — evidence-capture 示例输出根与后续 sha256 校验目录不一致 | 已集成；门禁见下表 | — | — | `1a718cf1c543f18594997bdda02e5879ce95dde2` |
+| 63 / OPS-10 | P1 — 用户证据手册把 env-only 连接器配置错误描述成文件凭据登记前提 | 已集成；门禁见下表 | — | — | `0c148f288c1cd606b04845ec612bfffb69376304` |
+| 64 / PC-001 | P1 — 预算解析 unknown-field 用例使用必定无效的空 capabilities，移除严格解码后仍绿 | 已集成；门禁见下表 | — | — | `94fac85c427b90ac8759cb5af933fd5c5b5d5af4` |
+| 65 / PC-002 | P1 — 三个 SMS Action 契约仍宣称仅 HUMAN，当前运行定义已经允许 SERVICE | 已集成；门禁见下表 | — | — | `dc2b39a56bb9d16c30b50f24512df518ae4f79bb` |
+| 66 / POP-10 | P1 — promote 的 test-mode 保护只检查冒号拼接后的第一条路径 | 已集成；门禁见下表 | — | — | `c0523a9661e46047f40c39bf13a484cd7e8b8017` |
+| 67 / POP-11 | P1 — 只读窗口证据 helper 将未经校验的时间参数直接拼进 SQL | 已集成；门禁见下表 | — | — | `72b1f9835d7f14e9216487a1466f96aa552f0ffe` |
+| 68 / POP-12 | P1 — 部署顺序与安装接线测试用字符串存在性冒充行为断言 | 已集成；门禁见下表 | — | — | `78c123863155cb491028708329ec39bf8ce0f4f2` |
+| 69 / POP-12-CPA | P1 — CPA专属生命周期接线测试的顺序断言不充分（本轮禁止触碰CPA） | — | — | 是 | `-` |
+| 70 / POP-13 | P1 — 负向测试被前序错误遮住，删掉真实闸门仍全绿 | 已集成；门禁见下表 | — | — | `8fc9374bfb0956be668991f355bc62d3e436289a` |
+| 71 / POP-14 | P1 — 通知隔离测试检查 payload，未检查它已经捕获的环境文件 | 已集成；门禁见下表 | — | — | `07df405170ac3c3a8669c20663c5175c94c4fa13` |
+| 72 / PS-01 | P1 — 密钥材料门禁按Git声明扫描集合，却让rg忽略已跟踪的ignored文件 | 已集成；门禁见下表 | — | — | `0942d541a9f00b84cc3f9f5b973e5263f934d846` |
+| 73 / PS-02 | P1 — 内容扫描器的Windows负退出码被当作未发现问题 | 已集成；门禁见下表 | — | — | `e6fa0ef7ac8934893d8ea1862de14298b2da4822` |
+| 74 / PS-03 | P1 — 生产只读预检把缺失/畸形磁盘与Docker网络输出当作通过 | 已集成；门禁见下表 | — | — | `5e248331fbafa25fbe22ffe1e28261c289e7a3c6` |
+| 75 / PS-04 | P1 — New API精确版本预检实际只做整行子串匹配 | 已集成；门禁见下表 | — | — | `e36e785af4198b978dc5a2c98ca73da413dbc3bd` |
+| 76 / PS-05 | P1 — 发布产物目录只拒绝叶节点链接，父目录junction可越过项目边界 | 已集成；门禁见下表 | — | — | `3bf75e4c223dfb13311d7ce42ac08c92ceaa91c6` |
+| 77 / PS-06 | P1 — SHA256SUMS生成与验证同时忽略隐藏产物，内容改动不被发现 | 已集成；门禁见下表 | — | — | `c5635d15620dd5329ebf2334f18fe2e7ee4e1e62` |
+| 78 / PT-04 | P1 — 治理变更守卫未识别 monorepo 路径，且新增 Compose 环境扫描器未登记保护 | 已集成；门禁见下表 | — | — | `d286d56846027cec049616fa1515a12d2698c3f5` |
+| 79 / PT-05 | P1 — Compose 环境变量门禁只查文件全局存在，API 缺透传会被 worker 同名变量掩盖 | 已集成；门禁见下表 | — | — | `b5d209470e7ff071d55fbd59b9920b764756317c` |
+| 80 / PT-06 | P1 — DB-role负向Compose夹具位于RepoRoot外，端口/镜像断言实际只测到路径拒绝 | 已集成；门禁见下表 | — | — | `106f39a94053979ad889e2bbbd3182e9b9484c19` |
+| 81 / PT-07 | P1 — Runway脚手架守卫测试不检查原生子进程退出码，并接受零测试运行 | 已集成；门禁见下表 | — | — | `c4b5dc74a8a92c9dd72f46a19885f81ce2a8c4ae` |
+| 82 / RUNEARLY-04 | P1 — RC39 post-migration command block returns success after exact migration comparison fails | 已集成；门禁见下表 | — | — | `1e16dd5c1a124ddcf107620fbfff2dd63cf05a81` |
+| 83 / TRIVY-02 | P1 — digest 相同快速路径不验证数据库内容或时效，自称成功而保留不可用缓存 | 已集成；门禁见下表 | — | — | `08faee3faca81dc5c970437e62ee89f148a29aa8` |
+| 84 / TRIVY-03 | P1 — 共享 Docker volume 的锁按 worktree 项目目录分散，跨工作树互斥失效 | 已集成；门禁见下表 | — | — | `32bc6376546cfdd93d30427de627449f0734b290` |
+| 85 / TRIVY-05 | P1 — 锁文件打开的所有错误都伪装成正常争用跳过 exit75 | 已集成；门禁见下表 | — | — | `6293b58589419f16935c95204fda784c52f55edb` |
+| 86 / CONTRACT-DOC-01 | P2 — CR-0007/0008/0009 在同一文件保留互相冲突的当前状态 | — | P2 不选 | — | `-` |
+| 87 / HSC-P2-01 | P2 — RC110 顶部状态仍是发布前初始值，与后续完成记录不一致 | — | P2 不选 | — | `-` |
+| 88 / IDEP-009 | P2 — 恢复成功文案仍写 source_states=4，实际检查十个状态目录 | — | P2 不选 | — | `-` |
+| 89 / INV-DOC-05 | P2 — eligibility repair 退出码表把kind/组合拒绝过宽地列为2 | 已集成；门禁见下表 | — | — | `685adfe9428cf3cc348f90dddd3eac95a9a8ac8f` |
+| 90 / PC-003 | P2 — 卡用途 Action 契约遗漏已实现的订阅金额和周期参数 | 已集成；门禁见下表 | — | — | `01cadbdc44319b17ba46a263e4c2ba77c3d84a46` |
+
+## 复审补证
+
+原始测试记录保留为历史；下列补证专门修补原测试无法证明的判据。旧记录中的 green 不能单独作为这些判据的最终证明。
+
+| Finding | 补证判据 | 补证 / 集成 |
+|---|---|---|
+| PT-03 | 必须实际执行全部七次治理调用并核对 deliberate exit 1；旧仅比较原文件不变可能假绿。 | [补证](<G:/xingmang/logs/full-audit-20260910/phase2/platform-tests/PT-03/integration-correction.patch>)；随原 finding 集成；追加提交 `-` |
+| F4 | 资产必须是普通文件且不能是 symlink；旧路径测试不足以单独证明资产类型拒绝。 | [补证](<G:/xingmang/logs/full-audit-20260910/phase2/invoice-core/F4/asset-types/proof.json>)；committed-source-matches；追加提交 `854b4b2c34aa2945c3629165f92a3fd8600d3e50` |
+| TRIVY-01 | 失败重试前必须先捕获非空分片集合与哈希；旧失败后快照不足以证明分片保留。 | [补证](<G:/xingmang/logs/full-audit-20260910/phase2/trivy/TRIVY-01/integration-correction/integration-correction.patch>)；随原 finding 集成；追加提交 `-` |
+| OPS-09 | 必须逐个正式命令核对两个平台的精确集合；旧跨块匹配不充分。 | [补证](<G:/xingmang/logs/full-audit-20260910/phase2/platform-docs/integration-corrections/OPS-09-integration-correction.patch>)；随原 finding 集成；追加提交 `-` |
+| OPS-10 | 每个正式命令独立检查 secret root 及可读性前置；旧跨命令匹配不充分。 | [补证](<G:/xingmang/logs/full-audit-20260910/phase2/platform-docs/integration-corrections/OPS-10-integration-correction.patch>)；随原 finding 集成；追加提交 `-` |
+
+## 完整门禁实测
+
+仅使用明确提供的 full-gates JSON；尚未完成的门禁保持 pending，不把 targeted tests 当作完整验证。额外 normal-regression 门禁需明确提供 kind、命令、时刻与日志，纳入同一验收表。
+
+| 命令 | UTC 起 | UTC 止 | 秒 | 退出码 | 状态 / 日志 |
+|---|---|---|---:|---:|---|
+| `"C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -File .\scripts\verify.ps1 (started via scripts/run-detached.ps1)` | 2026-09-10T19:12:15.260074+00:00 | 2026-09-10T19:29:27.712045+00:00 | 1032.458 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/invoice-verify-r6.stdout.log>) |
+| `go.exe test -race -p 1 ./...` | 2026-09-10T19:30:44.955448+00:00 | 2026-09-10T19:35:40.864745+00:00 | 295.916 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-go-test.stdout.log>) |
+| `go.exe vet ./...` | 2026-09-10T19:35:40.945578+00:00 | 2026-09-10T19:36:06.541019+00:00 | 25.596 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-go-vet.stdout.log>) |
+| `pnpm.cmd install --config.verify-deps-before-run=false --frozen-lockfile` | 2026-09-10T18:21:48.577916+00:00 | 2026-09-10T18:21:50.378937+00:00 | 1.807 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-pnpm-install.stdout.log>) |
+| `pnpm.cmd -r run typecheck` | 2026-09-10T19:36:06.611585+00:00 | 2026-09-10T19:36:21.669638+00:00 | 15.062 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-typecheck.stdout.log>) |
+| `pnpm.cmd -r run test` | 2026-09-10T19:36:21.795145+00:00 | 2026-09-10T19:37:08.744043+00:00 | 46.953 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-test.stdout.log>) |
+| `D:\Git\bin\bash.exe scripts/check-governance.sh` | 2026-09-10T19:37:08.827942+00:00 | 2026-09-10T19:37:16.406499+00:00 | 7.579 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-governance.stdout.log>) |
+| `D:\Git\bin\bash.exe tests/security/governance-protected-paths.test.sh` | 2026-09-10T19:44:16.877368+00:00 | 2026-09-10T19:44:20.756329+00:00 | 3.880 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-governance-protection-regression-r2.stdout.log>) |
+| `D:\Git\bin\bash.exe tests/security/compose-env-services.test.sh` | 2026-09-10T19:37:17.197304+00:00 | 2026-09-10T19:37:17.574974+00:00 | 0.382 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-compose-env-regression.stdout.log>) |
+| `D:\Git\bin\bash.exe tests/security/full-audit-regressions.test.sh` | 2026-09-10T19:44:20.828794+00:00 | 2026-09-10T19:44:59.049654+00:00 | 38.234 | 0 | passed [日志](<G:/xingmang/logs/full-audit-20260910/full-gates/platform-full-audit-regressions-r2.stdout.log>) |
+
+## 需要负责人拍板
+
+- **POP-12-CPA**：CPA 专用顺序测试仍可能让错误顺序通过。本轮禁止修改 CPA 专用代码与测试，保留原始 finding 与变异证据。建议另行授权 CPA 负责人修复测试，代价是独立验证 CPA 生命周期顺序；本轮不调整生命周期。
+- 服务器真相源切换、真实部署验证、GitHub 推送、签名 tag 与旧盘清理均未授权给本轮，也未作为完成条件执行。若安排这些操作，应另行确认目标、窗口与相应验收。
+- 手册涉及的真实 secret 可读性、tokenmap 消费权限、观测采样与生产模式/端口选择，仍需负责人在实际环境验收；本轮只修正文档及本地 fail-closed 判据，没有迁移生产权限、身份或端口。
+
+## 未验证与保留范围
+
+本地 fakes、临时 Git 仓库、源码拷贝与 Go overlays 的证据不等于线上验证。未连接服务器、未执行生产 roll-forward/backup/shadow/restart、未读取真实密钥内容。真实生产数据、实际网络/镜像服务、计划任务服务与现有 DB/容器生命周期均不由这些 targeted tests 证明。本轮 10 项有效门禁全部退出 0；早期失败尝试另表保留。
+
+CONTRACT-DOC-01、HSC-P2-01、IDEP-009 三条 P2 保留历史/非运行时内容，本轮不整理。生成物契约哈希、main/tag 边界和门禁源码一致性已实测，见下节及最终核对 JSON。
+
+## 最终核对与集成验证修正
+
+24 条 P0、60 条 P1、2 条 P2 已按 finding 分别提交并集成；CPA 专用 1 条待负责人授权，另 3 条 P2 保留。上方 HEAD 是已验证代码快照；最终交接文档提交不改变两个子系统源码。
+
+[完整门禁表及全部失败尝试](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/GATE-RESULTS.md>) · [最终边界与门禁源码一致性](<G:/xingmang/logs/full-audit-20260910/full-gates/preservation-final.json>) · [逐条命令与变异证据索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
+
+- main 保持 `9d430fb284e5e9b91327089ae39cef207c42f482`；原切根分支和两枚演练签名 tag 对象均未变。
+- 依赖清单与数据库迁移未变；上游、AI manager 和 CPA 代码未改。未连接服务器、未推送、未合并 main、未读取真实密钥内容。
+- 开票完整门禁在 `824728ee14fe3bd018d73613ee4c7c138495047e` 运行通过；此后 invoice 树完全相同。平台基础门禁通过后只改了两份 Python 测试的 Bash 定位，这两项已经完整重跑通过；Go、前端与治理实现保持不变。
+- 平台全量 `go test ./...` 包含既有 CPA 包测试；这不等于修复或验证了保留的 CPA 专用顺序 finding。Runway DB 测试只证明既有 scaffold 的参数边界，完整迁移/角色生命周期仍未实现或实测。
+
+### TypeScript 生成物内容不变证明
+
+仅通过现有 Go 生成器 `-update` 重建；原有 invoice 下 eol=crlf 规则保留，未修改全局 Git 设置。73 个裸 LF 变为 73 个 CRLF，归一化后逐字节相同；Git 内容对象保持 `c48dcf9af16b213e4ddbc6c6b97413dc92ed21c6`。
+
+| 文件 | 行尾归一化后 SHA-256 |
+|---|---|
+| 旧文件 | `e51f92b17b061f08f8b4f8b38a3324bf692c6bdd8321635359addff444bf68e5` |
+| 新文件 | `e51f92b17b061f08f8b4f8b38a3324bf692c6bdd8321635359addff444bf68e5` |
+
+[新旧文件、生成命令与哈希证据](<G:/xingmang/logs/full-audit-20260910/phase2/integration-fixes/generated-line-endings/normalized-hashes.json>)
+
+### 集成门禁补充提交
+
+以下只补门禁接线、测试证据与运行环境兼容；保留各 finding 的原提交，不改写历史。缺失 executable 或编译失败等夹具错误没有计作行为变异成功。
+
+| 提交 | 内容 | 证据 |
+|---|---|---|
+| `854b4b2c34aa2945c3629165f92a3fd8600d3e50` | Normal audit gate wiring and F4 additional asset-type regression | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/gate-wiring-invoice/results.json>) / [记录](<G:/xingmang/logs/full-audit-20260910/phase2/gate-wiring-platform/results.json>) / [记录](<G:/xingmang/logs/full-audit-20260910/phase2/invoice-core/F4/asset-types/proof.json>) |
+| `4fc80c7bb3f7390d878d1168aead448df0461f49` | Scope strict-transfer verifier assertions to executable commands | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/integration-fixes/runbook-strict-command/results.json>) |
+| `7df825b5abc6b640d830b0c4c222b71df3adf5d7` | Include strings import in extracted CLI fixture | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/integration-fixes/repair-cli-import/restored-green.json>) |
+| `824728ee14fe3bd018d73613ee4c7c138495047e` | Use local Linux permissions for two allowed POSIX test fixtures | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/invoice-posix-test-routing/results.json>) |
+| `b201754f70911b18944bab0b5de17bea5e297b66` | Resolve Git Bash for existing security regression entrypoints in cmd/bin/mingw64 layouts | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/platform-tests/BASH-RESOLUTION/delivery.json>) |
+
+Git Bash 的符号链接设置仅应用于本次验证进程；两个 Unix 权限测试使用本机 WSL 新建的合成临时环境。生产 validator 和原 Shell fixture 未改。部分 WSL 启动提示使用混合编码，原始 stderr 已保留；成功判据是实际退出码与测试断言。
+
+## 原始阶段一报告（原字节保留）
+
+以下完整保留阶段一报告；其中“尚未修复”等文字描述当时快照，当前状态以上表为准。原报告 SHA256 `707dda8dc050765174b373d88bea0f6af146807feb736ee3f694c0e50c64afb8`。
+
+---
+
 # 全量审查与修复 — 2026-09-11
 
 ## 阶段一：完整清单（源码只读，尚未开始修复）
