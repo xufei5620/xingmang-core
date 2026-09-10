@@ -36,3 +36,24 @@ All selected gate commands run against the integrated checkout. Full and targete
 Invoice r5 also exposed LF checkout bytes in the generated TypeScript module; the existing generator rebuilt CRLF and proved identical normalized bytes. Platform supplemental tests initially derived a nonexistent Bash from mingw64 Git; test-only correction b201754f restored actual execution. Their successful reruns are in the main table.
 
 Supplemental corrections and normalized-hash proof: [final report](<G:/xingmang/01-core/docs/handoffs/FULL-AUDIT-20260911.md>).
+
+## 2026-09-11 四条补充修复
+
+本节为本次实际新跑的定向检查；上方完整门禁是前次记录。应用源码和依赖未变，未重复运行完整构建/DB/前后端全套。CPA 两个普通入口及针对性变异另见专属交接。
+
+| 检查 | UTC 开始 | UTC 结束 | 秒 | exit | 输出 |
+|---|---|---|---:|---:|---|
+| cpa-gitbash-normal-entry | 2026-09-10T20:15:55.086727+00:00 | 2026-09-10T20:15:57.328989+00:00 | 2.242 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/POP-12-CPA/portable/gitbash-normal-entry/stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/POP-12-CPA/portable/gitbash-normal-entry/stderr.log>) |
+| cpa-linux-normal-entry | 2026-09-10T20:15:49.301718+00:00 | 2026-09-10T20:15:54.517438+00:00 | 5.216 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/POP-12-CPA/portable/green-fixed-test/stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/POP-12-CPA/portable/green-fixed-test/stderr.log>) |
+| platform-governance | 2026-09-10T20:14:58.758829+00:00 | 2026-09-10T20:15:06.182297+00:00 | 7.424 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/gates/platform-governance.stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/gates/platform-governance.stderr.log>) |
+| restore-capacity | 2026-09-10T20:10:28.396110+00:00 | 2026-09-10T20:10:36.514635+00:00 | 8.122 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-capacity.stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-capacity.stderr.log>) |
+| restore-cleanup | 2026-09-10T20:10:20.943752+00:00 | 2026-09-10T20:10:28.159128+00:00 | 7.219 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-cleanup.stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-cleanup.stderr.log>) |
+| restore-runtime-env | 2026-09-10T20:10:20.546515+00:00 | 2026-09-10T20:10:20.873152+00:00 | 0.330 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-runtime-env.stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-runtime-env.stderr.log>) |
+| restore-syntax | 2026-09-10T20:10:20.445235+00:00 | 2026-09-10T20:10:20.478151+00:00 | 0.033 | 0 | [stdout](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-syntax.stdout.log>) / [stderr](<G:/xingmang/logs/full-audit-20260911-followup/gates/restore-syntax.stderr.log>) |
+
+每条 finding 的先红、修后绿、变异红和恢复绿记录：
+
+- [POP-12-CPA](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-POP-12-CPA.md>)
+- [CONTRACT-DOC-01](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-CONTRACT-DOC-01.md>)
+- [HSC-P2-01](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-HSC-P2-01.md>)
+- [IDEP-009](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-IDEP-009.md>)

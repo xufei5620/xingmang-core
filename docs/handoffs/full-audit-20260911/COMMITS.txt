@@ -66,7 +66,7 @@ PC-002 | db597457b183768adf2f771a1c845cf91ae21678 -> dc2b39a56bb9d16c30b50f24512
 POP-10 | 386be9fa0677485689a7aca77274ca33d644f1e8 -> c0523a9661e46047f40c39bf13a484cd7e8b8017 | POP-10: validate each normalized test-mode target before filesystem access — verify red, green and killed mutation | integrated-targeted-evidence
 POP-11 | aa8e96c26969d57527291d2ebea44718008bcfa2 -> 72b1f9835d7f14e9216487a1466f96aa552f0ffe | POP-11: validate RFC3339 dates and bind psql input values — verify red, green and killed mutation | integrated-targeted-evidence
 POP-12 | 093448abd75acbacc21bfa0a7f2a01431b9bdabd -> 78c123863155cb491028708329ec39bf8ce0f4f2 | POP-12: verify actual deploy order and executable installer config calls; non-CPA tests only | integrated-targeted-evidence
-POP-12-CPA | - -> - | CPA专属生命周期接线测试的顺序断言不充分（本轮禁止触碰CPA） | owner-decision
+POP-12-CPA | e14b41f54ea2b757083be25393b60a1fec6adee8 -> e14b41f54ea2b757083be25393b60a1fec6adee8 | CPA 专属测试执行隔离顺序片段并拒绝安装失败放行；8 行为与 2 结构变异、双入口验证 | followup-fixed-targeted-evidence
 POP-13 | 9ceb7a22714cf7685cbfdfb33aa9c7b7fa332169 -> 8fc9374bfb0956be668991f355bc62d3e436289a | POP-13: reach hash/confirmation/ready negative boundaries with legal controls; kill all five mutants | integrated-targeted-evidence
 POP-14 | e12c2dd0dc81b794a00d32189f2000ec646dcc84 -> 07df405170ac3c3a8669c20663c5175c94c4fa13 | POP-14: assert captured notification environment is nonempty and isolated | integrated-targeted-evidence
 PS-01 | 0942d541a9f00b84cc3f9f5b973e5263f934d846 -> 0942d541a9f00b84cc3f9f5b973e5263f934d846 | PS-01: scan the exact Git release file set including tracked ignored and hidden files | integrated-targeted-evidence
@@ -83,9 +83,9 @@ RUNEARLY-04 | 1e8dc0492c7c1f3f9e5cf8d664d6aaefa39c063d -> 1e16dd5c1a124ddcf10762
 TRIVY-02 | 3cb432e5953af8453a7b9a9e5e9ba053a68e5e48 -> 08faee3faca81dc5c970437e62ee89f148a29aa8 | fix(TRIVY-02): validate unchanged cache files and metadata and retain staging self-checks | integrated-targeted-evidence
 TRIVY-03 | 2b92b3658c169e4d34bfe1c44c52a96aa86cf1db -> 32bc6376546cfdd93d30427de627449f0734b290 | fix(TRIVY-03): share a daemon and volume mutex across worktrees and release output directories | integrated-targeted-evidence
 TRIVY-05 | 54ca8666daa323e78e2814c134d57ef73e68f51f -> 6293b58589419f16935c95204fda784c52f55edb | fix(TRIVY-05): preserve lock IO failures and reserve exit 75 for actual contention | integrated-targeted-evidence
-CONTRACT-DOC-01 | - -> - | CR-0007/0008/0009 在同一文件保留互相冲突的当前状态 | not-selected-p2
-HSC-P2-01 | - -> - | RC110 顶部状态仍是发布前初始值，与后续完成记录不一致 | not-selected-p2
-IDEP-009 | - -> - | 恢复成功文案仍写 source_states=4，实际检查十个状态目录 | not-selected-p2
+CONTRACT-DOC-01 | 43b13d96c30b9bebd973ae6a4168ec163f23a0ac -> 43b13d96c30b9bebd973ae6a4168ec163f23a0ac | 三份 CR 按本地证据补历史摘要，原文保留并明确 CR-0008 运行时验收未核实；18 文档变异 | followup-fixed-targeted-evidence
+HSC-P2-01 | 433dfda58aab70b1c4e215bef40cfa92189de776 -> 433dfda58aab70b1c4e215bef40cfa92189de776 | RC110 补历史发布摘要并保留原文及验收限制；6 文档变异 | followup-fixed-targeted-evidence
+IDEP-009 | 88da933cd64c3b46aa5b5c06727758ccf32289bb -> 88da933cd64c3b46aa5b5c06727758ccf32289bb | 恢复摘要从检查数组计算状态数，移除过时注释；10/11/1 场景及 5 个变异验证 | followup-fixed-targeted-evidence
 INV-DOC-05 | 51db3db4ace24307ad681b5848cbf5c883e8372b -> 685adfe9428cf3cc348f90dddd3eac95a9a8ac8f | INV-DOC-05: 对齐CLI错误退出码并列具体错误示例；原解析映射及9项变异验证 | integrated-targeted-evidence
 PC-003 | bc1073f69bb949879312d90aff97bf594ed641cc -> 01cadbdc44319b17ba46a263e4c2ba77c3d84a46 | docs(PC-003): publish existing optional subscription fields; validate against runtime definition | integrated-targeted-evidence
 
@@ -95,3 +95,5 @@ Additional gate/evidence integration commits (original finding commits preserved
 7df825b5abc6b640d830b0c4c222b71df3adf5d7 | Include strings import in extracted CLI fixture
 824728ee14fe3bd018d73613ee4c7c138495047e | Use local Linux permissions for two allowed POSIX test fixtures
 b201754f70911b18944bab0b5de17bea5e297b66 | Resolve Git Bash for existing security regression entrypoints in cmd/bin/mingw64 layouts
+
+Follow-up: all 90 original findings locally repaired; see FOLLOWUP-*.md for the four previously retained findings.

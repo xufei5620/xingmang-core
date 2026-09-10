@@ -1,10 +1,10 @@
 # 全量审查与修复 — 阶段二交付状态
 
-实测快照 UTC `2026-09-10T19:45:44.014591+00:00`。修复分支 `ai/codex/XM-FULL-AUDIT-20260911`，HEAD `b201754f70911b18944bab0b5de17bea5e297b66`；main `9d430fb284e5e9b91327089ae39cef207c42f482`。
+补充修复快照 UTC `2026-09-10T20:20:03.909146+00:00`。修复分支 `ai/codex/XM-FULL-AUDIT-20260911`，四条补充修复后的代码 HEAD `e14b41f54ea2b757083be25393b60a1fec6adee8`；main `9d430fb284e5e9b91327089ae39cef207c42f482`。最终交付提交另见 [补充交付凭据](<G:/xingmang/logs/full-audit-20260911-followup/FINAL-DELIVERY.json>)。
 
-90 条原始 finding 顺序不变；86 条在本轮修复范围。目前已提交 86 条，已集成 86 条。完整门禁状态：**已通过（10/10）**。本表的“已修”仅指提交与集成，验收必须同时看完整门禁。
+90 条原始 finding 顺序不变；**90 条均已完成本地修复并提交（24 P0、61 P1、5 P2），未修/待拍板 finding 为 0**。本次按负责人补充授权完成原保留的四条：CPA 专属顺序测试及三条文档/提示问题。原完整门禁 10/10 记录保留；补充修改的定向检查与变异均通过，未把旧完整门禁标作本次重跑。
 
-[逐条提交映射](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/COMMITS.txt>) · [完整命令、UTC 与退出码索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
+[逐条提交映射](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/COMMITS.txt>) · [原 86 条命令、UTC 与退出码索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
 
 | 排序 / ID | 问题 | 已修 | 未修 | 待拍板 | 集成提交 |
 |---|---|---|---|---|---|
@@ -76,7 +76,7 @@
 | 66 / POP-10 | P1 — promote 的 test-mode 保护只检查冒号拼接后的第一条路径 | 已集成；门禁见下表 | — | — | `c0523a9661e46047f40c39bf13a484cd7e8b8017` |
 | 67 / POP-11 | P1 — 只读窗口证据 helper 将未经校验的时间参数直接拼进 SQL | 已集成；门禁见下表 | — | — | `72b1f9835d7f14e9216487a1466f96aa552f0ffe` |
 | 68 / POP-12 | P1 — 部署顺序与安装接线测试用字符串存在性冒充行为断言 | 已集成；门禁见下表 | — | — | `78c123863155cb491028708329ec39bf8ce0f4f2` |
-| 69 / POP-12-CPA | P1 — CPA专属生命周期接线测试的顺序断言不充分（本轮禁止触碰CPA） | — | — | 是 | `-` |
+| 69 / POP-12-CPA | P1 — CPA专属生命周期接线测试的顺序断言不充分 | 已修；补充验证通过 | — | — | `e14b41f54ea2b757083be25393b60a1fec6adee8` |
 | 70 / POP-13 | P1 — 负向测试被前序错误遮住，删掉真实闸门仍全绿 | 已集成；门禁见下表 | — | — | `8fc9374bfb0956be668991f355bc62d3e436289a` |
 | 71 / POP-14 | P1 — 通知隔离测试检查 payload，未检查它已经捕获的环境文件 | 已集成；门禁见下表 | — | — | `07df405170ac3c3a8669c20663c5175c94c4fa13` |
 | 72 / PS-01 | P1 — 密钥材料门禁按Git声明扫描集合，却让rg忽略已跟踪的ignored文件 | 已集成；门禁见下表 | — | — | `0942d541a9f00b84cc3f9f5b973e5263f934d846` |
@@ -93,9 +93,9 @@
 | 83 / TRIVY-02 | P1 — digest 相同快速路径不验证数据库内容或时效，自称成功而保留不可用缓存 | 已集成；门禁见下表 | — | — | `08faee3faca81dc5c970437e62ee89f148a29aa8` |
 | 84 / TRIVY-03 | P1 — 共享 Docker volume 的锁按 worktree 项目目录分散，跨工作树互斥失效 | 已集成；门禁见下表 | — | — | `32bc6376546cfdd93d30427de627449f0734b290` |
 | 85 / TRIVY-05 | P1 — 锁文件打开的所有错误都伪装成正常争用跳过 exit75 | 已集成；门禁见下表 | — | — | `6293b58589419f16935c95204fda784c52f55edb` |
-| 86 / CONTRACT-DOC-01 | P2 — CR-0007/0008/0009 在同一文件保留互相冲突的当前状态 | — | P2 不选 | — | `-` |
-| 87 / HSC-P2-01 | P2 — RC110 顶部状态仍是发布前初始值，与后续完成记录不一致 | — | P2 不选 | — | `-` |
-| 88 / IDEP-009 | P2 — 恢复成功文案仍写 source_states=4，实际检查十个状态目录 | — | P2 不选 | — | `-` |
+| 86 / CONTRACT-DOC-01 | P2 — CR-0007/0008/0009 在同一文件保留互相冲突的当前状态 | 已修；补充验证通过 | — | — | `43b13d96c30b9bebd973ae6a4168ec163f23a0ac` |
+| 87 / HSC-P2-01 | P2 — RC110 顶部状态仍是发布前初始值，与后续完成记录不一致 | 已修；补充验证通过 | — | — | `433dfda58aab70b1c4e215bef40cfa92189de776` |
+| 88 / IDEP-009 | P2 — 恢复成功文案仍写 source_states=4，实际检查十个状态目录 | 已修；补充验证通过 | — | — | `88da933cd64c3b46aa5b5c06727758ccf32289bb` |
 | 89 / INV-DOC-05 | P2 — eligibility repair 退出码表把kind/组合拒绝过宽地列为2 | 已集成；门禁见下表 | — | — | `685adfe9428cf3cc348f90dddd3eac95a9a8ac8f` |
 | 90 / PC-003 | P2 — 卡用途 Action 契约遗漏已实现的订阅金额和周期参数 | 已集成；门禁见下表 | — | — | `01cadbdc44319b17ba46a263e4c2ba77c3d84a46` |
 
@@ -130,26 +130,26 @@
 
 ## 需要负责人拍板
 
-- **POP-12-CPA**：CPA 专用顺序测试仍可能让错误顺序通过。本轮禁止修改 CPA 专用代码与测试，保留原始 finding 与变异证据。建议另行授权 CPA 负责人修复测试，代价是独立验证 CPA 生命周期顺序；本轮不调整生命周期。
+- 原保留的 **POP-12-CPA** 已按负责人本次授权完成专属测试加固；原有生产安装/启动流程保持不变。四条 finding 均已关闭，没有由本次修复新增的待拍板项。
 - 服务器真相源切换、真实部署验证、GitHub 推送、签名 tag 与旧盘清理均未授权给本轮，也未作为完成条件执行。若安排这些操作，应另行确认目标、窗口与相应验收。
 - 手册涉及的真实 secret 可读性、tokenmap 消费权限、观测采样与生产模式/端口选择，仍需负责人在实际环境验收；本轮只修正文档及本地 fail-closed 判据，没有迁移生产权限、身份或端口。
 
 ## 未验证与保留范围
 
-本地 fakes、临时 Git 仓库、源码拷贝与 Go overlays 的证据不等于线上验证。未连接服务器、未执行生产 roll-forward/backup/shadow/restart、未读取真实密钥内容。真实生产数据、实际网络/镜像服务、计划任务服务与现有 DB/容器生命周期均不由这些 targeted tests 证明。本轮 10 项有效门禁全部退出 0；早期失败尝试另表保留。
+本地 fakes、临时 Git 仓库、源码拷贝与 Go overlays 的证据不等于线上验证。未连接服务器、未执行生产 roll-forward/backup/shadow/restart、未读取真实密钥内容。真实生产数据、实际网络/镜像服务、计划任务服务与现有 DB/容器生命周期均不由这些 targeted tests 证明。原 10 项完整门禁全部退出 0；本次补充定向检查另表列出，早期失败尝试保留。
 
-CONTRACT-DOC-01、HSC-P2-01、IDEP-009 三条 P2 保留历史/非运行时内容，本轮不整理。生成物契约哈希、main/tag 边界和门禁源码一致性已实测，见下节及最终核对 JSON。
+三条 P2 已补充修复：CR 和 RC110 增加有出处的历史摘要并逐字节保留原文；恢复计数来自实际检查列表。CR-0008 的真实读侧 ≥99% 验收与 RC110 用户 34 的后续状态仍未重新核实，文档如实标明；这两项外部验收不由本地状态整理证明。生成物契约、main/tag 和运行时代码边界见补充交付凭据。
 
 ## 最终核对与集成验证修正
 
-24 条 P0、60 条 P1、2 条 P2 已按 finding 分别提交并集成；CPA 专用 1 条待负责人授权，另 3 条 P2 保留。上方 HEAD 是已验证代码快照；最终交接文档提交不改变两个子系统源码。
+24 条 P0、61 条 P1、5 条 P2 已按 finding 分别提交并集成。原 86 条加本次四条补充修复合计 90 条；下方原始阶段一记录仅描述当时发现，不代表当前未修状态。上方 HEAD 是四条补充修复后的代码快照，后续汇总提交只更新交付文档。
 
-[完整门禁表及全部失败尝试](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/GATE-RESULTS.md>) · [最终边界与门禁源码一致性](<G:/xingmang/logs/full-audit-20260910/full-gates/preservation-final.json>) · [逐条命令与变异证据索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
+[完整门禁表及全部失败尝试](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/GATE-RESULTS.md>) · [最终边界与门禁源码一致性](<G:/xingmang/logs/full-audit-20260910/full-gates/preservation-final.json>) · [原 86 条命令与变异证据索引](<G:/xingmang/logs/full-audit-20260910/phase2/final-report-prep/finding-evidence-index.json>)
 
 - main 保持 `9d430fb284e5e9b91327089ae39cef207c42f482`；原切根分支和两枚演练签名 tag 对象均未变。
-- 依赖清单与数据库迁移未变；上游、AI manager 和 CPA 代码未改。未连接服务器、未推送、未合并 main、未读取真实密钥内容。
-- 开票完整门禁在 `824728ee14fe3bd018d73613ee4c7c138495047e` 运行通过；此后 invoice 树完全相同。平台基础门禁通过后只改了两份 Python 测试的 Bash 定位，这两项已经完整重跑通过；Go、前端与治理实现保持不变。
-- 平台全量 `go test ./...` 包含既有 CPA 包测试；这不等于修复或验证了保留的 CPA 专用顺序 finding。Runway DB 测试只证明既有 scaffold 的参数边界，完整迁移/角色生命周期仍未实现或实测。
+- 依赖清单与数据库迁移未变；上游、AI manager 与 CPA 运行时代码未改，CPA 仅修改专属测试。未连接服务器、未推送、未合并 main、未读取真实密钥内容。
+- 原开票完整门禁在 `824728ee14fe3bd018d73613ee4c7c138495047e` 运行通过；本次后端、前端、agents 和依赖保持相同，增量仅历史文档、最终成功提示与 Compose 注释。平台本次仅三份历史文档和 CPA 测试修改；应用源码与治理实现保持相同。修改覆盖的恢复检查、治理及 CPA 普通入口已定向验证；本次未重复运行应用完整构建、DB/容器或前后端全套。
+- 原平台全量 `go test ./...` 包含既有 CPA 包测试；本次另行验证 CPA 专属安装到应用启动的合成执行轨迹及失败拦截，关闭 POP-12-CPA。它不证明真实 CPA 全生命周期或功能适配已验收。Runway DB 测试仍只证明既有 scaffold 的参数边界，完整迁移/角色生命周期未实现或实测。
 
 ### TypeScript 生成物内容不变证明
 
@@ -174,7 +174,20 @@ CONTRACT-DOC-01、HSC-P2-01、IDEP-009 三条 P2 保留历史/非运行时内容
 | `824728ee14fe3bd018d73613ee4c7c138495047e` | Use local Linux permissions for two allowed POSIX test fixtures | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/invoice-posix-test-routing/results.json>) |
 | `b201754f70911b18944bab0b5de17bea5e297b66` | Resolve Git Bash for existing security regression entrypoints in cmd/bin/mingw64 layouts | [记录](<G:/xingmang/logs/full-audit-20260910/phase2/platform-tests/BASH-RESOLUTION/delivery.json>) |
 
-Git Bash 的符号链接设置仅应用于本次验证进程；两个 Unix 权限测试使用本机 WSL 新建的合成临时环境。生产 validator 和原 Shell fixture 未改。部分 WSL 启动提示使用混合编码，原始 stderr 已保留；成功判据是实际退出码与测试断言。
+Git Bash 的符号链接设置仅应用于本次验证进程；两个 Unix 权限测试使用本机 WSL 新建的合成临时环境。前次 POSIX 运行方式修正保持对应的生产 validator 和原 Shell fixture 不变；本次 CPA 专属测试改动另见下节。部分 WSL 启动提示使用混合编码，原始 stderr 已保留；成功判据是实际退出码与测试断言。
+
+## 四条补充修复验收
+
+本次负责人明确要求四条全部处理；CPA 的授权限定于该 finding 的专属测试加固。每条独立提交，实际 UTC、退出码、变异与保留证明分别见：
+
+| Finding | 独立提交 | 补充验收 |
+|---|---|---|
+| POP-12-CPA | `e14b41f54ea2b757083be25393b60a1fec6adee8` | [完整记录](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-POP-12-CPA.md>) |
+| CONTRACT-DOC-01 | `43b13d96c30b9bebd973ae6a4168ec163f23a0ac` | [完整记录](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-CONTRACT-DOC-01.md>) |
+| HSC-P2-01 | `433dfda58aab70b1c4e215bef40cfa92189de776` | [完整记录](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-HSC-P2-01.md>) |
+| IDEP-009 | `88da933cd64c3b46aa5b5c06727758ccf32289bb` | [完整记录](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/FOLLOWUP-IDEP-009.md>) |
+
+文档变异与运行时行为变异分开记录，不将文档关键词核对算作生产执行验证。原 10 项完整门禁的有效源码范围和本次补充检查见 [门禁表](<G:/xingmang/01-core/docs/handoffs/full-audit-20260911/GATE-RESULTS.md>)。
 
 ## 原始阶段一报告（原字节保留）
 
