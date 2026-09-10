@@ -43,12 +43,16 @@ reader 也会读的同一个上游只读接入点**——因此复用的是与
 | `--credential-ref` | `secret://<scope>/<name>` 引用，**不是明文 token** | 同 `XM_SUB2API_CREDENTIAL_REF` |
 | `--secret-root` | 文件型凭据库根目录，缺省 `$XM_SECRET_ROOT` 或 `/run/xm/secrets` | 同 platform-worker 的 `connectorSecretsChain` |
 
-**凭据本身在哪**：由运营/验收线通过平台后台把凭据写入 `XM_SECRET_ROOT` 对应的
-共享卷（`<root>/<scope>/<name>`，见 `cmd/platform-worker/secret_chain.go` 的
-装配注释）——这与已经在用的 v1 ListUsers real 接入是**同一份注册流程**，如果
-对应平台已经按 `SWITCH-SUB2API-REAL.md`/`SWITCH-NEWAPI-REAL.md` 配过 real
-凭据，直接复用同一个 `--credential-ref`；如果还没配过，先照那两份 runbook
-把凭据登记到位（本工具不提供登记凭据的功能，只读）。
+**文件凭据前置**：运营先在目标环境的后台凭据管理中登记 `credential-ref`，
+确认值落在 `<XM_SECRET_ROOT>/<scope>/<name>` 文件库。`evidence-capture` 只使用
+FileProvider；worker 的 legacy env fallback 不在此工具中，所以仅在部署 `.env`
+设置 token、或观察 worker 已经 real，均不能证明采集工具能够解析该引用。
+不要给 CLI 增加明文 token。
+
+在宿主机执行前，由获批操作员提供已有文件库的只读挂载或可读副本，并将
+`XM_SECRET_ROOT` 设为该主机上实际可读的**绝对路径**；容器内 `/run/xm/secrets`
+不自动等于宿主机路径。下例显式要求该前置，未提供就停止。不得打印文件内容。
+本工具不会登记凭据；旧 SWITCH 卡中的 env 配置必须先完成上述文件库登记。
 
 `--credential-ref` **绝不能是命令行上的明文 token**——`cmd/evidence-capture`
 的 flag 定义里没有"直接传 token"这个选项，只有引用。
@@ -103,6 +107,7 @@ go build -trimpath -o evidence-capture ./cmd/evidence-capture
   --endpoint https://<你的 Sub2API 实例> \
   --allowlist <实例主机名> \
   --credential-ref secret://sub2api-prod/read-token \
+  --secret-root "${XM_SECRET_ROOT:?先提供获批且可读的文件凭据库绝对路径}" \
   --out docs/evidence/users-real/sub2api
 
 ./evidence-capture capture \
@@ -110,6 +115,7 @@ go build -trimpath -o evidence-capture ./cmd/evidence-capture
   --endpoint https://<你的 NewAPI 实例> \
   --allowlist <实例主机名> \
   --credential-ref secret://newapi-prod/read-token \
+  --secret-root "${XM_SECRET_ROOT:?先提供获批且可读的文件凭据库绝对路径}" \
   --out docs/evidence/users-real/newapi
 
 ./evidence-capture reqlog \
