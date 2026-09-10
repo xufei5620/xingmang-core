@@ -34,7 +34,7 @@ def exit_codes(project,fixture):
     run_start=src.index('func run(ctx');run_end=src.index('\n\tdatabaseURL, err := readOneLineSecret',run_start)
     # Preserve main's real flag parser, path checks, filters and exit mapping.
     # Replace the first credential read and all subsequent code with a sentinel.
-    go='package main\nimport("context";"errors";"flag";"fmt";"io";"log/slog";"os";"path/filepath";"time")\n'+constants+main+src[run_start:run_end]+'\nreturn errors.New("FIXTURE_STOP_BEFORE_SECRET_IO")\n}\n'
+    go='package main\nimport("context";"errors";"flag";"fmt";"io";"log/slog";"os";"path/filepath";"strings";"time")\n'+constants+main+src[run_start:run_end]+'\nreturn errors.New("FIXTURE_STOP_BEFORE_SECRET_IO")\n}\n'
     file=fixture/'exit-check.go';file.write_text(go,encoding='utf-8');binary=fixture/('exit-check.exe' if os.name=='nt' else 'exit-check')
     env=dict(os.environ,GOWORK='off',GOPROXY='off',GOTOOLCHAIN='local')
     p=subprocess.run(['go','build','-o',str(binary),str(file)],env=env,capture_output=True,text=True)
