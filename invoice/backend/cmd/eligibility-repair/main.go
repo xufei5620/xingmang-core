@@ -78,6 +78,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -174,6 +175,14 @@ type repairFilters struct {
 }
 
 func run(ctx context.Context, databaseURLFile, keyringFile, migrationsDir string, apply bool, operatorID, kind string, filters repairFilters, out io.Writer) error {
+	// Empty filters retain the documented bulk mode. A supplied nonempty
+	// value must not normalize to empty and silently widen the repair.
+	if filters.accountID != "" && strings.TrimSpace(filters.accountID) == "" {
+		return errors.New("--account must not be whitespace")
+	}
+	if filters.eventID != "" && strings.TrimSpace(filters.eventID) == "" {
+		return errors.New("--event must not be whitespace")
+	}
 	if kind != kindPreAnchorUsage && kind != kindBalanceAnchor && kind != kindBalanceBlip && kind != kindQueueNarrow &&
 		kind != kindPolicyStartReanchor && kind != kindProjectionRequeueDead && kind != kindIngestRequeueDead &&
 		kind != kindIngestAcknowledgeUnreplayable && kind != kindPendingReevaluate {
