@@ -9,7 +9,27 @@ ROOT = Path(__file__).resolve().parents[2]
 env = os.environ.copy()
 env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
 git = shutil.which("git")
-bash = str(Path(git).parents[1] / "bin/bash.exe") if os.name == "nt" else "bash"
+
+
+def resolve_bash(git_path):
+    explicit = os.environ.get("BASH_EXE")
+    if os.name != "nt":
+        candidate = explicit or shutil.which("bash")
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+    else:
+        root = Path(git_path).parent.parent
+        if root.name.lower() in ("mingw32", "mingw64"):
+            root = root.parent
+        candidates = [Path(explicit)] if explicit else [root / "bin/bash.exe", root / "usr/bin/bash.exe"]
+        for candidate in candidates:
+            runtime = (candidate.parent / "msys-2.0.dll", candidate.parent.parent / "usr/bin/msys-2.0.dll")
+            if candidate.is_absolute() and candidate.is_file() and any(p.is_file() for p in runtime):
+                return str(candidate.resolve())
+    raise RuntimeError("A valid Git Bash executable is required; check BASH_EXE or the Git installation")
+
+
+bash = resolve_bash(git)
 
 for state in ("unstaged", "staged"):
     with tempfile.TemporaryDirectory(prefix="governance-preserve-") as temporary:
