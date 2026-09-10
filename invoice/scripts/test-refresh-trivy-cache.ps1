@@ -2,8 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Safety note for whoever reviews or reruns this file: scripts/refresh-
-# trivy-cache.ps1 takes the exact same shared release\.trivy-0.74.release-
-# gate.lock file scripts/release-image-gate.ps1 does, and this repo
+# trivy-cache.ps1 takes the same daemon/volume mutex as release-image-gate.ps1,
+# independently of the worktree/output directory, and this repo
 # routinely has other concurrent agents/worktrees that may be running a
 # real release gate at any time. Every functional test below (digest
 # verification, extraction, the newer-cache guard, seeding round-trips)
@@ -236,10 +236,7 @@ Write-Host 'Get-BlobDownloadPlanExcludingCompleteParts correctly identifies only
 $lockScratchRoot = Join-Path ([IO.Path]::GetTempPath()) "trivy-cache-test-lock-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
 New-Item -ItemType Directory -Path $lockScratchRoot -Force | Out-Null
 try {
-    $scratchLockPath = Get-TrivyReleaseGateLockPath -ProjectRoot $lockScratchRoot
-    if ($scratchLockPath -cne (Join-Path $lockScratchRoot 'release\.trivy-0.74.release-gate.lock')) {
-        throw "Get-TrivyReleaseGateLockPath returned an unexpected path: $scratchLockPath"
-    }
+    $scratchLockPath = Join-Path $lockScratchRoot 'legacy-file.lock'
     $firstLock = Enter-TrivyReleaseGateLock -LockPath $scratchLockPath
     try {
         $contentionRejected = $false
@@ -253,7 +250,11 @@ try {
 } finally {
     Remove-Item -LiteralPath $lockScratchRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
-Write-Host 'Get-TrivyReleaseGateLockPath / Enter-TrivyReleaseGateLock fixtures passed (path shape, contention, release, reacquisition) -- all against a scratch project root, never the real shared lock.'
+Write-Host 'Legacy explicit file lock fixtures passed (contention, release, reacquisition) against a scratch path.'
+
+foreach ($safetyCase in @('image-parameters', 'lock-errors', 'resume-identity', 'unchanged-cache', 'shared-cache-lock')) {
+    & (Join-Path $PSScriptRoot 'test-trivy-cache-safety.ps1') -Case $safetyCase
+}
 
 # --- network + docker checks -------------------------------------------------
 $networkAvailable = $false
@@ -478,7 +479,7 @@ if ($networkAvailable -and $dockerAvailable) {
         # quick manifest fetch, no download, and (being -WhatIf as well) no
         # write -- bounding how long it holds the real shared release-gate
         # lock to roughly the time of one HTTPS request.
-        $lockPath = Get-TrivyReleaseGateLockPath -ProjectRoot $projectRoot
+        $lockPath = Get-TrivyReleaseGateLockPath -Volume $testVolume
         $lockCurrentlyFree = $true
         try { (Enter-TrivyReleaseGateLock -LockPath $lockPath).Dispose() } catch { $lockCurrentlyFree = $false }
 
@@ -568,7 +569,7 @@ if ($networkAvailable -and $dockerAvailable) {
         # itself for the duration of one child CLI invocation, so it cannot
         # reuse that earlier, momentary check.
         $heldLock = $null
-        try { $heldLock = Enter-TrivyReleaseGateLock -LockPath (Get-TrivyReleaseGateLockPath -ProjectRoot $projectRoot) } catch { $heldLock = $null }
+        try { $heldLock = Enter-TrivyReleaseGateLock -LockPath (Get-TrivyReleaseGateLockPath -Volume $testVolume) } catch { $heldLock = $null }
         if ($null -eq $heldLock) {
             Write-Warning 'The real shared release-gate Trivy lock is currently held by another process -- skipping the exit-75 (gate holds the cache volume) CLI fixture rather than risk contending with it.'
         } else {

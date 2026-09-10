@@ -107,7 +107,7 @@ freshness check must succeed against it -- before any live component is
 replaced. A failed self-check leaves the live volume completely untouched.
 
 Takes the exact same shared lock release-image-gate.ps1 does
-(release\.trivy-0.74.release-gate.lock) for the whole run, so this script
+(a global mutex keyed by Docker daemon ID and volume) for the whole run, so this script
 and a concurrently running release gate can never race the same volume;
 like release-image-gate.ps1, it fails fast rather than waiting if that lock
 is already held -- in that case this script exits 75 (distinct from the
@@ -203,7 +203,7 @@ try {
         throw 'docker is not available (daemon not running, or this user cannot reach it)'
     }
 
-    $lockPath = Get-TrivyReleaseGateLockPath -ProjectRoot $projectRoot
+    $lockPath = Get-TrivyReleaseGateLockPath -Volume $TrivyCacheVolume
     Write-Host "Acquiring shared Trivy cache lock: $lockPath"
     $lock = Enter-TrivyReleaseGateLock -LockPath $lockPath
     try {
@@ -381,7 +381,7 @@ try {
 } catch {
     if ($_.Exception.Data['TrivyCacheLockContention'] -eq $true) {
         # release-image-gate.ps1 (a real release, or a concurrently running
-        # gate) currently holds release\.trivy-0.74.release-gate.lock --
+        # gate) currently holds the daemon/volume mutex --
         # this is contention over the shared cache volume, not a failure.
         # Exit 75 (distinct from the generic 1 every other error below
         # uses) so a scheduled run's LastTaskResult, this run's own log,

@@ -162,5 +162,45 @@ if ($Case -eq 'image-parameters') {
     $script:readOutput='';function docker { $global:LASTEXITCODE=0; $script:readOutput }
     $state=Get-TrivyCacheVolumeComponentState -Volume 'fixture' -SubPath 'db' -SeedImage 'fixture'
     if($state.PSObject.Properties.Name -notcontains 'DatabasePresent' -or $state.DatabasePresent){throw 'unchanged-cache: state reader did not report missing database'}
+} elseif ($Case -eq 'shared-cache-lock') {
+    $script:daemon='fixture-daemon'; $script:dockerExit=0
+    function docker { $global:LASTEXITCODE=$script:dockerExit; $script:daemon }
+    $volume='fixture-' + [Guid]::NewGuid().ToString('N')
+    $aRoot=Join-Path $FixtureRoot 'a/invoice';$bRoot=Join-Path $FixtureRoot 'b/invoice'
+    $extra=@{}
+    if((Get-Command Get-TrivyReleaseGateLockPath).Parameters.ContainsKey('Volume')){$extra.Volume=$volume}
+    $a=Get-TrivyReleaseGateLockPath -ProjectRoot $aRoot @extra
+    $b=Get-TrivyReleaseGateLockPath -ProjectRoot $bRoot @extra
+    if($a -cne $b){throw 'shared-cache-lock: same daemon and volume got different locks across worktrees'}
+    $parent=Enter-TrivyReleaseGateLock -LockPath $a
+    try {
+        $child=Join-Path $FixtureRoot 'lock-child.ps1'
+        @'
+param($Library,$LockName)
+$ErrorActionPreference='Stop'
+. $Library
+try { $held=Enter-TrivyReleaseGateLock -LockPath $LockName; $held.Dispose(); exit 0 }
+catch { if($_.Exception.Data['TrivyCacheLockContention'] -eq $true){exit 75};throw }
+'@ | Set-Content -LiteralPath $child
+        & pwsh -NoProfile -NonInteractive -File $child -Library (Join-Path $SourceDirectory 'refresh-trivy-cache-lib.ps1') -LockName $b
+        if($LASTEXITCODE -ne 75){throw 'shared-cache-lock: another process acquired the same live resource lock'}
+    } finally {$parent.Dispose()}
+    & pwsh -NoProfile -NonInteractive -File $child -Library (Join-Path $SourceDirectory 'refresh-trivy-cache-lib.ps1') -LockName $a
+    if($LASTEXITCODE -ne 0){throw 'shared-cache-lock: released resource could not be acquired'}
+    $different=Get-TrivyReleaseGateLockPath -ProjectRoot $aRoot -Volume ($volume+'-other')
+    if($different -ceq $a){throw 'shared-cache-lock: unrelated volumes share the same lock'}
+    $script:daemon='fixture-other-daemon'
+    if((Get-TrivyReleaseGateLockPath -ProjectRoot $aRoot -Volume $volume) -ceq $a){throw 'shared-cache-lock: different daemons share the same lock'}
+    $script:dockerExit=9;$rejected=$false
+    try {Get-TrivyReleaseGateLockPath -ProjectRoot $aRoot -Volume $volume|Out-Null}catch{$rejected=$true}
+    if(-not $rejected){throw 'shared-cache-lock: unavailable daemon identity was accepted'}
+    $script:dockerExit=0;$script:daemon='fixture-daemon'
+    foreach($file in @('refresh-trivy-cache.ps1','release-image-gate.ps1')){
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceDirectory $file),[ref]$tokens,[ref]$errors)
+        $assign=$ast.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$lockPath'},$true)
+        $projectRoot=$aRoot;$TrivyCacheVolume=$volume;$releaseRoot=Join-Path $aRoot 'release/nested/output'
+        & ([scriptblock]::Create($assign.Extent.Text + '; $lockPath')) | ForEach-Object { if($_ -cne $a){throw "shared-cache-lock: $file did not use the shared volume lock"} }
+    }
 } else { throw "unknown safety case: $Case" }
 Write-Host "TRIVY-SAFETY-PASS: $Case"
