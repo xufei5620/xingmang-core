@@ -62,7 +62,8 @@ ensure_attachment() {
 }
 
 validate_members() {
-  local network=$1 source=$2 database=$3 member
+  local network=$1 source=$2 database=$3 member members
+  members=$(docker network inspect --format '{{range .Containers}}{{println .Name}}{{end}}' "$network")
   while IFS= read -r member; do
     [[ -z "$member" ]] && continue
     case "$member" in
@@ -70,7 +71,7 @@ validate_members() {
       invoice-source-agents-prod-${source}-payments-[0-9]*|invoice-source-agents-prod-${source}-identities-[0-9]*|invoice-source-agents-prod-${source}-usage-[0-9]*|invoice-source-agents-prod-${source}-credits-[0-9]*|invoice-source-agents-prod-${source}-balances-[0-9]*|invoice-source-agents-prod-${source}-cutover-init-[0-9]*) ;;
       *) echo "unexpected container ${member} on ${network}" >&2; exit 1 ;;
     esac
-  done < <(docker network inspect --format '{{range .Containers}}{{println .Name}}{{end}}' "$network")
+  done <<< "$members"
 }
 
 ensure_network "$sub2_network" "$sub2_subnet"

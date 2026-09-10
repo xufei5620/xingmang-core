@@ -31,7 +31,14 @@ done
 
 # 每一代配置一个目录（v4-<configuration hash>），每条流一个子目录。
 # 用 find 而不是写死十条路径：多一个源或多一条流时这道闸不能悄悄漏掉它。
-mapfile -t pending < <(find "$state_root" -type f -name pending.enc -printf '%p\t%s\n' 2>/dev/null | sort)
+if ! pending_output=$(find "$state_root" -type f -name pending.enc -printf '%p\t%s\n' 2>/dev/null | sort); then
+  echo "unable to scan pending spools: $state_root" >&2
+  exit 2
+fi
+pending=()
+if [[ -n "$pending_output" ]]; then
+  mapfile -t pending <<< "$pending_output"
+fi
 
 if [[ ${#pending[@]} -eq 0 ]]; then
   echo "PENDING-SPOOLS-EMPTY root=$state_root"
