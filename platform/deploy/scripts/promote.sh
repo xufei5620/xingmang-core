@@ -242,8 +242,20 @@ marker_lock_owned=0
 audit_written=0
 
 cleanup_marker_lock() {
+  local file expected
   if [ "$marker_lock_owned" -eq 1 ]; then
-    rmdir -- "$marker_lock" 2>/dev/null || true
+    # Only remove this invocation's two files. A replaced/unknown lock is retained.
+    [ -d "$marker_lock" ] && [ ! -L "$marker_lock" ] || return 0
+    for file in pid sha; do
+      expected="$source_sha"
+      [ "$file" != pid ] || expected="$$"
+      if [ -e "$marker_lock/$file" ] || [ -L "$marker_lock/$file" ]; then
+        [ -f "$marker_lock/$file" ] && [ ! -L "$marker_lock/$file" ] &&
+          [ "$(cat -- "$marker_lock/$file" 2>/dev/null)" = "$expected" ] || return 0
+      fi
+    done
+    rm -f -- "$marker_lock/pid" "$marker_lock/sha" 2>/dev/null || return 0
+    rmdir -- "$marker_lock" 2>/dev/null || return 0
     marker_lock_owned=0
   fi
 }
