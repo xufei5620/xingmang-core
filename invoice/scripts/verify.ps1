@@ -19,6 +19,9 @@ function Test-OrdinalStringEqual {
 & (Join-Path $PSScriptRoot 'check-no-secrets.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'secret-material gate failed' }
 
+& (Join-Path $PSScriptRoot 'test-secret-scan-native-exits.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'secret scanner native exit fixtures failed' }
+
 & (Join-Path $PSScriptRoot 'verify-source-readiness-index-operator.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'RC39 concurrent readiness-index operator/verifier gate failed' }
 

@@ -30,7 +30,7 @@ try {
     $findings = @()
     foreach ($pattern in $patterns) {
         $matches = @(rg -l -I --pcre2 --glob '!web/dist/**' --glob '!web/node_modules/**' -- $pattern . 2>$null)
-        if ($LASTEXITCODE -gt 1) { throw 'secret scan failed to execute' }
+        if ($LASTEXITCODE -notin @(0, 1)) { throw 'secret scan failed to execute' }
         $findings += $matches
     }
     $findings = @($findings | Sort-Object -Unique)
