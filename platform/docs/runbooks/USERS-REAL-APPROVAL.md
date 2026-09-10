@@ -103,14 +103,14 @@ go build -trimpath -o evidence-capture ./cmd/evidence-capture
   --endpoint https://<你的 Sub2API 实例> \
   --allowlist <实例主机名> \
   --credential-ref secret://sub2api-prod/read-token \
-  --out docs/evidence/users-real
+  --out docs/evidence/users-real/sub2api
 
 ./evidence-capture capture \
   --platform newapi \
   --endpoint https://<你的 NewAPI 实例> \
   --allowlist <实例主机名> \
   --credential-ref secret://newapi-prod/read-token \
-  --out docs/evidence/users-real
+  --out docs/evidence/users-real/newapi
 
 ./evidence-capture reqlog \
   --data-dir /path/to/local/copy/of/reqlog/data \
