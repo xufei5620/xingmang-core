@@ -3170,9 +3170,10 @@ chosen tmpfs ceiling plus a fixed 4 GiB reserve. An unreadable memory value or
 insufficient capacity fails closed. The detached PostgreSQL container uses
 `--rm`, and the exit trap force-removes its exact container and network names,
 so success, restore failure, or capacity failure leaves no restore database,
-container, network, or volume behind. An inspect error counts as “absent” only
-while an independent `docker info` still proves the daemon is reachable;
-otherwise cleanup itself fails critically instead of hiding unknown state. Run the drill on a host with more
+container, network, or volume behind. After an inspect error, cleanup requires
+both a reachable daemon and a successful resource inventory that excludes the
+exact name; a denied or failed inventory remains unknown and fails cleanup.
+Run the drill on a host with more
 available memory rather than substituting persistent storage without a
 separately reviewed encrypted-at-rest design.
 

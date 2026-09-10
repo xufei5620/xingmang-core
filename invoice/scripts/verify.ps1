@@ -54,6 +54,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'roll-forward recovery boundary tests failed' }
     bash scripts/test-restore-runtime-env.sh
     if ($LASTEXITCODE -ne 0) { throw 'restore runtime environment tests failed' }
+    bash scripts/test-restore-cleanup-state.sh
+    if ($LASTEXITCODE -ne 0) { throw 'restore resource-state tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
     bash scripts/test-preserve-source-reader-roles.sh
