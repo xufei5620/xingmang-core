@@ -173,7 +173,7 @@ func TestWorktreeRootIsFindableFromThisPackagesOwnSourceFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "backend", "go.mod")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "invoice", "backend", "go.mod")); err != nil {
 		t.Fatalf("worktreeRoot()=%q does not look like this repository's root: %v", root, err)
 	}
 }
