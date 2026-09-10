@@ -50,8 +50,9 @@ ensure_attachment() {
   local network=$1 container=$2 alias=$3
   docker container inspect "$container" >/dev/null
   if docker network inspect --format '{{range $id,$c := .Containers}}{{if eq $c.Name "'"$container"'"}}present{{end}}{{end}}' "$network" | grep -qx present; then
-    docker network inspect --format '{{range $id,$c := .Containers}}{{if eq $c.Name "'"$container"'"}}{{range $c.Aliases}}{{println .}}{{end}}{{end}}{{end}}' "$network" |
-      grep -Fxq "$alias" || {
+    local aliases
+    aliases=$(docker container inspect --format '{{range (index .NetworkSettings.Networks "'"$network"'").Aliases}}{{println .}}{{end}}' "$container")
+    grep -Fxq "$alias" <<< "$aliases" || {
         echo "${container} is attached to ${network} without required alias ${alias}; stop and review manually" >&2
         exit 1
       }
