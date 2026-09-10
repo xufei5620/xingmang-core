@@ -64,6 +64,26 @@ def shadow_order(project):
     assert set(seen)=={'source gate','signed tag','image gate','verified image load','shadow evaluation','roll-forward'},'RC template omits a required existing stage'
     print('INV-DOC-04 placement matches historical release dependencies and extracted image-availability gate; no production command executed.')
 
+def keycloak_identity(project):
+    doc=(project/'docs/PRODUCTION-RUNBOOK.md').read_text(encoding='utf-8')
+    section=doc.split('The optimized image uses a 2 GiB memory limit.',1)[1].split('The maintenance wrapper encrypts',1)[0]
+    row=re.search(r'\| `SOURCE_TAG` \| `([^`]+)` \|',section)
+    if row:
+        tag=row.group(1);image=re.search(r'\| `KEYCLOAK_IMAGE.config_image` \| `([^`]+)` \|',section).group(1)
+    else:
+        rc=re.search(r'The (RC\d+) installation must',section).group(1).lower()
+        tag='v0.1.0-'+rc+'-signed';image='invoice-keycloak:0.1.0-'+rc
+    src=(project/'deploy/keycloak/invite-permanent-master-admin.sh').read_text(encoding='utf-8')
+    declaration=re.search(r"(?m)^readonly EXPECTED_SOURCE_TAG=.*$",src).group(0)
+    tag_guard=re.search(r'(?m)^\[\[ "\$SOURCE_TAG" == "\$EXPECTED_SOURCE_TAG" \]\].*$',src).group(0)
+    image_guard=re.search(r'(?m)^\[\[ "\$KEYCLOAK_CONFIG_IMAGE" == .*$',src).group(0)
+    bash='D:/Git/bin/bash.exe' if os.name=='nt' else 'bash'
+    script='set -eu\ndie() { echo "$*" >&2; exit 1; };\n'+declaration+'\n'+tag_guard+'\n'+image_guard
+    env=dict(os.environ,SOURCE_TAG=tag,KEYCLOAK_CONFIG_IMAGE=image);env.pop('BASH_ENV',None);env.pop('ENV',None)
+    p=subprocess.run([bash,'--noprofile','--norc','-c',script],env=env,capture_output=True,text=True)
+    assert p.returncode==0,'documented Keycloak identity is rejected by the unchanged operator: '+p.stderr
+    print('INV-AUX-007 documented historical tag/image accepted by extracted unchanged RC38 identity predicates; no operator/key operation.')
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event','shadow-order'],required=True);p.add_argument('--project',type=Path,default=PROJECT)
-    a=p.parse_args();{'blocked-event':blocked_event,'shadow-order':shadow_order}[a.case](a.project)
+    p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event','shadow-order','keycloak-identity'],required=True);p.add_argument('--project',type=Path,default=PROJECT)
+    a=p.parse_args();{'blocked-event':blocked_event,'shadow-order':shadow_order,'keycloak-identity':keycloak_identity}[a.case](a.project)

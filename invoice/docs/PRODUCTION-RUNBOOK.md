@@ -1306,9 +1306,22 @@ the admin hostname and `https://auth.solov.cc/realms/master/` must return 403.
 Public discovery under `https://auth.solov.cc/realms/solov/` must still work.
 Do not expose Keycloak port `9000`.
 
-The optimized image uses a 2 GiB memory limit. Create the permanent master
-administrator with the create-only operator; do not type or pass a target email
-or SMTP value to it:
+The optimized image uses a 2 GiB memory limit. The permanent master administrator
+operator below is a **historical RC38-only** create-only procedure. It is not a
+runnable maintenance step for RC100, RC110 or the current monorepo candidate.
+Do not deploy an old RC38 image or manufacture new attestations merely to make
+its guard pass. Support for a newer release requires the owner's approval of
+the exact signed tag, image and attestation; the current allowlist stays fixed.
+
+Its existing signed identity inputs are:
+
+| Attestation field | Existing accepted value |
+| --- | --- |
+| `SOURCE_TAG` | `v0.1.0-rc38-signed` |
+| `KEYCLOAK_IMAGE.config_image` | `invoice-keycloak:0.1.0-rc38` |
+
+Historical command reference, usable only within that separately approved
+RC38 maintenance scope. Do not type or pass a target email or SMTP value to it:
 
 ```bash
 AGE_RECIPIENT_FILE=/root/invoice-system/config/backup-recipients.txt \
@@ -1322,7 +1335,7 @@ KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap
 The fixed `/root/invoice-system/keycloak-backups` directory must already be
 `root:root 0700` on a non-ephemeral filesystem. The age identity and
 Ed25519 signing key are temporarily mounted offline material and must not live
-under the backup directory. The RC100 installation must create root-only
+under the backup directory. The historical approved RC38 installation requires root-only
 `SOURCE_COMMIT`, `SOURCE_TAG`, `KEYCLOAK_IMAGE`, `SMTP_TRANSPORT` and an exact
 six-entry `RELEASE-TREE.sha256`, then sign it with the release key under the
 dedicated release-tree namespace. The production operator re-verifies this
@@ -1330,11 +1343,12 @@ attestation using the independent root-only release-tree trust file. This is a
 signed installed-tree attestation; the deployment wrapper must separately
 verify the Git tag signature and peeled tag commit before generating it.
 
-Before the mail window, rebuild/recreate the exact RC100 Keycloak container and
-prove its immutable image ID plus the explicit default TLS hostname verifier
-and disabled Kubernetes truststore environment. Run the negative wrong-hostname
-SMTP canary when available; do not use this operator to send from an older
-container or an unverified truststore-provider state.
+The current release's later TLS hardening does not change this operator's
+RC38-only identity check. Before any newly authorized mail window, the owner
+must settle the supported release identity and verify its immutable image ID,
+explicit default TLS hostname verifier and disabled Kubernetes truststore
+environment. Run the negative wrong-hostname SMTP canary when available; an
+unverified truststore-provider state is not an acceptable sending environment.
 
 The maintenance wrapper encrypts and signs the original administrator
 allowlist, atomically installs a loopback-only allowlist, tests/reloads Nginx
