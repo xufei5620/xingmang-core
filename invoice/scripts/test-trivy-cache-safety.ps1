@@ -32,5 +32,32 @@ if ($Case -eq 'image-parameters') {
     foreach ($pin in @(('localhost:5000/team/postgres:18.6-alpine@sha256:' + ('a' * 64)), ('ghcr.io/team/trivy@sha256:' + ('a' * 64)))) {
         & $binder -ProxyUrl '' -TrivyImage $pin | Out-Null
     }
+} elseif ($Case -eq 'lock-errors') {
+    $badPath = Join-Path $FixtureRoot 'lock-is-directory'
+    [IO.Directory]::CreateDirectory($badPath) | Out-Null
+    $badError = $null
+    try { (Enter-TrivyReleaseGateLock -LockPath $badPath).Dispose() } catch { $badError = $_.Exception }
+    if ($null -eq $badError -or $badError.Message.Contains('already using the shared Trivy cache lock')) {
+        throw 'lock-errors: directory failure was lost or reported as contention'
+    }
+    $path = Join-Path $FixtureRoot 'shared.lock'
+    $first = Enter-TrivyReleaseGateLock -LockPath $path
+    try {
+        $contention = $null
+        try { (Enter-TrivyReleaseGateLock -LockPath $path).Dispose() } catch { $contention = $_.Exception }
+        if ($null -eq $contention -or $contention.Data['TrivyCacheLockContention'] -ne $true) {
+            throw 'lock-errors: real sharing violation lacks the typed contention marker'
+        }
+    } finally { $first.Dispose() }
+    (Enter-TrivyReleaseGateLock -LockPath $path).Dispose()
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceDirectory 'refresh-trivy-cache.ps1'), [ref]$tokens, [ref]$errors)
+    $clause = $ast.Find({ param($node) $node -is [Management.Automation.Language.CatchClauseAst] -and $node.Extent.Text.Contains('$exitCode = 75') }, $true)
+    $classify = [scriptblock]::Create('param($Failure) $exitCode=0; try { throw $Failure } ' + $clause.Extent.Text + '; $exitCode')
+    if ((& $classify $contention) -ne 75) { throw 'lock-errors: actual CLI catch did not classify true contention as 75' }
+    $fakeText = [IO.IOException]::new('already using the shared Trivy cache lock: unrelated IO failure')
+    $rejected = $false
+    try { & $classify $fakeText | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'lock-errors: CLI trusted message text instead of typed contention' }
 } else { throw "unknown safety case: $Case" }
 Write-Host "TRIVY-SAFETY-PASS: $Case"

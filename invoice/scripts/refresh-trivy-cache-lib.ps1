@@ -692,6 +692,17 @@ function Enter-TrivyReleaseGateLock {
     try {
         return [IO.File]::Open($LockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
     } catch {
-        throw 'another process (a release image gate run, or a concurrent Trivy cache refresh) is already using the shared Trivy cache lock'
+        $cause = $_.Exception
+        while ($null -ne $cause.InnerException) { $cause = $cause.InnerException }
+        $nativeCode = $cause.HResult -band 0xffff
+        # Only sharing/locking violations mean another process owns the lock.
+        # Preserve access-denied, directory, disk and other IO failures.
+        if ($cause -is [IO.IOException] -and
+            (($IsWindows -and $nativeCode -in @(32, 33)) -or (-not $IsWindows -and $nativeCode -eq 11))) {
+            $contention = [IO.IOException]::new('another process (a release image gate run, or a concurrent Trivy cache refresh) is already using the shared Trivy cache lock', $cause)
+            $contention.Data['TrivyCacheLockContention'] = $true
+            throw $contention
+        }
+        throw
     }
 }

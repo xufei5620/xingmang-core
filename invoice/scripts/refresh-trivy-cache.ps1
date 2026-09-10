@@ -378,7 +378,7 @@ try {
         $lock.Dispose()
     }
 } catch {
-    if ($_.Exception.Message -clike '*already using the shared Trivy cache lock*') {
+    if ($_.Exception.Data['TrivyCacheLockContention'] -eq $true) {
         # release-image-gate.ps1 (a real release, or a concurrently running
         # gate) currently holds release\.trivy-0.74.release-gate.lock --
         # this is contention over the shared cache volume, not a failure.
@@ -386,10 +386,8 @@ try {
         # uses) so a scheduled run's LastTaskResult, this run's own log,
         # and latest.json all make that unambiguous, and so register-
         # trivy-refresh-task.ps1's RestartCount/RestartInterval settings
-        # retry it later the same day. The message matched above must stay
-        # in sync with Enter-TrivyReleaseGateLock's own throw (refresh-
-        # trivy-cache-lib.ps1) -- scripts/test-refresh-trivy-cache.ps1
-        # already asserts that same message text on contention.
+        # retry it later the same day. Only the typed sharing-violation
+        # marker from Enter-TrivyReleaseGateLock takes this path.
         $exitCode = 75
         $failureMessage = 'gate holds the cache volume; skipped'
         Write-Host "SKIPPED: $failureMessage ($($_.Exception.Message))"
