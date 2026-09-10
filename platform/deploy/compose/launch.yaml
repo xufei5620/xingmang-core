@@ -269,6 +269,16 @@ services:
       XM_PLATFORM_USERS_MODE: ${XM_PLATFORM_USERS_MODE:-}
       # 平台支付模式（off / fake / real）。留空 = 进程默认 fake。
       XM_PLATFORM_PAYMENTS_MODE: ${XM_PLATFORM_PAYMENTS_MODE:-}
+      # Payments API defaults share the worker's existing connection settings.
+      XM_SUB2API_ENDPOINT: ${XM_SUB2API_ENDPOINT:-}
+      XM_SUB2API_TARGET_ALLOWLIST: ${XM_SUB2API_TARGET_ALLOWLIST:-}
+      XM_SUB2API_CREDENTIAL_REF: ${XM_SUB2API_CREDENTIAL_REF:-}
+      XM_SUB2API_INSTANCE_ID: ${XM_SUB2API_INSTANCE_ID:-sub2api-staging}
+      XM_NEWAPI_ENDPOINT: ${XM_NEWAPI_ENDPOINT:-}
+      XM_NEWAPI_TARGET_ALLOWLIST: ${XM_NEWAPI_TARGET_ALLOWLIST:-}
+      XM_NEWAPI_CREDENTIAL_REF: ${XM_NEWAPI_CREDENTIAL_REF:-}
+      XM_NEWAPI_INSTANCE_ID: ${XM_NEWAPI_INSTANCE_ID:-newapi-staging}
+      XM_NEWAPI_USER_ID: ${XM_NEWAPI_USER_ID:-}
       # 接码（XM-SMS0）：off / fake / real。**这是接码唯一的环境变量**——
       # 开哪几家供应商在管理后台点（sms.provider_status.enabled，
       # Action sms.provider.set_enabled@1），不落配置文件。
