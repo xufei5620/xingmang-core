@@ -171,10 +171,14 @@ describe("invoiceConsoleOrigin：静态直传，不参与 authMode 那套多层�
   it("没有 VITE_* 回落层：只认 window.__XM_CONFIG__", () => {
     // authMode/oidcIssuer 有 vite-env 兜底,但这个字段是「静态环境变量模式」
     // （同 reqlog/CPA 先例），刻意没有第二层——这里钉住这条边界不被以后悄悄补上
-    const cfg = resolveRuntimeConfig(undefined, {
+    const competingEnv = {
       VITE_XM_AUTH_MODE: "dev-header",
-    } as RuntimeEnv);
+      VITE_XM_INVOICE_CONSOLE_ORIGIN: "https://stale-build.example.test",
+    } as RuntimeEnv;
+    const cfg = resolveRuntimeConfig(undefined, competingEnv);
     expect(cfg.invoiceConsoleOrigin).toBeUndefined();
+    const configured = resolveRuntimeConfig({ invoiceConsoleOrigin: "https://runtime.example.test" }, competingEnv);
+    expect(configured.invoiceConsoleOrigin).toBe("https://runtime.example.test");
   });
 });
 
