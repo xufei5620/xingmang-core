@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -111,9 +112,26 @@ func TestLoadPolicyRejectsUnknownFieldsAndOverflow(t *testing.T) {
 	if _, err := LoadPolicy(strings.NewReader(valid)); err == nil {
 		t.Fatal("empty policy should fail validation")
 	}
-	unknown := `{"policy_version":1,"capabilities":[],"unexpected":true}`
-	if _, err := LoadPolicy(strings.NewReader(unknown)); err == nil {
-		t.Fatal("unknown fields must be rejected")
+	// The unknown field must be the only defect. An empty capabilities list
+	// is already invalid and cannot prove that strict decoding is enabled.
+	data, err := os.ReadFile("../../../contracts/connectors/budgets.v1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicyBytes(data); err != nil {
+		t.Fatalf("unknown-field control must be valid: %v", err)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["unexpected"] = json.RawMessage("true")
+	unknown, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPolicyBytes(unknown); err == nil || !strings.Contains(err.Error(), `unknown field "unexpected"`) {
+		t.Fatalf("unknown fields must be rejected by strict decoding: %v", err)
 	}
 	overflow := `{"policy_version":1,"capabilities":[{"connector_type":"x","capability":"x.y","provider_scope_rule":"scope","cost_class":"probe","max_requests":9223372036854775808}]}`
 	if _, err := LoadPolicy(strings.NewReader(overflow)); err == nil {
