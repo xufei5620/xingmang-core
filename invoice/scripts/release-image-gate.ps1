@@ -623,6 +623,7 @@ try {
             }
             source = [ordered]@{
                 gitHead = $gitHead
+                gitHeadScope = 'monorepo'
                 gitDirty = $gitDirty
                 contextFingerprints = $sourceFingerprints
                 verificationLog = 'logs/source-verification.log'

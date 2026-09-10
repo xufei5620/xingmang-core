@@ -1,4 +1,25 @@
+[CmdletBinding()]
+param(
+    [switch]$MonorepoTestsOnly,
+    [ValidateSet('All', 'PinnedRoot', 'GitProvenance')]
+    [string]$MonorepoTestGroup = 'All',
+    [string]$MonorepoCase = '*',
+    [string]$MonorepoFixtureRoot = ''
+)
+
 $ErrorActionPreference = 'Stop'
+
+# Run the same behavior fixtures in both the complete gate and focused red/green
+# checks. Case IDs also allow every assertion to be checked against a mutation.
+if (-not $MonorepoTestsOnly -and ($MonorepoTestGroup -ne 'All' -or $MonorepoCase -ne '*')) {
+    throw 'Selecting a monorepo group/case requires -MonorepoTestsOnly'
+}
+& (Join-Path $PSScriptRoot 'test-monorepo-release-contract.ps1') `
+    -Group $MonorepoTestGroup -CaseId $MonorepoCase -FixtureRoot $MonorepoFixtureRoot
+if ($MonorepoTestsOnly) {
+    $global:LASTEXITCODE = 0
+    return
+}
 
 $gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
 if ([regex]::Matches($gateSource, "'--timeout', '15m'").Count -lt 4) {

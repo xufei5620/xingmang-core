@@ -67,6 +67,28 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 
 ## 3. Build and release gates
 
+### Monorepo source roots (2026-09-10)
+
+The candidate Git root is `G:\xingmang\09-wt\core-mono-cutover`; the invoice
+project root is its `invoice/` child. Run the PowerShell commands below from
+`G:\xingmang\09-wt\core-mono-cutover\invoice`. Normalize Git's reported root
+before comparing paths. `source.gitHead` is the complete **monorepo commit**;
+the manifest records `source.gitHeadScope=monorepo`, while `source.gitDirty`
+covers only the invoice subtree. Signed tags bind that same monorepo commit.
+
+Platform tags use `platform/v...`; invoice production tags keep
+`v0.1.0-rcN-signed`. Rehearsal tags use a separate `rehearsal/` namespace and
+must never replace an existing signed production tag.
+
+On the server, bundle checkout remains
+`/root/invoice-system/app/releases/<sha>/source`; the executable invoice root
+is `/root/invoice-system/app/releases/<sha>/source/invoice`. The release's
+`.env.production` remains beside `source`, not under the invoice source tree.
+For example, after a separately approved production source-root switch, the
+entry points relative to the monorepo checkout are `invoice/deploy/roll-forward.sh`,
+`invoice/deploy/backup/backup.sh` and `invoice/deploy/rehearsal/shadow-eval.sh`.
+This cutover rehearsal does not execute those production operations.
+
 > ### 照抄本节会撞上的五处（2026-09-08 RC104 实测）
 >
 > 这一节里有五处**写着但过不去**的东西。RC100–RC103 每一版都发布成功了，说明
@@ -87,14 +109,14 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 > **② RC49–52 失败证据锚点必须在证据所在的工作树里跑。** 四个
 > `verify-rcNN-failure-evidence.ps1` 检查的是 `release/` 下的目录名集合，而
 > `release/` 是 **gitignore 的本地目录**：那四组证据在
-> `K:/发票/wt-XM-INV-SEC-RC49`，发布工作树里一个都没有，照本节顺序跑必然报
+ > 历史独立的 RC49 证据工作树，发布工作树里一个都没有，照本节顺序跑必然报
 > `RCnn failure evidence exact directory namespace drifted`。在
 > `wt-XM-INV-SEC-RC49` 里跑，四个都是 exit 0。
 >
 > **③ 工作树绑定判据永远不等。** 下面镜像门禁那段用
-> `[string]::Equals((git rev-parse --show-toplevel), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, …)`
-> 直接比较两个字符串，但 **git 在 Windows 上回正斜杠** `K:/发票/…`、
-> **`Resolve-Path` 回反斜杠** `K:\发票\…`，于是必然 `throw`。判据的意图
+ > `[string]::Equals((git rev-parse --show-toplevel), (Resolve-Path '<candidate-root>').Path, …)`
+ > 直接比较两个字符串，但 **git 在 Windows 上回正斜杠** `G:/xingmang/…`、
+ > **`Resolve-Path` 回反斜杠** `G:\xingmang\…`，于是必然 `throw`。判据的意图
 > （在对的工作树、HEAD 等于签名 tag）是对的，**比较前要先归一分隔符**。
 >
 > **④ 打 tag 之前必须先推进发布身份。** `release-image-gate-lib.ps1` 把上一版
@@ -124,9 +146,10 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 > 前端依赖没装而死在 `vitest not recognized`，先 `npm ci`。
 
 Run locally from the exact RC100 candidate worktree
-`K:\发票\wt-XM-INV-AUTOLOGIN`:
+`G:\xingmang\09-wt\core-mono-cutover\invoice`:
 
 ```powershell
+Set-Location -LiteralPath 'G:\xingmang\09-wt\core-mono-cutover\invoice'
 pwsh -NoProfile -File .\scripts\verify.ps1
 $sourceGateExit = $LASTEXITCODE
 if ($sourceGateExit -ne 0) { throw "RC100 full source gate failed with exit $sourceGateExit" }
@@ -176,10 +199,10 @@ source commit and annotated tag.  The tag must peel to the signed source commit
 used by the gate; do not create or move it after image evidence exists:
 
 ```powershell
-$expectedWorktree = (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path
+$expectedWorktree = (Resolve-Path 'G:\xingmang\09-wt\core-mono-cutover').Path
 $worktreeLines = @(git rev-parse --show-toplevel)
 $worktreeExit = $LASTEXITCODE
-if ($worktreeExit -ne 0 -or -not [string]::Equals(($worktreeLines -join '').Trim(), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC100 candidate worktree' }
+if ($worktreeExit -ne 0 -or -not [string]::Equals([IO.Path]::GetFullPath(($worktreeLines -join '').Trim()), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC100 candidate worktree' }
 pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1
 $rc49AnchorExit = $LASTEXITCODE
 if ($rc49AnchorExit -ne 0) { throw "RC49 failure evidence anchor verification failed with exit $rc49AnchorExit" }
@@ -192,13 +215,13 @@ if ($rc51AnchorExit -ne 0) { throw "RC51 failure evidence anchor verification fa
 pwsh -NoProfile -File .\scripts\verify-rc52-failure-evidence.ps1
 $rc52AnchorExit = $LASTEXITCODE
 if ($rc52AnchorExit -ne 0) { throw "RC52 failure evidence anchor verification failed with exit $rc52AnchorExit" }
-gitleaks git --redact --no-banner --log-opts="08aff147766c046b12e19221a6aabb675485d452..HEAD"
+gitleaks git $expectedWorktree --redact --no-banner --log-opts="08aff147766c046b12e19221a6aabb675485d452..HEAD -- invoice"
 $gitleaksExit = $LASTEXITCODE
 if ($gitleaksExit -ne 0) { throw "RC100 release-range gitleaks failed with exit $gitleaksExit" }
 git diff --check
 $diffExit = $LASTEXITCODE
 if ($diffExit -ne 0) { throw "RC100 source diff check failed with exit $diffExit" }
-$statusLines = @(git status --porcelain=v1)
+$statusLines = @(git status --porcelain=v1 -- .)
 $statusExit = $LASTEXITCODE
 if ($statusExit -ne 0) { throw "RC100 git status failed with exit $statusExit" }
 if ($statusLines.Count -ne 0) { throw 'RC100 source worktree is dirty' }
@@ -254,7 +277,7 @@ $headExit = $LASTEXITCODE
 $tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc110-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 if ($worktreeExit -ne 0 -or $headExit -ne 0 -or $tagHeadExit -ne 0 -or
-    -not [string]::Equals(($worktreeLines -join '').Trim(), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath(($worktreeLines -join '').Trim()), (Resolve-Path 'G:\xingmang\09-wt\core-mono-cutover').Path, [StringComparison]::OrdinalIgnoreCase) -or
     ($headLines -join '').Trim() -cne ($tagHeadLines -join '').Trim()) { throw 'RC100 worktree/tag/HEAD binding failed' }
 $rc100ReleaseDirectory = 1..99 |
   ForEach-Object { "release\0.1.0-rc110-exact$_" } |
@@ -549,7 +572,7 @@ Refresh any base only through the full image scan/SBOM/review flow.
 > wait gives up — a recovery step that only runs on the happy path is not a
 > recovery step.
 
-Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC100
+Set `INVOICE_IMAGE_TAG` in the reviewed release-level `.env.production` only after the exact RC100
 manifest, signature and artifact verifier have passed. Production Compose has
 no image-tag fallback: all nine images (`invoice-system-api`,
 `invoice-system-pdf-scanner`, `invoice-system-tools`, `invoice-system-web`,
@@ -2042,6 +2065,13 @@ Never use `{key}` or append a New API model/API token.
 
 ## 9. Public invoice service and Nginx
 
+For an approved monorepo release, the working directory for this section is
+`/root/invoice-system/app/releases/<sha>/source/invoice`. Set
+`PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<sha>/.env.production`
+to the owner's reviewed release; do not move or regenerate that file.
+Thus project-relative Compose paths resolve beneath `source/invoice/deploy/`.
+The cutover rehearsal does not start or restart these services.
+
 Start the API process and internal mTLS ingress after migrations, permissions,
 settings, ten agent state directories and both encrypted cutover pairs are ready. The ingest proxy waits
 for the API process, not its readiness: readiness itself requires the first
@@ -2459,22 +2489,22 @@ contract.
 
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build api web ingest-proxy
 
 # Before any fresh V4 generation starts: prove all ten static and live checks.
 all_sources=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 for service in "${all_sources[@]}"; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" check-db
 done
 
 # The create-only pairs were already captured/verified before migration 0011.
 # Never run cutover-init here. Re-check the exact same encrypted files, source
 # contracts and strict pre-policy clocks before registering trust.
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never sub2api-cutover-init check-cutover
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never newapi-cutover-init check-cutover
 # Verify persisted contracts are exactly sub2api-economic-v4 and
 # newapi-economic-rc25-v4; fixture-v3 is forbidden in production.
@@ -2482,31 +2512,31 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.source
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
 for service in "${all_sources[@]}"; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-state
 done
 for service in sub2api-identities newapi-identities; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-reconcile
 done
 
 # Register trust first, then let manifest-only balances sequence 1 commit.
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-balances newapi-balances
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-payments sub2api-usage sub2api-credits newapi-payments newapi-usage newapi-credits
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-identities newapi-identities
 
 # Now wait for the source heartbeats, event drain, ClamAV/scanner and API health.
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build --wait --wait-timeout 300 \
   api web ingest-proxy
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml ps
 ```
 
@@ -3028,6 +3058,14 @@ Use one finance admin, one Sub2API user and one New API user.
 
 ## 11. Backup and restore
 
+This section is a separately approved production procedure, not part of the
+monorepo cutover rehearsal. Its server working directory is
+`/root/invoice-system/app/releases/<sha>/source/invoice`; from the monorepo
+source root the corresponding paths are `invoice/deploy/backup/backup.sh`,
+`invoice/deploy/backup/restore-drill.sh` and
+`invoice/deploy/rehearsal/shadow-eval.sh`. Keep `.env.production` at the release
+directory and supply its absolute path as `PRODUCTION_ENV_FILE`.
+
 Install `age` and OpenSSH, and keep the private age identity offline. Backup
 authenticity uses a different Ed25519 signing key and the fixed
 `solov-invoice-backup-v1` namespace. Generate it on an offline encrypted volume
@@ -3061,15 +3099,15 @@ rechecks the database immediately before each deletion, accepts only old
 `issued/*.pdf.enc` files and fsyncs the directory:
 
 ```bash
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml stop api ingest-proxy
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml stop \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml stop api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml stop \
   sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances \
   newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h --execute \
@@ -3086,7 +3124,7 @@ SOURCE_STATE_ROOT=/root/invoice-system/source-state \
 SOURCE_CUTOVER_ROOT=/root/invoice-system/source-state/cutover \
 BACKUP_SIGNING_KEY_FILE=/mnt/offline-signing/invoice-backup-signing-2026 \
 BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
-PRODUCTION_ENV_FILE=/root/invoice-system/app/deploy/.env.production \
+PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<sha>/.env.production \
 BACKUP_QUIESCE_CONFIRMED=YES \
 BACKUP_LOCAL_KEYCLOAK=true \
   bash deploy/backup/backup.sh
@@ -3189,25 +3227,25 @@ The source agents do not write this table, but stop `ingest-proxy` as well so
 they spool safely while the API is down:
 
 ```bash
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml stop api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml stop api ingest-proxy
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500 --execute --maintenance-confirmed \
   --reason 'quarterly OIDC logout replay retention after verified backup'
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml up -d --no-build api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml up -d --no-build api ingest-proxy
 ```
 
 Record the emitted `request_id`, starting eligible count, deleted count, batch
@@ -3462,6 +3500,12 @@ before the tag is created:
 ```
 
 ## 12. Rollback
+
+After a separately approved source-root switch, run this section from
+`/root/invoice-system/app/releases/<sha>/source/invoice`; the roll-forward
+entry point from the monorepo root is `invoice/deploy/roll-forward.sh`.
+Keep the existing release-level `.env.production` location. No rollback or
+roll-forward is authorized by the cutover rehearsal.
 
 Before first public traffic, an image-only rollback is allowed only when the
 previous image explicitly declares the current migration set compatible.

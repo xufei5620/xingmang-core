@@ -35,7 +35,7 @@ by building or testing this repository.
 
 ```powershell
 # Backend domain, concurrency and HTTP authorization tests
-cd K:\发票\invoice-system\backend
+cd G:\xingmang\01-core\invoice\backend
 go test -race ./...
 
 # Start the milestone-1 mock API (headers identify local mock users only)
@@ -43,12 +43,12 @@ $env:AUTH_MODE = 'mock'
 go run ./cmd/api
 
 # User and administrator UI
-cd K:\发票\invoice-system\web
+cd G:\xingmang\01-core\invoice\web
 npm install
 npm run dev
 
 # Assert that the upstream research trees were not modified
-cd K:\发票\invoice-system
+cd G:\xingmang\01-core\invoice
 pwsh -NoProfile -File .\scripts\check-upstream-integrity.ps1
 
 # Full local gates, including an isolated disposable PostgreSQL container

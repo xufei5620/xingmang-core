@@ -647,19 +647,20 @@ function Get-ReleaseGitProvenance {
     $headLines = @(& git -C $RepositoryRoot rev-parse --verify HEAD 2>$null)
     $headExitCode = $LASTEXITCODE
     $headOutput = ($headLines | Out-String).Trim()
+    if ($headExitCode -ne 0 -or $headOutput -cnotmatch '^[0-9a-f]{40}$') {
+        throw "git HEAD failed with exit $headExitCode while capturing release provenance"
+    }
 
-    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 2>$null)
+    # HEAD identifies the complete monorepo; the pathspec limits dirtiness to
+    # the invoice project passed by the release gate, including untracked files.
+    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 -- . 2>$null)
     $statusExitCode = $LASTEXITCODE
     if ($statusExitCode -ne 0) {
         throw "git status failed with exit $statusExitCode while capturing release provenance"
     }
 
-    $gitHead = $null
-    if ($headExitCode -eq 0 -and $headOutput -match '^[0-9a-f]{40}$') {
-        $gitHead = $headOutput
-    }
     return [pscustomobject]@{
-        GitHead = $gitHead
+        GitHead = $headOutput
         GitDirty = [bool]($statusLines.Count -ne 0)
     }
 }
