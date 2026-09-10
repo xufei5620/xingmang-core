@@ -3531,9 +3531,12 @@ other non-zero exit -- including a failed `invoice-migrate` step or the
 `tooling_failure` marker case above -- is an execution failure
 (decrypt/restore/signature/migration/Docker problem) with no verdict at all.
 
-**RC plan template step:** for any RC plan whose Task 1 scope matches the
-"when" list above, add this bullet to Task 1, after the full test suite and
-before the tag is created:
+**RC plan template step:** for any RC plan whose scope matches the "when" list
+above, place this gate after the signed candidate's image gate, artifact
+verification and separately approved transfer/load, and before deployment.
+This describes the existing release order; it adds no pre-tag image workflow.
+
+Placement: source gate → signed tag → image gate → verified image load → shadow evaluation → roll-forward.
 
 ```
 - [ ] Run deploy/rehearsal/shadow-eval.sh against the newest signed backup with
@@ -3541,11 +3544,13 @@ before the tag is created:
       changes the evaluator, the projection, or a migration feeding either
       (without it the rehearsal cannot exercise the change at all, and will
       still say "ready"); require verdict "ready" (exit 0). A
-      "not_ready" verdict (exit 3) blocks the tag until the report's
+      "not_ready" verdict (exit 3) blocks deployment until the report's
       new_freeze_reasons/round_errors/failed_accounts are root-caused and
       fixed, not silently re-run past. A failed invoice-migrate step inside
-      the rehearsal (exit 1, no verdict) blocks the tag the same way -- fix
-      the migration itself before retrying.
+      the rehearsal (exit 1, no verdict) blocks deployment the same way -- fix
+      the migration itself before retrying. Source changes require a new
+      candidate identity and rebuilt/reverified artifacts; never move the
+      existing signed tag or reuse its old image evidence for changed source.
 ```
 
 ## 12. Rollback

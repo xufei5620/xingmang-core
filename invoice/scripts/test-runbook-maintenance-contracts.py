@@ -4,7 +4,7 @@ This models only prerequisite states read from source; it never executes a
 maintenance tool, database query, signature operation, or network call.
 """
 from pathlib import Path
-import argparse,re,shlex
+import argparse,re,shlex,subprocess,os
 PROJECT=Path(__file__).resolve().parents[1]
 
 def blocked_event(project):
@@ -31,6 +31,39 @@ def blocked_event(project):
     assert resolved,'blocked-event procedure has no final guarded resolution step'
     print('INV-DOC-03 documented dry-run/apply/resolve order satisfies extracted CLI and dead-event prerequisites; no production execution.')
 
+def shadow_order(project):
+    text=(project/'docs/PRODUCTION-RUNBOOK.md').read_text(encoding='utf-8')
+    template=text.split('**RC plan template step:**',1)[1].split('## 12. Rollback',1)[0]
+    # The prose's explicit phase placement becomes the input to a dependency
+    # check, rather than accepting the presence of a "shadow" keyword.
+    if 'before the tag is created' in template:
+        order=['source gate','shadow evaluation','signed tag','image gate','verified image load','roll-forward']
+    else:
+        declaration=re.search(r'(?m)^Placement: (.+)\.$',template)
+        assert declaration, 'RC template must declare its operation placement'
+        order=[x.strip() for x in declaration.group(1).split(' → ')]
+    historical=(project/'docs/handoffs/RELEASE-RC110.md').read_text(encoding='utf-8')
+    history=historical.split('## 顺序',1)[1].split('## 补记',1)[0]
+    assert history.index('tag')<history.index('镜像门禁')<history.index('stage2')<history.index('影子评估')<history.index('roll-forward.sh'),'historical release order source changed; review explicit scope'
+    script=(project/'deploy/rehearsal/shadow-eval.sh').read_text(encoding='utf-8')
+    inspect=re.search(r'(?m)^docker image inspect "\$tools_image" "\$postgres_image" >/dev/null$',script)
+    assert inspect, 'shadow image-availability consumer changed; review test scope'
+    # Execute only that side-effect-free entry guard with a Docker function that
+    # refuses images until the documented load step. No shadow script executes.
+    bash='D:/Git/bin/bash.exe' if os.name=='nt' else 'bash'
+    state='';seen=[]
+    for step in order:
+        if step=='image gate':assert 'signed tag' in seen,'image gate precedes signed source identity'
+        if step=='verified image load':assert 'image gate' in seen,'load precedes reviewed image generation';state='yes'
+        if step=='shadow evaluation':
+            guard='docker() { [[ "$AVAILABLE" == yes ]]; };\ntools_image=inert-tools; postgres_image=inert-pg;\n'+inspect.group(0)
+            p=subprocess.run([bash,'--noprofile','--norc','-c',guard],env=dict(os.environ,AVAILABLE=state),capture_output=True,text=True)
+            assert p.returncode==0,'template runs shadow before its required candidate images are loaded'
+        if step=='roll-forward':assert 'shadow evaluation' in seen,'template allows deployment before shadow gate'
+        seen.append(step)
+    assert set(seen)=={'source gate','signed tag','image gate','verified image load','shadow evaluation','roll-forward'},'RC template omits a required existing stage'
+    print('INV-DOC-04 placement matches historical release dependencies and extracted image-availability gate; no production command executed.')
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event'],required=True);p.add_argument('--project',type=Path,default=PROJECT)
-    a=p.parse_args();blocked_event(a.project)
+    p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event','shadow-order'],required=True);p.add_argument('--project',type=Path,default=PROJECT)
+    a=p.parse_args();{'blocked-event':blocked_event,'shadow-order':shadow_order}[a.case](a.project)
