@@ -452,13 +452,11 @@ try {
     $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
     Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase | Out-Null
+    Assert-KeycloakSourceRebuildLayout -DockerfileText $keycloakDockerfile | Out-Null
     if (-not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build') -or
         -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.pull_policy -Expected 'never') -or
-        $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build' -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& rm -f /opt/keycloak/lib/lib/main/com\.microsoft\.sqlserver\.mssql-jdbc-\*\.jar \\$').Count -ne 2 -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& test ! -e /opt/keycloak/bin/client \\$').Count -ne 2) {
-        throw 'Keycloak build is not pinned to exact 26.7.2 or does not prune admin CLI/MSSQL artifacts in both stages'
+        $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build') {
+        throw 'Keycloak compose must use the verified local image, pull_policy never, and no build override'
     }
     $keycloakEnvironment = $idpBaseObject.services.keycloak.environment
     if ($keycloakEnvironment.KC_HOSTNAME -ne 'https://auth.solov.cc' -or

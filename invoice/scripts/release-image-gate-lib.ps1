@@ -184,6 +184,106 @@ function Assert-KeycloakDockerfileLiteralBasePins {
     return $true
 }
 
+function Assert-KeycloakSourceRebuildLayout {
+    param([Parameter(Mandatory)][string]$DockerfileText)
+
+    # This is the reviewed runtime assembly contract, not a general Dockerfile
+    # evaluator. Keep commands ordered so an old base cannot survive COPY and
+    # proof/absence checks cannot accidentally run before the replacement.
+    $instructions = [Collections.Generic.List[object]]::new()
+    $pending = ''
+    foreach ($line in ($DockerfileText.Replace("`r`n", "`n").Replace("`r", "`n") -split "`n")) {
+        $piece = $line.Trim()
+        if ($piece.Length -eq 0 -or $piece.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+        $continued = $piece.EndsWith('\', [StringComparison]::Ordinal)
+        if ($continued) { $piece = $piece.Substring(0, $piece.Length - 1).TrimEnd() }
+        $pending = ($pending + ' ' + $piece).TrimStart()
+        if ($continued) { continue }
+        $match = [regex]::Match($pending, '^(?<instruction>[A-Za-z]+)[\t ]+(?<arguments>.+)$')
+        if (-not $match.Success) { throw 'Keycloak source-rebuild layout contains an unsupported instruction' }
+        $instructions.Add([pscustomobject]@{
+            Name = $match.Groups['instruction'].Value.ToUpperInvariant()
+            Arguments = ([regex]::Replace($match.Groups['arguments'].Value.Trim(), '\s+', ' '))
+        })
+        $pending = ''
+    }
+    if ($pending.Length -gt 0) { throw 'Keycloak source-rebuild layout has an unfinished continuation' }
+    $fromIndices = @(
+        for ($index = 0; $index -lt $instructions.Count; $index++) {
+            if ($instructions[$index].Name -ceq 'FROM') { $index }
+        }
+    )
+    if ($fromIndices.Count -ne 3 -or
+        $instructions[$fromIndices[0]].Arguments -cnotmatch ' AS source-build$' -or
+        $instructions[$fromIndices[1]].Arguments -cnotmatch ' AS builder$' -or
+        $instructions[$fromIndices[2]].Arguments -match ' AS ') {
+        throw 'Keycloak source-rebuild layout requires source-build, builder, then final runtime stages'
+    }
+
+    $mssqlAbsence = "RUN ! find /opt/keycloak -type f -name 'com.microsoft.sqlserver.mssql-jdbc-*.jar' -print -quit | grep -q ."
+    $verifierCopy = 'COPY --chmod=755 source-build/verify-runtime.sh /usr/local/bin/verify-keycloak-source-build'
+    $builderEvents = @(
+        'USER root'
+        'RUN rm -rf /opt/keycloak'
+        'COPY --from=source-build --chown=1000:0 /rebuilt/keycloak/ /opt/keycloak/'
+        'COPY --from=source-build --chown=1000:0 /audit/ /opt/keycloak/source-build-audit/'
+        $verifierCopy
+        'RUN mkdir -p /opt/keycloak/data'
+        'RUN chmod -R g+rwX /opt/keycloak'
+        'USER 1000'
+        'RUN /opt/keycloak/bin/kc.sh build'
+        'RUN rm -rf /opt/keycloak/bin/client'
+        'RUN rm -f /opt/keycloak/lib/lib/main/com.microsoft.sqlserver.mssql-jdbc-*.jar'
+        'RUN test ! -e /opt/keycloak/bin/client'
+        $mssqlAbsence
+        'RUN /usr/local/bin/verify-keycloak-source-build'
+    )
+    $finalEvents = @(
+        'USER root'
+        'RUN rm -rf /opt/keycloak'
+        'COPY --from=builder --chown=1000:0 /opt/keycloak/ /opt/keycloak/'
+        $verifierCopy
+        'USER 1000'
+        'RUN test ! -e /opt/keycloak/bin/client'
+        $mssqlAbsence
+        'RUN /usr/local/bin/verify-keycloak-source-build'
+        'COPY --chmod=755 entrypoint.sh /opt/keycloak/bin/invoice-entrypoint.sh'
+        'COPY --chmod=755 validate-proxy-trust.sh /opt/keycloak/bin/invoice-validate-proxy-trust.sh'
+    )
+    foreach ($stage in @('builder', 'final')) {
+        $first = if ($stage -ceq 'builder') { $fromIndices[1] + 1 } else { $fromIndices[2] + 1 }
+        $last = if ($stage -ceq 'builder') { $fromIndices[2] } else { $instructions.Count }
+        $expected = if ($stage -ceq 'builder') { $builderEvents } else { $finalEvents }
+        $actual = [Collections.Generic.List[string]]::new()
+        for ($index = $first; $index -lt $last; $index++) {
+            $instruction = $instructions[$index]
+            switch -CaseSensitive ($instruction.Name) {
+                'USER' { $actual.Add('USER ' + $instruction.Arguments) }
+                'COPY' { $actual.Add('COPY ' + $instruction.Arguments) }
+                'RUN' {
+                    foreach ($command in ($instruction.Arguments -split '\s*&&\s*')) {
+                        if ([string]::IsNullOrWhiteSpace($command)) { throw "Keycloak $stage stage has an empty RUN command" }
+                        $actual.Add('RUN ' + $command.Trim())
+                    }
+                }
+                'ENV' { }
+                'ENTRYPOINT' { }
+                'LABEL' { }
+                default { throw "Keycloak $stage stage has an unreviewed $($instruction.Name) instruction" }
+            }
+        }
+        if ($actual.Count -ne $expected.Count) {
+            throw "Keycloak $stage source-rebuild layout must preserve the complete ordered replacement, pruning, absence, and proof chain"
+        }
+        for ($index = 0; $index -lt $expected.Count; $index++) {
+            if ($actual[$index] -cne $expected[$index]) {
+                throw "Keycloak $stage source-rebuild layout mismatch at step $($index + 1): expected '$($expected[$index])', found '$($actual[$index])'"
+            }
+        }
+    }
+    return $true
+}
+
 function Get-TrivyFindingSummary {
     param([Parameter(Mandatory)]$Report)
 

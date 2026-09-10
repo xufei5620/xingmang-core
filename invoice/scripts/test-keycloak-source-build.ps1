@@ -46,5 +46,98 @@ Check-RebuildCase 'source-build-libicu-pin-before-maven' {
         throw 'Keycloak source-build must assert the exact libicu package with rpm -q after installation and before Maven.'
     }
 }
+
+function Get-SourceRebuildLayoutFixture {
+    [IO.File]::ReadAllText($DockerfilePath).Replace("`r`n","`n").Replace("`r","`n")
+}
+
+function Replace-SourceRebuildStageAnchor(
+    [string]$Text,
+    [ValidateSet('builder','final')][string]$Stage,
+    [string]$Old,
+    [AllowEmptyString()][string]$New
+){
+    $headers=[regex]::Matches($Text,'(?m)^FROM[\t ]+[^\n]+')
+    if($headers.Count -ne 3 -or $headers[1].Value -notmatch '[\t ]AS[\t ]builder$' -or $headers[2].Value -match '[\t ]AS[\t ]'){
+        throw 'Layout mutation requires exactly source-build, builder, and unnamed final stages.'
+    }
+    $index=if($Stage -eq 'builder'){1}else{2}
+    $start=$headers[$index].Index
+    $end=if($index -eq 1){$headers[2].Index}else{$Text.Length}
+    $stageText=$Text.Substring($start,$end-$start)
+    if([string]::IsNullOrEmpty($Old) -or [regex]::Matches($stageText,[regex]::Escape($Old)).Count -ne 1){
+        throw ('Layout mutation anchor is not unique in '+$Stage+': '+$Old)
+    }
+    $mutated=$stageText.Replace($Old,$New)
+    if($mutated -ceq $stageText){throw ('Layout mutation did not change '+$Stage)}
+    $Text.Substring(0,$start)+$mutated+$Text.Substring($end)
+}
+
+function Require-SourceRebuildLayoutRejected([string]$Original,[string]$Mutant){
+    # Resolve the new guard and accept the real fixture before the rejection
+    # catch, so a missing/broken function cannot make a negative case green.
+    Get-Command Assert-KeycloakSourceRebuildLayout -CommandType Function -ErrorAction Stop|Out-Null
+    Assert-KeycloakSourceRebuildLayout -DockerfileText $Original|Out-Null
+    if($Original -ceq $Mutant){throw 'Layout mutant is identical to its accepted baseline.'}
+    $rejected=$false
+    try{Assert-KeycloakSourceRebuildLayout -DockerfileText $Mutant|Out-Null}catch{$rejected=$true}
+    if(-not $rejected){throw 'Unsafe source-rebuild runtime layout was accepted.'}
+}
+
+Check-RebuildCase 'source-rebuild-runtime-layout-accepted' {
+    Get-Command Assert-KeycloakSourceRebuildLayout -CommandType Function -ErrorAction Stop|Out-Null
+    Assert-KeycloakSourceRebuildLayout -DockerfileText (Get-SourceRebuildLayoutFixture)|Out-Null
+}
+
+$distributionCopies=@{
+    builder='COPY --from=source-build --chown=1000:0 /rebuilt/keycloak/ /opt/keycloak/'
+    final='COPY --from=builder --chown=1000:0 /opt/keycloak/ /opt/keycloak/'
+}
+$verifierCopy='COPY --chmod=755 source-build/verify-runtime.sh /usr/local/bin/verify-keycloak-source-build'
+$mssqlAbsence="! find /opt/keycloak -type f -name 'com.microsoft.sqlserver.mssql-jdbc-*.jar' -print -quit | grep -q ."
+foreach($stageName in @('builder','final')){
+    $distributionCopy=$distributionCopies[$stageName]
+    $wrongCopy=if($stageName -eq 'builder'){
+        $distributionCopy.Replace('--from=source-build','--from=builder')
+    }else{
+        $distributionCopy.Replace('--from=builder','--from=source-build')
+    }
+    $layoutMutants=@(
+        @{Name='old-root-delete-missing';Old="RUN rm -rf /opt/keycloak`n";New=''},
+        @{Name='old-root-delete-after-copy';Old="RUN rm -rf /opt/keycloak`n$distributionCopy";New="$distributionCopy`nRUN rm -rf /opt/keycloak"},
+        @{Name='root-user-missing';Old="USER root`n";New=''},
+        @{Name='root-user-wrong';Old="USER root`n";New="USER 1000`n"},
+        @{Name='root-user-after-delete';Old="USER root`nRUN rm -rf /opt/keycloak";New="RUN rm -rf /opt/keycloak`nUSER root"},
+        @{Name='runtime-user-missing';Old="USER 1000`n";New=''},
+        @{Name='runtime-user-root';Old="USER 1000`n";New="USER root`n"},
+        @{Name='distribution-copy-missing';Old=$distributionCopy+"`n";New=''},
+        @{Name='distribution-copy-wrong-source';Old=$distributionCopy;New=$wrongCopy},
+        @{Name='cli-absence-missing';Old='test ! -e /opt/keycloak/bin/client';New='true'},
+        @{Name='mssql-absence-missing';Old=$mssqlAbsence;New='true'},
+        @{Name='verifier-copy-missing';Old=$verifierCopy+"`n";New=''},
+        @{Name='verifier-execution-missing';Old='&& /usr/local/bin/verify-keycloak-source-build';New='&& true'}
+    )
+    foreach($mutation in $layoutMutants){
+        Check-RebuildCase ('source-layout-'+$stageName+'-'+$mutation.Name+'-rejected') {
+            $original=Get-SourceRebuildLayoutFixture
+            $mutant=Replace-SourceRebuildStageAnchor -Text $original -Stage $stageName -Old $mutation.Old -New $mutation.New
+            Require-SourceRebuildLayoutRejected -Original $original -Mutant $mutant
+        }
+    }
+}
+
+$builderOnlyMutants=@(
+    @{Name='audit-copy-missing';Old="COPY --from=source-build --chown=1000:0 /audit/ /opt/keycloak/source-build-audit/`n";New=''},
+    @{Name='cli-prune-missing';Old='rm -rf /opt/keycloak/bin/client';New='true'},
+    @{Name='mssql-prune-missing';Old='rm -f /opt/keycloak/lib/lib/main/com.microsoft.sqlserver.mssql-jdbc-*.jar';New='true'},
+    @{Name='keycloak-build-missing';Old='/opt/keycloak/bin/kc.sh build';New='true'}
+)
+foreach($mutation in $builderOnlyMutants){
+    Check-RebuildCase ('source-layout-builder-'+$mutation.Name+'-rejected') {
+        $original=Get-SourceRebuildLayoutFixture
+        $mutant=Replace-SourceRebuildStageAnchor -Text $original -Stage builder -Old $mutation.Old -New $mutation.New
+        Require-SourceRebuildLayoutRejected -Original $original -Mutant $mutant
+    }
+}
 if($failures.Count){throw ('Keycloak source-build contracts failed: '+($failures -join '; '))}
 Write-Host 'Keycloak source-build stage contracts passed.'
