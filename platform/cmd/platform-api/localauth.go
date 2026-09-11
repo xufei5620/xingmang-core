@@ -5,18 +5,18 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
-	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
+	"github.com/xufei5620/xingmang-platform/internal/platform/rolepermissions"
 	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
 )
 
 // localAuthRoleMap 返回本地登录（XM-LOGIN）用的"角色 -> scope"翻译表：
-// 与 OIDC 路径共用同一份配置（XM_OIDC_ROLE_SCOPES 留空则用 oidcauth 的默认
+// 使用通用员工权限配置（XM_AUTH_ROLE_SCOPES 留空则用 rolepermissions 的默认
 // 表）。角色能做什么只维护一张表，不必区分当前是哪种登录模式。
 func localAuthRoleMap(cfg config) map[string][]string {
-	if cfg.Auth.OIDCRoleScopes != nil {
-		return cfg.Auth.OIDCRoleScopes
+	if cfg.Auth.RoleScopes != nil {
+		return cfg.Auth.RoleScopes
 	}
-	return oidcauth.DefaultRoleScopeMap()
+	return rolepermissions.DefaultRoleScopeMap()
 }
 
 // registerLocalAuthActions 注册员工账号管理的七个 Action（staff.manage；

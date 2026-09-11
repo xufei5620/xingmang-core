@@ -6,10 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
-
-const stagingIssuer = "https://auth.solov.cc/realms/solov-staff"
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -42,7 +39,7 @@ func TestAuthModeRejectsUnknownValue(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 生产：只允许 oidc
+// 生产：只允许本地会话
 // ---------------------------------------------------------------------------
 
 func TestProductionRefusesDevHeader(t *testing.T) {
@@ -59,18 +56,6 @@ func TestProductionRefusesDevHeader(t *testing.T) {
 		}
 	})
 
-	t.Run("生产默认走 oidc 而不是 dev-header", func(t *testing.T) {
-		// 缺 issuer/audience，所以这里期望的是「因为缺 OIDC 配置」而失败，
-		// 而不是「默认到了 dev-header 然后跑起来」
-		_, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "production"}))
-		if err == nil {
-			t.Fatal("生产缺 OIDC 配置应拒绝启动")
-		}
-		if !strings.Contains(err.Error(), "XM_OIDC_ISSUER") {
-			t.Fatalf("生产的默认模式应是 oidc（报错应指向 XM_OIDC_ISSUER）, got %v", err)
-		}
-	})
-
 	// 纵深防御：即便有人绕过 configFromEnv 直接拼一个 config，
 	// httpapi.NewDevHeaderResolver 自己那道硬拒绝仍然在
 	t.Run("直接构造 config 也拦得住", func(t *testing.T) {
@@ -80,164 +65,6 @@ func TestProductionRefusesDevHeader(t *testing.T) {
 		}
 	})
 }
-
-// ---------------------------------------------------------------------------
-// oidc：缺配置 Fail Closed
-// ---------------------------------------------------------------------------
-
-func TestOIDCModeRequiresIssuerAndAudience(t *testing.T) {
-	for name, vars := range map[string]map[string]string{
-		"缺 issuer 与 audience": {},
-		"只有 issuer":           {"XM_OIDC_ISSUER": stagingIssuer},
-		"只有 audience":         {"XM_OIDC_AUDIENCE": "xingmang-admin-web"},
-		"issuer 是空白": {
-			"XM_OIDC_ISSUER":   "   ",
-			"XM_OIDC_AUDIENCE": "xingmang-admin-web",
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			m := map[string]string{"ENVIRONMENT": "staging", "XM_AUTH_MODE": "oidc"}
-			for k, v := range vars {
-				m[k] = v
-			}
-			if _, err := configFromEnv(env(m)); err == nil {
-				t.Fatal("oidc 模式缺必填配置应拒绝启动（Fail Closed）")
-			}
-		})
-	}
-}
-
-func TestOIDCModeAcceptsCompleteConfig(t *testing.T) {
-	c, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":      "staging",
-		"XM_AUTH_MODE":     "oidc",
-		"XM_OIDC_ISSUER":   stagingIssuer,
-		"XM_OIDC_AUDIENCE": "xingmang-admin-web",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Auth.Mode != authModeOIDC || c.Auth.OIDCIssuer != stagingIssuer {
-		t.Fatalf("Auth = %+v", c.Auth)
-	}
-	// 没配映射表时留 nil，由 oidcauth 回落到默认表
-	if c.Auth.OIDCRoleScopes != nil {
-		t.Fatalf("未配 XM_OIDC_ROLE_SCOPES 时应留 nil, got %v", c.Auth.OIDCRoleScopes)
-	}
-	if _, err := newPrincipalResolver(c, quietLogger()); err != nil {
-		t.Fatalf("完整配置应能装配出 OIDC Resolver: %v", err)
-	}
-}
-
-// 生产 + oidc + 完整配置 = 唯一被允许的生产形态。
-func TestProductionOIDCAssembles(t *testing.T) {
-	c, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":      "production",
-		"XM_OIDC_ISSUER":   stagingIssuer,
-		"XM_OIDC_AUDIENCE": "xingmang-admin-web",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Auth.Mode != authModeOIDC {
-		t.Fatalf("Mode = %q", c.Auth.Mode)
-	}
-	if _, err := newPrincipalResolver(c, quietLogger()); err != nil {
-		t.Fatalf("生产 + oidc + 完整配置应能启动: %v", err)
-	}
-}
-
-// 生产的 issuer 必须是 https：明文传的令牌等于没有令牌。
-func TestProductionOIDCRejectsPlainHTTPIssuer(t *testing.T) {
-	c, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":      "production",
-		"XM_OIDC_ISSUER":   "http://auth.solov.cc/realms/solov-staff",
-		"XM_OIDC_AUDIENCE": "xingmang-admin-web",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := newPrincipalResolver(c, quietLogger()); err == nil {
-		t.Fatal("生产的 issuer 必须是 https")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// 可选配置
-// ---------------------------------------------------------------------------
-
-func TestOIDCRoleScopesFromEnv(t *testing.T) {
-	c, err := configFromEnv(env(map[string]string{
-		"ENVIRONMENT":         "staging",
-		"XM_AUTH_MODE":        "oidc",
-		"XM_OIDC_ISSUER":      stagingIssuer,
-		"XM_OIDC_AUDIENCE":    "xingmang-admin-web",
-		"XM_OIDC_ROLE_SCOPES": `{"staff":["registry.read"],"auditor":["audit.read"]}`,
-		"XM_OIDC_JWKS_URL":    stagingIssuer + "/protocol/openid-connect/certs",
-		"XM_OIDC_CLOCK_SKEW":  "30s",
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(c.Auth.OIDCRoleScopes["staff"], []string{"registry.read"}) {
-		t.Fatalf("staff = %v", c.Auth.OIDCRoleScopes["staff"])
-	}
-	if c.Auth.OIDCClockSkew != 30*time.Second {
-		t.Fatalf("ClockSkew = %v", c.Auth.OIDCClockSkew)
-	}
-	if _, err := newPrincipalResolver(c, quietLogger()); err != nil {
-		t.Fatalf("装配失败: %v", err)
-	}
-}
-
-func TestOIDCOptionalConfigRejectsBadValues(t *testing.T) {
-	base := map[string]string{
-		"ENVIRONMENT":      "staging",
-		"XM_AUTH_MODE":     "oidc",
-		"XM_OIDC_ISSUER":   stagingIssuer,
-		"XM_OIDC_AUDIENCE": "xingmang-admin-web",
-	}
-	for name, vars := range map[string]map[string]string{
-		"映射表不是 JSON":   {"XM_OIDC_ROLE_SCOPES": "staff=registry.read"},
-		"映射表方向写反":      {"XM_OIDC_ROLE_SCOPES": `{"registry.read":["registry.read"]}`},
-		"偏移容忍非法":       {"XM_OIDC_CLOCK_SKEW": "abc"},
-		"偏移容忍为零":       {"XM_OIDC_CLOCK_SKEW": "0s"},
-		"偏移容忍为负":       {"XM_OIDC_CLOCK_SKEW": "-1s"},
-		"偏移容忍大到架空令牌寿命": {"XM_OIDC_CLOCK_SKEW": "24h"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			m := map[string]string{}
-			for k, v := range base {
-				m[k] = v
-			}
-			for k, v := range vars {
-				m[k] = v
-			}
-			if _, err := configFromEnv(env(m)); err == nil {
-				t.Fatal("应拒绝启动")
-			}
-		})
-	}
-
-	t.Run("JWKS 地址跨源", func(t *testing.T) {
-		m := map[string]string{}
-		for k, v := range base {
-			m[k] = v
-		}
-		m["XM_OIDC_JWKS_URL"] = "https://evil.example.com/certs"
-		c, err := configFromEnv(env(m))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := newPrincipalResolver(c, quietLogger()); err == nil {
-			t.Fatal("JWKS 地址与 issuer 不同源应拒绝启动")
-		}
-	})
-}
-
-// ---------------------------------------------------------------------------
-// local（XM-LOGIN）：生产允许，不像 dev-header 那样被硬性禁止
-// ---------------------------------------------------------------------------
 
 func TestProductionAllowsLocalAuthMode(t *testing.T) {
 	c, err := configFromEnv(env(map[string]string{
@@ -265,7 +92,7 @@ func TestLocalAuthModeWorksInNonProduction(t *testing.T) {
 }
 
 // newPrincipalResolver（auth.go）刻意不处理 local——它只装配不依赖数据库连接
-// 的两种模式；local 需要 pool，main.go 单独装配（见 cmd/platform-api/localauth.go
+// 的开发头模式；local 需要 pool，main.go 单独装配（见 cmd/platform-api/localauth.go
 // 与 main.go 里 `if cfg.Auth.Mode == authModeLocal` 分支）。这条测试提醒读到
 // 这个函数的人：新增一种模式不代表它自动被这里接管。
 func TestNewPrincipalResolverDoesNotHandleLocalMode(t *testing.T) {
@@ -288,5 +115,27 @@ func TestDevHeaderModeStillWorksInNonProduction(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "auth_mode_dev_header") {
 		t.Fatalf("dev-header 模式应留一条 warn:\n%s", buf.String())
+	}
+}
+
+func TestLocalRoleScopesFromEnv(t *testing.T) {
+	c, err := configFromEnv(env(map[string]string{"ENVIRONMENT": "production", "XM_AUTH_ROLE_SCOPES": `{"ops":["ops.read"],"auditor":["audit.read"]}`}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roles := localAuthRoleMap(c)
+	if !slices.Equal(roles["ops"], []string{"ops.read"}) {
+		t.Fatalf("custom roles lost: %v", roles)
+	}
+	if _, ok := roles["admin"]; ok {
+		t.Fatalf("custom roles were merged with defaults: %v", roles)
+	}
+}
+
+func TestLocalRoleScopesRejectMalformedOrReversedMap(t *testing.T) {
+	for _, raw := range []string{"staff=registry.read", `{}`, `{"registry.read":["registry.read"]}`} {
+		if _, err := authConfigFromEnv(env(map[string]string{"XM_AUTH_ROLE_SCOPES": raw}), "production"); err == nil {
+			t.Fatalf("unsafe role map accepted: %s", raw)
+		}
 	}
 }

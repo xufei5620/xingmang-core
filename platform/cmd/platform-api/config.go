@@ -6,12 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
-	"github.com/xufei5620/xingmang-platform/internal/platform/oidcauth"
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
-	"github.com/xufei5620/xingmang-platform/internal/platform/secrets"
+	"github.com/xufei5620/xingmang-platform/internal/platform/rolepermissions"
 )
 
 // config 只承载**非机密**配置。
@@ -57,89 +55,8 @@ type config struct {
 	// 名单（XM_CONSOLE_ADMIN_IP_ALLOWLIST，逗号分隔 CIDR；空＝不启用）。
 	// 只对已经/将要被要求启用 TOTP 的账号（管理员）生效，见
 	// localauth.accountNeedsAdminIPCheck。这是纵深防御，不是唯一防线——与
-	// 断言签发端点（XM-INVCON1，届时应读取**同一个**环境变量，两侧配置须
-	// 保持一致）各自独立校验。
+	// 同进程开票管理员适配器复用相同名单独立校验。
 	ConsoleAdminIPAllowlist localauth.AdminIPAllowlist
-
-	// ConsoleAssertion 是 CR-0006/XM-INVCON1 断言签发端点的配置。
-	// Enabled=false（默认）时 cmd/platform-api 完全不构造签名器/Handlers，
-	// 路由不挂载 POST /api/v1/auth/console-assertion（404，不是拿一个未装配
-	// 的依赖硬跑出 500——与 LocalAuth/RequestLogs 同一条纪律）。
-	ConsoleAssertion consoleAssertionConfig
-}
-
-// consoleAssertionConfig 承载 CR-0006/XM-INVCON1 的非机密配置；私钥只有一个
-// CredentialRef（KeyRef），明文永不出现在这个结构体里。
-type consoleAssertionConfig struct {
-	Enabled      bool
-	Issuer       string
-	Audience     string
-	KeyRef       secrets.CredentialRef
-	StepUpMaxAge time.Duration
-}
-
-// consoleAssertionConfigFromEnv 解析 XM_INVOICE_CONSOLE_ASSERTION_* 五个
-// 环境变量。**enabled=false 时对其余四项一律不校验**——与本文件其它「未启用
-// 的功能不该因为配置半吊子而拒绝整个进程启动」的既定纪律一致（对照
-// authConfigFromEnv 对 dev-header/oidc/local 三态的分层校验）；一旦
-// enabled=true，任何一项非法都拒绝启动（Fail Closed，同 XM_CONSOLE_ADMIN_IP_
-// ALLOWLIST 的既定纪律）。
-//
-// authMode 是已解析好的当前 XM_AUTH_MODE：断言签发依赖 mfa_at/TOTP 新鲜度，
-// 这个概念只有 local 模式的 Resolver 会填充（见 principal.Principal.MFAAt
-// 的注释，dev-header/oidc 两种解析器留空），因此 enabled=true 时同时要求
-// authMode=local，否则签发端点会对每一次请求都判"从未过二因素"，永远
-// ADMIN_STEP_UP_REQUIRED，是一种可预见但无意义的死锁——不如启动时直接拒绝。
-func consoleAssertionConfigFromEnv(getenv func(string) string, authMode authMode) (consoleAssertionConfig, error) {
-	c := consoleAssertionConfig{}
-	enabledRaw := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_ENABLED"))
-	if enabledRaw == "" {
-		return c, nil
-	}
-	enabled, err := strconv.ParseBool(enabledRaw)
-	if err != nil {
-		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ENABLED=%q 必须是布尔值: %w", enabledRaw, err)
-	}
-	if !enabled {
-		return c, nil
-	}
-	c.Enabled = true
-
-	if authMode != authModeLocal {
-		return consoleAssertionConfig{}, fmt.Errorf(
-			"XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 要求 XM_AUTH_MODE=local" +
-				"（断言签发依赖本地登录的 TOTP 新鲜度 mfa_at，oidc/dev-header 两种" +
-				"身份解析器都不填充这个字段）")
-	}
-
-	issuer, err := consoleassertion.ValidateIssuer(getenv("XM_INVOICE_CONSOLE_ASSERTION_ISSUER"))
-	if err != nil {
-		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ISSUER: %w", err)
-	}
-	c.Issuer = issuer
-	c.Audience = strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_AUDIENCE"))
-
-	keyRefRaw := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_KEY_REF"))
-	if keyRefRaw == "" {
-		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 时 XM_INVOICE_CONSOLE_ASSERTION_KEY_REF 必填")
-	}
-	keyRef, err := secrets.ParseCredentialRef(keyRefRaw)
-	if err != nil {
-		return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_KEY_REF: %w", err)
-	}
-	c.KeyRef = keyRef
-
-	if v := strings.TrimSpace(getenv("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE: %w", err)
-		}
-		if d <= 0 {
-			return consoleAssertionConfig{}, fmt.Errorf("XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE must be positive, got %s", v)
-		}
-		c.StepUpMaxAge = d
-	}
-	return c, nil
 }
 
 // defaultSecretRoot 与 deploy/compose/launch.yaml 里 xm-secrets 卷的挂载点一致。
@@ -151,8 +68,6 @@ type authMode string
 const (
 	// authModeDevHeader：身份来自 X-Dev-* 请求头，仅非生产（Foundation-A 现状）。
 	authModeDevHeader authMode = "dev-header"
-	// authModeOIDC：身份来自 Keycloak 的 Access Token（XM-0008）。
-	authModeOIDC authMode = "oidc"
 	// authModeLocal：身份来自平台自带的账号库（XM-LOGIN），账号与口令哈希
 	// 落在 core.staff_account，会话是服务端持有状态的 Cookie。与 dev-header
 	// 不同，它不是"请求头自称身份"——账号需要 cmd/staff-bootstrap 或
@@ -161,15 +76,10 @@ const (
 	authModeLocal authMode = "local"
 )
 
-// authConfig 是身份解析的配置。**不含任何机密**：OIDC 校验只用公钥（JWKS），
-// 平台侧不需要 Client Secret——CR-0001 的 xingmang-admin-web 是 public client。
+// authConfig 只承载本地会话模式和员工角色权限映射，不含凭据。
 type authConfig struct {
-	Mode           authMode
-	OIDCIssuer     string
-	OIDCAudience   string
-	OIDCJWKSURL    string
-	OIDCRoleScopes map[string][]string
-	OIDCClockSkew  time.Duration
+	Mode       authMode
+	RoleScopes map[string][]string
 }
 
 // configFromEnv 从环境变量读取配置。
@@ -269,95 +179,45 @@ func configFromEnv(getenv func(string) string) (config, error) {
 	}
 	c.ConsoleAdminIPAllowlist = allowlist
 
-	consoleAssertionCfg, err := consoleAssertionConfigFromEnv(getenv, c.Auth.Mode)
-	if err != nil {
-		return config{}, err
-	}
-	c.ConsoleAssertion = consoleAssertionCfg
 	return c, nil
 }
 
-// authConfigFromEnv 解析身份相关配置，全程 Fail Closed。
-//
-// 四条不可协商的规则：
-//
-//  1. **生产只允许 oidc 或 local**。dev-header 让调用方用请求头自称身份，在
-//     生产等于没有鉴权。httpapi.NewDevHeaderResolver 里已经有一道硬拒绝，
-//     这里再挡一次——那道闸在「构造解析器」时才触发，这道在「读配置」时就
-//     触发，报错信息也能直接说清楚该怎么改；local（XM-LOGIN）不在此列——
-//     账号与口令哈希都在平台自己的库里，有真实的鉴权语义；
-//  2. **oidc 缺 issuer 或 audience 拒绝启动**。少了 issuer 就没有信任根，少了
-//     audience 就等于接受任何 Client 拿到的令牌。两者都不能有默认值；
-//  3. **非生产默认 dev-header**。XM-0008 不改现状：development / staging 的栈
-//     照常跑，切换是显式动作（把 XM_AUTH_MODE 设成 oidc 或 local）；
-//  4. **XM_AUTH_MODE 是 dev-header / oidc / local 之外的任何值一律拒绝启动**，
-//     不静默回落——回落等于让一次拼写错误变成一次静默的鉴权降级。
+// authConfigFromEnv 只允许本地会话及非生产开发头，错误配置拒绝启动。
 func authConfigFromEnv(getenv func(string) string, environment string) (authConfig, error) {
-	a := authConfig{}
-
+	// 旧配置必须显式移除；尤其权限覆盖不能在升级时静默丢失。
+	for _, key := range []string{
+		"XM_OIDC_ISSUER", "XM_OIDC_AUDIENCE", "XM_OIDC_JWKS_URL",
+		"XM_OIDC_ROLE_SCOPES", "XM_OIDC_CLOCK_SKEW",
+		"XM_INVOICE_CONSOLE_ASSERTION_ENABLED", "XM_INVOICE_CONSOLE_ASSERTION_ISSUER",
+		"XM_INVOICE_CONSOLE_ASSERTION_AUDIENCE", "XM_INVOICE_CONSOLE_ASSERTION_KEY_REF",
+		"XM_INVOICE_CONSOLE_ASSERTION_STEP_UP_MAX_AGE",
+	} {
+		if strings.TrimSpace(getenv(key)) != "" {
+			return authConfig{}, fmt.Errorf("%s 已退役，请移除；员工权限覆盖使用 XM_AUTH_ROLE_SCOPES", key)
+		}
+	}
 	mode := strings.TrimSpace(getenv("XM_AUTH_MODE"))
 	if mode == "" {
-		// 默认值跟着环境走：生产没有「先跑起来再说」这个选项
 		if environment == "production" {
-			mode = string(authModeOIDC)
+			mode = string(authModeLocal)
 		} else {
 			mode = string(authModeDevHeader)
 		}
 	}
-	a.Mode = authMode(mode)
-
+	a := authConfig{Mode: authMode(mode)}
 	switch a.Mode {
+	case authModeLocal:
 	case authModeDevHeader:
 		if environment == "production" {
-			return authConfig{}, fmt.Errorf(
-				"XM_AUTH_MODE=dev-header 不允许在生产环境使用：" +
-					"请求头自称身份等于没有鉴权。生产请设 XM_AUTH_MODE=oidc " +
-					"并配置 XM_OIDC_ISSUER / XM_OIDC_AUDIENCE（前置条件：CR-0001 已执行），" +
-					"或设 XM_AUTH_MODE=local 使用平台自带登录（XM-LOGIN）")
+			return authConfig{}, fmt.Errorf("XM_AUTH_MODE=dev-header 不允许在生产环境使用；生产请使用 local")
 		}
-	case authModeOIDC:
-	case authModeLocal:
-		// 生产允许：账号与口令哈希落在平台自己的库里，不是「请求头自称身份」。
-		// 需要先用 cmd/staff-bootstrap 建出第一个管理员账号，见
-		// docs/modules/httpapi/AUTH-SWITCH.md「local 模式」一节。
 	default:
-		return authConfig{}, fmt.Errorf("XM_AUTH_MODE 必须是 dev-header / oidc / local 之一，got %q", mode)
+		return authConfig{}, fmt.Errorf("XM_AUTH_MODE 必须是 local 或非生产 dev-header，got %q", mode)
 	}
-
-	a.OIDCIssuer = strings.TrimSpace(getenv("XM_OIDC_ISSUER"))
-	a.OIDCAudience = strings.TrimSpace(getenv("XM_OIDC_AUDIENCE"))
-	a.OIDCJWKSURL = strings.TrimSpace(getenv("XM_OIDC_JWKS_URL"))
-
-	roleScopes, err := oidcauth.ParseRoleScopeMap(getenv("XM_OIDC_ROLE_SCOPES"))
+	roleScopes, err := rolepermissions.ParseRoleScopeMap(getenv("XM_AUTH_ROLE_SCOPES"))
 	if err != nil {
-		return authConfig{}, fmt.Errorf("XM_OIDC_ROLE_SCOPES: %w", err)
+		return authConfig{}, fmt.Errorf("XM_AUTH_ROLE_SCOPES: %w", err)
 	}
-	a.OIDCRoleScopes = roleScopes
-
-	if v := strings.TrimSpace(getenv("XM_OIDC_CLOCK_SKEW")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return authConfig{}, fmt.Errorf("XM_OIDC_CLOCK_SKEW: %w", err)
-		}
-		// 上限刻意压到 5 分钟：偏移容忍本质是在延长令牌寿命，
-		// 一个「顺手写成 24h」的值会让 CR-0001 定的 5 分钟令牌形同虚设
-		if d <= 0 || d > 5*time.Minute {
-			return authConfig{}, fmt.Errorf("XM_OIDC_CLOCK_SKEW 必须在 (0, 5m] 之间，got %s", v)
-		}
-		a.OIDCClockSkew = d
-	}
-
-	if a.Mode == authModeOIDC {
-		if a.OIDCIssuer == "" {
-			return authConfig{}, fmt.Errorf(
-				"XM_AUTH_MODE=oidc 时 XM_OIDC_ISSUER 必填，" +
-					"例如 https://auth.solov.cc/realms/solov-staff")
-		}
-		if a.OIDCAudience == "" {
-			return authConfig{}, fmt.Errorf(
-				"XM_AUTH_MODE=oidc 时 XM_OIDC_AUDIENCE 必填，" +
-					"例如 xingmang-admin-web（CR-0001 的 Client ID）")
-		}
-	}
+	a.RoleScopes = roleScopes
 	return a, nil
 }

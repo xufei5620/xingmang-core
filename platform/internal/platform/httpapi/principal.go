@@ -13,10 +13,10 @@ import (
 //
 // 两个实现：
 //   - DevHeaderResolver（本文件，仅非生产）——Foundation-A 的过渡手段；
-//   - oidcauth.Resolver（internal/platform/oidcauth，XM-0008）——Keycloak 令牌。
+//   - localauth.Resolver（internal/platform/localauth）——员工 Cookie 会话。
 //
 // 后者不在本包，也不反向依赖本包：Go 的接口是结构化满足的，装配点在
-// cmd/platform-api/auth.go，由 XM_AUTH_MODE 选择。换实现时本接口与所有
+// cmd/platform-api/main.go，由 XM_AUTH_MODE 选择。换实现时本接口与所有
 // handler 一行不动——切换步骤见 docs/modules/httpapi/AUTH-SWITCH.md。
 type PrincipalResolver interface {
 	Resolve(r *http.Request) (principal.Principal, error)
@@ -36,14 +36,14 @@ type devHeaderResolver struct {
 // NewDevHeaderResolver 创建开发期身份注入器。
 //
 // 生产环境一律拒绝：允许用请求头自称身份等于没有鉴权。这个拒绝是硬编码的，
-// 不提供任何开关——需要生产可用时，用 XM_AUTH_MODE=oidc 换成 oidcauth.Resolver。
+// 不提供任何开关——生产使用 XM_AUTH_MODE=local 的员工账号与 Cookie 会话。
 //
 // XM-0008 之后 cmd/platform-api 又在读配置时加了一道同样的拒绝，两道都留着：
 // 那一道能在报错里直接告诉人该改哪个环境变量，这一道保证即便有人绕过配置
 // 解析、直接调用本函数，生产也依然起不来。
 func NewDevHeaderResolver(environment string) (PrincipalResolver, error) {
 	if environment == "production" {
-		return nil, fmt.Errorf("开发期 Principal 注入器不允许在生产环境使用；请接入 OIDC（XM-0008）")
+		return nil, fmt.Errorf("开发期 Principal 注入器不允许在生产环境使用；请使用 XM_AUTH_MODE=local")
 	}
 	return &devHeaderResolver{environment: environment}, nil
 }

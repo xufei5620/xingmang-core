@@ -8,12 +8,12 @@ import (
 func TestLocalAuthRoleMapFallsBackToDefault(t *testing.T) {
 	m := localAuthRoleMap(config{})
 	if !slices.Contains(m["admin"], "staff.manage") {
-		t.Fatalf("留空 XM_OIDC_ROLE_SCOPES 时应回落到 oidcauth 默认表（含 admin -> staff.manage）, got %v", m["admin"])
+		t.Fatalf("留空 XM_AUTH_ROLE_SCOPES 时应回落到 rolepermissions 默认表（含 admin -> staff.manage）, got %v", m["admin"])
 	}
 }
 
 func TestLocalAuthRoleMapUsesConfiguredOverride(t *testing.T) {
-	cfg := config{Auth: authConfig{OIDCRoleScopes: map[string][]string{"ops": {"ops.read"}}}}
+	cfg := config{Auth: authConfig{RoleScopes: map[string][]string{"ops": {"ops.read"}}}}
 	m := localAuthRoleMap(cfg)
 	if !slices.Equal(m["ops"], []string{"ops.read"}) {
 		t.Fatalf("应使用显式配置的表, got %v", m)
