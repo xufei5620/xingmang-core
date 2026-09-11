@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"log/slog"
 	"regexp"
 	"sync"
 	"time"
@@ -67,6 +68,45 @@ func NotReady(check, summary string, err error) error {
 // a shape a reader has to interpret.
 type ReadinessOutcome struct {
 	Degraded []string
+}
+
+// ReadinessReport is the safe, public subset of one readiness evaluation.
+// It deliberately has no error field: dependency details belong only in logs.
+type ReadinessReport struct {
+	Ready    bool
+	Check    string
+	Summary  string
+	Degraded []string
+}
+
+// ReadinessDiagnostics applies the same publication filter and bounded
+// failure/recovery logging to direct module and HTTP readiness responses.
+type ReadinessDiagnostics struct {
+	log readinessOutcomeLog
+}
+
+func (d *ReadinessDiagnostics) Report(outcome ReadinessOutcome, err error, logger *slog.Logger) ReadinessReport {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if err != nil {
+		logCheck, check, summary := readinessFailureFields(err)
+		if d.log.record(logCheck, time.Now().UTC()) {
+			logger.Error("readiness check failed", "check", logCheck, "error", err)
+		}
+		if check == "" {
+			summary = "required dependencies are unavailable"
+		}
+		return ReadinessReport{Check: check, Summary: summary}
+	}
+	if d.log.record("", time.Now().UTC()) {
+		logger.Info("readiness recovered")
+	}
+	degraded, rejected := outcome.publishableDegraded()
+	if rejected {
+		logger.Error("readiness check failed", "check", readinessRejectedCheck)
+	}
+	return ReadinessReport{Ready: true, Degraded: degraded}
 }
 
 // publishableDegraded filters an outcome's names through the same guard a

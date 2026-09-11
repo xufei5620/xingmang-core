@@ -1,7 +1,5 @@
-// Command platform-api 提供管理后台与内部集成 API（规格 §5.5）。
-//
-// 本进程不参与用户实时请求路径（ADR-011）：它只服务管理后台与后置的
-// 私有集成 API，平台故障不得影响用户 API 中转、支付回调或开票前端。
+// Command platform-api serves the control platform and invoice module in one
+// process (CR-0010). Upstream model traffic remains outside this process.
 package main
 
 import (
@@ -11,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,12 +22,12 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/audit"
 	"github.com/xufei5620/xingmang-platform/internal/platform/buildinfo"
 	"github.com/xufei5620/xingmang-platform/internal/platform/cards"
-	"github.com/xufei5620/xingmang-platform/internal/platform/consoleassertion"
 	"github.com/xufei5620/xingmang-platform/internal/platform/credentials"
 	"github.com/xufei5620/xingmang-platform/internal/platform/extapp"
 	"github.com/xufei5620/xingmang-platform/internal/platform/finance"
 	"github.com/xufei5620/xingmang-platform/internal/platform/httpapi"
 	"github.com/xufei5620/xingmang-platform/internal/platform/integration"
+	"github.com/xufei5620/xingmang-platform/internal/platform/invoicehost"
 	"github.com/xufei5620/xingmang-platform/internal/platform/jobs"
 	"github.com/xufei5620/xingmang-platform/internal/platform/lifecycle"
 	"github.com/xufei5620/xingmang-platform/internal/platform/localauth"
@@ -37,6 +36,7 @@ import (
 	"github.com/xufei5620/xingmang-platform/internal/platform/registry"
 	"github.com/xufei5620/xingmang-platform/internal/platform/savedviews"
 	"github.com/xufei5620/xingmang-platform/internal/platform/server"
+	invoiceservice "invoice-system/backend/service"
 )
 
 func main() {
@@ -58,6 +58,10 @@ func main() {
 			slog.String("error_code", "config_invalid"), slog.Any("err", err))
 		os.Exit(2)
 	}
+	if err := validateUnifiedModes(cfg.Environment, string(cfg.Auth.Mode), os.Getenv); err != nil {
+		logger.Error("api_start_failed", slog.String("error_code", "unified_auth_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
 
 	// 连接串单独解析：密码走 CredentialRef，明文不进 config、不进日志
 	databaseURL, err := databaseURLFromEnv(ctx, os.Getenv, logger)
@@ -75,12 +79,10 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 身份解析器由 XM_AUTH_MODE 决定（dev-header / oidc / local）。
-	// 生产只允许 oidc 或 local；dev-header 与 oidc 缺 issuer/audience 都在
-	// authConfigFromEnv 里直接拒绝启动。
+	// 生产使用本地员工会话；开发请求头身份只能在非生产使用。
 	//
 	// local（XM-LOGIN）单独装配，不经 newPrincipalResolver（auth.go）：
-	// 那个函数只处理不依赖数据库连接的两种模式，local 的账号与会话都落库，
+	// 那个函数只处理不依赖数据库连接的开发模式，local 的账号与会话都落库，
 	// 需要 pool——而 pool 在这里已经建好了。localAuthStore 非 nil 时后面还
 	// 要用它注册 staff.manage Action 与装配 /api/v1/auth/* 的 HTTP 处理器。
 	var resolver httpapi.PrincipalResolver
@@ -315,26 +317,6 @@ func main() {
 			localAuthStore, cfg.Environment, auditStore, logger,
 			kernel, totpSecretReader, cfg.ConsoleAdminIPAllowlist,
 		)
-	}
-	// 断言签发端点（CR-0006/XM-INVCON1）：只在 local 模式 + 显式启用时装配
-	// （configFromEnv 已经把"enabled=true 但 auth mode 不是 local"当成启动期
-	// 错误拒绝了，这里 localAuthStore!=nil 与 cfg.ConsoleAssertion.Enabled
-	// 因此不会出现"想启用却没有 store"的组合）。私钥经与 TOTP 同一份
-	// XM_SECRET_ROOT 目录的 SecretProvider 解析，装配失败即拒绝启动——
-	// 一个「配置说启用了，但私钥读不出来」的进程不该在没有签发能力的情况下
-	// 假装自己就绪。
-	var consoleAssertionHandlers *consoleassertion.Handlers
-	if cfg.ConsoleAssertion.Enabled {
-		h, err := buildConsoleAssertionHandlers(
-			ctx, cfg, localAuthStore, platformUsersSecretProvider(cfg.SecretRoot, cfg.Environment, logger),
-			auditStore, logger,
-		)
-		if err != nil {
-			logger.Error("api_start_failed", slog.String("module", "platform.api"),
-				slog.String("error_code", "console_assertion_config_invalid"), slog.Any("err", err))
-			os.Exit(2)
-		}
-		consoleAssertionHandlers = h
 	}
 	opsStore := ops.NewStore(pool)
 	runwaySummaryStore := finance.NewSummaryStore(pool, nil)
@@ -657,9 +639,6 @@ func main() {
 		RateLimit:                  cfg.RateLimit,
 		// nil 时本地登录端点不挂载（XM-LOGIN，只有 XM_AUTH_MODE=local 才有值）
 		LocalAuth: localAuthHandlersOrNil(localAuthHandlers),
-		// nil 时断言签发端点不挂载（CR-0006/XM-INVCON1，只有
-		// XM_INVOICE_CONSOLE_ASSERTION_ENABLED=true 才有值）
-		ConsoleAssertion: consoleAssertionHandlersOrNil(consoleAssertionHandlers),
 		// 运行保障页「控制平面健康」子页（XM-OPS0）。复用凭据登记的同一个
 		// 仓储——它已经在读 core.connector_config，不必再开一条访问路径。
 		OpsConnectorConfigs: credentialStore,
@@ -667,22 +646,57 @@ func main() {
 		OpsAlertDelivery: alertDeliveryStatusFromEnv(os.Getenv),
 	})
 
+	invoiceOptions := invoiceservice.Options{}
+	if localAuthStore != nil {
+		staffResolver, err := invoicehost.NewStaffResolver(localAuthStore, invoicehost.StaffConfig{
+			Origin: os.Getenv("INVOICE_STAFF_ORIGIN"), Environment: cfg.Environment,
+			RoleScopes: localAuthRoleMap(cfg), AdminIPAllowlist: cfg.ConsoleAdminIPAllowlist,
+			TrustedProxyCIDRs: strings.Split(os.Getenv("TRUSTED_PROXY_CIDRS"), ","),
+		})
+		if err != nil {
+			logger.Error("api_start_failed", slog.String("error_code", "invoice_staff_invalid"), slog.Any("err", err))
+			os.Exit(2)
+		}
+		invoiceOptions.StaffResolver = staffResolver
+	}
+	invoiceRuntime, err := invoiceservice.New(ctx, invoiceOptions)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("error_code", "invoice_runtime_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	unifiedHandler, err := invoicehost.NewHandler(handler, invoiceRuntime, pool.Ping)
+	if err != nil {
+		logger.Error("api_start_failed", slog.String("error_code", "invoice_handler_invalid"), slog.Any("err", err))
+		os.Exit(2)
+	}
+	listener, err := startUnifiedListener(ctx, cfg.ListenAddr, invoiceRuntime.Start)
+	if err != nil {
+		closeCtx, done := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = invoiceRuntime.Shutdown(closeCtx)
+		done()
+		logger.Error("api_start_failed", slog.String("error_code", "unified_listener_start_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           handler,
+		Handler:           unifiedHandler,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       cfg.RequestTimeout,
-		WriteTimeout:      cfg.RequestTimeout + 5*time.Second,
+		ReadTimeout:       max(cfg.RequestTimeout, 15*time.Second),
+		WriteTimeout:      max(cfg.RequestTimeout+5*time.Second, 60*time.Second),
 		IdleTimeout:       120 * time.Second,
 	}
 
+	serveResult := make(chan error, 1)
 	go func() {
 		logger.Info("api_listening",
 			slog.String("module", "platform.api"),
 			slog.String("environment", cfg.Environment),
 			slog.String("addr", cfg.ListenAddr),
 			slog.String("build", buildinfo.String()))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		err := srv.Serve(listener)
+		serveResult <- err
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("api_serve_failed", slog.String("module", "platform.api"),
 				slog.String("error_code", "listen_failed"), slog.Any("err", err))
 			stop()
@@ -690,11 +704,18 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error("api_shutdown_failed", slog.String("module", "platform.api"),
 			slog.String("error_code", "shutdown_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := invoiceRuntime.Shutdown(shutdownCtx); err != nil {
+		logger.Error("api_shutdown_failed", slog.String("error_code", "invoice_shutdown_failed"), slog.Any("err", err))
+		os.Exit(1)
+	}
+	if err := <-serveResult; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		os.Exit(1)
 	}
 	logger.Info("api_stopped", slog.String("module", "platform.api"))

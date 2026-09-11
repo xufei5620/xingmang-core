@@ -2,6 +2,8 @@ module github.com/xufei5620/xingmang-platform
 
 go 1.27.0
 
+replace invoice-system/backend => ../invoice/backend
+
 require (
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/golang-migrate/migrate/v4 v4.19.1
@@ -13,6 +15,7 @@ require (
 	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.45.0
 	github.com/riverqueue/river/rivertype v0.45.0
 	golang.org/x/crypto v0.55.0
+	invoice-system/backend v0.0.0
 )
 
 require (

@@ -1,18 +1,10 @@
-package main
+package service
 
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -23,7 +15,7 @@ import (
 )
 
 // fakeIdentityStore is a scriptable auth.IdentityStore double for
-// provisionPlatformOrOIDCUser's tests: it never talks to a real PostgreSQL
+// provisionUser's tests: it never talks to a real PostgreSQL
 // connection.
 type fakeIdentityStore struct {
 	calls   int
@@ -88,7 +80,7 @@ func (f *fakeProvisionDeps) GetCurrentUser(_ context.Context, userID string) (ap
 	return f.getCurrentUser(userID)
 }
 
-func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T) {
+func TestProvisionUserClaimsExistingProjectedIdentity(t *testing.T) {
 	// Mirrors the production incident: a source-projection pipeline already
 	// bound (sub2api-main, "1113") to a pre-existing invoice_user before its
 	// owner ever tried a platform-password login.
@@ -114,7 +106,7 @@ func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T
 	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformSub2API: "sub2api-main"}
 
-	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-1", sourceInstanceIDs)
+	user, err := provisionUser(context.Background(), deps, identity, principal, "req-1", sourceInstanceIDs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -142,7 +134,7 @@ func TestProvisionPlatformOrOIDCUserClaimsExistingProjectedIdentity(t *testing.T
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *testing.T) {
+func TestProvisionUserCreatesNewIdentityWhenNoExistingBinding(t *testing.T) {
 	// Regression: a genuinely first-ever platform-password login (no
 	// source-projection binding exists yet) must still go through the
 	// original resolve-then-bind flow unchanged.
@@ -173,7 +165,7 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	principal := auth.Principal{Issuer: "https://xm.solov.cc", Subject: "48", Platform: auth.PlatformNewAPI, PlatformUserID: "48"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformNewAPI: "newapi-main"}
 
-	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-2", sourceInstanceIDs)
+	user, err := provisionUser(context.Background(), deps, identity, principal, "req-2", sourceInstanceIDs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +186,7 @@ func TestProvisionPlatformOrOIDCUserCreatesNewIdentityWhenNoExistingBinding(t *t
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserAcceptsMultiPlatformIdentity(t *testing.T) {
+func TestProvisionUserAcceptsMultiPlatformIdentity(t *testing.T) {
 	// The external_accounts binding row is the ownership proof. A user whose
 	// accounts on BOTH platforms are bound to one SSO invoice_user claims
 	// first with one platform; the stored platform columns then differ from
@@ -223,7 +215,7 @@ func TestProvisionPlatformOrOIDCUserAcceptsMultiPlatformIdentity(t *testing.T) {
 	principal := auth.Principal{Issuer: "https://xm.solov.cc", Subject: "48", Platform: auth.PlatformNewAPI, PlatformUserID: "48"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformNewAPI: "newapi-main"}
 
-	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-3", sourceInstanceIDs)
+	user, err := provisionUser(context.Background(), deps, identity, principal, "req-3", sourceInstanceIDs)
 	if err != nil {
 		t.Fatalf("multi-platform identity login must succeed: %v", err)
 	}
@@ -245,22 +237,22 @@ func TestProvisionPlatformOrOIDCUserAcceptsMultiPlatformIdentity(t *testing.T) {
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserOIDCPrincipalSkipsClaimPathEntirely(t *testing.T) {
-	const oidcUserID = "oidc-admin-0004"
+func TestProvisionUserStaffPrincipalSkipsClaimPathEntirely(t *testing.T) {
+	const staffUserID = "oidc-admin-0004"
 	deps := &fakeProvisionDeps{
 		getExternalAccount: func(string, string) (postgresstore.ExternalAccountRecord, error) {
-			t.Fatal("an OIDC principal must never look up a platform external account binding")
+			t.Fatal("an staff principal must never look up a platform external account binding")
 			return postgresstore.ExternalAccountRecord{}, nil
 		},
 		claim: func(string, string, string) (string, string, error) {
-			t.Fatal("an OIDC principal must never call ClaimPlatformIdentity")
+			t.Fatal("an staff principal must never call ClaimPlatformIdentity")
 			return "", "", nil
 		},
 		ensureUser: func(application.OIDCIdentity) (postgresstore.UserRecord, error) {
-			return postgresstore.UserRecord{ID: oidcUserID}, nil
+			return postgresstore.UserRecord{ID: staffUserID}, nil
 		},
 		bind: func(postgresstore.ExternalAccountRecord) (postgresstore.ExternalAccountRecord, error) {
-			t.Fatal("an OIDC principal must never call BindExternalAccount")
+			t.Fatal("an staff principal must never call BindExternalAccount")
 			return postgresstore.ExternalAccountRecord{}, nil
 		},
 		getCurrentUser: func(userID string) (application.CurrentUser, error) {
@@ -268,28 +260,28 @@ func TestProvisionPlatformOrOIDCUserOIDCPrincipalSkipsClaimPathEntirely(t *testi
 		},
 	}
 	identity := &fakeIdentityStore{resolve: func(auth.Principal) (auth.InvoiceIdentity, error) {
-		return auth.InvoiceIdentity{UserID: oidcUserID}, nil
+		return auth.InvoiceIdentity{UserID: staffUserID}, nil
 	}}
 	principal := auth.Principal{Issuer: "https://keycloak.example/realms/invoice", Subject: "admin-sub"}
 
-	user, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-4", nil)
+	user, err := provisionUser(context.Background(), deps, identity, principal, "req-4", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if user.ID != oidcUserID {
-		t.Fatalf("user.ID=%q want %q", user.ID, oidcUserID)
+	if user.ID != staffUserID {
+		t.Fatalf("user.ID=%q want %q", user.ID, staffUserID)
 	}
 	if identity.calls != 1 {
 		t.Fatalf("expected exactly one ResolveOrCreate call, got %d", identity.calls)
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserRejectsMissingSourceInstanceConfig(t *testing.T) {
+func TestProvisionUserRejectsMissingSourceInstanceConfig(t *testing.T) {
 	deps := &fakeProvisionDeps{}
 	identity := &fakeIdentityStore{}
 	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113"}
 
-	if _, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-5", map[auth.Platform]string{}); err == nil {
+	if _, err := provisionUser(context.Background(), deps, identity, principal, "req-5", map[auth.Platform]string{}); err == nil {
 		t.Fatal("expected an error when no source instance is configured for the platform")
 	}
 	if deps.getExternalAccountCalls != 0 {
@@ -297,7 +289,7 @@ func TestProvisionPlatformOrOIDCUserRejectsMissingSourceInstanceConfig(t *testin
 	}
 }
 
-func TestProvisionPlatformOrOIDCUserPropagatesExternalAccountLookupFailure(t *testing.T) {
+func TestProvisionUserPropagatesExternalAccountLookupFailure(t *testing.T) {
 	// A lookup error other than "not found" (e.g. a database error) must fail
 	// closed rather than silently falling through to the create path -- that
 	// would risk creating a second, orphaned identity underneath a lookup
@@ -311,7 +303,7 @@ func TestProvisionPlatformOrOIDCUserPropagatesExternalAccountLookupFailure(t *te
 	principal := auth.Principal{Issuer: "https://api.solov.cc", Subject: "1113", Platform: auth.PlatformSub2API, PlatformUserID: "1113"}
 	sourceInstanceIDs := map[auth.Platform]string{auth.PlatformSub2API: "sub2api-main"}
 
-	if _, err := provisionPlatformOrOIDCUser(context.Background(), deps, identity, principal, "req-6", sourceInstanceIDs); err == nil {
+	if _, err := provisionUser(context.Background(), deps, identity, principal, "req-6", sourceInstanceIDs); err == nil {
 		t.Fatal("expected the lookup failure to propagate")
 	}
 	if identity.calls != 0 {
@@ -354,168 +346,5 @@ func TestRunWorkerLogsProcessedCountAlongsideError(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("log missing %q: %s", want, logText)
 		}
-	}
-}
-
-// testConsoleAssertionKeyJSON mirrors auth's unexported wire shape for
-// contracts/auth/console-assertion-keyring.v1.json (see console_assertion.go)
-// -- redefined here since the real type is unexported and this package
-// cannot import it, only build an equivalent JSON document by hand.
-type testConsoleAssertionKeyJSON struct {
-	KeyID       string `json:"key_id"`
-	Algorithm   string `json:"algorithm"`
-	PublicKey   string `json:"public_key"`
-	Fingerprint string `json:"fingerprint"`
-	Purpose     string `json:"purpose"`
-	Protocol    string `json:"protocol"`
-	ValidFrom   string `json:"valid_from"`
-	ValidUntil  string `json:"valid_until"`
-}
-
-// writeTestConsoleAssertionKeyringFile writes a single valid, freshly
-// generated Ed25519 trust record to a temp file and returns its path. Every
-// keypair used here is generated at test-run time, never a literal committed
-// key (matching this codebase's existing console-assertion test discipline).
-func writeTestConsoleAssertionKeyringFile(t *testing.T, dir string) string {
-	t.Helper()
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate test ed25519 key: %v", err)
-	}
-	sum := sha256.Sum256(pub)
-	raw, err := json.Marshal([]testConsoleAssertionKeyJSON{{
-		KeyID:       "2026-09-test",
-		Algorithm:   "Ed25519",
-		PublicKey:   base64.StdEncoding.EncodeToString(pub),
-		Fingerprint: hex.EncodeToString(sum[:]),
-		Purpose:     "console_admin_assertion_signing",
-		Protocol:    "xm-console-assertion-v1",
-		ValidFrom:   "2020-01-01T00:00:00Z",
-		ValidUntil:  "2099-01-01T00:00:00Z",
-	}})
-	if err != nil {
-		t.Fatalf("marshal test keyring: %v", err)
-	}
-	path := filepath.Join(dir, "console-assertion-keyring.json")
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
-		t.Fatalf("write test keyring file: %v", err)
-	}
-	return path
-}
-
-func TestLoadConsoleAssertionRuntimeConfigDisabledNeverTouchesEnvOrFilesystem(t *testing.T) {
-	// docker-compose.prod.yml's CONSOLE_ASSERTION_KEYRING_FILE bind mount
-	// (XM-INV-CONSOLE-ASSERT-DEPLOY) may point at an absent or empty host
-	// path for every release where this flag stays false. Deliberately set
-	// garbage/absent values for all three variables this function would need
-	// if it actually read them, so this test fails loudly if the "disabled
-	// means untouched" guard is ever removed or weakened.
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
-
-	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(false, "invoice-admin")
-	if err != nil {
-		t.Fatalf("disabled config load must never fail, got: %v", err)
-	}
-	if keyring != nil {
-		t.Fatalf("disabled config load must return a nil keyring, got %v", keyring)
-	}
-	if cfg != (auth.ConsoleAssertionConfig{}) {
-		t.Fatalf("disabled config load must return a zero-value config, got %+v", cfg)
-	}
-}
-
-func TestLoadConsoleAssertionRuntimeConfigEnabledLoadsValidKeyring(t *testing.T) {
-	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
-
-	keyring, cfg, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if keyring.Len() != 1 {
-		t.Fatalf("expected exactly one trusted key, got %d", keyring.Len())
-	}
-	if cfg.Issuer != "https://console.example.test" || cfg.Audience != "xingmang-console-assertion-v1" {
-		t.Fatalf("unexpected config: %+v", cfg)
-	}
-	// CONSOLE_ASSERTION_ADMIN_ROLE unset must fall back to this deployment's
-	// OIDC_ADMIN_ROLE, so turning the feature on without the newer variable
-	// keeps the behavior every release before XM-INV-CONSOLE-ASSERT-ADMIN-ROLE
-	// had.
-	if cfg.AdminRole != "invoice-admin" {
-		t.Fatalf("expected the OIDC admin role as the default console admin role, got %q", cfg.AdminRole)
-	}
-}
-
-// TestLoadConsoleAssertionRuntimeConfigAdminRoleOverride is the production
-// shape after XM-INV-CONSOLE-ASSERT-ADMIN-ROLE: the console signs staff roles
-// (admin, credential-admin, staff) while the transitional Keycloak login
-// still carries invoice-admin, so the two roles must be configurable apart.
-func TestLoadConsoleAssertionRuntimeConfigAdminRoleOverride(t *testing.T) {
-	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
-	t.Setenv("CONSOLE_ASSERTION_ADMIN_ROLE", "admin")
-
-	_, cfg, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if cfg.AdminRole != "admin" {
-		t.Fatalf("expected the configured console admin role, got %q", cfg.AdminRole)
-	}
-}
-
-// TestLoadConsoleAssertionRuntimeConfigRejectsInvalidAdminRole keeps the
-// startup fail-closed contract: a blank OIDC_ADMIN_ROLE with no override
-// would otherwise produce a config whose role matches nothing.
-func TestLoadConsoleAssertionRuntimeConfigRejectsInvalidAdminRole(t *testing.T) {
-	keysPath := writeTestConsoleAssertionKeyringFile(t, t.TempDir())
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", keysPath)
-	t.Setenv("CONSOLE_ASSERTION_ADMIN_ROLE", " admin ")
-
-	if _, _, err := loadConsoleAssertionRuntimeConfig(true, ""); err == nil ||
-		!strings.Contains(err.Error(), "administrator role") {
-		t.Fatalf("expected an administrator-role validation error, got: %v", err)
-	}
-}
-
-func TestLoadConsoleAssertionRuntimeConfigEnabledRequiresKeysFilePath(t *testing.T) {
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", "")
-
-	if _, _, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin"); err == nil ||
-		!strings.Contains(err.Error(), "CONSOLE_ASSERTION_KEYS_FILE is required") {
-		t.Fatalf("expected a required-keys-file error, got: %v", err)
-	}
-}
-
-func TestLoadConsoleAssertionRuntimeConfigEnabledFailsClosedOnEmptyKeysFile(t *testing.T) {
-	// Simulates the exact Docker bind-mount footgun the compose change
-	// guards against: an empty placeholder file at the mounted path
-	// (deploy/roll-forward.sh creates one only when nothing exists yet)
-	// must never be silently accepted as "zero trusted keys" once the flag
-	// is actually turned on -- an operator who flips
-	// CONSOLE_ASSERTION_ENABLED before the real reviewed manifest is
-	// installed must see a loud startup failure, not a verifier that
-	// silently rejects every assertion forever.
-	emptyPath := filepath.Join(t.TempDir(), "console-assertion-keyring.json")
-	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
-		t.Fatalf("write empty test keys file: %v", err)
-	}
-	t.Setenv("CONSOLE_ASSERTION_ISSUER", "https://console.example.test")
-	t.Setenv("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1")
-	t.Setenv("CONSOLE_ASSERTION_KEYS_FILE", emptyPath)
-
-	if _, _, err := loadConsoleAssertionRuntimeConfig(true, "invoice-admin"); err == nil {
-		t.Fatal("expected an empty keys file to fail closed when the flag is enabled")
 	}
 }

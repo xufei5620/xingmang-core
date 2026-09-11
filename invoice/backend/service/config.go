@@ -1,53 +1,32 @@
-package main
+package service
 
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"net/http"
-	"os"
-	"os/signal"
-	"strings"
-	"sync"
-	"syscall"
-	"time"
-
+	"invoice-system/backend/internal/auth"
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/ledger"
+	"os"
+	"strings"
+	"time"
 )
 
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	runtime, err := buildRuntime(ctx)
-	if err != nil {
-		slog.Error("invoice service startup rejected", "error", err)
-		os.Exit(1)
-	}
-	defer runtime.Close()
+func loadAdminPolicy() (auth.AdminPolicy, error) {
+	policy := auth.AdminPolicy{Role: os.Getenv("ADMIN_ROLE"), RequiredACR: "mfa", RequiredAMR: []string{"pwd", "otp"}, StepUpMaxAge: 10 * time.Minute}
+	return policy, policy.Validate()
+}
 
-	var workers sync.WaitGroup
-	for _, worker := range runtime.Workers {
-		workers.Add(1)
-		go func(spec workerSpec) {
-			defer workers.Done()
-			runWorker(ctx, spec)
-		}(worker)
+func loadProductionCSRF() (string, auth.CSRFPolicy, error) {
+	publicOrigin, err := exactHTTPSOrigin(os.Getenv("PUBLIC_ORIGIN"))
+	if err != nil {
+		return "", auth.CSRFPolicy{}, err
 	}
-	server := &http.Server{Addr: env("HTTP_ADDR", ":8088"), Handler: runtime.API.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 60 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	slog.Info("invoice API listening", "addr", server.Addr, "auth_mode", runtime.AuthMode, "source_mode", runtime.SourceMode)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("invoice API stopped", "error", err)
-		os.Exit(1)
+	staffOrigin, err := exactHTTPSOrigin(os.Getenv("INVOICE_STAFF_ORIGIN"))
+	if err != nil {
+		return "", auth.CSRFPolicy{}, fmt.Errorf("INVOICE_STAFF_ORIGIN: %w", err)
 	}
-	stop()
-	workers.Wait()
+	policy, err := auth.NewCSRFPolicy([]string{publicOrigin, staffOrigin})
+	return publicOrigin, policy, err
 }
 
 func env(key, fallback string) string {
@@ -55,26 +34,6 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-// boolEnv accepts exactly "true"/"false" (case-sensitive, no other spelling
-// -- unlike EnforceProductionAuthMode's tolerant AUTH_MODE parsing, a
-// security-relevant on/off switch like OIDC_ADMIN_LOGIN_ENABLED or
-// CONSOLE_ASSERTION_ENABLED must fail closed on anything ambiguous (e.g.
-// "1", "yes", "True") rather than silently guessing.
-func boolEnv(key string, fallback bool) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(key))
-	if raw == "" {
-		return fallback, nil
-	}
-	switch raw {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	default:
-		return false, fmt.Errorf("%s must be exactly \"true\" or \"false\"", key)
-	}
 }
 
 func csvEnv(key, fallback string) []string {

@@ -1,4 +1,4 @@
-package main
+package service
 
 import (
 	"bytes"
@@ -32,7 +32,7 @@ import (
 //	 not rejected with 403, and it does not mint a second invoice_user"
 //
 // It exercises the production provisioning function itself
-// (provisionPlatformOrOIDCUser) against a real database and a real
+// (provisionUser) against a real database and a real
 // application.Service, because the inference spans two packages: the claim
 // branch in runtime.go never calls auth.ResolveOrCreate, which is precisely
 // why identity.go's "stored platform identity does not match the verified
@@ -90,7 +90,7 @@ func setupClaimFixture(t *testing.T) (*postgresstore.Store, *application.Service
 	if _, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {
 		t.Fatal(err)
 	}
-	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
+	if err = migrate.Up(ctx, pool, filepath.Join("..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
 	policyStart := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
@@ -176,7 +176,7 @@ func TestShadowBoundAccountIsClaimedByItsOwnersFirstRealLogin(t *testing.T) {
 		Platform: auth.PlatformSub2API, PlatformUserID: claimExternalID,
 		AuthTime: time.Now().UTC(),
 	}
-	sessionUser, err := provisionPlatformOrOIDCUser(ctx, service, identity, principal, "claim-login-1",
+	sessionUser, err := provisionUser(ctx, service, identity, principal, "claim-login-1",
 		map[auth.Platform]string{auth.PlatformSub2API: claimSourceID})
 	if err != nil {
 		t.Fatalf("the customer's first real login was rejected: %v", err)
@@ -198,7 +198,7 @@ func TestShadowBoundAccountIsClaimedByItsOwnersFirstRealLogin(t *testing.T) {
 	// one. The platform columns were already filled by the bind, so this also
 	// covers ClaimPlatformIdentity's "never overwrite, report what is stored"
 	// branch reached with an already-claimed row.
-	repeat, err := provisionPlatformOrOIDCUser(ctx, service, identity, principal, "claim-login-2",
+	repeat, err := provisionUser(ctx, service, identity, principal, "claim-login-2",
 		map[auth.Platform]string{auth.PlatformSub2API: claimSourceID})
 	if err != nil {
 		t.Fatalf("the customer's second login was rejected: %v", err)
@@ -214,7 +214,7 @@ func TestShadowBoundAccountIsClaimedByItsOwnersFirstRealLogin(t *testing.T) {
 			Platform: auth.PlatformSub2API, PlatformUserID: "99999",
 			AuthTime: time.Now().UTC(),
 		}
-		fresh, controlErr := provisionPlatformOrOIDCUser(ctx, service, control, controlPrincipal, "control-login",
+		fresh, controlErr := provisionUser(ctx, service, control, controlPrincipal, "control-login",
 			map[auth.Platform]string{auth.PlatformSub2API: claimSourceID})
 		if controlErr != nil {
 			t.Fatal(controlErr)
@@ -259,7 +259,7 @@ func TestShadowBindWithAWrongIssuerStillClaimsButLeavesTheIdentityWrong(t *testi
 	}
 
 	identity := &countingIdentityStore{inner: auth.NewPostgresIdentityStore(pool)}
-	sessionUser, err := provisionPlatformOrOIDCUser(ctx, service, identity, auth.Principal{
+	sessionUser, err := provisionUser(ctx, service, identity, auth.Principal{
 		Issuer: claimIssuer, Subject: claimExternalID,
 		Platform: auth.PlatformSub2API, PlatformUserID: claimExternalID, AuthTime: time.Now().UTC(),
 	}, "wrong-issuer-login", map[auth.Platform]string{auth.PlatformSub2API: claimSourceID})
@@ -294,7 +294,7 @@ func TestShadowBoundAccountLoginIsRejectedWhenTheShadowUserIsDisabled(t *testing
 		t.Fatal(err)
 	}
 	identity := &countingIdentityStore{inner: auth.NewPostgresIdentityStore(pool)}
-	_, err := provisionPlatformOrOIDCUser(ctx, service, identity,
+	_, err := provisionUser(ctx, service, identity,
 		auth.Principal{
 			Issuer: claimIssuer, Subject: claimExternalID,
 			Platform: auth.PlatformSub2API, PlatformUserID: claimExternalID, AuthTime: time.Now().UTC(),

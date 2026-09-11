@@ -1,15 +1,21 @@
-package main
+package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"invoice-system/backend/internal/adminsettings"
+	"invoice-system/backend/internal/auth"
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/postgresstore"
 )
@@ -31,10 +37,54 @@ func TestLoadBreakGlassCIDRsPrefersDeploymentFile(t *testing.T) {
 	}
 }
 
+func TestAdminPolicyRequiresExplicitRoleAndPreservesMFA(t *testing.T) {
+	t.Setenv("ADMIN_ROLE", "invoice-admin")
+	policy, err := loadAdminPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Role != "invoice-admin" || policy.RequiredACR != "mfa" || !reflect.DeepEqual(policy.RequiredAMR, []string{"pwd", "otp"}) || policy.StepUpMaxAge != 10*time.Minute {
+		t.Fatalf("staff policy weakened: %+v", policy)
+	}
+	for _, role := range []string{"", " invoice-admin", "invoice-admin "} {
+		t.Setenv("ADMIN_ROLE", role)
+		if _, err := loadAdminPolicy(); err == nil {
+			t.Fatalf("invalid explicit staff role accepted: %q", role)
+		}
+	}
+}
+
+func TestProductionCSRFUsesExactPublicAndStaffOrigins(t *testing.T) {
+	t.Setenv("PUBLIC_ORIGIN", "https://invoice.example.invalid")
+	t.Setenv("INVOICE_STAFF_ORIGIN", "https://staff.example.invalid")
+	public, policy, err := loadProductionCSRF()
+	if err != nil || public != "https://invoice.example.invalid" {
+		t.Fatalf("origin setup failed: %s %v", public, err)
+	}
+	token := strings.Repeat("a", 43)
+	hash := sha256.Sum256([]byte(token))
+	session := auth.Session{CSRFHash: hex.EncodeToString(hash[:])}
+	for _, origin := range []string{public, "https://staff.example.invalid", "https://other.example.invalid"} {
+		r := httptest.NewRequest(http.MethodPost, public+"/invoice-api/v1/admin/requests", nil)
+		r.Header.Set("Origin", origin)
+		r.Header.Set("X-CSRF-Token", token)
+		err := policy.ValidateMutation(r, session)
+		if (err == nil) != (origin != "https://other.example.invalid") {
+			t.Fatalf("origin %s: %v", origin, err)
+		}
+	}
+	for _, origin := range []string{"", "http://staff.example.invalid", "https://*.example.invalid", "https://staff.example.invalid/path"} {
+		t.Setenv("INVOICE_STAFF_ORIGIN", origin)
+		if _, _, err := loadProductionCSRF(); err == nil {
+			t.Fatalf("unsafe staff origin accepted: %s", origin)
+		}
+	}
+}
+
 func TestLoadBreakGlassCIDRsEnvFallbackIsMockOnly(t *testing.T) {
 	t.Setenv("ADMIN_BREAK_GLASS_CIDRS_FILE", "")
 	t.Setenv("ADMIN_BOOTSTRAP_IP_ALLOWLIST", "127.0.0.1/32")
-	if _, err := loadBreakGlassCIDRs("oidc"); err == nil {
+	if _, err := loadBreakGlassCIDRs("session"); err == nil {
 		t.Fatal("production accepted environment fallback")
 	}
 	got, err := loadBreakGlassCIDRs("mock")
@@ -50,7 +100,7 @@ func TestExactHTTPSOriginAndSecretFile(t *testing.T) {
 	if got, err := exactHTTPSOrigin("https://invoice.solov.cc"); err != nil || got != "https://invoice.solov.cc" {
 		t.Fatalf("origin=%q err=%v", got, err)
 	}
-	for _, value := range []string{"http://invoice.solov.cc", "https://invoice.solov.cc/path", "https://user@invoice.solov.cc", "https://invoice.solov.cc?token=x"} {
+	for _, value := range []string{"http://invoice.solov.cc", "https://invoice.solov.cc/path", "https://user@invoice.solov.cc", "https://invoice.solov.cc?token=x", "https://*.example.invalid"} {
 		if _, err := exactHTTPSOrigin(value); err == nil {
 			t.Errorf("unsafe origin accepted: %s", value)
 		}
@@ -70,15 +120,15 @@ func TestExactHTTPSOriginAndSecretFile(t *testing.T) {
 	}
 }
 
-func TestBoundedOIDCResponseSizeEnvironment(t *testing.T) {
-	t.Setenv("OIDC_MAX_HTTP_RESPONSE_BYTES", "1048576")
-	if value, err := boundedInt64Env("OIDC_MAX_HTTP_RESPONSE_BYTES", 1<<20, 64<<10, 4<<20); err != nil || value != 1<<20 {
-		t.Fatalf("response limit=%d err=%v", value, err)
+func TestBoundedLoginAttemptsEnvironment(t *testing.T) {
+	t.Setenv("PLATFORM_LOGIN_MAX_ATTEMPTS", "8")
+	if value, err := boundedInt64Env("PLATFORM_LOGIN_MAX_ATTEMPTS", 8, 3, 50); err != nil || value != 8 {
+		t.Fatalf("attempt limit=%d err=%v", value, err)
 	}
-	for _, value := range []string{"65535", "4194305", "not-an-integer"} {
-		t.Setenv("OIDC_MAX_HTTP_RESPONSE_BYTES", value)
-		if _, err := boundedInt64Env("OIDC_MAX_HTTP_RESPONSE_BYTES", 1<<20, 64<<10, 4<<20); err == nil {
-			t.Fatalf("unsafe response limit accepted: %q", value)
+	for _, value := range []string{"2", "51", "not-an-integer"} {
+		t.Setenv("PLATFORM_LOGIN_MAX_ATTEMPTS", value)
+		if _, err := boundedInt64Env("PLATFORM_LOGIN_MAX_ATTEMPTS", 8, 3, 50); err == nil {
+			t.Fatalf("unsafe attempt limit accepted: %q", value)
 		}
 	}
 }

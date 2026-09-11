@@ -1,4 +1,4 @@
-package main
+package service
 
 import (
 	"bytes"
@@ -49,6 +49,7 @@ type appRuntime struct {
 	AuthMode   string
 	SourceMode string
 	Workers    []workerSpec
+	readiness  func(context.Context) (httpapi.ReadinessOutcome, error)
 	close      func()
 }
 
@@ -64,6 +65,9 @@ func runWorker(ctx context.Context, spec workerSpec) {
 		interval = 5 * time.Second
 	}
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		processed, err := spec.Worker.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("background worker failed", "worker", spec.Name, "processed", processed, "error", err)
@@ -84,14 +88,14 @@ func runWorker(ctx context.Context, spec workerSpec) {
 	}
 }
 
-func buildRuntime(ctx context.Context) (appRuntime, error) {
+func buildRuntime(ctx context.Context, options Options) (appRuntime, error) {
 	appEnv := strings.ToLower(strings.TrimSpace(env("APP_ENV", "development")))
 	authMode := strings.ToLower(strings.TrimSpace(env("AUTH_MODE", "mock")))
 	if err := auth.EnforceProductionAuthMode(appEnv, authMode, os.Getenv); err != nil {
 		return appRuntime{}, err
 	}
 	if appEnv == "production" {
-		return buildProductionRuntime(ctx, authMode)
+		return buildProductionRuntime(ctx, authMode, options)
 	}
 	return buildMockRuntime(authMode)
 }
@@ -155,11 +159,18 @@ const (
 	economicRescanProcessingTailAllowance = 30 * time.Minute
 )
 
-func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, error) {
-	if authMode != "oidc" || strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE_MODE"))) != "agent" {
-		return appRuntime{}, errors.New("production requires AUTH_MODE=oidc and SOURCE_MODE=agent")
+func buildProductionRuntime(ctx context.Context, authMode string, options Options) (appRuntime, error) {
+	if authMode != "session" || strings.ToLower(strings.TrimSpace(os.Getenv("SOURCE_MODE"))) != "agent" {
+		return appRuntime{}, errors.New("production requires AUTH_MODE=session and SOURCE_MODE=agent")
 	}
-	publicOrigin, err := exactHTTPSOrigin(os.Getenv("PUBLIC_ORIGIN"))
+	if options.StaffResolver == nil {
+		return appRuntime{}, errors.New("production requires a trusted in-process staff resolver")
+	}
+	adminPolicy, err := loadAdminPolicy()
+	if err != nil {
+		return appRuntime{}, err
+	}
+	publicOrigin, csrf, err := loadProductionCSRF()
 	if err != nil {
 		return appRuntime{}, err
 	}
@@ -249,14 +260,6 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	logoutTokenMaxAge, err := boundedDurationEnv("OIDC_LOGOUT_TOKEN_MAX_AGE", "10m", time.Minute, 30*time.Minute)
-	if err != nil {
-		return appRuntime{}, err
-	}
-	oidcMaximumResponseBytes, err := boundedInt64Env("OIDC_MAX_HTTP_RESPONSE_BYTES", 1<<20, 64<<10, 4<<20)
-	if err != nil {
-		return appRuntime{}, err
-	}
 	appService, err := application.NewService(store, keyring, settingsService, application.Options{
 		MinimumRequestMinor: settings.MinimumRequestMinor, DownloadBaseURL: publicOrigin,
 		EmailTemplateVersion:               "invoice-ready-v1",
@@ -268,43 +271,6 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	oidcConfig := auth.OIDCConfig{
-		IssuerURL: os.Getenv("OIDC_ISSUER_URL"), ClientID: os.Getenv("OIDC_CLIENT_ID"),
-		ClientSecretFile: os.Getenv("OIDC_CLIENT_SECRET_FILE"), RedirectURL: publicOrigin + "/api/v1/auth/callback",
-		PostLogoutRedirectURL: publicOrigin + "/",
-		ProviderLabel:         env("OIDC_PROVIDER_LABEL", "SoloV 统一登录"), AdminRole: os.Getenv("OIDC_ADMIN_ROLE"),
-		RoleClaim: env("OIDC_ROLE_CLAIM", "roles"), RequiredAdminACR: os.Getenv("OIDC_REQUIRED_ADMIN_ACR"),
-		RequiredAdminAMR:          csvEnv("OIDC_REQUIRED_ADMIN_AMR", "otp"),
-		AllowedSigningAlgs:        csvEnv("OIDC_ALLOWED_SIGNING_ALGS", "RS256"),
-		AllowedEndpointHosts:      csvEnv("OIDC_ALLOWED_ENDPOINT_HOSTS", ""),
-		AllowedPrivateEndpointIPs: csvEnv("OIDC_ALLOWED_PRIVATE_ENDPOINT_IPS", ""),
-		Scopes:                    csvEnv("OIDC_SCOPES", "openid,profile,email"),
-		TokenEndpointAuthMethod:   env("OIDC_TOKEN_AUTH_METHOD", "client_secret_basic"),
-		LogoutTokenMaxAge:         logoutTokenMaxAge, RequireBackchannelLogout: true,
-		MaximumHTTPResponseBytes: oidcMaximumResponseBytes,
-	}
-	// CR-0006 (XM-INV-CONSOLE-ASSERT): OIDC_ADMIN_LOGIN_ENABLED defaults true
-	// (unchanged production behavior in this phase; Keycloak stays the
-	// default admin login path). When explicitly set to false, OIDC
-	// discovery below is skipped entirely (a real network dependency on the
-	// IdP at every process start) and ProductionAuth.Register does not wire
-	// the OIDC-touching routes at all -- see production_auth.go.
-	oidcAdminLoginEnabled, err := boolEnv("OIDC_ADMIN_LOGIN_ENABLED", true)
-	if err != nil {
-		return appRuntime{}, err
-	}
-	consoleAssertionEnabled, err := boolEnv("CONSOLE_ASSERTION_ENABLED", false)
-	if err != nil {
-		return appRuntime{}, err
-	}
-	flowStore := auth.NewPostgresFlowStore(store.Pool())
-	var oidcClient *auth.OIDCClient
-	if oidcAdminLoginEnabled {
-		oidcClient, err = auth.NewOIDCClient(ctx, oidcConfig, flowStore, auth.SecureFieldsFlowProtector{Keyring: keyring})
-		if err != nil {
-			return appRuntime{}, err
-		}
-	}
 	sessionStore := auth.NewPostgresSessionStore(store.Pool(), keyring)
 	auditSink := auth.NewPostgresSecurityAuditSink(store.Pool())
 	sessions, err := auth.NewSessionManager(sessionStore, auth.SessionConfig{}, auditSink)
@@ -315,71 +281,27 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	if err != nil {
 		return appRuntime{}, err
 	}
-	csrf, err := auth.NewCSRFPolicy([]string{publicOrigin})
-	if err != nil {
-		return appRuntime{}, err
-	}
-	adminPolicy := auth.AdminPolicy{Role: oidcConfig.AdminRole, RequiredACR: oidcConfig.RequiredAdminACR, RequiredAMR: oidcConfig.RequiredAdminAMR, StepUpMaxAge: 10 * time.Minute}
 	identityStore := auth.NewPostgresIdentityStore(store.Pool())
-	backchannelLogout, err := auth.NewBackchannelLogoutService(auth.NewPostgresBackchannelLogoutRepository(store.Pool()))
-	if err != nil {
-		return appRuntime{}, err
-	}
 	platformSourceInstanceIDs, err := loadPlatformSourceInstanceIDs(ctx, store)
-	if err != nil {
-		return appRuntime{}, err
-	}
-	// CR-0006: CONSOLE_ASSERTION_ENABLED defaults false (unchanged
-	// production behavior in this phase). The nonce store, rate limiter and
-	// audit sink have no external config of their own and are always built;
-	// only the issuer/audience/keys-file below need "fail closed on
-	// malformed config" gated to when the feature is actually meant to be
-	// used -- an operator who never turns this on should not need a valid
-	// CONSOLE_ASSERTION_ISSUER or keys file at all.
-	consoleAssertionNonces := auth.NewPostgresConsoleAssertionNonceStore(store.Pool())
-	// 20/minute matches the design spec's own cited rate exactly (section
-	// 5.2) and the edge nginx zone (invoice_auth, deploy/nginx/invoice-
-	// http-context.conf) that already covers this route by prefix -- kept
-	// as a fixed value, not a new env var, so there is exactly one place
-	// this number is decided rather than two that could drift apart.
-	consoleAssertionRateLimiter := auth.NewLoginRateLimiter(20, time.Minute)
-	consoleAssertionKeyring, consoleAssertionCfg, err := loadConsoleAssertionRuntimeConfig(consoleAssertionEnabled, oidcConfig.AdminRole)
 	if err != nil {
 		return appRuntime{}, err
 	}
 	productionAuth := &httpapi.ProductionAuth{
 		Sessions: sessions, BindingHasher: bindingHasher,
-		CSRF: csrf, Admin: adminPolicy, BackchannelLogout: backchannelLogout,
-		DisableOIDCAdminLogin: !oidcAdminLoginEnabled,
+		CSRF: csrf, Admin: adminPolicy, StaffResolver: options.StaffResolver,
 		ProvisionUser: func(callbackCtx context.Context, principal auth.Principal, requestID string) (httpapi.SessionUser, error) {
-			return provisionPlatformOrOIDCUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
+			return provisionUser(callbackCtx, appService, identityStore, principal, requestID, platformSourceInstanceIDs)
 		},
 		LoadUser: func(loadCtx context.Context, userID string) (httpapi.SessionUser, error) {
 			// No principal is available on a plain session reload (only the
 			// stored userID), so Claimed can't be recovered here -- only a fresh
-			// login (see provisionPlatformOrOIDCUser) sets it. The platform
+			// login (see provisionUser) sets it. The platform
 			// display name lives on the session row now (encrypted,
 			// migration 0017), not here -- sessionStatus reads it straight off
 			// current.Session.DisplayName instead of going through LoadUser.
 			return loadSessionUser(loadCtx, appService, userID, false)
 		},
-		ConsoleAssertionEnabled:     consoleAssertionEnabled,
-		ConsoleAssertionKeyring:     consoleAssertionKeyring,
-		ConsoleAssertionConfig:      consoleAssertionCfg,
-		ConsoleAssertionNonces:      consoleAssertionNonces,
-		ConsoleAssertionRateLimiter: consoleAssertionRateLimiter,
-		SecurityAudit:               auditSink,
-	}
-	// oidcClient is only non-nil when oidcAdminLoginEnabled (see its
-	// construction above); assigning it unconditionally here would wrap a
-	// nil *auth.OIDCClient inside the OIDC/Logout interface fields, which is
-	// NOT a nil interface (the classic Go footgun) -- Register's route-
-	// registration gate is the real defense, but leaving these fields as a
-	// literal nil interface value when disabled is a second, independent
-	// guard against ever calling through a nil pointer.
-	if oidcAdminLoginEnabled {
-		productionAuth.OIDC = oidcClient
-		productionAuth.Logout = oidcClient
+		SecurityAudit: auditSink,
 	}
 	platformLogin, err := buildPlatformLogin(productionAuth)
 	if err != nil {
@@ -451,7 +373,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 		now:               func() time.Time { return time.Now().UTC() },
 	}
 	api, err := httpapi.NewWithConfig(appService, httpapi.Config{
-		AuthMode: "oidc", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
+		AuthMode: "session", SourceMode: "agent", AdminIPAllowlist: settings.AdminCIDRs,
 		BreakGlassCIDRs: breakGlass, TrustedProxies: trustedProxies,
 		DocumentStore: documentStore, AdminSettings: settingsService, ProductionAuth: productionAuth, PlatformLogin: platformLogin,
 		SMTPTestSender: mailer.SettingsSender{Source: settingsService}, SMTPTestRecipient: smtpTestRecipient, PublicOrigin: publicOrigin,
@@ -470,19 +392,8 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 			})
 		})},
 		{Name: "auth-cleanup", Interval: time.Hour, Worker: workerFunc(func(cleanCtx context.Context) (int, error) {
-			flows, flowErr := flowStore.DeleteExpired(cleanCtx, time.Now().UTC())
-			if flowErr != nil {
-				return int(flows), flowErr
-			}
 			sessionCount, sessionErr := sessionStore.DeleteExpired(cleanCtx, time.Now().UTC())
-			if sessionErr != nil {
-				return int(flows + sessionCount), sessionErr
-			}
-			// console_assertion_nonces (migration 0018): harmless to sweep
-			// even when CONSOLE_ASSERTION_ENABLED=false -- the table simply
-			// stays empty in that case.
-			nonceCount, nonceErr := consoleAssertionNonces.DeleteExpired(cleanCtx, time.Now().UTC())
-			return int(flows + sessionCount + nonceCount), nonceErr
+			return int(sessionCount), sessionErr
 		})},
 	}
 	// XM-INV-SUBMIT-NOTICE：提交开票申请后推一条企业微信通知。
@@ -512,61 +423,7 @@ func buildProductionRuntime(ctx context.Context, authMode string) (appRuntime, e
 	})
 
 	closeOnError = false
-	return appRuntime{API: api, AuthMode: "oidc", SourceMode: "agent", Workers: workers, close: store.Close}, nil
-}
-
-// loadConsoleAssertionRuntimeConfig is the pure config-loading decision
-// extracted from buildProductionRuntime so the "off means untouched" contract
-// is table-testable without a database (same extraction pattern as
-// eligibilityProjectionReady below, XM-INV-READY-PENDING).
-//
-// When enabled is false it must read neither CONSOLE_ASSERTION_ISSUER/
-// CONSOLE_ASSERTION_AUDIENCE nor the CONSOLE_ASSERTION_KEYS_FILE path, and
-// must not touch the filesystem at all -- an operator who has never turned
-// this feature on needs no valid keys file to exist. This matters concretely
-// for docker-compose.prod.yml's CONSOLE_ASSERTION_KEYRING_FILE bind mount
-// (XM-INV-CONSOLE-ASSERT-DEPLOY): the mounted path may be an empty
-// placeholder file, or briefly absent before deploy/roll-forward.sh's own
-// preflight creates one, for every release where this flag stays false.
-//
-// When enabled is true, a missing/empty/malformed keys file must still fail
-// the process closed (auth.LoadConsoleAssertionKeyringJSON already refuses an
-// empty manifest -- "at least one key" -- by design, see its own doc
-// comment): silently starting with zero trusted keys would make the
-// exchange endpoint reject every assertion forever instead of the operator
-// noticing at startup that the real reviewed manifest was never installed.
-// oidcAdminRole is this deployment's OIDC_ADMIN_ROLE and serves as the
-// default for CONSOLE_ASSERTION_ADMIN_ROLE, so a deployment that has not set
-// the newer variable keeps the exact behavior it had before that variable
-// existed. Production sets them to different values on purpose: the console
-// signs its own staff role vocabulary while the transitional Keycloak login
-// carries the realm role -- see ConsoleAssertionConfig.AdminRole's doc
-// comment (XM-INV-CONSOLE-ASSERT-ADMIN-ROLE).
-func loadConsoleAssertionRuntimeConfig(enabled bool, oidcAdminRole string) (*auth.ConsoleAssertionKeyring, auth.ConsoleAssertionConfig, error) {
-	if !enabled {
-		return nil, auth.ConsoleAssertionConfig{}, nil
-	}
-	cfg := auth.ConsoleAssertionConfig{
-		Issuer:    os.Getenv("CONSOLE_ASSERTION_ISSUER"),
-		Audience:  env("CONSOLE_ASSERTION_AUDIENCE", "xingmang-console-assertion-v1"),
-		AdminRole: env("CONSOLE_ASSERTION_ADMIN_ROLE", oidcAdminRole),
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("console assertion config: %w", err)
-	}
-	keysFilePath := strings.TrimSpace(os.Getenv("CONSOLE_ASSERTION_KEYS_FILE"))
-	if keysFilePath == "" {
-		return nil, auth.ConsoleAssertionConfig{}, errors.New("CONSOLE_ASSERTION_KEYS_FILE is required when CONSOLE_ASSERTION_ENABLED=true")
-	}
-	keysFileBytes, readErr := readBoundedConfigFile(keysFilePath, 256<<10)
-	if readErr != nil {
-		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("read CONSOLE_ASSERTION_KEYS_FILE: %w", readErr)
-	}
-	keyring, err := auth.LoadConsoleAssertionKeyringJSON(keysFileBytes)
-	if err != nil {
-		return nil, auth.ConsoleAssertionConfig{}, fmt.Errorf("load console assertion keyring: %w", err)
-	}
-	return keyring, cfg, nil
+	return appRuntime{API: api, AuthMode: "session", SourceMode: "agent", Workers: workers, readiness: readiness.evaluate, close: store.Close}, nil
 }
 
 func validateIssuerReadiness(settings adminsettings.Settings) error {
@@ -1010,7 +867,7 @@ type currentUserLoader interface {
 }
 
 // provisionUserDeps groups the application-service dependencies
-// provisionPlatformOrOIDCUser needs, narrowed to an interface so its
+// provisionUser needs, narrowed to an interface so its
 // claim-vs-create branching (XM-INV-AUTOLOGIN: see
 // docs/handoffs/XM-INV-AUTOLOGIN.md) is unit-tested against fakes in
 // runtime_test.go instead of requiring a live PostgreSQL connection.
@@ -1024,8 +881,8 @@ type provisionUserDeps interface {
 	WakeSourceAccountFacts(ctx context.Context, sourceInstanceID, externalUserID string) error
 }
 
-// provisionPlatformOrOIDCUser resolves the local invoice_user for a verified
-// login -- OIDC administrator or platform-password -- and returns the
+// provisionUser resolves the local invoice_user for a verified
+// login -- trusted platform staff or platform-password -- and returns the
 // session-ready projection of it.
 //
 // For a platform-password principal, it first checks whether a
@@ -1042,9 +899,9 @@ type provisionUserDeps interface {
 // ("当前账号没有执行此操作的权限") on every platform-password login for an
 // account a source-projection pipeline had already touched. See
 // docs/handoffs/XM-INV-AUTOLOGIN.md for the full writeup.
-func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, identity auth.IdentityStore, principal auth.Principal, requestID string, sourceInstanceIDs map[auth.Platform]string) (httpapi.SessionUser, error) {
-	actorType := "oidc"
-	reason := "OIDC login synchronized"
+func provisionUser(ctx context.Context, deps provisionUserDeps, identity auth.IdentityStore, principal auth.Principal, requestID string, sourceInstanceIDs map[auth.Platform]string) (httpapi.SessionUser, error) {
+	actorType := "staff"
+	reason := "trusted platform staff identity synchronized"
 	var sourceInstanceID string
 	if principal.Platform != "" {
 		actorType = "platform"
@@ -1090,7 +947,7 @@ func provisionPlatformOrOIDCUser(ctx context.Context, deps provisionUserDeps, id
 			return loadSessionUser(auditCtx, deps, existing.PrincipalID, true)
 		}
 		// Not found: fall through to the create-or-find path below exactly
-		// like a first-ever login (OIDC or platform) always has.
+		// like a first-ever trusted staff or platform login always has.
 	}
 
 	resolved, resolveErr := identity.ResolveOrCreate(ctx, principal, requestID)
@@ -1158,8 +1015,7 @@ func loadPlatformSourceInstanceIDs(ctx context.Context, store *postgresstore.Sto
 
 // buildPlatformLogin wires the Sub2API/New API password-login verifiers used
 // by the user-facing login page (CR-0004). It shares session issuance with
-// OIDC through productionAuth; it does not replace the administrator OIDC
-// login, which remains unchanged.
+// productionAuth while staff access comes only from the host resolver.
 func buildPlatformLogin(productionAuth *httpapi.ProductionAuth) (*httpapi.PlatformLogin, error) {
 	sub2apiBaseURL := strings.TrimRight(env("SUB2API_LOGIN_BASE_URL", "https://api.solov.cc"), "/")
 	newapiBaseURL := strings.TrimRight(env("NEWAPI_LOGIN_BASE_URL", "https://xm.solov.cc"), "/")
@@ -1204,7 +1060,7 @@ func buildPlatformLogin(productionAuth *httpapi.ProductionAuth) (*httpapi.Platfo
 
 func exactHTTPSOrigin(value string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || strings.Contains(parsed.Host, "*") || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", errors.New("PUBLIC_ORIGIN must be one exact HTTPS origin")
 	}
 	return parsed.String(), nil
