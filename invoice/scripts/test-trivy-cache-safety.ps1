@@ -195,7 +195,9 @@ catch { if($_.Exception.Data['TrivyCacheLockContention'] -eq $true){exit 75};thr
     try {Get-TrivyReleaseGateLockPath -ProjectRoot $aRoot -Volume $volume|Out-Null}catch{$rejected=$true}
     if(-not $rejected){throw 'shared-cache-lock: unavailable daemon identity was accepted'}
     $script:dockerExit=0;$script:daemon='fixture-daemon'
-    foreach($file in @('refresh-trivy-cache.ps1','release-image-gate.ps1')){
+    # The retired release entry no longer consumes the cache. Its actual exit
+    # before tools or output writes is covered by test-release-path-boundaries.
+    foreach($file in @('refresh-trivy-cache.ps1')){
         $tokens=$null;$errors=$null
         $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $SourceDirectory $file),[ref]$tokens,[ref]$errors)
         $assign=$ast.Find({param($node) $node -is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left.Extent.Text -eq '$lockPath'},$true)

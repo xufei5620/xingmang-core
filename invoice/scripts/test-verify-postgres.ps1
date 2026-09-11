@@ -31,6 +31,8 @@ function Assert-PostgresContainerNetworkContract {
         '$backendRunnerImage = "invoice-system-postgres-backend-runner:$suffix"',
         '$agentRunnerImage = "invoice-system-postgres-agent-runner:$suffix"',
         '$contractsPath = Join-Path $projectRoot ''contracts''',
+        '$monorepoRoot = Split-Path -Parent $projectRoot',
+        '$target = ''/src/invoice/'' +',
         "--platform 'linux/amd64'",
         '--provenance=false',
         '--target build',
@@ -42,7 +44,7 @@ function Assert-PostgresContainerNetworkContract {
         './internal/postgresstore',
         './internal/adminsettings',
         './internal/auth',
-        './internal/oidcretention',
+        './service',
         './internal/application',
         './internal/migrate',
         './internal/backupverify',
@@ -61,6 +63,9 @@ function Assert-PostgresContainerNetworkContract {
     if ([regex]::Matches($Source, '(?m)^\s*docker build\s').Count -ne 2) {
         throw 'verify-postgres must build exactly two shared temporary runner images'
     }
+    if ([regex]::Matches($Source, '(?m)^\s*\$monorepoRoot\s*$').Count -ne 2) {
+        throw 'both PostgreSQL runners must use the monorepo build context'
+    }
     if ([regex]::Matches($Source, '(?m)^\s*--pull\s').Count -ne 2 -or
         [regex]::Matches($Source, '(?m)^\s*--target build\s').Count -ne 2) {
         throw 'both shared runner builds must refresh pinned metadata and select the build target'
@@ -71,7 +76,7 @@ $verifyPostgresSource = Get-Content -Raw -LiteralPath $verifyPostgresPath
 Assert-PostgresContainerNetworkContract -Source $verifyPostgresSource
 
 $verifySource = Get-Content -Raw -LiteralPath $verifyPath
-if ([regex]::Matches($verifySource, '(?m)^\s*go test -race \./\.\.\.\s*$').Count -lt 2 -or
+if ([regex]::Matches($verifySource, '(?m)^\s*go test -race -p 1 \./\.\.\.\s*$').Count -lt 2 -or
     [regex]::Matches($verifySource, '(?m)^\s*go vet \./\.\.\.\s*$').Count -lt 2) {
     throw 'host verify.ps1 no longer supplies full backend and agent race/vet coverage before database compatibility'
 }

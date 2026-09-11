@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$monorepoRoot = Split-Path -Parent $projectRoot
 $consumptionStoreSource = Get-Content -Raw (Join-Path $projectRoot 'backend\internal\postgresstore\consumption.go')
 $normalizedConsumptionStore = [regex]::Replace($consumptionStoreSource, '\s+', ' ')
 $forbiddenImmutableRowLocks = @(
@@ -37,14 +38,14 @@ function Invoke-PostgresContainerCommand {
     }
     # 后端测试有一批按「源文件往上三级 = 仓库根」去读仓库其它目录：eligibilitywire 读
     # contracts/ 与 backend/{migrations,internal}，又按全仓发现扫 agents/；就绪原因对拍闸读
-    # web/src/App.tsx；验证脚本同步闸读 deploy/postgres/…。运行器镜像只带 /src，仓库根解析成
-    # 容器根，所以把这些目录按同名只读挂到 / 下（与 /src 是同一份源码）。RC106 第一次门禁死在
+    # web/src/App.tsx；验证脚本同步闸读 deploy/postgres/…。统一构建根以后，后端位于
+    # /src/invoice/backend，相关目录同名只读挂到 /src/invoice 下。RC106 第一次门禁死在
     # contracts/，第二次死在 backend/，RC107 第一次死在 web/ 与 deploy/——手列一个补一个的
     # 形状，这里一次把仓库根下会被读的目录全部挂上，调用方传清单。
     foreach ($relative in $RepoRootMounts) {
         $sourcePath = Join-Path $projectRoot $relative
         if (-not (Test-Path -LiteralPath $sourcePath)) { throw "repo mount source missing: $relative" }
-        $target = '/' + ($relative -replace '\\', '/')
+        $target = '/src/invoice/' + ($relative -replace '\\', '/')
         $arguments += @('--mount', "type=bind,source=$sourcePath,target=$target,readonly")
     }
     foreach ($environmentEntry in $Environment) {
@@ -80,7 +81,7 @@ try {
         --target build `
         --tag $backendRunnerImage `
         --file (Join-Path $projectRoot 'backend\Dockerfile') `
-        (Join-Path $projectRoot 'backend')
+        $monorepoRoot
     if ($LASTEXITCODE -ne 0) { throw 'failed to build shared PostgreSQL backend test runner image' }
 
     docker build `
@@ -90,7 +91,7 @@ try {
         --target build `
         --tag $agentRunnerImage `
         --file (Join-Path $projectRoot 'agents\Dockerfile.production') `
-        (Join-Path $projectRoot 'agents')
+        $monorepoRoot
     if ($LASTEXITCODE -ne 0) { throw 'failed to build shared PostgreSQL source-agent test runner image' }
 
     try {
@@ -153,7 +154,7 @@ try {
             [pscustomobject]@{ Package = './internal/postgresstore'; Failure = 'PostgreSQL integration tests failed' },
             [pscustomobject]@{ Package = './internal/adminsettings'; Failure = 'admin settings PostgreSQL integration tests failed' },
             [pscustomobject]@{ Package = './internal/auth'; Failure = 'authentication PostgreSQL integration tests failed' },
-            [pscustomobject]@{ Package = './internal/oidcretention'; Failure = 'OIDC logout retention PostgreSQL integration tests failed' },
+            [pscustomobject]@{ Package = './service'; Failure = 'unified runtime/readiness PostgreSQL integration tests failed' },
             [pscustomobject]@{ Package = './internal/application'; Failure = 'application PostgreSQL integration tests failed' },
             [pscustomobject]@{ Package = './internal/migrate'; Failure = 'migration exact-set/atomicity PostgreSQL integration tests failed' },
             [pscustomobject]@{ Package = './internal/backupverify'; Failure = 'backup document restore verification PostgreSQL integration tests failed' }
@@ -169,7 +170,7 @@ try {
                 -Environment @("INVOICE_TEST_DATABASE_URL=$databaseUrl") `
                 -Command "go test $($databaseTest.Package) -count=1" `
                 -ContractsPath $contractsPath `
-                -RepoRootMounts @('backend', 'agents', 'web\src', 'deploy', 'docs') `
+                -RepoRootMounts @('backend', 'agents', 'web\src', 'deploy', 'docs', 'contracts') `
                 -FailureMessage $databaseTest.Failure
         }
 

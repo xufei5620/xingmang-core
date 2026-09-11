@@ -29,7 +29,7 @@ $checks = @(
     @{ File='tests/test_full_audit_wiring.py'; Arguments=@() }
     @{ File='test-git-root-boundaries.ps1'; Arguments=@() }
     @{ File='test-release-path-boundaries.ps1'; Arguments=@() }
-    @{ File='test-preflight-production.ps1'; Arguments=@() }
+    @{ File='test-unified-operations.py'; Arguments=@() }
     @{ File='test-trivy-cache-safety.ps1'; Arguments=@('-Case', 'image-parameters') }
     @{ File='test-trivy-cache-safety.ps1'; Arguments=@('-Case', 'lock-errors') }
     @{ File='test-trivy-cache-safety.ps1'; Arguments=@('-Case', 'resume-identity') }
@@ -49,7 +49,6 @@ $checks = @(
     @{ File='test-runbook-repair-contracts.py'; Arguments=@('--case', 'exit-codes', '--fixture-root', (Join-Path $FixtureRoot 'repair-exits')) }
     @{ File='test-runbook-maintenance-contracts.py'; Arguments=@('--case', 'blocked-event') }
     @{ File='test-runbook-maintenance-contracts.py'; Arguments=@('--case', 'shadow-order') }
-    @{ File='test-runbook-maintenance-contracts.py'; Arguments=@('--case', 'keycloak-identity') }
 )
 $previousEnvironment = @{}
 foreach ($name in @('PATH', 'TEST_BASH', 'RUNBOOK_TEST_BASH', 'PYTHONOPTIMIZE')) {

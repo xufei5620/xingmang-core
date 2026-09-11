@@ -14,9 +14,9 @@ test() {
   if [[ "${1:-}" == '!' && "${2:-}" == -L ]]; then [[ "$kind" != symlink ]]; return; fi
   command test "$@"
 }
-for relative in deploy/preflight-secret-permissions.sh deploy/backup/backup.sh \
-  deploy/backup/restore-drill.sh deploy/rehearsal/shadow-eval.sh \
-  deploy/validate-keycloak-admin-allowlist.sh; do
+# Unified backup/cutover/rollback input guards run in test-unified-operations.py.
+for relative in deploy/preflight-secret-permissions.sh \
+  deploy/backup/restore-drill.sh deploy/rehearsal/shadow-eval.sh; do
   ordinal=0
   while IFS= read -r guard; do
     [[ "$guard" == *'test -f '* && "$guard" == *'test ! -L '* && "$guard" == *'test -s '* ]] || continue

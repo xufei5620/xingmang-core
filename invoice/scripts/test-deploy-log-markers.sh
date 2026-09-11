@@ -15,8 +15,9 @@ docker() {
 }
 failures=0
 cases=0
-for relative in deploy/roll-forward.sh deploy/backup/restore-drill.sh \
-  deploy/rehearsal/shadow-eval.sh deploy/keycloak/attach-invoice-basic-scope.sh; do
+# Unified lifecycle predicates are exercised by test-unified-operations.py.
+# These retained offline restore/shadow helpers still require producer-exit guards.
+for relative in deploy/backup/restore-drill.sh deploy/rehearsal/shadow-eval.sh; do
   ordinal=0
   while IFS= read -r line; do
     [[ "$line" == *'docker logs'*'| grep '* ]] || continue

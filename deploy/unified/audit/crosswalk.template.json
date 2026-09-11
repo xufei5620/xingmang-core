@@ -1,0 +1,5 @@
+{
+  "schema": "xingmang.identity-audit.crosswalk/v1",
+  "legacy_issuers": ["https://idp.example.invalid/realms/staff"],
+  "entries": []
+}

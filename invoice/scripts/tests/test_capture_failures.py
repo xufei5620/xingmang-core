@@ -1,5 +1,5 @@
 """Exercise secret capture and documented DB capture without starting services."""
-import argparse, os, pathlib, re, shutil, subprocess, tempfile
+import argparse, json, os, pathlib, re, shutil, subprocess, tempfile
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--root', type=pathlib.Path, default=pathlib.Path(__file__).resolve().parents[3])
@@ -20,24 +20,27 @@ def check(case, script, expected, output, env=None):
     if not ok: failures.append(f'{case}: expected exit {expected} and bounded sentinel, got exit {result.returncode}')
     else: print('PASS '+case)
 
-entry = (args.root/'invoice/deploy/keycloak/entrypoint.sh').read_text(encoding='utf-8-sig')
-body = entry[entry.index('read_secret() {'):entry.index('exec /opt/keycloak/bin/kc.sh')]
-db, bootstrap = fixture/'db-input.txt', fixture/'bootstrap-input.txt'
-body = body.replace('/run/secrets/keycloak_app_db_password', db.as_posix()).replace('/run/secrets/keycloak_bootstrap_admin_password', bootstrap.as_posix())
-marker = '-'.join(['inert', 'format', 'fixture'])
-for case, db_text, bootstrap_text, expected in [
-    ('db-format-rejected',marker+'\r\nline',marker,1),
-    ('bootstrap-format-rejected',marker,marker+'\r\nline',1),
-    ('valid-exported',marker,marker,0),
-    ('read-failure-rejected',marker,marker,1),
-]:
-    db.write_text(db_text,encoding='utf-8',newline='')
-    bootstrap.write_text(bootstrap_text,encoding='utf-8',newline='')
-    prefix = 'cat(){ printf partial; return 73; }\n' if case == 'read-failure-rejected' else ''
-    sentinel = '\n[[ "$KC_DB_PASSWORD" == "$EXPECTED_MARKER" && "$KC_BOOTSTRAP_ADMIN_PASSWORD" == "$EXPECTED_MARKER" ]] || exit 91\nexport -p | grep -q "declare -x KC_DB_PASSWORD=" || exit 92\nexport -p | grep -q "declare -x KC_BOOTSTRAP_ADMIN_PASSWORD=" || exit 93\nprintf reached\n'
-    # Invalid cases must fail before a downstream start, regardless of values.
-    if expected: sentinel='\nprintf reached\n'
-    check(case,prefix+body+sentinel,expected,b'reached' if expected==0 else b'',{'KC_BOOTSTRAP_ADMIN_USERNAME':'fixture-user','EXPECTED_MARKER':marker})
+# Exercise the installed module's consumer, never the removed IdP wrapper.
+assert not (args.root/'invoice/deploy/keycloak/entrypoint.sh').exists(), 'retired Keycloak entrypoint must remain absent'
+if not args.case or args.case == 'service-secret-capture':
+    go = shutil.which('go')
+    assert go, 'Go is required for the active secret-file capture contract'
+    result = subprocess.run(
+        [go, 'test', '-json', '-count=1', '-p', '1', './service', '-run', '^TestReadSecretLineCaptureContract$'],
+        cwd=args.root/'invoice/backend', capture_output=True,
+    )
+    # These tests use inert data and intentionally never print captured values.
+    print(result.stdout.decode('utf-8', errors='replace'), end='')
+    if result.returncode != 0:
+        print(result.stderr.decode('utf-8', errors='replace'), end='')
+        raise AssertionError('active secret capture Go test failed: exit '+str(result.returncode))
+    events=[]
+    for line in result.stdout.splitlines():
+        try: events.append(json.loads(line))
+        except (ValueError, TypeError): pass
+    assert any(e.get('Test') == 'TestReadSecretLineCaptureContract' and e.get('Action') == 'pass' for e in events), 'active secret capture test did not run'
+    assert not any(e.get('Action') in ('fail', 'skip') for e in events), 'active secret capture test failed or skipped'
+    print('PASS service-secret-capture')
 
 for origin, relative in [('runbook','platform/docs/runbooks/GIT-WORKFLOW.md'),('header','platform/scripts/dev/worktree-testdb.sh')]:
     text=(args.root/relative).read_text(encoding='utf-8-sig')

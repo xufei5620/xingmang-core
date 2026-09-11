@@ -12,7 +12,7 @@ EXPECTED = [
     ('tests/test_full_audit_wiring.py', []),
     ('test-git-root-boundaries.ps1', []),
     ('test-release-path-boundaries.ps1', []),
-    ('test-preflight-production.ps1', []),
+    ('test-unified-operations.py', []),
     *[('test-trivy-cache-safety.ps1', ['-Case', case]) for case in
       ('image-parameters', 'lock-errors', 'resume-identity', 'unchanged-cache', 'shared-cache-lock')],
     *[('test-register-trivy-refresh-behavior.ps1', ['-Case', case]) for case in ('legacy-suite', 'meta')],
@@ -24,7 +24,7 @@ EXPECTED = [
     ('test-runbook-repair-contracts.py', ['--case', 'kinds', '--fixture-root', '{fixture}/repair-kinds']),
     ('test-runbook-repair-contracts.py', ['--case', 'exit-codes', '--fixture-root', '{fixture}/repair-exits']),
     *[('test-runbook-maintenance-contracts.py', ['--case', case]) for case in
-      ('blocked-event', 'shadow-order', 'keycloak-identity')],
+      ('blocked-event', 'shadow-order')],
 ]
 PS_STUB = r'''param([string]$Case, [string]$FixtureRoot)
 $arguments = @()

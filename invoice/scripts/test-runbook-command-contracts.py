@@ -1,6 +1,7 @@
-"""Bounded command/document checks. Never invokes Docker, SSH or a production tool."""
+"""Current unified command consumers; all external operations use inert fixtures."""
 from pathlib import Path
-import argparse, hashlib, os, re, shlex, subprocess
+import argparse, copy, hashlib, importlib, json, os, re, shlex, subprocess, sys
+from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 BASH = os.environ.get('RUNBOOK_TEST_BASH', 'D:/Git/bin/bash.exe' if os.name == 'nt' else 'bash')
@@ -8,68 +9,104 @@ BASH = os.environ.get('RUNBOOK_TEST_BASH', 'D:/Git/bin/bash.exe' if os.name == '
 def blocks(text):
     return re.findall(r'(?ms)^\s*```(?:bash|powershell)?\s*\n(.*?)^\s*```\s*$', text)
 
-def release_env(runbook, fixture):
-    release = fixture / 'release with spaces'
-    project = release / 'source' / 'invoice'
-    (project / 'deploy').mkdir(parents=True, exist_ok=True)
-    env_file = release / '.env.production'
-    env_file.write_text('ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00\n', encoding='utf-8')
-    (project/'relative.env').write_text('inert relative-path control\n',encoding='utf-8')
-    for name in ['prod','sources','idp','idp.bootstrap']:
-        (project/'deploy'/('docker-compose.'+name+'.yml')).write_text('# inert compose fixture\n')
-    source = runbook.split('## 4. Host directories and secrets',1)[1].split('## 8. Configure upstream OIDC',1)[0]
-    logical = '\n'.join(blocks(source)).replace('\\\n',' ')
-    prefixes = re.findall(r'docker compose\b(.*?)(?=\s+(?:up|run|exec|config|stop|ps)\b)',logical)
-    assert prefixes, 'release environment command inventory is empty'
-    fake = '''docker() {
-      [[ "$1" == compose ]] || return 91
-      shift
-      local used_env='' file
-      while (( $# )); do
-        case "$1" in
-          --env-file) used_env=$2; shift 2 ;;
-          -f) file=$2; [[ -f "$file" ]] || { echo COMPOSE_PATH_MISSING >&2; return 92; }; shift 2 ;;
-          *) shift ;;
-        esac
-      done
-      [[ "$used_env" == "$EXPECTED_RELEASE_ENV" && -s "$used_env" ]] || { echo WRONG_RELEASE_ENV >&2; return 93; }
-    }
-    '''
-    env=dict(os.environ,PRODUCTION_ENV_FILE=env_file.as_posix(),EXPECTED_RELEASE_ENV=env_file.as_posix())
-    env.pop('BASH_ENV',None);env.pop('ENV',None)
-    setup=next((b for b in blocks(source) if b.startswith('export PRODUCTION_ENV_FILE=')),None)
-    assert setup is not None, 'release environment selection prerequisite is absent'
-    value=env_file.as_posix()
-    if os.name=='nt': value='/'+value[0].lower()+value[2:]
-    for supplied,expected in [(value,0),(value+'.absent',1),('relative.env',1)]:
-        case=re.sub(r"(?m)^export PRODUCTION_ENV_FILE=.*$",'export PRODUCTION_ENV_FILE='+shlex.quote(supplied),setup)
-        p=subprocess.run([BASH,'--noprofile','--norc','-c',case],cwd=project,env=env,capture_output=True,text=True)
-        assert p.returncode==expected, f'release env setup did not enforce absolute existing file: {supplied}'
-    for i,prefix in enumerate(prefixes):
-        # Only the inspected command's Compose/global-options prefix is evaluated;
-        # no lifecycle arguments, substitutions, redirections or pipelines run.
-        assert not any(x in prefix for x in ['$', '`',';','|','<','>']) or '$PRODUCTION_ENV_FILE' in prefix, prefix
-        command='docker compose'+prefix+' config\n'
-        p=subprocess.run([BASH,'--noprofile','--norc','-c',fake+command],cwd=project,env=env,capture_output=True,text=True)
-        assert p.returncode==0, f'Compose invocation {i} does not select the release environment: {p.stderr}'
-    # Inspect assignments passed to two actual shell entrypoints. External bash
-    # is replaced, so neither provisioning nor permissions code can execute.
-    for entry in ['preflight-secret-permissions.sh','provision-projection-networks.sh']:
-        for match in re.finditer(r'(?m)^([^\n]*?)bash deploy/'+re.escape(entry)+r'\b',logical):
-            assignments=match.group(1)
-            p=subprocess.run([BASH,'--noprofile','--norc','-c',
-                'bash() { [[ "$PRODUCTION_ENV_FILE" == "$EXPECTED_RELEASE_ENV" ]] || { echo WRONG_RELEASE_ENV >&2; return 94; }; };\n'+assignments+'bash fixture-entrypoint'],cwd=project,env=env,capture_output=True,text=True)
-            assert p.returncode==0, f'{entry} environment assignment is stale: {p.stderr}'
-    # Actual stat/grep path arguments in the policy-start check must address the
-    # same file selected by Compose; tokenize without executing any file reader.
-    policy=next(b for b in blocks(source) if "ELIGIBILITY_START_AT=2026-09-01" in b and 'stat -c' in b)
-    for pattern in [r"stat -c '%a' (.*?)\)",r"grep -Fxc 'ELIGIBILITY_START_AT=[^']+' (.*?)\)"]:
-        arg=re.search(pattern,policy).group(1).replace('$PRODUCTION_ENV_FILE',env_file.as_posix())
-        tokens=shlex.split(arg)
-        assert len(tokens)==1 and Path(tokens[0])==env_file, 'policy-start check reads a different environment file'
-    print(f'RUNEARLY-02: {len(prefixes)} actual Compose prefixes and wrapper/policy paths select one release env; external calls trapped.')
+def load_operator(root):
+    scripts = root / 'deploy/rehearsal-unified'
+    assert (scripts / 'lifecycle.py').is_file(), 'current unified lifecycle is absent'
+    sys.path.insert(0, str(scripts))
+    return importlib.import_module('lifecycle')
 
-def migration_gate(runbook,fixture):
+def config_fixture(m, fixture):
+    folder = fixture / "release with spaces [甲]&'"
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for name in ('compose.one.json', 'compose.two.json', 'reviewed.env', 'manifest.json', 'smoke.json'):
+        path = folder / name; path.write_text('{}\n', encoding='utf-8'); paths[name] = str(path)
+    def project(kind, roles, prefix):
+        return dict(kind=kind, name=prefix+'-'+kind, compose_files=[paths['compose.one.json'], paths['compose.two.json']],
+                    env_file=paths['reviewed.env'], services={role: dict(role=role, image_id='sha256:'+'a'*64) for role in roles})
+    old = [project(kind, sorted(roles), 'old') for kind, roles in m.OLD_ROLES.items()]
+    candidate = [project('unified', ['platform-api'], 'new'), project('sources', sorted(m.STREAM_ROLES), 'new')]
+    config = dict(schema='xingmang.unified.operator/v1', mode='local-synthetic', state_root=str(folder/'state'),
+        docker=dict(binary=sys.executable, context='inert-local', config_dir=str(folder)),
+        candidate=dict(head='a'*40, manifest=paths['manifest.json'], manifest_sha256='b'*64, migration_digest='c'*64,
+            projects=candidate, jobs=[dict(project='new-unified',service=x) for x in ('migrate','invoice-migrate','invoice-permissions')], ready_url='http://127.0.0.1:1/readyz', databases={}),
+        previous=dict(projects=old, migration_digest='c'*64, ready_urls={}, permission_jobs=[], databases={}),
+        backups=dict(invoice={},platform={}), approvals={}, smoke_config=paths['smoke.json'], rehearsal={}, host_preflight={})
+    return config
+
+def release_env(root, fixture):
+    m = load_operator(root)
+    config = config_fixture(m, fixture)
+    fake = fixture/'inert-compose.py'
+    fake.write_text('import json,os,sys\nassert sys.argv[1:]==json.loads(os.environ["EXPECTED_ARGV"])\nassert "COMPOSE_FILE" not in os.environ and "DOCKER_HOST" not in os.environ\nprint("EXACT_ARGV_ENV_OK")\nraise SystemExit(int(os.environ["FIXTURE_EXIT"]))\n', encoding='utf-8')
+    with patch.dict(os.environ, {'COMPOSE_FILE':'must-not-leak','DOCKER_HOST':'tcp://inert.invalid:2375'}):
+        driver = m.DockerDriver(config, record_root=fixture/'commands')
+    # Replace only the external executable with Python; the actual compose argv,
+    # reviewed context/env/files, sanitized env and command exit handling execute.
+    driver.docker = [sys.executable, str(fake), '--context', 'inert-local']
+    count = 0
+    for project in config['candidate']['projects']:
+        for command in (['config','--quiet'], ['run','--rm','--no-deps','--pull','never','invoice-permissions'], ['up','-d','--no-deps','--pull','never','platform-api']):
+            expected = ['--context','inert-local','compose','--project-name',project['name'],'--env-file',project['env_file']]
+            for path in project['compose_files']: expected += ['-f',path]
+            expected += command
+            driver.env.update(EXPECTED_ARGV=json.dumps(expected), FIXTURE_EXIT='0')
+            assert driver.compose(project, 'valid-'+str(count), command).stdout.strip() == b'EXACT_ARGV_ENV_OK'
+            driver.env['FIXTURE_EXIT']='23'
+            try: driver.compose(project, 'reject-'+str(count), command)
+            except m.OperatorError: pass
+            else: raise AssertionError('actual Compose consumer swallowed exit 23')
+            count += 1
+    for field in ('env_file','compose_files'):
+        for bad in ('relative.env', str(fixture/'absent.env')):
+            value = copy.deepcopy(config)
+            value['candidate']['projects'][0][field] = [bad] if field == 'compose_files' else bad
+            try: m.validate_config(value)
+            except m.OperatorError: pass
+            else: raise AssertionError('current config accepted a relative/missing '+field)
+    print(f'RUNEARLY-02 unified actual compose consumer: {count} exact argv/env successes, {count} real child exit rejections, four path refusals; no Docker.')
+
+def current_migration_gate(root, fixture):
+    m = load_operator(root)
+    config = config_fixture(m, fixture)
+    state = Path(config['state_root']); state.mkdir(parents=True,exist_ok=True)
+    ledgers = {'platform':['p','r'],'invoice':['i']}; permissions=['r','m','t','s','f']
+    (state/'deployment-record.json').write_text(json.dumps({'status':'PREPARED','snapshot':{'ledger_hashes':ledgers,'platform_permissions':permissions}}))
+    count = 0
+    for failure in (None,'migrate','invoice-migrate','invoice-permissions','ledger-query','extra-ledger','permissions-query','permissions-changed'):
+        class Driver(m.DockerDriver):
+            def compose(self, project, name, args, **kwargs):
+                self.calls.append(args[-1])
+                assert args == ['run','--rm','--no-deps','--pull','never',args[-1]]
+                if args[-1] == failure: raise m.OperatorError('inert failed prerequisite')
+            def ledger_snapshot(self, side):
+                self.calls.append('ledger')
+                if failure == 'ledger-query': raise m.OperatorError('inert failed ledger query')
+                return {**ledgers,'invoice':['i','unapproved']} if failure=='extra-ledger' else ledgers
+            def platform_permissions_snapshot(self, side):
+                self.calls.append('permissions')
+                if failure == 'permissions-query': raise m.OperatorError('inert failed permission query')
+                return permissions+['extra-grant'] if failure=='permissions-changed' else permissions
+        driver=Driver(config);driver.calls=[]
+        try: driver.migrate_and_permissions()
+        except m.OperatorError:
+            assert failure is not None
+        else: assert failure is None, 'current prerequisite/ledger/permission failure accepted: '+str(failure)
+        order=['migrate','invoice-migrate','invoice-permissions','ledger','permissions']
+        assert driver.calls == order[:len(driver.calls)], 'current prerequisite order changed'
+        if failure is None: assert driver.calls == order
+        if failure in order: assert driver.calls[-1] == failure, 'work continued after failed prerequisite'
+        count += 1
+    for changed in (['invoice-migrate','migrate','invoice-permissions'], ['migrate','invoice-migrate']):
+        bad=copy.deepcopy(config);bad['candidate']['jobs']=[dict(project='new-unified',service=x) for x in changed]
+        driver=Driver(bad);driver.calls=[]
+        try: driver.migrate_and_permissions()
+        except m.OperatorError: pass
+        else: raise AssertionError('missing/reordered mandatory jobs accepted')
+        assert driver.calls == [], 'invalid plan ran a prerequisite'
+    print(f'RUNEARLY-04 unified real migrate_and_permissions: {count} success/failure scenarios plus two invalid-order refusals.')
+
+def historical_financial_invariants(runbook,fixture):
     migration=next(b for b in blocks(runbook) if 'schema-migrations-expected.tsv' in b and 'run --rm --pull never migrate' in b)
     privileges=next(b for b in blocks(runbook) if 'carry-forward-effective-privileges.tsv' in b and '<deploy/postgres/harden-runtime-role.sql' in b)
     (fixture/'backend/migrations').mkdir(parents=True,exist_ok=True)
@@ -120,10 +157,19 @@ docker() {
         assert (p.returncode==0)==(case=='matching'),f'{case} {"privilege" if is_privilege else "migration"} gate exit={p.returncode}; must stop on failed proof; stderr={p.stderr} stdout={p.stdout}'
     print(f'RUNEARLY-04: {len(cases)} actual migration/privilege command-block controls passed; Docker and permissions execution trapped.')
 
+
 if __name__=='__main__':
-    parser=argparse.ArgumentParser()
-    parser.add_argument('--case',choices=['release-env','migration-gate'],required=True)
-    parser.add_argument('--fixture-root',type=Path,required=True)
-    parser.add_argument('--runbook',type=Path,default=PROJECT/'docs/PRODUCTION-RUNBOOK.md')
-    args=parser.parse_args();args.fixture_root.mkdir(parents=True,exist_ok=True)
-    {'release-env':release_env,'migration-gate':migration_gate}[args.case](args.runbook.read_text(encoding='utf-8-sig'),args.fixture_root)
+    p=argparse.ArgumentParser()
+    p.add_argument('--case',choices=['release-env','migration-gate'],required=True)
+    p.add_argument('--fixture-root',type=Path,required=True)
+    p.add_argument('--source-root',type=Path,default=PROJECT.parent)
+    p.add_argument('--runbook',type=Path)
+    a=p.parse_args();a.fixture_root.mkdir(parents=True,exist_ok=True)
+    current=a.runbook or a.source_root/'docs/runbooks/UNIFIED-CUTOVER.md'
+    assert 'deploy/rehearsal-unified/rehearse.sh' in current.read_text(encoding='utf-8'), 'active runbook must address unified D/E'
+    if a.case=='release-env':release_env(a.source_root,a.fixture_root)
+    else:
+        current_migration_gate(a.source_root,a.fixture_root/'current')
+        # Historical financial command blocks stay byte-for-byte controls only;
+        # their mocked Docker prefixes are not a current deployment procedure.
+        historical_financial_invariants((a.source_root/'invoice/docs/PRODUCTION-RUNBOOK.md').read_text(encoding='utf-8'),a.fixture_root/'financial')
