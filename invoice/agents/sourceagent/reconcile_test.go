@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -194,6 +195,10 @@ func TestReconcilePaginationRestartAndPartialScanNeverCountAsMiss(t *testing.T) 
 		NextCursor:  ScanCursor{Version: 1, ID: 2, Completed: true}, HasMore: false,
 	}, false)
 
+	before, err := restarted.loadInventory()
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Start a later scan, acknowledge only its first page, then fail. Since the
 	// complete boundary was never reached, no miss count or tombstone is made.
 	if err := restarted.StartCycle(ScanReconcile); err != nil {
@@ -205,6 +210,16 @@ func TestReconcilePaginationRestartAndPartialScanNeverCountAsMiss(t *testing.T) 
 	}, false)
 	if _, synthetic, err := restarted.SyntheticPage(100); err != nil || synthetic {
 		t.Fatalf("partial scan created a deletion plan: synthetic=%t err=%v", synthetic, err)
+	}
+	// Reopen to check durable state rather than only the current object.
+	reopened := &FileReconciler{Path: r.Path, SourceID: r.SourceID, StreamID: r.StreamID, SourceType: r.SourceType, MissThreshold: 3, Now: r.Now}
+	after, err := reopened.loadInventory()
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("partial scan changed durable inventory or miss counters: before=%+v after=%+v err=%v", before, after, err)
+	}
+	control, err := reopened.loadControl()
+	if err != nil || control.Phase != "scanning" {
+		t.Fatalf("partial scan left the scanning phase: phase=%s err=%v", control.Phase, err)
 	}
 }
 

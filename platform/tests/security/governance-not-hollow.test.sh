@@ -12,7 +12,31 @@
 # 用法: bash tests/security/governance-not-hollow.test.sh
 set -uo pipefail
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
-cd "$repo_root" || exit 1
+# All mutations run against current input bytes in a new, independent Git fixture.
+# In particular, never use git checkout to restore a caller's uncommitted migration.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
+fixture="$(mktemp -d "${TMPDIR:-/tmp}/xm-governance.XXXXXXXX")" || exit 1
+[ -d "$fixture" ] && [ ! -L "$fixture" ] || exit 1
+cleanup() { rm -rf -- "$fixture"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+while IFS= read -r -d '' input; do
+  [ -f "$repo_root/$input" ] && [ ! -L "$repo_root/$input" ] || continue
+  mkdir -p -- "$fixture/$(dirname -- "$input")" || exit 1
+  cp -- "$repo_root/$input" "$fixture/$input" || exit 1
+done < <(git -C "$repo_root" ls-files -z -- PROJECT-CONSTITUTION.md AGENTS.md CLAUDE.md GEMINI.md \
+  VERSIONS.lock .tool-versions go.mod pnpm-workspace.yaml '*package.json' \
+  'scripts/check-*' scripts/guard-governance-files.sh 'db/migrations/*.sql' \
+  'docs/adr/*.md' docs/architecture/BASELINE-v2.1.md '.github/workflows/*' \
+  'cmd/platform-api/*.go' 'cmd/platform-worker/*.go' 'deploy/compose/*.yaml')
+cd -- "$fixture" || exit 1
+git init -q || exit 1
+git -c core.autocrlf=false add . || exit 1
+git -c user.name=governance-fixture -c user.email=fixture@example.invalid \
+  -c commit.gpgsign=false commit -qm 'isolated governance inputs' || exit 1
+git update-ref refs/remotes/origin/main HEAD || exit 1
+export GOVERNANCE_BASE_REF=origin/main
 fail=0
 err() { echo "SECURITY TEST FAIL: $*" >&2; fail=1; }
 
@@ -33,10 +57,11 @@ published="$(git ls-tree -r --name-only HEAD -- db/migrations 2>/dev/null \
 if [ -z "$published" ]; then
   echo "SKIP: 仓库里还没有已发布迁移"
 else
+  migration_backup="$fixture/migration.baseline"
+  cp -- "$published" "$migration_backup" || exit 1
   restore_migration() {
-    git checkout -- "$published" 2>/dev/null || true
+    cp -- "$migration_backup" "$published"
   }
-  trap restore_migration EXIT
 
   printf '\n-- security test tamper marker\n' >> "$published"
   if gov; then
@@ -44,21 +69,19 @@ else
   fi
   restore_migration
 
-  moved="$(mktemp)"
+  moved="$fixture/migration.moved"
   mv "$published" "$moved"
   if gov; then
     err "已发布迁移 $published 被删除却未被发现——遍历当前树永远看不见被删的文件"
   fi
   mv "$moved" "$published"
-  trap - EXIT
 fi
 
 # --- 3. 治理依赖的脚本必须都在守卫名单内 ---
 guard="scripts/guard-governance-files.sh"
-backup="$(mktemp)"
+backup="$fixture/guard.baseline"
 cp "$guard" "$backup"
 restore_guard() { cp "$backup" "$guard"; rm -f "$backup"; }
-trap restore_guard EXIT
 
 for dep in scripts/check-versions.py scripts/check-governance.sh PROJECT-CONSTITUTION.md; do
   cp "$backup" "$guard"
@@ -69,7 +92,6 @@ for dep in scripts/check-versions.py scripts/check-governance.sh PROJECT-CONSTIT
   fi
 done
 restore_guard
-trap - EXIT
 
 # 服务器闭环的 CI/hook/安装脚本同样是治理边界：修改它们不能绕过人工审阅。
 for dep in scripts/ci-local.sh deploy/git-hooks/ deploy/scripts/install-git-server.sh \
@@ -82,7 +104,7 @@ done
 
 # --- 4. workspace 的 packageExtensions 必须被版本扫描覆盖 ---
 if command -v python3 >/dev/null && python3 -c 'import yaml' 2>/dev/null; then
-  ws="$(mktemp --suffix=.yaml)"
+  ws="$fixture/versions-negative.yaml"
   cat > "$ws" <<'YAML'
 packages:
   - web/apps/*

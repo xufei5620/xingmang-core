@@ -61,13 +61,18 @@ sudo chmod -R g+rX /root/reqlog/data
 
 `g+rX`（大写 X）只给目录和已有执行位的文件加执行权限，不会把数据文件
 变成可执行——这是标准的"批量放开同组读权限"写法。这一步只需要做一次；
-`tokenmap.json` 会在下一次记录代理刷新时自动以新权限重写，不需要手动处理，
-但如果想立刻验证也可以顺手跑一遍：
+`tokenmap.json` 的刷新使用 `os.WriteFile`，既有文件的 mode 会保留；后续改属组
+不会自动补上组读权限。历史 `0600` 文件仍需核对可读性，不能把下次刷新视为修复。
+确认文件已存在、读组仍是获批的 GID `10001`，并取得这次权限迁移批准后，
+由操作员执行以下既有读组适配；任一步失败立即停止并排查，不吞掉错误：
 
 ```bash
-sudo chgrp 10001 /root/reqlog/tokenmap.json 2>/dev/null || true
-sudo chmod g+r /root/reqlog/tokenmap.json 2>/dev/null || true
+sudo chgrp 10001 /root/reqlog/tokenmap.json &&
+  sudo chmod g+r /root/reqlog/tokenmap.json
 ```
+
+本步骤不授权自动修改真实文件，也不改变记录代理运行时权限策略；未完成批准或
+文件尚未产出时，保留此项为待验证，不宣称容器已经可读。
 
 ## 第 4 步：替换 systemd 单元
 
@@ -109,7 +114,7 @@ backup 直连降级会兜住用户请求，不会中断服务，但那几秒内�
 
 ## 第 6 步：平台切到 file 模式
 
-编辑平台部署机器上的 `.env`（例如 `/srv/deploy/xingmang-platform/deploy/compose/.env`，
+编辑平台部署机器上的 `.env`（例如 `/srv/deploy/xingmang-platform/platform/deploy/compose/.env`，
 改前先 `cp -p .env .env.bak-reqlog-$(date +%Y%m%d)`）：
 
 ```dotenv
@@ -120,7 +125,7 @@ XM_REQLOG_MODE=file
 ```
 
 `XM_REQLOG_DATA_DIR`/`XM_REQLOG_TOKENMAP`（容器内路径）不需要改，
-`deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
+`platform/deploy/compose/server-prod.yaml` 已经把它们的默认值与只读挂载目标钉在一起。
 
 > CR-0008 新增的 `tokenmap.v2.json`（上游用户 ID）也在这一步一起覆盖：
 > `server-prod.yaml` 现在带 `XM_REQLOG_TOKENMAP_V2` 与对称的只读挂载，
@@ -135,12 +140,14 @@ XM_REQLOG_MODE=file
 采用的流程执行）：
 
 ```bash
+# 以下命令从 Git 顶层执行；服务器 monorepo 切换和配置迁移须已获批准。
+cd /srv/deploy/xingmang-platform
 # 方式一：受控 checkout 上的部署脚本（DEPLOY.md §3 描述的正式流程）
-deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION --reason "XM-REQLOG-MERGE cutover"
+platform/deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION --reason "XM-REQLOG-MERGE cutover"
 
 # 方式二：本机覆盖文件方式（GO-LIVE-CHECKLIST.md 记录的实际操作）
-cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.sh \
-  --override-file /srv/deploy/xingmang-platform/deploy/compose/server-prod.yaml
+cd /srv/deploy/xingmang-platform && nice -n 10 bash platform/deploy/scripts/deploy-local.sh \
+  --override-file /srv/deploy/xingmang-platform/platform/deploy/compose/server-prod.yaml
 ```
 
 这一步只重启 `platform-api`（`.env` 改动不影响 `platform-worker`/`web` 的行为），
@@ -151,10 +158,15 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
 
 1. **容器能读到挂载**：
    ```bash
-   docker compose -p xingmang-prod exec platform-api sh -c \
-     'ls /var/lib/xm/reqlog | tail -3 && cat /var/lib/xm/reqlog-tokenmap.json | head -c 200'
+   # 先设置为第 7 步实际部署的项目：方式一 xingmang-prod；方式二 xingmang-launch。
+   case "${XM_DEPLOY_PROJECT:-}" in
+     xingmang-prod|xingmang-launch) ;;
+     *) echo "请先设置 XM_DEPLOY_PROJECT 为第 7 步已部署的项目" >&2; exit 1 ;;
+   esac
+   docker exec "${XM_DEPLOY_PROJECT}-platform-api-1" sh -c \
+     'test -d /var/lib/xm/reqlog && test -r /var/lib/xm/reqlog-tokenmap.json'
    ```
-   应该能看到按天命名的目录与 tokenmap 的 JSON 内容（只读，容器内改不了）。
+   退出 0 表示指定容器能读取目录和映射文件；不输出映射内容。非零先核对项目、容器和挂载，不据此宣称 file 数据已验证。
 2. **API 能列出真实请求**（需要一个持有 `request.read` scope 的身份）：
    ```
    GET /api/v1/platforms/sub2api/requests?limit=5
@@ -206,7 +218,7 @@ cd /srv/deploy/xingmang-platform && nice -n 10 bash deploy/scripts/deploy-local.
 
 **容器化 `platform-api` 的接入现状**：`cmd/platform-api` 读环境变量
 `XM_REQLOG_TOKENMAP_V2`（容器内路径）传给 `FileConfig.TokenMapV2Path`，与
-既有 `XM_REQLOG_TOKENMAP` 同一条模式；`deploy/compose/server-prod.yaml`
+既有 `XM_REQLOG_TOKENMAP` 同一条模式；`platform/deploy/compose/server-prod.yaml`
 现在也带上了这个变量与对称的只读绑定挂载（XM-REQLOG-TOKENMAP-V2-MOUNT）：
 
 ```yaml
@@ -225,33 +237,37 @@ XM_REQLOG_TOKENMAP_V2: ${XM_REQLOG_TOKENMAP_V2:-/var/lib/xm/reqlog-tokenmap-v2.j
 挂载本身缺席时的行为不变：读侧把"文件缺失/解析失败"与"映射不到"视作
 同一件事，`User` 恒为 `nil`，不影响 `Username` 与其余字段。
 
-### 验收标准第 1 条的服务器验证命令（本次实现未跑，留给能连服务器的会话）
+### tokenmap 形状检查与真实读侧验收（本次未执行服务器验证）
 
-CR-0008 验收标准第 1 条要求"服务器上产出一份 `tokenmap.v2.json` 后，
-抽样核对：前缀命中的记录中至少 99% 能解出非空 `User`"。本次实现在开发
-机上跑不了（没有到生产服务器的连接），需要在完成第 1～5 步升级、记录
-代理至少刷新过一轮之后，在服务器上执行（只读，不改任何数据）：
+CR-0008 原验收标准保持：前缀命中的记录中至少 99% 能解出非空 `User`。
+下面的 jq **只检查 tokenmap 文件形状和条目中 user_id 的填充比例**，
+分母是映射条目数，不是实际请求记录数；即使结果为 100%，读侧仍可能全部
+返回 `User=nil`。因此它不能作为真实读侧 99% 通过证据。
+
+完成第 1～5 步且记录代理刷新后，获批操作员可运行以下只读形状检查。
+真正验收仍须保留目标版本、时间窗口、实际读侧结果及分子/分母的可复核证据；
+采样范围和生产取证由负责人批准，本段不新增采样 API 或改变既有标准。
 
 ```bash
 # 1) 确认 v2 文件已产出且形状合法
 sudo test -s /root/reqlog/tokenmap.v2.json && \
   sudo jq -e '.schema_version == 2 and (.entries | type == "object")' /root/reqlog/tokenmap.v2.json
 
-# 2) 抽样核对：v2 里有多少条目携带非空 user_id（分母是 v2 总条目数，
-#    不是全部 tokenmap 条目数——前缀命中但 v2 未登记的条目本身就不该计入
-#    这条"能否解出非空 User"的比例）
+# 2) 映射条目填充率，仅作形状诊断，不证明请求记录已解析为 User。
 sudo jq '
   (.entries | length) as $total |
   ([.entries[] | select(.user_id != null and .user_id != "")] | length) as $with_id |
-  {total: $total, with_id: $with_id,
+  {evidence_kind: "tokenmap_shape_only", proves_user_resolution: false,
+   total: $total, with_id: $with_id,
    pct: (if $total == 0 then 0 else ($with_id * 100.0 / $total) end)}
 ' /root/reqlog/tokenmap.v2.json
 ```
 
-`pct` 应 `>= 99`。若明显偏低，先核对两条导出 SQL 是否确实带上了新增的
+`pct` 仅表示映射条目填充率，不是验收通过标记；实际读侧证据缺失时必须记为未验证。
+若填充率偏低，核对两条导出 SQL 是否确实带上了新增的
 `u.id` 列（`docker exec postgres psql -c "..."`/`docker exec
 sub2api-mig-postgres sh -c '...'`，SQL 原文见 `tokenmap.go` 的
-`newapiTokenMapQuery`/`sub2apiTokenMapQuery` 常量），而不是先怀疑读侧。
+`newapiTokenMapQuery`/`sub2apiTokenMapQuery` 常量）。形状合格后仍要核对挂载、权限及实际读侧结果。
 
 ## 已知限制（不在本次收编范围内）
 

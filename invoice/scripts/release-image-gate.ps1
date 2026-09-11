@@ -23,6 +23,7 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-image-gate-lib.ps1')
+. (Join-Path $PSScriptRoot 'trivy-cache-lock-lib.ps1')
 Assert-ReleasePowerShellRuntime | Out-Null
 
 $trivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969'
@@ -183,6 +184,7 @@ if ($releaseRoot.TrimEnd([IO.Path]::DirectorySeparatorChar).Equals($allowedRelea
     -not ($releaseRoot + [IO.Path]::DirectorySeparatorChar).StartsWith($allowedReleaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'ReleaseDirectory must be a child of the project release directory'
 }
+Assert-NoReleasePathReparsePoints -Path $releaseRoot | Out-Null
 if (Test-Path -LiteralPath $releaseRoot) {
     if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw 'ReleaseDirectory cannot be a symlink/reparse point'
@@ -199,12 +201,8 @@ foreach ($name in @('build', 'logs', 'proof', 'reports', 'sbom')) {
 Write-Host "Release output: $releaseRoot"
 Write-Host "IdP mode: $IdPMode (default keycloak mode must pass its image scan and remains blocked pending the production canary)"
 
-$lockPath = Join-Path (Split-Path -Parent $releaseRoot) '.trivy-0.74.release-gate.lock'
-try {
-    $trivyLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-} catch {
-    throw 'another release image gate is already using the shared Trivy cache'
-}
+$lockPath = Get-TrivyReleaseGateLockPath -Volume $TrivyCacheVolume
+$trivyLock = Enter-TrivyReleaseGateLock -LockPath $lockPath
 
 try {
     Push-Location $projectRoot
@@ -623,6 +621,7 @@ try {
             }
             source = [ordered]@{
                 gitHead = $gitHead
+                gitHeadScope = 'monorepo'
                 gitDirty = $gitDirty
                 contextFingerprints = $sourceFingerprints
                 verificationLog = 'logs/source-verification.log'

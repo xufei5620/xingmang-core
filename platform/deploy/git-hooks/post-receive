@@ -225,6 +225,8 @@ run_ci() {
     echo "POST-RECEIVE FAIL: 可信 CI 脚本哈希不匹配" >&2
     return 1
   }
+  local ci_project_dir=/workspace
+  [ ! -d "$checkout/platform/scripts" ] || ci_project_dir=/workspace/platform
   secret_log_opts='HEAD'
   if [ "$previous" != "$zero" ]; then
     secret_log_opts="$previous..$sha"
@@ -237,13 +239,13 @@ run_ci() {
     --tmpfs /tmp:rw,nosuid,nodev,size=1g \
     -v "$checkout:/workspace" \
     -v "$ci_script_path:/opt/xm-ci-local.sh:ro" \
-    -e CI_LOCAL_ROOT=/workspace \
+    -e CI_LOCAL_ROOT="$ci_project_dir" \
     -e CI_LOCAL_REQUIRE_GIT=1 \
     -e CI_LOCAL_ALLOW_OVERRIDES=0 \
     -e CI_LOCAL_SECRET_SCAN_LOG_OPTS="$secret_log_opts" \
     -e GOVERNANCE_BASE_REF="${configured_base_ref:-origin/main}" \
     -e GOVERNANCE_REQUIRE_BASE="${configured_require_base:-1}" \
-    -w /workspace \
+    -w "$ci_project_dir" \
     "$ci_image" bash /opt/xm-ci-local.sh < /dev/null
 }
 

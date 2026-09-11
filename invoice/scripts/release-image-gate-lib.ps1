@@ -170,14 +170,116 @@ function Assert-KeycloakDockerfileLiteralBasePins {
             ForEach-Object { $_.TrimStart() }
     )
     $fromLines = @($instructionLines | Where-Object { $_ -match '(?i)^FROM[\t\v\f\r ]+' })
-    if ($fromLines.Count -ne 2 -or
-        $fromLines[0] -cne "FROM $ExpectedBaseReference AS builder" -or
-        $fromLines[1] -cne "FROM $ExpectedBaseReference") {
-        throw 'Keycloak Dockerfile must contain exactly two literal reviewed FROM digest lines'
+    $sourceBuildBase = 'registry.access.redhat.com/ubi9/openjdk-21@sha256:cc8a30e9181b0135e6657ca3b824d7b32e4c7f6a664769ef641d4f7031339564'
+    if ($fromLines.Count -ne 3 -or
+        $fromLines[0] -cne "FROM $sourceBuildBase AS source-build" -or
+        $fromLines[1] -cne "FROM $ExpectedBaseReference AS builder" -or
+        $fromLines[2] -cne "FROM $ExpectedBaseReference") {
+        throw 'Keycloak Dockerfile must contain the exact source builder and two literal reviewed runtime FROM digest lines'
     }
     if (@($instructionLines | Where-Object { $_ -match '(?i)^ARG[\t\v\f\r ]+[^\r\n]*(?:KEYCLOAK|BASE_IMAGE)' }).Count -gt 0 -or
         @($fromLines | Where-Object { $_ -match '\$' }).Count -gt 0) {
         throw 'Keycloak Dockerfile cannot expose an ARG or variable FROM base override'
+    }
+    return $true
+}
+
+function Assert-KeycloakSourceRebuildLayout {
+    param([Parameter(Mandatory)][string]$DockerfileText)
+
+    # This is the reviewed runtime assembly contract, not a general Dockerfile
+    # evaluator. Keep commands ordered so an old base cannot survive COPY and
+    # proof/absence checks cannot accidentally run before the replacement.
+    $instructions = [Collections.Generic.List[object]]::new()
+    $pending = ''
+    foreach ($line in ($DockerfileText.Replace("`r`n", "`n").Replace("`r", "`n") -split "`n")) {
+        $piece = $line.Trim()
+        if ($piece.Length -eq 0 -or $piece.StartsWith('#', [StringComparison]::Ordinal)) { continue }
+        $continued = $piece.EndsWith('\', [StringComparison]::Ordinal)
+        if ($continued) { $piece = $piece.Substring(0, $piece.Length - 1).TrimEnd() }
+        $pending = ($pending + ' ' + $piece).TrimStart()
+        if ($continued) { continue }
+        $match = [regex]::Match($pending, '^(?<instruction>[A-Za-z]+)[\t ]+(?<arguments>.+)$')
+        if (-not $match.Success) { throw 'Keycloak source-rebuild layout contains an unsupported instruction' }
+        $instructions.Add([pscustomobject]@{
+            Name = $match.Groups['instruction'].Value.ToUpperInvariant()
+            Arguments = ([regex]::Replace($match.Groups['arguments'].Value.Trim(), '\s+', ' '))
+        })
+        $pending = ''
+    }
+    if ($pending.Length -gt 0) { throw 'Keycloak source-rebuild layout has an unfinished continuation' }
+    $fromIndices = @(
+        for ($index = 0; $index -lt $instructions.Count; $index++) {
+            if ($instructions[$index].Name -ceq 'FROM') { $index }
+        }
+    )
+    if ($fromIndices.Count -ne 3 -or
+        $instructions[$fromIndices[0]].Arguments -cnotmatch ' AS source-build$' -or
+        $instructions[$fromIndices[1]].Arguments -cnotmatch ' AS builder$' -or
+        $instructions[$fromIndices[2]].Arguments -match ' AS ') {
+        throw 'Keycloak source-rebuild layout requires source-build, builder, then final runtime stages'
+    }
+
+    $mssqlAbsence = "RUN ! find /opt/keycloak -type f -name 'com.microsoft.sqlserver.mssql-jdbc-*.jar' -print -quit | grep -q ."
+    $verifierCopy = 'COPY --chmod=755 source-build/verify-runtime.sh /usr/local/bin/verify-keycloak-source-build'
+    $builderEvents = @(
+        'USER root'
+        'RUN rm -rf /opt/keycloak'
+        'COPY --from=source-build --chown=1000:0 /rebuilt/keycloak/ /opt/keycloak/'
+        'COPY --from=source-build --chown=1000:0 /audit/ /opt/keycloak/source-build-audit/'
+        $verifierCopy
+        'RUN mkdir -p /opt/keycloak/data'
+        'RUN chmod -R g+rwX /opt/keycloak'
+        'USER 1000'
+        'RUN /opt/keycloak/bin/kc.sh build'
+        'RUN rm -rf /opt/keycloak/bin/client'
+        'RUN rm -f /opt/keycloak/lib/lib/main/com.microsoft.sqlserver.mssql-jdbc-*.jar'
+        'RUN test ! -e /opt/keycloak/bin/client'
+        $mssqlAbsence
+        'RUN /usr/local/bin/verify-keycloak-source-build'
+    )
+    $finalEvents = @(
+        'USER root'
+        'RUN rm -rf /opt/keycloak'
+        'COPY --from=builder --chown=1000:0 /opt/keycloak/ /opt/keycloak/'
+        $verifierCopy
+        'USER 1000'
+        'RUN test ! -e /opt/keycloak/bin/client'
+        $mssqlAbsence
+        'RUN /usr/local/bin/verify-keycloak-source-build'
+        'COPY --chmod=755 entrypoint.sh /opt/keycloak/bin/invoice-entrypoint.sh'
+        'COPY --chmod=755 validate-proxy-trust.sh /opt/keycloak/bin/invoice-validate-proxy-trust.sh'
+    )
+    foreach ($stage in @('builder', 'final')) {
+        $first = if ($stage -ceq 'builder') { $fromIndices[1] + 1 } else { $fromIndices[2] + 1 }
+        $last = if ($stage -ceq 'builder') { $fromIndices[2] } else { $instructions.Count }
+        $expected = if ($stage -ceq 'builder') { $builderEvents } else { $finalEvents }
+        $actual = [Collections.Generic.List[string]]::new()
+        for ($index = $first; $index -lt $last; $index++) {
+            $instruction = $instructions[$index]
+            switch -CaseSensitive ($instruction.Name) {
+                'USER' { $actual.Add('USER ' + $instruction.Arguments) }
+                'COPY' { $actual.Add('COPY ' + $instruction.Arguments) }
+                'RUN' {
+                    foreach ($command in ($instruction.Arguments -split '\s*&&\s*')) {
+                        if ([string]::IsNullOrWhiteSpace($command)) { throw "Keycloak $stage stage has an empty RUN command" }
+                        $actual.Add('RUN ' + $command.Trim())
+                    }
+                }
+                'ENV' { }
+                'ENTRYPOINT' { }
+                'LABEL' { }
+                default { throw "Keycloak $stage stage has an unreviewed $($instruction.Name) instruction" }
+            }
+        }
+        if ($actual.Count -ne $expected.Count) {
+            throw "Keycloak $stage source-rebuild layout must preserve the complete ordered replacement, pruning, absence, and proof chain"
+        }
+        for ($index = 0; $index -lt $expected.Count; $index++) {
+            if ($actual[$index] -cne $expected[$index]) {
+                throw "Keycloak $stage source-rebuild layout mismatch at step $($index + 1): expected '$($expected[$index])', found '$($actual[$index])'"
+            }
+        }
     }
     return $true
 }
@@ -647,19 +749,20 @@ function Get-ReleaseGitProvenance {
     $headLines = @(& git -C $RepositoryRoot rev-parse --verify HEAD 2>$null)
     $headExitCode = $LASTEXITCODE
     $headOutput = ($headLines | Out-String).Trim()
+    if ($headExitCode -ne 0 -or $headOutput -cnotmatch '^[0-9a-f]{40}$') {
+        throw "git HEAD failed with exit $headExitCode while capturing release provenance"
+    }
 
-    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 2>$null)
+    # HEAD identifies the complete monorepo; the pathspec limits dirtiness to
+    # the invoice project passed by the release gate, including untracked files.
+    $statusLines = @(& git -C $RepositoryRoot status --porcelain=v1 --untracked-files=all -- . 2>$null)
     $statusExitCode = $LASTEXITCODE
     if ($statusExitCode -ne 0) {
         throw "git status failed with exit $statusExitCode while capturing release provenance"
     }
 
-    $gitHead = $null
-    if ($headExitCode -eq 0 -and $headOutput -match '^[0-9a-f]{40}$') {
-        $gitHead = $headOutput
-    }
     return [pscustomobject]@{
-        GitHead = $gitHead
+        GitHead = $headOutput
         GitDirty = [bool]($statusLines.Count -ne 0)
     }
 }
@@ -966,9 +1069,32 @@ function Resolve-ReleaseArtifactPath {
     return $path
 }
 
+function Assert-NoReleasePathReparsePoints {
+    param([Parameter(Mandatory)][string]$Path)
+
+    # Check ancestors even when the output leaf does not exist yet. A lexical
+    # release/ prefix cannot contain writes if any parent redirects elsewhere.
+    $current = [IO.Path]::GetFullPath($Path)
+    while (-not [string]::IsNullOrEmpty($current)) {
+        $item = $null
+        try {
+            $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        } catch [Management.Automation.ItemNotFoundException] {
+            # Producers may create missing directories, after all existing
+            # ancestors have been checked. Other lookup failures must propagate.
+        }
+        if ($null -ne $item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "release directory path contains a symlink/reparse point: $current"
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+    return $true
+}
+
 function Assert-NoReleaseReparsePoints {
     param([Parameter(Mandatory)][string]$ReleaseDirectory)
 
+    Assert-NoReleasePathReparsePoints -Path $ReleaseDirectory | Out-Null
     $rootItem = Get-Item -LiteralPath $ReleaseDirectory -Force
     if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "release directory contains a symlink/reparse point: $($rootItem.FullName)"
@@ -1016,7 +1142,7 @@ function Write-Sha256Sums {
     Assert-NoReleaseReparsePoints -ReleaseDirectory $fullRoot | Out-Null
     $sumPath = Join-Path $fullRoot 'SHA256SUMS'
     $lines = @(
-        Get-ChildItem -LiteralPath $fullRoot -Recurse -File |
+        Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force |
             Where-Object FullName -ne $sumPath |
             ForEach-Object {
                 "$(Get-FileSha256Lower -Path $_.FullName)  $(Get-ReleaseRelativePath -BasePath $fullRoot -Path $_.FullName)"
@@ -1051,7 +1177,7 @@ function Assert-Sha256Sums {
     }
 
     $actualFiles = @(
-        Get-ChildItem -LiteralPath $fullRoot -Recurse -File |
+        Get-ChildItem -LiteralPath $fullRoot -Recurse -File -Force |
             Where-Object FullName -ne $sumPath |
             ForEach-Object { Get-ReleaseRelativePath -BasePath $fullRoot -Path $_.FullName }
     )

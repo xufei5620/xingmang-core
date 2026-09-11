@@ -8,7 +8,7 @@
 # 真库往返部分（建库→迁移→列库→删库）默认跳过，需要显式
 # `XM_DEV_WTDB_E2E=1 bash scripts/dev/test-worktree-testdb.sh` 才会跑，
 # 会针对本机 invoice-test-pg 容器创建并删除当前 worktree 对应的
-# xm_test_<worktree 目录名> 库（跑完清理，即使中途失败也会清理）。
+# xm_test_<短名>_<完整路径哈希> 库（跑完清理，即使中途失败也会清理）。
 set -uo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -125,17 +125,17 @@ out2="$(call_fn sanitize_name "")"
 assert_eq "sanitize_name 兜底哈希确定性（同输入同输出）" "$out1" "$out2"
 
 ###############################################################################
-# derive_db_name：xm_test_ 前缀，取路径 basename，长度不超过 63
+# derive_db_name：xm_test_ 前缀、完整路径哈希，长度不超过 63
 ###############################################################################
 out="$(call_fn derive_db_name "/some/path/wt-wtdb")"
-assert_eq "derive_db_name 取路径 basename 并加前缀" "xm_test_wt_wtdb" "$out"
+assert_eq "derive_db_name 可读 basename 加完整路径哈希" "xm_test_wt_wtdb_3d7025e1c5b2a9c5" "$out"
 
 out="$(call_fn derive_db_name "wt-wtdb")"
-assert_eq "derive_db_name 接受纯名字（非路径）" "xm_test_wt_wtdb" "$out"
+assert_eq "derive_db_name 纯名字按当前目录解析" "$(call_fn derive_db_name "$PWD/wt-wtdb")" "$out"
 
 long_name="$(printf 'a%.0s' $(seq 1 80))"
 out="$(call_fn derive_db_name "$long_name")"
-assert_match "derive_db_name 超长名字截断到 63 字符以内" '^xm_test_a+_[0-9a-f]{8}$' "$out"
+assert_match "derive_db_name 超长名字截断到 63 字符以内" '^xm_test_a+_[0-9a-f]{16}$' "$out"
 assert_eq "derive_db_name 超长名字精确等于 63 字符" "63" "${#out}"
 
 long_a="$(printf 'a%.0s' $(seq 1 80))"
@@ -205,6 +205,8 @@ expect_success "-h 是 --help 的别名" bash "$script" -h
 expect_failure "--pg-url 指向不可达目标时清楚失败" \
   bash "$script" --pg-url postgres://postgres:test@127.0.0.1:1/nope --print-url
 assert_text "失败信息带统一前缀" "WORKTREE-TESTDB FAIL" "$tmp/stderr"
+
+expect_success "完整工作树身份与 fake SQL 隔离回归" bash "$repo_root/scripts/dev/test-worktree-testdb-identity.sh"
 
 if [ "$fail" -eq 0 ]; then
   printf 'WORKTREE-TESTDB-UNIT-TEST-OK\n'

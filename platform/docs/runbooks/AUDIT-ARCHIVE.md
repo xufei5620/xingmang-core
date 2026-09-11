@@ -24,7 +24,8 @@
    `xingmang-launch`：
 
    ```bash
-   docker compose -p xingmang-archive -f deploy/compose/archive.yaml \
+   XM_ARCHIVE_CREDENTIAL_ENV_FILE=/path/to/operator-managed.env \
+     docker compose -p xingmang-archive -f deploy/compose/archive.yaml \
      --profile archive-fixture down --volumes --remove-orphans
    ```
 

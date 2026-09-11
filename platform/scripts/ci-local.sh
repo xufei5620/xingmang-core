@@ -36,7 +36,7 @@ if [ "${CI_LOCAL_ALLOW_NO_GIT:-0}" != "1" ]; then
   if [[ "$git_repo" =~ ^[A-Za-z]:[\\/].* ]] && command -v cygpath >/dev/null 2>&1; then
     git_repo="$(cygpath -u "$git_repo")"
   fi
-  [ "$git_repo" = "$repo_root" ] || {
+  [ "$git_repo" = "$repo_root" ] || [ "$git_repo/platform" = "$repo_root" ] || {
     echo "CI LOCAL FAIL: 必须在目标 Git 工作树根目录运行" >&2
     exit 2
   }
@@ -44,7 +44,13 @@ if [ "${CI_LOCAL_ALLOW_NO_GIT:-0}" != "1" ]; then
   [ -n "$head_commit" ] || { echo "CI LOCAL FAIL: Git HEAD 不可验证" >&2; exit 2; }
   shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || printf false)"
   [ "$shallow" != "true" ] || { echo "CI LOCAL FAIL: 禁止在浅克隆上运行门禁" >&2; exit 2; }
+  repo_root="$git_repo"
 fi
+
+# Git owns the checkout root; Go/pnpm/governance assets belong to the platform project.
+project_root="$repo_root"
+[ ! -f "$repo_root/platform/go.mod" ] || project_root="$repo_root/platform"
+cd -- "$project_root"
 
 gate_log="${CI_LOCAL_GATE_LOG:-}"
 allow_overrides="${CI_LOCAL_ALLOW_OVERRIDES:-0}"

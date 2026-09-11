@@ -1,4 +1,9 @@
+param([switch]$ConsumerOnly)
 $ErrorActionPreference = 'Stop'
+$consumerTest = Join-Path $PSScriptRoot 'tests/test_offsite_ack_content.py'
+& python $consumerTest
+if ($LASTEXITCODE -ne 0) { throw 'Keycloak off-site ACK consumer content fixtures failed' }
+if ($ConsumerOnly) { $global:LASTEXITCODE = 0; return }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $helper = Join-Path $PSScriptRoot 'create-keycloak-offsite-ack.ps1'
 $ssh = (Get-Command ssh-keygen -ErrorAction Stop).Source

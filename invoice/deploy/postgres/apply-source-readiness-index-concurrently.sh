@@ -255,13 +255,16 @@ finalize_record() {
   local status=$?
   trap - EXIT ERR
   set +e
+  if (( status != 0 )); then OPERATION_STATUS=failed; fi
   local finish_utc duration_seconds compose_hash env_hash migration_hash
   finish_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   duration_seconds=$((SECONDS-START_SECONDS))
-  compose_hash=$(sha256sum "$COMPOSE_FILE" | cut -d' ' -f1)
-  env_hash=$(sha256sum "$PRODUCTION_ENV_FILE" | cut -d' ' -f1)
+  compose_hash=$(sha256sum "$COMPOSE_FILE" | cut -d' ' -f1) || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
+  env_hash=$(sha256sum "$PRODUCTION_ENV_FILE" | cut -d' ' -f1) || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
   migration_hash='unavailable'
-  [[ -s "$RECORD_DIR/schema-migrations-after.tsv" ]] && migration_hash=$(sha256sum "$RECORD_DIR/schema-migrations-after.tsv" | cut -d' ' -f1)
+  if [[ -s "$RECORD_DIR/schema-migrations-after.tsv" ]]; then
+    migration_hash=$(sha256sum "$RECORD_DIR/schema-migrations-after.tsv" | cut -d' ' -f1) || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
+  fi
   cat >"$RECORD_DIR/result.env" <<RESULT
 status=$OPERATION_STATUS
 operation=rc39_source_readiness_index_concurrent_prebuild
@@ -278,14 +281,26 @@ schema_migrations_sha256=$migration_hash
 schema_migrations_written_by_operator=false
 sub2api_newapi_touched=false
 RESULT
+  if [[ $? != 0 ]]; then (( status != 0 )) || status=1; OPERATION_STATUS=failed; fi
   (
     cd "$RECORD_DIR" || exit 1
     find . -type f ! -name 'RC39-SOURCE-READINESS-INDEX.sha256' -printf '%P\0' |
       sort -z | xargs -0 sha256sum -- >RC39-SOURCE-READINESS-INDEX.sha256
-  )
-  chmod -R go-rwx -- "$RECORD_DIR"
-  sync -f "$RECORD_ROOT" 2>/dev/null || sync
+  ) || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
+  chmod -R go-rwx -- "$RECORD_DIR" || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
+  sync -f "$RECORD_ROOT" 2>/dev/null || sync || { (( status != 0 )) || status=1; OPERATION_STATUS=failed; }
   if (( status != 0 )); then
+    # Best effort only: inability to retain failure evidence never restores a
+    # successful exit. Rebind the manifest after changing the result status.
+    if grep -q '^status=' "$RECORD_DIR/result.env" 2>/dev/null; then
+      sed -i 's/^status=.*/status=failed/' "$RECORD_DIR/result.env" 2>/dev/null || true
+    else
+      printf 'status=failed\n' >"$RECORD_DIR/result.env" 2>/dev/null || true
+    fi
+    ( cd "$RECORD_DIR" && find . -type f ! -name 'RC39-SOURCE-READINESS-INDEX.sha256' -printf '%P\0' |
+        sort -z | xargs -0 sha256sum -- >RC39-SOURCE-READINESS-INDEX.sha256 ) 2>/dev/null || true
+    chmod -R go-rwx -- "$RECORD_DIR" 2>/dev/null || true
+    sync -f "$RECORD_ROOT" 2>/dev/null || sync || true
     printf 'operator failed closed; inspect and sign the failure evidence if retained: %s\n' "$RECORD_DIR" >&2
   fi
   exit "$status"

@@ -39,7 +39,7 @@ source "$script_dir/../backup/docker-cleanup-state.sh"
 # shellcheck source=deploy/rehearsal/shadow-eval-lib.sh
 source "$script_dir/shadow-eval-lib.sh"
 capacity_validator="$script_dir/../backup/validate-restore-postgres-capacity.sh"
-test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
+test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 
 backup_name=""
 image_tag=""
@@ -154,9 +154,9 @@ rehearsal_root=${REHEARSAL_ROOT:-/root/invoice-system/rehearsals}
 
 for command in age docker sha256sum ssh-keygen stat grep awk comm sort mktemp; do command -v "$command" >/dev/null; done
 test -d "$BACKUP_DIR"
-test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE"
+test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 (( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
-test -f "$AGE_IDENTITY_FILE" && test ! -L "$AGE_IDENTITY_FILE" && test -s "$AGE_IDENTITY_FILE"
+test -f "$AGE_IDENTITY_FILE" && test ! -L "$AGE_IDENTITY_FILE" && test -s "$AGE_IDENTITY_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 
 tools_image="invoice-system-tools:$image_tag"
 postgres_image="invoice-postgres:$image_tag"
@@ -212,7 +212,7 @@ database_backup="$BACKUP_DIR/$backup_name.postgres.dump.age"
 manifest_file="$BACKUP_DIR/$backup_name.sha256"
 signature_file="$manifest_file.sig"
 for file in "$database_backup" "$manifest_file" "$signature_file"; do
-  test -f "$file" && test ! -L "$file" && test -s "$file"
+  test -f "$file" && test ! -L "$file" && test -s "$file" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 done
 (( $(stat -c '%s' "$manifest_file") <= 65536 ))
 (( $(stat -c '%s' "$signature_file") <= 16384 ))
@@ -343,7 +343,7 @@ done
 # official image's transient bootstrap postmaster before its restart into
 # the final server. Require the init-complete marker plus three consecutive
 # final-server readiness checks.
-until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+until docker logs "$container" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null; do
   (( SECONDS < deadline )) || { echo 'shadow-eval PostgreSQL initialization did not complete' >&2; exit 1; }
   sleep 1
 done
@@ -496,6 +496,14 @@ set -e
 tool_verdict=$(_shadow_eval_scalar "$report_json" verdict)
 if [[ "$verdict" != "$tool_verdict" ]]; then
   echo "shadow-eval: bash-recomputed verdict ($verdict) disagrees with the tool's own verdict ($tool_verdict) -- treating this as a rehearsal-tooling failure" >&2
+  exit 1
+fi
+
+# A complete report does not make Docker/tool execution failure successful.
+# Only the documented ready(0)/not_ready(3) process status may agree with the
+# independently recomputed result. Keep execution failure distinct (1).
+if (( tool_exit != recomputed_exit )); then
+  echo "shadow-eval: tool exit $tool_exit disagrees with verdict exit $recomputed_exit" >&2
   exit 1
 fi
 

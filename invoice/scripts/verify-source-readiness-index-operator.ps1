@@ -1,4 +1,9 @@
+param([switch]$PlanFixturesOnly)
 $ErrorActionPreference = 'Stop'
+
+& python (Join-Path $PSScriptRoot 'tests/test_readiness_plan.py')
+if ($LASTEXITCODE -ne 0) { throw 'readiness plan behavioral fixtures failed' }
+if ($PlanFixturesOnly) { $global:LASTEXITCODE = 0; return }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $operatorPath = Join-Path $projectRoot 'deploy\postgres\apply-source-readiness-index-concurrently.sh'
@@ -279,8 +284,10 @@ foreach ($path in @($operatorPath, $verifierPath)) {
 $bash = Get-Command bash -ErrorAction Stop
 Push-Location $projectRoot
 try {
-    & $bash.Source -n 'deploy/postgres/apply-source-readiness-index-concurrently.sh' 'deploy/postgres/verify-source-readiness-index.sh'
-    if ($LASTEXITCODE -ne 0) { throw 'RC39 readiness index shell syntax failed' }
+    foreach ($shellScript in @('deploy/postgres/apply-source-readiness-index-concurrently.sh', 'deploy/postgres/verify-source-readiness-index.sh')) {
+        & $bash.Source -n $shellScript
+        if ($LASTEXITCODE -ne 0) { throw "RC39 readiness index shell syntax failed: $shellScript" }
+    }
 } finally {
     Pop-Location
 }

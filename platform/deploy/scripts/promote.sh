@@ -94,9 +94,12 @@ validate_path audit-log "$audit_log" || exit 1
 [[ "$remote_name" =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "PROMOTE FAIL: remote 非法" >&2; exit 1; }
 if [ "$test_mode" -eq 1 ]; then
   [ "${XM_DEPLOY_TEST_MODE:-0}" = "1" ] || { echo "PROMOTE FAIL: --test-mode 需要 XM_DEPLOY_TEST_MODE=1" >&2; exit 1; }
-  case "$repo_path:$checkout_path:$status_dir:$audit_log" in
-    /srv/*) echo "PROMOTE FAIL: test-mode 禁止使用 /srv 路径" >&2; exit 1 ;;
-  esac
+  for test_path in "$repo_path" "$checkout_path" "$status_dir" "$audit_log"; do
+    protected_path="$(readlink -m -- "$test_path" 2>/dev/null)" || exit 1
+    case "$protected_path" in
+      /srv|/srv/*) echo "PROMOTE FAIL: test-mode 禁止使用 /srv 路径" >&2; exit 1 ;;
+    esac
+  done
 fi
 if [ "$test_mode" -eq 0 ]; then
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -146,8 +149,11 @@ git --git-dir="$repo_path" rev-parse --is-bare-repository 2>/dev/null | grep -qx
 }
 resolved_checkout="$(readlink -f -- "$checkout_path" 2>/dev/null || true)"
 [ "$resolved_checkout" = "$checkout_path" ] || { echo "PROMOTE FAIL: checkout 路径解析后越界或不可验证" >&2; exit 1; }
-git -C "$checkout_path" rev-parse --show-toplevel >/dev/null 2>&1 || {
+checkout_top="$(git -C "$checkout_path" rev-parse --show-toplevel 2>/dev/null)" || {
   echo "PROMOTE FAIL: checkout 不是 Git checkout" >&2; exit 1;
+}
+[ "$(cd -- "$checkout_top" 2>/dev/null && pwd -P)" = "$resolved_checkout" ] || {
+  echo "PROMOTE FAIL: checkout must be the actual Git top-level" >&2; exit 1;
 }
 git -C "$checkout_path" rev-parse --is-shallow-repository 2>/dev/null | grep -qx false || {
   echo "PROMOTE FAIL: 拒绝在 shallow checkout 晋级" >&2; exit 1;
@@ -207,7 +213,9 @@ git --git-dir="$repo_path" config --get receive.denyNonFastForwards | grep -qx t
 git --git-dir="$repo_path" config --get receive.denyDeletes | grep -qx true || {
   echo "PROMOTE FAIL: bare repo 未启用 denyDeletes" >&2; exit 1;
 }
-trusted_hook="$checkout_path/deploy/git-hooks/pre-receive"
+project_path="$checkout_path"
+[ ! -d "$checkout_path/platform/deploy/git-hooks" ] || project_path="$checkout_path/platform"
+trusted_hook="$project_path/deploy/git-hooks/pre-receive"
 [ -f "$trusted_hook" ] && [ ! -L "$trusted_hook" ] && [ -x "$trusted_hook" ] || {
   echo "PROMOTE FAIL: checkout 缺少版本化 pre-receive hook" >&2; exit 1;
 }
@@ -242,8 +250,20 @@ marker_lock_owned=0
 audit_written=0
 
 cleanup_marker_lock() {
+  local file expected
   if [ "$marker_lock_owned" -eq 1 ]; then
-    rmdir -- "$marker_lock" 2>/dev/null || true
+    # Only remove this invocation's two files. A replaced/unknown lock is retained.
+    [ -d "$marker_lock" ] && [ ! -L "$marker_lock" ] || return 0
+    for file in pid sha; do
+      expected="$source_sha"
+      [ "$file" != pid ] || expected="$$"
+      if [ -e "$marker_lock/$file" ] || [ -L "$marker_lock/$file" ]; then
+        [ -f "$marker_lock/$file" ] && [ ! -L "$marker_lock/$file" ] &&
+          [ "$(cat -- "$marker_lock/$file" 2>/dev/null)" = "$expected" ] || return 0
+      fi
+    done
+    rm -f -- "$marker_lock/pid" "$marker_lock/sha" 2>/dev/null || return 0
+    rmdir -- "$marker_lock" 2>/dev/null || return 0
     marker_lock_owned=0
   fi
 }

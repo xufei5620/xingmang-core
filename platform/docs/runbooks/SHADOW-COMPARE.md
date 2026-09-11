@@ -55,9 +55,15 @@ GRANT SELECT  ON public.relay_profit_daily   TO xm_shadow;
 
 ## 每天跑一次
 
+在 `platform/` 项目目录构建并直接运行二进制；构建失败时不执行旧二进制。
+
 ```bash
-go run ./cmd/platform-shadow -environment production
+go build -o ./platform-shadow ./cmd/platform-shadow &&
+  ./platform-shadow -environment production
 ```
+
+直接执行保留工具的 0/1/2 退出码；`go run` 会把非零工具退出码统一包装为 1，
+不能用于下面按退出码分类的正式记录。构建产物按当前平台选择可执行文件后缀。
 
 不带 `-from/-to` 就是**昨天往前的 14 天**(CST)。为什么到昨天为止:今天的行还在被
 采集任务反复覆盖(§5.3「今日可覆盖、过去冻结」),拿它对比会得到一个随时间变化的

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+project_root=${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 temporary=$(mktemp -d)
 trap 'rm -rf -- "$temporary"' EXIT
 state_file="$temporary/resource-present"
@@ -20,9 +20,19 @@ if [[ "${1:-}" == container && "${2:-}" == inspect ]] ||
   case "$mode" in
     absent) exit 1 ;;
     unknown) exit 2 ;;
+    inspect-denied|query-denied) exit 1 ;;
     present|persistent) exit 0 ;;
     removable) [[ -e "$state_file" ]]; exit ;;
   esac
+fi
+if [[ "${1:-}" == container && "${2:-}" == ls ]] ||
+   [[ "${1:-}" == network && "${2:-}" == ls ]]; then
+  case "$mode" in
+    unknown|query-denied) exit 2 ;;
+    present|persistent|inspect-denied) printf '%s\n' test-container test-network ;;
+    removable) if [[ -e "$state_file" ]]; then printf '%s\n' test-container test-network; fi ;;
+  esac
+  exit 0
 fi
 if [[ "${1:-}" == rm ]] || [[ "${1:-}" == network && "${2:-}" == rm ]]; then
   [[ "$mode" == removable ]] && rm -f -- "$state_file"
@@ -60,5 +70,9 @@ touch "$state_file"
 FAKE_DOCKER_MODE=removable expect_status 0 remove_docker_resource_strict network test-network
 [[ ! -e "$state_file" ]]
 FAKE_DOCKER_MODE=unknown expect_status 2 remove_docker_resource_strict container test-container
+for kind in container network; do
+  FAKE_DOCKER_MODE=inspect-denied expect_status 1 docker_resource_absent "$kind" "test-$kind"
+  FAKE_DOCKER_MODE=query-denied expect_status 2 docker_resource_absent "$kind" "test-$kind"
+done
 
 printf '%s\n' 'Restore Docker cleanup three-state contract passed.'

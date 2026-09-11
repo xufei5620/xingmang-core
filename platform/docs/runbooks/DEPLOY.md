@@ -42,13 +42,36 @@ staging 覆盖通过 `staging` profile 启用 `001_staging_seed.sql`。种子数
 
 ## 3. production 晋级与部署
 
-生产晋级分两步，必须由产品负责人在服务器上执行：
+生产晋级分两步，必须由产品负责人在服务器上执行。以下为 DEPLOY0 流程，
+其探针和对应 Nginx 模板固定使用 `127.0.0.1:18089`。操作前须由负责人确认
+该流程的获批 env 已显式配置 `WEB_PORT=18089`；不能直接套用 example 的 8088。
+`deploy-local.sh` 所用的 8088 与 Compose 现有默认保持不变，本节不授权迁移
+生产端口或修改 Nginx。
+
+命令从已获批并完成 monorepo 真相源切换的 checkout 的 `platform/` 目录执行。
+需要已有 `jq`；先只读解析同一组 base/override/env 的实际 Compose 模型，仅
+验证 web 的端口映射，不打印模型或 env 内容。解析失败或端口不匹配立即停止，
+不会进入晋级/部署；由负责人排查配置，不能删除此检查继续执行：
 
 ```bash
-deploy/scripts/promote.sh --confirm PROMOTE-PRODUCTION \
-  --reason "release approval XM-C-DEPLOY0-b"
-deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION \
-  --reason "production rollout XM-C-DEPLOY0-b"
+(
+  set -euo pipefail
+  docker compose -p xingmang-prod -f deploy/compose/launch.yaml \
+    -f deploy/compose/server-prod.yaml --env-file deploy/compose/.env \
+    config --format json |
+    jq -e '.services.web.ports as $ports |
+      ($ports | length) == 1 and
+      $ports[0].host_ip == "127.0.0.1" and
+      ($ports[0].published | tostring) == "18089" and
+      $ports[0].target == 80' >/dev/null || {
+        echo "DEPLOY0 port preflight failed; require approved 127.0.0.1:18089 -> web:80" >&2
+        exit 1
+      }
+  deploy/scripts/promote.sh --confirm PROMOTE-PRODUCTION \
+    --reason "release approval XM-C-DEPLOY0-b"
+  deploy/scripts/deploy.sh prod --confirm DEPLOY-PRODUCTION \
+    --reason "production rollout XM-C-DEPLOY0-b"
+)
 ```
 
 两个脚本都要求显式确认和非空原因；非交互环境缺少确认会直接拒绝。晋级脚本

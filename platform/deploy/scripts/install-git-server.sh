@@ -53,6 +53,14 @@ validate_path() {
     */../*|*/./*) echo "INSTALL FAIL: $label 不得包含 . 或 .. 路径段" >&2; return 1 ;;
   esac
   [ "$value" != "/" ] || { echo "INSTALL FAIL: $label 不能是根目录" >&2; return 1; }
+  # Resolve existing ancestors before any install/chown, including symlink aliases.
+  local resolved
+  resolved="$(readlink -m -- "$value" 2>/dev/null)" || {
+    echo "INSTALL FAIL: $label 无法规范化" >&2; return 1;
+  }
+  [ "$resolved" = "$value" ] || {
+    echo "INSTALL FAIL: $label 必须使用无别名的规范路径" >&2; return 1;
+  }
 }
 
 validate_path repo "$repo_path"
@@ -67,6 +75,7 @@ case "$git_user" in
   root|daemon|nobody) echo "INSTALL FAIL: 禁止使用高风险系统用户" >&2; exit 1 ;;
 esac
 repo_parent="$(dirname -- "$repo_path")"
+validate_path repo-parent "$repo_parent"
 case "$ci_dir/" in
   "$repo_parent/"* ) echo "INSTALL FAIL: ci-dir 不能位于仓库父目录内" >&2; exit 1 ;;
 esac

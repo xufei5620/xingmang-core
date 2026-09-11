@@ -11,6 +11,17 @@ docker_resource_absent() {
     return 1
   fi
   docker info >/dev/null 2>&1 || return 2
+  # A reachable daemon does not make a denied/failed inspect mean not-found.
+  # Require a successful inventory and compare the complete resource name.
+  local names observed
+  if [[ "$kind" == container ]]; then
+    names=$(docker container ls --all --format '{{.Names}}') || return 2
+  else
+    names=$(docker network ls --format '{{.Name}}') || return 2
+  fi
+  while IFS= read -r observed; do
+    [[ "$observed" != "$name" ]] || return 1
+  done <<<"$names"
   return 0
 }
 

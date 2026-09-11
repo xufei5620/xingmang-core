@@ -3,8 +3,10 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 Push-Location $projectRoot
 try {
-    $candidateFiles = @(git ls-files --cached --others --exclude-standard)
-    if ($LASTEXITCODE -ne 0 -or $candidateFiles.Count -eq 0) {
+    $candidateOutput = @(& git ls-files -z --cached --others --exclude-standard)
+    $enumerationExit = $LASTEXITCODE
+    $candidateFiles = @(($candidateOutput -join "`n").Split([char]0) | Where-Object { $_ -ne '' } | Sort-Object -Unique)
+    if ($enumerationExit -ne 0 -or $candidateFiles.Count -eq 0) {
         throw 'cannot enumerate release files for secret scanning'
     }
     $forbiddenNames = @($candidateFiles | Where-Object {
@@ -29,9 +31,16 @@ try {
     )
     $findings = @()
     foreach ($pattern in $patterns) {
-        $matches = @(rg -l -I --pcre2 --glob '!web/dist/**' --glob '!web/node_modules/**' -- $pattern . 2>$null)
-        if ($LASTEXITCODE -gt 1) { throw 'secret scan failed to execute' }
-        $findings += $matches
+        # Git defines the release set, including force-added ignored files.
+        # Explicit bounded batches preserve whitespace without scanning ignored
+        # untracked runtime data or allowing a second set of ignore rules.
+        for ($offset = 0; $offset -lt $candidateFiles.Count; $offset += 32) {
+            $last = [Math]::Min($offset + 31, $candidateFiles.Count - 1)
+            $batch = @($candidateFiles[$offset..$last] | ForEach-Object { './' + $_ })
+            $matches = @(rg -l -I --pcre2 --no-ignore --hidden -- $pattern @batch 2>$null)
+            if ($LASTEXITCODE -notin @(0, 1)) { throw 'secret scan failed to execute' }
+            $findings += $matches
+        }
     }
     $findings = @($findings | Sort-Object -Unique)
     if ($findings.Count -ne 0) {

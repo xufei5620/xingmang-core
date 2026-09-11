@@ -174,11 +174,15 @@ foreach ($required in @(
 
 Push-Location $projectRoot
 try {
-    bash -n deploy/postgres/apply-balance-history-cleanup.sh `
-        deploy/postgres/plan-balance-history-cleanup.sh `
-        deploy/postgres/rehearse-balance-history-cleanup.sh `
-        deploy/backup/restore-drill.sh
-    if ($LASTEXITCODE -ne 0) { throw 'cleanup operator/rehearsal shell syntax failed' }
+    foreach ($shellScript in @(
+        'deploy/postgres/apply-balance-history-cleanup.sh',
+        'deploy/postgres/plan-balance-history-cleanup.sh',
+        'deploy/postgres/rehearse-balance-history-cleanup.sh',
+        'deploy/backup/restore-drill.sh'
+    )) {
+        bash -n $shellScript
+        if ($LASTEXITCODE -ne 0) { throw "cleanup operator/rehearsal shell syntax failed: $shellScript" }
+    }
 } finally {
     Pop-Location
 }

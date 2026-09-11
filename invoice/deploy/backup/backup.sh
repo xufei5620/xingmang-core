@@ -19,15 +19,16 @@ backup_schema_mode=${BACKUP_SCHEMA_MODE:-post-0011}
   exit 2
 }
 
-for command in age docker sha256sum flock tar find ssh-keygen stat cmp; do command -v "$command" >/dev/null; done
+for command in age docker sha256sum flock tar find ssh-keygen stat cmp realpath; do command -v "$command" >/dev/null; done
 test -s "$AGE_RECIPIENT_FILE"
 test -d "$SOURCE_STATE_ROOT"
 test -d "$SOURCE_CUTOVER_ROOT"
 state_root=$(cd "$SOURCE_STATE_ROOT" && pwd -P)
 cutover_root=$(cd "$SOURCE_CUTOVER_ROOT" && pwd -P)
 [[ "$cutover_root" == "$state_root/cutover" ]] || { echo 'SOURCE_CUTOVER_ROOT must resolve to SOURCE_STATE_ROOT/cutover for atomic source-state backup' >&2; exit 1; }
-test -f "$BACKUP_SIGNING_KEY_FILE" && test ! -L "$BACKUP_SIGNING_KEY_FILE" && test -s "$BACKUP_SIGNING_KEY_FILE"
-test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE"
+export SOURCE_STATE_ROOT="$state_root" SOURCE_CUTOVER_ROOT="$cutover_root"
+test -f "$BACKUP_SIGNING_KEY_FILE" && test ! -L "$BACKUP_SIGNING_KEY_FILE" && test -s "$BACKUP_SIGNING_KEY_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
+test -f "$BACKUP_ALLOWED_SIGNERS_FILE" && test ! -L "$BACKUP_ALLOWED_SIGNERS_FILE" && test -s "$BACKUP_ALLOWED_SIGNERS_FILE" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 (( $(stat -c '%s' "$BACKUP_SIGNING_KEY_FILE") <= 65536 ))
 (( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
 signing_mode=$(stat -c '%a' "$BACKUP_SIGNING_KEY_FILE")
@@ -185,6 +186,75 @@ record_running_service() {
   fi
 }
 
+verify_backup_mount() {
+  local container=$1 destination=$2 expected_type=$3 expected_resource=$4 observed resource
+  local field=Source
+  [[ "$expected_type" != volume ]] || field=Name
+  if ! observed=$(docker inspect --format "{{range .Mounts}}{{if eq .Destination \"$destination\"}}{{.Type}}|{{.$field}}{{\"\\n\"}}{{end}}{{end}}" "$container"); then
+    echo "cannot inspect backup mount identity: $destination" >&2
+    return 1
+  fi
+  # Exactly one mount at the destination, with the required storage type.
+  [[ "$observed" == "$expected_type|"* && "$observed" != *$'\n'* ]] || {
+    echo "backup mount identity is missing, duplicated or has the wrong type: $destination" >&2
+    return 1
+  }
+  resource=${observed#*|}
+  if [[ "$expected_type" == bind ]]; then
+    if ! resource=$(realpath -e -- "$resource"); then
+      echo "backup mount identity is not an existing physical path: $destination" >&2
+      return 1
+    fi
+  fi
+  [[ "$resource" == "$expected_resource" ]] || {
+    echo "backup mount identity does not match the reviewed resource: $destination" >&2
+    return 1
+  }
+}
+
+verify_backup_resource_identity() {
+  local compose_scope=$1 service=$2 container_output labels config expected_config
+  local -a container_ids=()
+  local -a compose=()
+  if [[ "$compose_scope" == source ]]; then
+    compose=("${source_compose[@]}"); expected_config=$source_compose_file
+  else
+    compose=("${prod_compose[@]}"); expected_config=$prod_compose_file
+  fi
+  # Include stopped containers without starting them. The same Compose/env
+  # scope will later restore only the services that were running beforehand.
+  if ! container_output=$("${compose[@]}" ps -a -q "$service"); then
+    echo "cannot query backup container identity: $service" >&2
+    return 1
+  fi
+  [[ -z "$container_output" ]] || mapfile -t container_ids <<<"$container_output"
+  (( ${#container_ids[@]} == 1 )) || {
+    echo "backup container identity requires exactly one installed container: $service" >&2
+    return 1
+  }
+  if ! labels=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}' "${container_ids[0]}"); then
+    echo "cannot inspect backup container identity: $service" >&2
+    return 1
+  fi
+  [[ "$labels" == "$service|"* && "$labels" != *$'\n'* ]] || {
+    echo "backup container identity has the wrong service: $service" >&2
+    return 1
+  }
+  config=${labels#*|}
+  if ! config=$(realpath -e -- "$config") || ! expected_config=$(realpath -e -- "$expected_config") || [[ "$config" != "$expected_config" ]]; then
+    echo "backup container identity has the wrong Compose project file: $service" >&2
+    return 1
+  fi
+  if [[ "$compose_scope" == source ]]; then
+    verify_backup_mount "${container_ids[0]}" /state bind "$state_root/$service" || return 1
+    if [[ "$service" != *-identities ]]; then
+      verify_backup_mount "${container_ids[0]}" /cutover bind "$cutover_root/${service%%-*}" || return 1
+    fi
+  else
+    verify_backup_mount "${container_ids[0]}" /data/documents volume "$document_volume" || return 1
+  fi
+}
+
 verify_services_running() {
   local compose_scope=$1
   shift
@@ -300,6 +370,10 @@ done
 # Freeze every writer before taking any component snapshot. The whole source
 # directory is archived, including pending spool, inventory, reconciliation and
 # lock metadata introduced by future compatible agent versions.
+for service in "${source_services[@]}"; do
+  verify_backup_resource_identity source "$service"
+done
+verify_backup_resource_identity prod api
 for service in "${source_services[@]}"; do
   record_running_service source "$service"
 done

@@ -68,7 +68,7 @@ $trickyValues = @(
     "plain",
     "has a space",
     "single'quote",
-    'K:\发票\wt-XM-INV-TOOLCHAIN with 空格 and a''quote',
+    'G:\xingmang\09-wt\发票-toolchain-fixture with 空格 and a''quote',
     'semi;colon$var`backtick"quote'
 )
 foreach ($value in $trickyValues) {
@@ -95,11 +95,11 @@ Write-Host 'ConvertTo-PowerShellArgumentArrayLiteral round-trips correctly, incl
 
 # --- New-DetachedRunWrapperScriptText --------------------------------------
 $wrapperText = New-DetachedRunWrapperScriptText `
-    -ScriptPath 'K:\发票\wt-XM-INV-TOOLCHAIN\scripts\release-image-gate.ps1' `
+    -ScriptPath 'G:\xingmang\09-wt\发票-toolchain-fixture\scripts\release-image-gate.ps1' `
     -ScriptArguments @('-ReleaseName', "it's-rc68", '-IdPMode', 'keycloak') `
-    -WorkingDirectory 'K:\发票\wt-XM-INV-TOOLCHAIN' `
-    -TranscriptPath 'K:\发票\wt-XM-INV-TOOLCHAIN\logs\detached-runs\example\transcript.log' `
-    -ExitCodePath 'K:\发票\wt-XM-INV-TOOLCHAIN\logs\detached-runs\example\exitcode.txt'
+    -WorkingDirectory 'G:\xingmang\09-wt\发票-toolchain-fixture' `
+    -TranscriptPath 'G:\xingmang\09-wt\发票-toolchain-fixture\logs\detached-runs\example\transcript.log' `
+    -ExitCodePath 'G:\xingmang\09-wt\发票-toolchain-fixture\logs\detached-runs\example\exitcode.txt'
 Assert-TextParsesAsPowerShell -Text $wrapperText -Label 'New-DetachedRunWrapperScriptText'
 foreach ($required in @('chcp.com 65001', '[Console]::OutputEncoding', '$OutputEncoding', 'exitcode.txt', 'transcript.log', "it''s-rc68")) {
     if (-not $wrapperText.Contains($required, [StringComparison]::Ordinal)) {

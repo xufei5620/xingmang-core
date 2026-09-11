@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FINANCE_READ_PERMISSION } from "../api/finance";
 import { InvoiceConsolePanel, type InvoiceConsoleMode } from "./InvoiceConsolePanel";
@@ -92,6 +92,7 @@ describe("InvoiceConsolePanel（CR-0005 平台线 g/h/i/j/k）", () => {
 
     afterEach(() => {
       vi.unstubAllGlobals();
+      vi.restoreAllMocks();
     });
 
     it("签发成功：渲染带 iframe 的正常态", async () => {
@@ -105,6 +106,31 @@ describe("InvoiceConsolePanel（CR-0005 平台线 g/h/i/j/k）", () => {
       render(<InvoiceConsolePanel mode="sub2api" scopes={[FINANCE_READ_PERMISSION]} />);
       const frame = (await screen.findByTitle("开票")) as HTMLIFrameElement;
       expect(frame.src).toBe(`${ORIGIN}/embed/admin/sub2api`);
+      const postMessage = vi.spyOn(frame.contentWindow!, "postMessage");
+      fireEvent.load(frame);
+      expect(postMessage).toHaveBeenCalledWith(
+        { type: "xm-embed", version: 1, kind: "admin-assertion", assertion: "jws-value" },
+        ORIGIN,
+      );
+    });
+
+    it("iframe 请求刷新时重新签发断言", async () => {
+      setLocalConfig(ORIGIN);
+      let issued = 0;
+      stubFetch({
+        "/api/v1/auth/console-assertion": () => {
+          issued += 1;
+          return { status: 200, body: { assertion: `synthetic-${issued}`, expires_at: new Date(Date.now() + 300_000).toISOString() } };
+        },
+      });
+      render(<InvoiceConsolePanel mode="sub2api" scopes={[FINANCE_READ_PERMISSION]} />);
+      const frame = (await screen.findByTitle("开票")) as HTMLIFrameElement;
+      act(() => window.dispatchEvent(new MessageEvent("message", {
+        origin: ORIGIN,
+        source: frame.contentWindow,
+        data: { type: "xm-embed", version: 1, kind: "admin-assertion-needed" },
+      })));
+      await waitFor(() => expect(issued).toBe(2));
     });
 
     it("FINANCE_SCOPE_REQUIRED：显示无权访问，不渲染 iframe", async () => {

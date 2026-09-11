@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -135,6 +136,23 @@ func TestFileScheduleStoreDurableAndSharesEnvelopeWithCursor(t *testing.T) {
 		t.Fatalf("seed cursor CAS failed: matched=%t err=%v", matched, err)
 	}
 
+	beforeCursor, err := cursors.Load(ctx, state.SourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequences := FileSequenceStore{State: state}
+	beforeSequence, err := sequences.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched, err := sequences.CompareAndSwap(ctx, beforeSequence, SequenceState{Sequence: 1, LastBatchHash: strings.Repeat("a", 64)}); err != nil || !matched {
+		t.Fatalf("seed sequence CAS failed: matched=%t err=%v", matched, err)
+	}
+	beforeSequence, err = sequences.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	schedule := FileScheduleStore{State: state}
 	saved := ScheduleState{LastReconcileAt: "2026-08-21T00:00:00Z", LastFullAt: "2026-08-21T01:00:00Z"}
 	if err := schedule.Save(ctx, saved); err != nil {
@@ -147,8 +165,13 @@ func TestFileScheduleStoreDurableAndSharesEnvelopeWithCursor(t *testing.T) {
 		t.Fatalf("schedule was not durable: got=%#v err=%v", reloadedSchedule, err)
 	}
 	reloadedCursor, err := (FileCursorStore{State: reopened}).Load(ctx, state.SourceID)
-	if err != nil || reloadedCursor.ID != 3 {
+	if err != nil || reloadedCursor != beforeCursor {
 		t.Fatalf("saving the schedule must not disturb the cursor: cursor=%#v err=%v", reloadedCursor, err)
+	}
+
+	reloadedSequence, err := (FileSequenceStore{State: reopened}).Load(ctx)
+	if err != nil || reloadedSequence != beforeSequence {
+		t.Fatalf("saving the schedule lost published sequence history: got=%+v want=%+v err=%v", reloadedSequence, beforeSequence, err)
 	}
 
 	if err := schedule.Save(ctx, ScheduleState{LastReconcileAt: "not-a-time"}); err == nil {

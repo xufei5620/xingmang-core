@@ -99,15 +99,22 @@ if [ -x "$deploy_script" ] && [ -n "$release_sha" ]; then
   expect_success "staging green 提交执行部署链" env PATH="$bin:$PATH" D0B_TRACE="$trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --project xingmang-staging --health-url http://127.0.0.1:18088/healthz --ready-url http://127.0.0.1:18088/readyz --reason acceptance
   assert_text "staging 审计写 green" 'result=green' "$audit"
   assert_text "staging 审计含环境" 'environment=staging' "$audit"
-  if [ -f "$trace" ] && grep -Fq config "$trace" && grep -Fq build "$trace" && grep -Fq up "$trace"; then ok "命令顺序含 config/build/up"; else bad "命令顺序含 config/build/up"; fi
+  config_line="$(grep -n ' config ' "$trace" | head -1 | cut -d: -f1)"
+  build_line="$(grep -n ' build ' "$trace" | head -1 | cut -d: -f1)"
+  up_line="$(grep -n ' up ' "$trace" | head -1 | cut -d: -f1)"
+  if [ -n "$config_line" ] && [ -n "$build_line" ] && [ -n "$up_line" ] &&
+     [ "$config_line" -lt "$build_line" ] && [ "$build_line" -lt "$up_line" ]; then
+    ok "命令顺序为 config/build/up"
+  else
+    bad "命令顺序为 config/build/up"
+  fi
   expect_success "既有审计 hash 链可追加" env PATH="$bin:$PATH" D0B_TRACE="$trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --project xingmang-staging --health-url http://127.0.0.1:18088/healthz --ready-url http://127.0.0.1:18088/readyz --reason second-run
   sed -i 's/result=green/result=red/' "$audit"
   expect_failure "篡改审计 hash 链时拒绝追加" env PATH="$bin:$PATH" D0B_TRACE="$tmp/tamper.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason tamper
 
   expect_failure "未显式 test-mode 时拒绝临时部署路径" "$deploy_script" staging --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/no-test.audit" --reason no-test
 
-  expect_failure "prod 缺确认拒绝" env PATH="$bin:$PATH" D0B_TRACE="$tmp/prod.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" prod --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/prod.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason missing
-  if [ ! -s "$tmp/prod.trace" ]; then ok "prod 缺确认未执行 Docker"; else bad "prod 缺确认未执行 Docker"; fi
+  expect_success "production 确认判据及合法控制" python3 "$repo_root/tests/deploy/production-confirm.test.py"
 
   printf '%s\n' red > "$status_dir/$release_sha.status"
   expect_failure "red status 拒绝" env PATH="$bin:$PATH" D0B_TRACE="$tmp/red.trace" XM_DEPLOY_TEST_MODE=1 "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/red.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --reason red
@@ -130,11 +137,15 @@ exit 0
 
   fail_curl="$bin/curl-fail"
   write_executable "$fail_curl" '#!/usr/bin/env bash
-exit 7
+printf "curl %s\n" "$*" >> "${D0B_TRACE:?}"
+case "$*" in */readyz*) exit 7;; esac
+exit 0
 '
   expect_failure "ready 探针失败停止部署" env PATH="$bin:$PATH" D0B_TRACE="$tmp/probe-fail.trace" XM_DEPLOY_TEST_MODE=1 \
     "$deploy_script" staging --test-mode --probe-attempts 1 --repo "$checkout" --status-dir "$status_dir" --audit-log "$tmp/probe-fail.audit" \
       --docker-bin "$bin/docker" --curl-bin "$fail_curl" --reason probe-fail
+  assert_text "health 控制先通过" 'probe=health result=ok' "$tmp/stdout"
+  assert_text "失败来自 ready 目标" 'probe=ready result=fail' "$tmp/stderr"
   assert_text "探针失败写 red 审计" 'result=red' "$tmp/probe-fail.audit"
   if [ ! -e "$status_dir/.deploy-staging-$release_sha.lock" ]; then ok "正常失败释放部署锁"; else bad "正常失败释放部署锁"; fi
 
@@ -153,7 +164,11 @@ env >> '$tmp/notify.env'
     XM_DEPLOY_TEST_MODE=1 SECRET_SENTINEL=must-not-cross "$deploy_script" staging --test-mode --repo "$checkout" --status-dir "$status_dir" \
       --audit-log "$tmp/notify.audit" --docker-bin "$bin/docker" --curl-bin "$bin/curl" --notify-hook "$notify" --reason notify
   assert_text "通知 payload 含环境" 'environment=staging' "$tmp/notify.payload"
-  assert_not_text "通知环境不含调用者秘密" 'SECRET_SENTINEL=must-not-cross' "$tmp/notify.payload"
+  if [ -s "$tmp/notify.env" ] && ! grep -Fq 'SECRET_SENTINEL=must-not-cross' "$tmp/notify.env"; then
+    ok "通知环境已捕获且不含调用者秘密"
+  else
+    bad "通知环境已捕获且不含调用者秘密"
+  fi
 fi
 
 staging_yaml="$repo_root/deploy/compose/server-staging.yaml"

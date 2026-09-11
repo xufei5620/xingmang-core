@@ -51,13 +51,13 @@ restore_postgres_image="invoice-postgres:$INVOICE_IMAGE_TAG"
 docker image inspect "$restore_postgres_image" >/dev/null
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 capacity_validator="$script_dir/validate-restore-postgres-capacity.sh"
-test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator"
+test -f "$capacity_validator" && test ! -L "$capacity_validator" && test -s "$capacity_validator" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 cleanup_state_helper="$script_dir/docker-cleanup-state.sh"
-test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper"
+test -f "$cleanup_state_helper" && test ! -L "$cleanup_state_helper" && test -s "$cleanup_state_helper" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 # shellcheck source=deploy/backup/docker-cleanup-state.sh
 source "$cleanup_state_helper"
 balance_history_rehearsal="$script_dir/../postgres/rehearse-balance-history-cleanup.sh"
-test -f "$balance_history_rehearsal" && test ! -L "$balance_history_rehearsal" && test -s "$balance_history_rehearsal"
+test -f "$balance_history_rehearsal" && test ! -L "$balance_history_rehearsal" && test -s "$balance_history_rehearsal" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 if [[ "$restore_balance_history_rehearsal" == YES ]]; then
   [[ "$(stat -c '%u:%g:%a' "$balance_history_rehearsal")" == 0:0:700 ]] || {
     echo 'installed balance history rehearsal must be root:root mode 0700' >&2
@@ -74,13 +74,13 @@ restore_postgres_tmpfs_bytes=$(bash "$capacity_validator" "$restore_postgres_tmp
   "$host_available_bytes" "$docker_total_bytes")
 [[ "$restore_postgres_tmpfs_bytes" =~ ^[1-9][0-9]*$ ]]
 for file in "$DATABASE_BACKUP" "$DOCUMENT_BACKUP" "$SOURCE_STATE_BACKUP" "$METADATA_BACKUP" "$BACKUP_MANIFEST" "$BACKUP_SIGNATURE" "$BACKUP_ALLOWED_SIGNERS_FILE" "$AGE_IDENTITY_FILE" "$FIELD_KEYRING_FILE"; do
-  test -f "$file" && test ! -L "$file" && test -s "$file"
+  test -f "$file" && test ! -L "$file" && test -s "$file" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 done
 (( $(stat -c '%s' "$BACKUP_MANIFEST") <= 65536 ))
 (( $(stat -c '%s' "$BACKUP_SIGNATURE") <= 16384 ))
 (( $(stat -c '%s' "$BACKUP_ALLOWED_SIGNERS_FILE") <= 65536 ))
 if [[ -n "${KEYCLOAK_BACKUP:-}" ]]; then
-  test -f "$KEYCLOAK_BACKUP" && test ! -L "$KEYCLOAK_BACKUP" && test -s "$KEYCLOAK_BACKUP"
+  test -f "$KEYCLOAK_BACKUP" && test ! -L "$KEYCLOAK_BACKUP" && test -s "$KEYCLOAK_BACKUP" || { echo "required path must be a nonempty regular file without symlinks" >&2; exit 1; }
 fi
 for key in sub2api_payments_spool_key sub2api_identities_spool_key sub2api_usage_spool_key sub2api_credits_spool_key sub2api_balances_spool_key newapi_payments_spool_key newapi_identities_spool_key newapi_usage_spool_key newapi_credits_spool_key newapi_balances_spool_key sub2api_cutover_key newapi_cutover_key sub2api_balance_snapshot_key newapi_balance_snapshot_key; do
   test -s "$SOURCE_SPOOL_KEY_ROOT/$key"
@@ -261,6 +261,11 @@ for directory in "${source_directories[@]}"; do
     runtime_version=$SUB2API_RUNTIME_VERSION
     balances_signing_key_id=$SUB2API_BALANCES_SIGNING_KEY_ID
     [[ "$source_type" == newapi ]] && runtime_version=$NEWAPI_RUNTIME_VERSION && balances_signing_key_id=$NEWAPI_BALANCES_SIGNING_KEY_ID
+    if [[ "$source_type" == newapi ]]; then
+      cutover_runtime_version=${NEWAPI_CUTOVER_RUNTIME_VERSION:-$runtime_version}
+    else
+      cutover_runtime_version=${SUB2API_CUTOVER_RUNTIME_VERSION:-$runtime_version}
+    fi
     cutover_key_copy="$temporary/$source_type-cutover-key"
     install -m 0400 "$SOURCE_SPOOL_KEY_ROOT/${source_type}_cutover_key" "$cutover_key_copy"
     chown 65532:65532 "$cutover_key_copy"
@@ -270,6 +275,7 @@ for directory in "${source_directories[@]}"; do
     find "$cutover_dir" -type d -exec chmod 0700 {} +
     find "$cutover_dir" -type f -exec chmod 0600 {} +
     docker_args+=(--env SOURCE_SCHEMA_VERSION=3.0 --env "SOURCE_RUNTIME_VERSION=$runtime_version"
+      --env "SOURCE_CUTOVER_RUNTIME_VERSION=$cutover_runtime_version"
       --env "ELIGIBILITY_START_AT=$eligibility_start_at"
       --env "SOURCE_SIGNING_KEY_ID=$balances_signing_key_id"
       --env SOURCE_CUTOVER_MANIFEST_FILE=/cutover/manifest.enc
@@ -314,7 +320,7 @@ done
 # the final server. A single pg_isready can hit that transient instance and
 # race pg_restore into the restart window. Require the entrypoint's init-complete
 # marker plus three consecutive final-server readiness checks.
-until docker logs "$container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+until docker logs "$container" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null; do
   (( SECONDS < deadline )) || { echo 'restore PostgreSQL initialization did not complete' >&2; exit 1; }
   sleep 1
 done
@@ -401,4 +407,4 @@ if [[ "$restore_balance_history_rehearsal" == YES ]]; then
   "$balance_history_rehearsal" "$container" "$rehearsal_evidence"
 fi
 
-printf 'restore drill passed: public_tables=%s; source_states=4; database/document/source metadata matched; encrypted document samples verified\n' "$table_count"
+printf 'restore drill passed: public_tables=%s; source_states=%s; database/document/source metadata matched; encrypted document samples verified\n' "$table_count" "${#source_directories[@]}"

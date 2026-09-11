@@ -9,12 +9,13 @@
 
 各子系统的工作入口、红线与常用命令见 `platform/CLAUDE.md` 与 `invoice/README.md` / `invoice/RELEASE-READINESS.md`；跨子系统的接口变更走 `platform/docs/change-requests/`。
 
-## 与两个原工作仓库的关系（过渡期）
+## monorepo 源码与生产状态
 
-- 两条发布链（平台 `deploy/scripts/deploy-local.sh`、开票 `scripts/verify.ps1` → 镜像门禁 → 签名 tag → bundle → 服务器 stage2）目前仍按「仓库根 = 子系统根」写的，
-  切到本仓库为唯一工作仓库前，要把它们改成以 `platform/`、`invoice/` 为根（见 `docs/MONOREPO-MIGRATION.md`）。
-- 在那之前，本仓库用 `git subtree pull` 从原仓库同步：
-  ```
-  git subtree pull --prefix=platform <platform-repo> release/v0.1-launch -m "sync(platform): …"
-  git subtree pull --prefix=invoice  <invoice-repo>  <release-branch>    -m "sync(invoice): …"
-  ```
+- 本地候选已适配 monorepo：平台 Git 根与 `platform/` 项目根分开；开票工具从
+  `invoice/` 解析项目资产。当前审查/修复仍按任务指定的独立工作树和批准基线执行。
+- 源码适配不等于 main 已合并或生产已切换。上表是原生产版本的历史交接快照，
+  本地验证、签名演练或镜像加载都不代表新的部署。
+- 目录约定与剩余边界见 [迁移说明](docs/MONOREPO-MIGRATION.md)；
+  已执行步骤和未上线范围见 [切根交接](docs/handoffs/MONOREPO-CUTOVER.md)。
+- 两套历史已通过 subtree 纳入；旧 subtree pull 流程保留在历史记录中，
+  不作为当前 monorepo 的自动同步命令。main 集成、服务器真相源及远端目标须负责人确认。

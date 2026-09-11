@@ -19,6 +19,12 @@ function Test-OrdinalStringEqual {
 & (Join-Path $PSScriptRoot 'check-no-secrets.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'secret-material gate failed' }
 
+& (Join-Path $PSScriptRoot 'test-secret-scan-native-exits.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'secret scanner native exit fixtures failed' }
+
+& (Join-Path $PSScriptRoot 'test-secret-scan-file-set.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'secret scanner file-set fixtures failed' }
+
 & (Join-Path $PSScriptRoot 'verify-source-readiness-index-operator.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'RC39 concurrent readiness-index operator/verifier gate failed' }
 
@@ -28,6 +34,16 @@ if ($LASTEXITCODE -ne 0) { throw 'balance history cleanup operator/rehearsal gat
 & (Join-Path $PSScriptRoot 'test-release-image-gate.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'release image gate static fixtures failed' }
 
+& (Join-Path $PSScriptRoot 'test-untracked-git-state.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'configured untracked Git state fixtures failed' }
+
+& (Join-Path $PSScriptRoot 'test-hidden-release-artifacts.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'hidden release artifact fixtures failed' }
+
+$auditPwsh = (Get-Process -Id $PID).Path
+& $auditPwsh -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot 'test-full-audit.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'full-audit regression gate failed' }
+
 & (Join-Path $PSScriptRoot 'test-verify-postgres.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'PostgreSQL 15 container-network static fixtures failed' }
 
@@ -36,9 +52,27 @@ if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
 }
 Push-Location $projectRoot
 try {
+    bash scripts/test-deploy-log-markers.sh
+    if ($LASTEXITCODE -ne 0) { throw 'deployment log-marker boundary tests failed' }
+    bash scripts/test-roll-forward-recovery.sh
+    if ($LASTEXITCODE -ne 0) { throw 'roll-forward recovery boundary tests failed' }
+    bash scripts/test-restore-runtime-env.sh
+    if ($LASTEXITCODE -ne 0) { throw 'restore runtime environment tests failed' }
+    bash scripts/test-restore-cleanup-state.sh
+    if ($LASTEXITCODE -ne 0) { throw 'restore resource-state tests failed' }
+    bash scripts/test-roll-forward-image-tag.sh
+    if ($LASTEXITCODE -ne 0) { throw 'roll-forward image-tag boundary tests failed' }
+    bash deploy/rehearsal/test-shadow-eval.sh
+    if ($LASTEXITCODE -ne 0) { throw 'shadow-eval final-decision tests failed' }
+    bash scripts/test-deploy-file-guards.sh
+    if ($LASTEXITCODE -ne 0) { throw 'deployment file-type guard tests failed' }
+    bash scripts/test-backup-mount-identity.sh
+    if ($LASTEXITCODE -ne 0) { throw 'backup resource identity boundary tests failed' }
     bash scripts/test-clamav-healthcheck.sh
     if ($LASTEXITCODE -ne 0) { throw 'ClamAV deployment healthcheck tests failed' }
-    bash scripts/test-preserve-source-reader-roles.sh
+    & (Join-Path $PSScriptRoot 'test-posix-permissions-dispatch.ps1')
+    if ($LASTEXITCODE -ne 0) { throw 'POSIX permission dispatcher fixtures failed' }
+    & (Join-Path $PSScriptRoot 'test-posix-permissions.ps1') -RelativeTestPath 'scripts/test-preserve-source-reader-roles.sh' -ProjectRoot $projectRoot
     if ($LASTEXITCODE -ne 0) { throw 'source reader role-verifier envelope tests failed' }
 } finally {
     Pop-Location
@@ -159,8 +193,10 @@ if (Get-Command bash -ErrorAction SilentlyContinue) {
     try {
         $shellScripts = @(rg --files deploy scripts | Where-Object { $_ -like '*.sh' })
         $scriptsForBash = @($shellScripts | ForEach-Object { $_.Replace('\', '/') })
-        bash -n @scriptsForBash
-        if ($LASTEXITCODE -ne 0) { throw 'production shell syntax validation failed' }
+        foreach ($shellScript in $scriptsForBash) {
+            bash -n $shellScript
+            if ($LASTEXITCODE -ne 0) { throw "production shell syntax validation failed: $shellScript" }
+        }
 
         bash deploy/validate-keycloak-admin-allowlist.sh deploy/nginx/auth-admin.solov.cc.allow.conf.example
         if ($LASTEXITCODE -ne 0) { throw 'Keycloak admin allowlist example failed exact-host validation' }
@@ -452,13 +488,11 @@ try {
     $expectedKeycloakBase = 'quay.io/keycloak/keycloak:26.7.2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067'
     $keycloakDockerfile = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\keycloak\Dockerfile')
     Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase | Out-Null
+    Assert-KeycloakSourceRebuildLayout -DockerfileText $keycloakDockerfile | Out-Null
     if (-not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.image -Expected 'invoice-keycloak:verification-build') -or
         -not (Test-OrdinalStringEqual -Actual $idpBaseObject.services.keycloak.pull_policy -Expected 'never') -or
-        $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build' -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^(?:RUN|\s*&&) rm -rf /opt/keycloak/bin/client \\$').Count -ne 2 -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& rm -f /opt/keycloak/lib/lib/main/com\.microsoft\.sqlserver\.mssql-jdbc-\*\.jar \\$').Count -ne 2 -or
-        [regex]::Matches($keycloakDockerfile, '(?m)^\s*&& test ! -e /opt/keycloak/bin/client \\$').Count -ne 2) {
-        throw 'Keycloak build is not pinned to exact 26.7.2 or does not prune admin CLI/MSSQL artifacts in both stages'
+        $idpBaseObject.services.keycloak.PSObject.Properties.Name -contains 'build') {
+        throw 'Keycloak compose must use the verified local image, pull_policy never, and no build override'
     }
     $keycloakEnvironment = $idpBaseObject.services.keycloak.environment
     if ($keycloakEnvironment.KC_HOSTNAME -ne 'https://auth.solov.cc' -or
@@ -601,6 +635,9 @@ if ($v3Schema.additionalProperties -ne $false -or (@($v3Schema.properties.stream
     throw 'v3 economic stream or strict payment schema drifted'
 }
 if ($v3Example.schema_version -ne '3.0' -or $v3Example.stream_id -ne 'usage' -or $v3Example.scan_complete -ne $false -or $v3Example.records[0].entity_type -ne 'usage_event') { throw 'v3 fixed example drifted' }
+
+& (Join-Path $PSScriptRoot 'verify-source-agent-contracts.ps1') -ProjectRoot $projectRoot
+& (Join-Path $PSScriptRoot 'test-source-agent-contracts.ps1') -ProjectRoot $projectRoot
 
 if (-not $SkipPostgres) {
     & (Join-Path $PSScriptRoot 'test-upstream-projection-maintenance.ps1') `

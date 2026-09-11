@@ -1,6 +1,6 @@
 # XM-INV-KEYCLOAK-RETIRE 设计：开票系统退役 Keycloak
 
-> 状态：**设计阶段，不是实施授权**。依据 `docs/change-requests/CR-0006-console-auth-for-invoice-admin.md` g 条第二阶段、`docs/roadmap/CR-0006-console-auth-slices.md`、`docs/superpowers/plans/2026-09-03-cr0006-phase2-rollout.md`。配套实施计划见同目录 `2026-09-03-xm-inv-keycloak-retire.md`。开票仓库路径以 `K:/发票/wt-XM-INV-AUTOLOGIN`（分支 `ai/claude/XM-INV-AUTOLOGIN`）为准，只读核对，本设计不改开票仓库任何文件。
+> 状态：**设计阶段，不是实施授权**。依据 `docs/change-requests/CR-0006-console-auth-for-invoice-admin.md` g 条第二阶段、`docs/roadmap/CR-0006-console-auth-slices.md`、`docs/superpowers/plans/2026-09-03-cr0006-phase2-rollout.md`。配套实施计划见同目录 `2026-09-03-xm-inv-keycloak-retire.md`。历史核对来源为原独立开票仓库中的 `wt-XM-INV-AUTOLOGIN` 工作树（当时分支 `ai/claude/XM-INV-AUTOLOGIN`），仅记录历史出处，不作为当前路径或已验证上游的依据；当前工作区见 monorepo 根目录的 `docs/MONOREPO-MIGRATION.md` 和 `docs/handoffs/MONOREPO-CUTOVER.md`。本设计不改开票仓库任何文件。
 
 ## 0. 范围边界：与 phase2-rollout 的分工
 

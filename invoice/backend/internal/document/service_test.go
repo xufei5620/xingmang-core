@@ -64,8 +64,30 @@ func TestSavePDFRejectsInvalidOversizedAndScannerFailure(t *testing.T) {
 }
 
 func TestOpenAuthorizedRejectsTraversal(t *testing.T) {
-	store := LocalStore{Root: t.TempDir(), Scanner: ScannerFunc(cleanScanner)}
-	if _, err := store.OpenAuthorized("../secret.pdf"); err == nil {
-		t.Fatal("path traversal accepted")
+	// Both the store and its readable sibling are owned by this synthetic
+	// sandbox: a removed boundary must open a real file, not fail on ENOENT.
+	sandbox := t.TempDir()
+	root := filepath.Join(sandbox, "store")
+	if err := os.MkdirAll(filepath.Join(root, "issued"), 0o700); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(sandbox, "outside.pdf"), []byte("outside fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "issued", "allowed.pdf"), []byte("allowed fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := LocalStore{Root: root, Scanner: ScannerFunc(cleanScanner)}
+	file, err := store.OpenAuthorized("../outside.pdf")
+	if file != nil {
+		_ = file.Close()
+	}
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected traversal policy rejection for existing sibling, got %v", err)
+	}
+	file, err = store.OpenAuthorized("issued/allowed.pdf")
+	if err != nil {
+		t.Fatalf("allowed issued file rejected: %v", err)
+	}
+	_ = file.Close()
 }

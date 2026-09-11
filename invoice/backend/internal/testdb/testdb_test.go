@@ -173,7 +173,7 @@ func TestWorktreeRootIsFindableFromThisPackagesOwnSourceFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "backend", "go.mod")); err != nil {
+	if _, err := os.Stat(filepath.Join(root, "invoice", "backend", "go.mod")); err != nil {
 		t.Fatalf("worktreeRoot()=%q does not look like this repository's root: %v", root, err)
 	}
 }
@@ -293,7 +293,7 @@ func TestResolveURLRewritesAndEnsuresWhenGitRootIsFound(t *testing.T) {
 	rawURL := "postgres://postgres:secret@127.0.0.1:5432/invoice_test?sslmode=disable"
 	var ensuredDB string
 	got, err := resolveURL(rawURL,
-		func() (string, error) { return filepath.Join("K:", "repo", "wt-Feature-A"), nil },
+		func() (string, error) { return "wt-Feature-A", nil },
 		func(_ context.Context, sourceURL, dbName string) error {
 			if sourceURL != rawURL {
 				t.Fatalf("ensure received sourceURL %q, want %q", sourceURL, rawURL)
@@ -304,10 +304,10 @@ func TestResolveURLRewritesAndEnsuresWhenGitRootIsFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveURL returned error: %v", err)
 	}
-	if ensuredDB != "invoice_test_wt_feature_a" {
-		t.Fatalf("ensured database = %q, want invoice_test_wt_feature_a", ensuredDB)
+	if ensuredDB != "invoice_test_wt_feature_a_9b54bf40d850d2f4" {
+		t.Fatalf("ensured database = %q, want invoice_test_wt_feature_a_9b54bf40d850d2f4", ensuredDB)
 	}
-	if got != "postgres://postgres:secret@127.0.0.1:5432/invoice_test_wt_feature_a?sslmode=disable" {
+	if got != "postgres://postgres:secret@127.0.0.1:5432/invoice_test_wt_feature_a_9b54bf40d850d2f4?sslmode=disable" {
 		t.Fatalf("resolveURL = %q", got)
 	}
 }

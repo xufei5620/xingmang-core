@@ -44,6 +44,20 @@
       "type": "string",
       "required": false
     },
+    "subscription_amount": {
+      "type": "string",
+      "required": false
+    },
+    "subscription_cycle": {
+      "type": "string",
+      "required": false,
+      "enum": [
+        "monthly",
+        "yearly",
+        "weekly",
+        "other"
+      ]
+    },
     "next_renewal_on": {
       "type": "string",
       "required": false

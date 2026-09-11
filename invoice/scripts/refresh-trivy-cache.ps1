@@ -38,21 +38,21 @@ param(
     # as the "throwaway container" that copies extracted files into the cache
     # volume, rather than introducing and having to track a second pinned
     # utility image just for this.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$SeedImage = 'postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2',
 
     # Must match scripts/release-image-gate.ps1's own $trivyImage pin exactly
     # -- the mandatory post-seed self-check below runs this same Trivy
     # build against a staging volume, so it needs to be the same version
     # the real release gate will actually use.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$TrivyImage = 'ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969',
 
     # A small image already present in the local Docker image store, scanned
     # by the mandatory post-seed self-check below. Defaults to -SeedImage
     # itself (already required, already pinned by digest, already present)
     # rather than introduce a second pinned-image dependency just for this.
-    [ValidatePattern('^[0-9A-Za-z][0-9A-Za-z._/-]*@sha256:[0-9a-f]{64}$')]
+    [ValidatePattern('^(?:[0-9A-Za-z][0-9A-Za-z.-]*(?::[0-9]{1,5})?/)?[0-9A-Za-z][0-9A-Za-z._-]*(?:/[0-9A-Za-z][0-9A-Za-z._-]*)*(?::[0-9A-Za-z_][0-9A-Za-z_.-]{0,127})?@sha256:[0-9a-f]{64}$')]
     [string]$SelfCheckImageReference = $SeedImage,
 
     [AllowEmptyString()]
@@ -107,7 +107,7 @@ freshness check must succeed against it -- before any live component is
 replaced. A failed self-check leaves the live volume completely untouched.
 
 Takes the exact same shared lock release-image-gate.ps1 does
-(release\.trivy-0.74.release-gate.lock) for the whole run, so this script
+(a global mutex keyed by Docker daemon ID and volume) for the whole run, so this script
 and a concurrently running release gate can never race the same volume;
 like release-image-gate.ps1, it fails fast rather than waiting if that lock
 is already held -- in that case this script exits 75 (distinct from the
@@ -203,7 +203,7 @@ try {
         throw 'docker is not available (daemon not running, or this user cannot reach it)'
     }
 
-    $lockPath = Get-TrivyReleaseGateLockPath -ProjectRoot $projectRoot
+    $lockPath = Get-TrivyReleaseGateLockPath -Volume $TrivyCacheVolume
     Write-Host "Acquiring shared Trivy cache lock: $lockPath"
     $lock = Enter-TrivyReleaseGateLock -LockPath $lockPath
     try {
@@ -259,6 +259,7 @@ try {
             }
 
             if ($currentState.Digest -ceq $layer.Digest) {
+                Assert-TrivyCacheComponentCurrent -State $currentState -SubPath $component.SubPath
                 Write-Host '    already up to date (seeded digest matches upstream); skipping download and reseed'
                 $metadata = Read-TrivyDbMetadataText -JsonText $currentState.MetadataText
                 $summaries.Add([pscustomobject]@{ Name = $component.Name; UpdatedAt = $metadata.UpdatedAt; NextUpdate = $metadata.NextUpdate; Action = 'unchanged' })
@@ -277,11 +278,11 @@ try {
                 Write-Host "    reusing a previously downloaded, digest-verified blob: $blobPath"
             } else {
                 Invoke-TrivyCacheRangedDownload -Url $blobUrl -Size $layer.Size -PartCount $ParallelDownloads `
-                    -BearerToken $token -ProxyUrl $ProxyUrl -PartsDirectory $partsDirectory -DestinationPath $blobPath | Out-Null
+                    -BearerToken $token -ProxyUrl $ProxyUrl -PartsDirectory $partsDirectory -DestinationPath $blobPath -ExpectedDigest $layer.Digest | Out-Null
                 $actualHex = Get-Sha256HexOfFile -Path $blobPath
                 Assert-OciDigestMatches -ActualHex $actualHex -ExpectedDigest $layer.Digest -Description "$($component.Name) blob" | Out-Null
                 Write-Host "    digest verified: $($layer.Digest)"
-                Remove-Item -LiteralPath $partsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+                # Keep digest-bound and rejected part sets as resumable/audit evidence.
             }
 
             $extractDirectory = Join-Path $componentWorkDirectory 'extracted'
@@ -325,7 +326,7 @@ try {
             })
         }
 
-        if ($pendingComponents.Count -gt 0) {
+        if ($pendingComponents.Count -gt 0 -or $summaries.Count -gt 0) {
             $pendingNames = ($pendingComponents | ForEach-Object { $_.Component.Name }) -join ', '
             if ($PSCmdlet.ShouldProcess($TrivyCacheVolume, "Stage, self-check, then seed: $pendingNames")) {
                 $stagingVolume = "$TrivyCacheVolume-staging-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
@@ -378,18 +379,16 @@ try {
         $lock.Dispose()
     }
 } catch {
-    if ($_.Exception.Message -clike '*already using the shared Trivy cache lock*') {
+    if ($_.Exception.Data['TrivyCacheLockContention'] -eq $true) {
         # release-image-gate.ps1 (a real release, or a concurrently running
-        # gate) currently holds release\.trivy-0.74.release-gate.lock --
+        # gate) currently holds the daemon/volume mutex --
         # this is contention over the shared cache volume, not a failure.
         # Exit 75 (distinct from the generic 1 every other error below
         # uses) so a scheduled run's LastTaskResult, this run's own log,
         # and latest.json all make that unambiguous, and so register-
         # trivy-refresh-task.ps1's RestartCount/RestartInterval settings
-        # retry it later the same day. The message matched above must stay
-        # in sync with Enter-TrivyReleaseGateLock's own throw (refresh-
-        # trivy-cache-lib.ps1) -- scripts/test-refresh-trivy-cache.ps1
-        # already asserts that same message text on contention.
+        # retry it later the same day. Only the typed sharing-violation
+        # marker from Enter-TrivyReleaseGateLock takes this path.
         $exitCode = 75
         $failureMessage = 'gate holds the cache volume; skipped'
         Write-Host "SKIPPED: $failureMessage ($($_.Exception.Message))"

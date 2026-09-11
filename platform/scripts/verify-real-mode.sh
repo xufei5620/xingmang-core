@@ -16,7 +16,7 @@ unset DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG COMPOSE_PROJECT_NAME COMPOSE_FILE
   BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES NODE_OPTIONS PYTHONPATH RUBYOPT PERL5OPT CDPATH
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-default_repo="$(cd -- "$script_dir/.." && pwd -P)"
+default_repo="$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null || (cd -- "$script_dir/.." && pwd -P))"
 repo_path="$default_repo"
 compose_file=
 env_file=
@@ -150,8 +150,10 @@ repo_path="$(normalize_path "$repo_path")"
 validate_path repo "$repo_path"
 [ -d "$repo_path" ] && [ ! -L "$repo_path" ] || die "repo 不存在或是符号链接"
 repo_path="$(cd -- "$repo_path" && pwd -P)"
-compose_file="${compose_file:-$repo_path/deploy/compose/launch.yaml}"
-env_file="${env_file:-$repo_path/deploy/compose/.env}"
+project_path="$repo_path"
+[ ! -d "$repo_path/platform/deploy/compose" ] || project_path="$repo_path/platform"
+compose_file="${compose_file:-$project_path/deploy/compose/launch.yaml}"
+env_file="${env_file:-$project_path/deploy/compose/.env}"
 compose_file="$(normalize_path "$compose_file")"
 env_file="$(normalize_path "$env_file")"
 validate_path compose-file "$compose_file"; validate_path env-file "$env_file"
@@ -173,7 +175,7 @@ git_root="$(cd -- "$git_root" && pwd -P)"
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
 compose() {
-  ( cd -- "$repo_path"; COMPOSE_FILE="$compose_file" COMPOSE_PROJECT_NAME="$project" COMPOSE_ENV_FILES="$env_file" "$docker_bin" compose "$@" )
+  ( cd -- "$project_path"; COMPOSE_FILE="$compose_file" COMPOSE_PROJECT_NAME="$project" COMPOSE_ENV_FILES="$env_file" "$docker_bin" compose "$@" )
 }
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 worker_id="$(compose ps -q --status running "$worker_service" 2>"$tmp/docker.err" || true)"

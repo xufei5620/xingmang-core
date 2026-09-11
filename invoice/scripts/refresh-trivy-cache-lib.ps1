@@ -183,6 +183,21 @@ function Read-TrivyDbMetadataText {
     }
 }
 
+function Assert-TrivyCacheComponentCurrent {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$SubPath)
+    if (-not $State.DatabasePresent) { throw "$SubPath cache database is missing or empty; refresh cannot report unchanged" }
+    $metadata = $State.MetadataText | ConvertFrom-Json -DateKind String
+    $now = [DateTimeOffset]::UtcNow
+    $updated = [DateTimeOffset]::Parse([string]$metadata.UpdatedAt)
+    $next = [DateTimeOffset]::Parse([string]$metadata.NextUpdate)
+    $downloaded = [DateTimeOffset]::Parse([string]$metadata.DownloadedAt)
+    $maximumAge = if ($SubPath -eq 'java-db') { [TimeSpan]::FromHours(96) } else { [TimeSpan]::FromHours(48) }
+    if ($now - $updated -gt $maximumAge -or $updated -gt $now.AddMinutes(5) -or $next -le $now -or
+        $downloaded -le [DateTimeOffset]::MinValue.AddDays(1) -or $downloaded -gt $now.AddMinutes(5)) {
+        throw "$SubPath cache metadata is stale or invalid; refresh cannot report unchanged"
+    }
+}
+
 # Test-CandidateMetadataIsAcceptable implements "refuse to replace a cache
 # newer than the download": a freshly downloaded database is only allowed to
 # replace what is already seeded if it is not older. CurrentUpdatedAt of
@@ -338,8 +353,22 @@ function Invoke-TrivyCacheRangedDownload {
         [Parameter(Mandatory)][string]$BearerToken,
         [AllowEmptyString()][string]$ProxyUrl = '',
         [Parameter(Mandatory)][string]$PartsDirectory,
-        [Parameter(Mandatory)][string]$DestinationPath
+        [Parameter(Mandatory)][string]$DestinationPath,
+        [string]$ExpectedDigest = ''
     )
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDigest)) {
+        Assert-SafeOciDigestForShell -Digest $ExpectedDigest
+        # A completed range is reusable only for this blob and range plan.
+        # Keep legacy and rejected attempts intact for diagnosis.
+        $identity = "$Url`n$ExpectedDigest`n$Size`n$PartCount"
+        $identityHex = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($identity))).ToLowerInvariant()
+        $identityRoot = Join-Path $PartsDirectory $identityHex
+        $attempt = 0
+        do {
+            $PartsDirectory = Join-Path $identityRoot "attempt-$attempt"
+            $attempt++
+        } while (Test-Path -LiteralPath (Join-Path $PartsDirectory 'digest-rejected.txt'))
+    }
     New-Item -ItemType Directory -Path $PartsDirectory -Force | Out-Null
     # @(...) at every call site here is deliberate, not decorative: a
     # PowerShell function's return value collapses from an array to a bare
@@ -373,8 +402,8 @@ function Invoke-TrivyCacheRangedDownload {
         }
     }
 
-    if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Force }
-    $destinationStream = [IO.File]::Create($DestinationPath)
+    $assembledPath = Join-Path $PartsDirectory 'assembled.tar.gz'
+    $destinationStream = [IO.File]::Create($assembledPath)
     try {
         foreach ($partPath in $partPaths) {
             $partStream = [IO.File]::OpenRead($partPath)
@@ -383,6 +412,20 @@ function Invoke-TrivyCacheRangedDownload {
     } finally {
         $destinationStream.Dispose()
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedDigest)) {
+        try {
+            Assert-OciDigestMatches -ActualHex (Get-Sha256HexOfFile -Path $assembledPath) -ExpectedDigest $ExpectedDigest -Description 'ranged download' | Out-Null
+        } catch {
+            [IO.File]::WriteAllText((Join-Path $PartsDirectory 'digest-rejected.txt'), "Digest verification failed; retained attempt is excluded from future resumes.`n")
+            throw
+        }
+    }
+    if (Test-Path -LiteralPath $DestinationPath) {
+        $existingHex = Get-Sha256HexOfFile -Path $DestinationPath
+        if ($existingHex -ceq (Get-Sha256HexOfFile -Path $assembledPath)) { return $DestinationPath }
+        Move-Item -LiteralPath $DestinationPath -Destination "$DestinationPath.retained-$([Guid]::NewGuid().ToString('N'))"
+    }
+    Copy-Item -LiteralPath $assembledPath -Destination $DestinationPath
     return $DestinationPath
 }
 
@@ -475,8 +518,10 @@ function Get-TrivyCacheVolumeComponentState {
         [Parameter(Mandatory)][string]$SeedImage
     )
     Assert-SafeTrivyCacheSubPath -SubPath $SubPath
+    $databaseFile = if ($SubPath -eq 'java-db') { 'trivy-java.db' } else { 'trivy.db' }
     $script = "if [ -f /cache/$SubPath/.source-digest ]; then echo DIGEST_BEGIN; cat /cache/$SubPath/.source-digest; echo; echo DIGEST_END; fi; " +
-        "if [ -f /cache/$SubPath/metadata.json ]; then echo METADATA_BEGIN; cat /cache/$SubPath/metadata.json; echo; echo METADATA_END; fi; exit 0"
+        "if [ -f /cache/$SubPath/metadata.json ]; then echo METADATA_BEGIN; cat /cache/$SubPath/metadata.json; echo; echo METADATA_END; fi; " +
+        "if [ -s /cache/$SubPath/$databaseFile ]; then echo DATABASE_PRESENT; fi; exit 0"
     $dockerArguments = @('run', '--rm', '-v', "${Volume}:/cache:ro", $SeedImage, 'sh', '-c', $script)
     $output = & docker @dockerArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -488,7 +533,7 @@ function Get-TrivyCacheVolumeComponentState {
     if ($text -match '(?s)DIGEST_BEGIN\r?\n(.*?)\r?\nDIGEST_END') { $digest = $Matches[1].Trim() }
     $metadataText = $null
     if ($text -match '(?s)METADATA_BEGIN\r?\n(.*?)\r?\nMETADATA_END') { $metadataText = $Matches[1].Trim() }
-    return [pscustomobject]@{ Digest = $digest; MetadataText = $metadataText }
+    return [pscustomobject]@{ Digest = $digest; MetadataText = $metadataText; DatabasePresent = ($text -match '(?m)^DATABASE_PRESENT\r?$') }
 }
 
 # Publish-TrivyCacheComponentToVolume copies FileNames from
@@ -674,24 +719,5 @@ function Invoke-TrivyCacheFreshnessSelfCheck {
     return ($allOutput -join "`n---`n")
 }
 
-# --- shared release-gate lock -------------------------------------------------
-
-# Get-TrivyReleaseGateLockPath must equal release-image-gate.ps1's own
-# $lockPath exactly (Join-Path (Split-Path -Parent $releaseRoot)
-# '.trivy-0.74.release-gate.lock', where $releaseRoot is always a child of
-# <projectRoot>\release), so this script and a concurrently running release
-# image gate take the same lock and cannot race the same shared cache volume.
-function Get-TrivyReleaseGateLockPath {
-    param([Parameter(Mandatory)][string]$ProjectRoot)
-    return Join-Path $ProjectRoot 'release\.trivy-0.74.release-gate.lock'
-}
-
-function Enter-TrivyReleaseGateLock {
-    param([Parameter(Mandatory)][string]$LockPath)
-    New-Item -ItemType Directory -Path (Split-Path -Parent $LockPath) -Force | Out-Null
-    try {
-        return [IO.File]::Open($LockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
-    } catch {
-        throw 'another process (a release image gate run, or a concurrent Trivy cache refresh) is already using the shared Trivy cache lock'
-    }
-}
+# Shared lock is also loaded by the release image gate.
+. (Join-Path $PSScriptRoot 'trivy-cache-lock-lib.ps1')

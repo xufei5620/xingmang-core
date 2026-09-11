@@ -67,6 +67,32 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 
 ## 3. Build and release gates
 
+### Monorepo source roots (2026-09-10)
+
+The candidate Git root is `G:\xingmang\09-wt\core-mono-cutover`; the invoice
+project root is its `invoice/` child. Run the PowerShell commands below from
+`G:\xingmang\09-wt\core-mono-cutover\invoice`. Normalize Git's reported root
+before comparing paths. `source.gitHead` is the complete **monorepo commit**;
+the manifest records `source.gitHeadScope=monorepo`, while `source.gitDirty`
+covers only the invoice subtree. Signed tags bind that same monorepo commit.
+
+Platform tags use `platform/v...`; invoice production tags keep
+`v0.1.0-rcN-signed`. Rehearsal tags use a separate `rehearsal/` namespace and
+must never replace an existing signed production tag.
+
+On the server, bundle checkout remains
+`/root/invoice-system/app/releases/<sha>/source`; the executable invoice root
+is `/root/invoice-system/app/releases/<sha>/source/invoice`. Deploy wrappers
+accept this layout or the legacy standalone `source` layout, and reject both
+layouts being present together. Keycloak maintenance derives its two script
+manifest paths from that selected layout; its exact RC38-only identity approval
+still applies, independently of path support. The release's
+`.env.production` remains beside `source`, not under the invoice source tree.
+For example, after a separately approved production source-root switch, the
+entry points relative to the monorepo checkout are `invoice/deploy/roll-forward.sh`,
+`invoice/deploy/backup/backup.sh` and `invoice/deploy/rehearsal/shadow-eval.sh`.
+This cutover rehearsal does not execute those production operations.
+
 > ### 照抄本节会撞上的五处（2026-09-08 RC104 实测）
 >
 > 这一节里有五处**写着但过不去**的东西。RC100–RC103 每一版都发布成功了，说明
@@ -87,14 +113,14 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 > **② RC49–52 失败证据锚点必须在证据所在的工作树里跑。** 四个
 > `verify-rcNN-failure-evidence.ps1` 检查的是 `release/` 下的目录名集合，而
 > `release/` 是 **gitignore 的本地目录**：那四组证据在
-> `K:/发票/wt-XM-INV-SEC-RC49`，发布工作树里一个都没有，照本节顺序跑必然报
+ > 历史独立的 RC49 证据工作树，发布工作树里一个都没有，照本节顺序跑必然报
 > `RCnn failure evidence exact directory namespace drifted`。在
 > `wt-XM-INV-SEC-RC49` 里跑，四个都是 exit 0。
 >
 > **③ 工作树绑定判据永远不等。** 下面镜像门禁那段用
-> `[string]::Equals((git rev-parse --show-toplevel), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, …)`
-> 直接比较两个字符串，但 **git 在 Windows 上回正斜杠** `K:/发票/…`、
-> **`Resolve-Path` 回反斜杠** `K:\发票\…`，于是必然 `throw`。判据的意图
+ > `[string]::Equals((git rev-parse --show-toplevel), (Resolve-Path '<candidate-root>').Path, …)`
+ > 直接比较两个字符串，但 **git 在 Windows 上回正斜杠** `G:/xingmang/…`、
+ > **`Resolve-Path` 回反斜杠** `G:\xingmang\…`，于是必然 `throw`。判据的意图
 > （在对的工作树、HEAD 等于签名 tag）是对的，**比较前要先归一分隔符**。
 >
 > **④ 打 tag 之前必须先推进发布身份。** `release-image-gate-lib.ps1` 把上一版
@@ -117,16 +143,18 @@ if ($upstreamIntegrityExit -ne 0) { throw "upstream integrity failed with exit $
 > 拿当前 release 目录。
 >
 > 另外两条不算"落差"但同样咬人的实测细节：验 `SHA256SUMS` 签名时，
-> `Get-Content -Raw | ssh-keygen`（本节已禁）与 `cmd /c "… < file"`（本节推荐）
+> `Get-Content -Raw | ssh-keygen`（本节已禁）与旧的 `cmd /c "… < file"` 写法
 > **在本仓库的 `发票` 中文路径段上都会假报失败**，前者报
 > `incorrect signature`、后者报「文件名、目录名或卷标语法不正确」；
-> **用 bash 的重定向一次就过**。以及 `verify.ps1` 在新建工作树里会因为
+> **用 bash 的重定向一次就过**；下方 PowerShell 命令现用原始文件流直送验证进程 stdin，
+> 不再跨 CMD 引号/环境变量边界。以及 `verify.ps1` 在新建工作树里会因为
 > 前端依赖没装而死在 `vitest not recognized`，先 `npm ci`。
 
 Run locally from the exact RC100 candidate worktree
-`K:\发票\wt-XM-INV-AUTOLOGIN`:
+`G:\xingmang\09-wt\core-mono-cutover\invoice`:
 
 ```powershell
+Set-Location -LiteralPath 'G:\xingmang\09-wt\core-mono-cutover\invoice'
 pwsh -NoProfile -File .\scripts\verify.ps1
 $sourceGateExit = $LASTEXITCODE
 if ($sourceGateExit -ne 0) { throw "RC100 full source gate failed with exit $sourceGateExit" }
@@ -176,10 +204,10 @@ source commit and annotated tag.  The tag must peel to the signed source commit
 used by the gate; do not create or move it after image evidence exists:
 
 ```powershell
-$expectedWorktree = (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path
+$expectedWorktree = (Resolve-Path 'G:\xingmang\09-wt\core-mono-cutover').Path
 $worktreeLines = @(git rev-parse --show-toplevel)
 $worktreeExit = $LASTEXITCODE
-if ($worktreeExit -ne 0 -or -not [string]::Equals(($worktreeLines -join '').Trim(), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC100 candidate worktree' }
+if ($worktreeExit -ne 0 -or -not [string]::Equals([IO.Path]::GetFullPath(($worktreeLines -join '').Trim()), $expectedWorktree, [StringComparison]::OrdinalIgnoreCase)) { throw 'wrong RC100 candidate worktree' }
 pwsh -NoProfile -File .\scripts\verify-rc49-failure-evidence.ps1
 $rc49AnchorExit = $LASTEXITCODE
 if ($rc49AnchorExit -ne 0) { throw "RC49 failure evidence anchor verification failed with exit $rc49AnchorExit" }
@@ -192,13 +220,13 @@ if ($rc51AnchorExit -ne 0) { throw "RC51 failure evidence anchor verification fa
 pwsh -NoProfile -File .\scripts\verify-rc52-failure-evidence.ps1
 $rc52AnchorExit = $LASTEXITCODE
 if ($rc52AnchorExit -ne 0) { throw "RC52 failure evidence anchor verification failed with exit $rc52AnchorExit" }
-gitleaks git --redact --no-banner --log-opts="08aff147766c046b12e19221a6aabb675485d452..HEAD"
+gitleaks git $expectedWorktree --redact --no-banner --log-opts="08aff147766c046b12e19221a6aabb675485d452..HEAD -- invoice"
 $gitleaksExit = $LASTEXITCODE
 if ($gitleaksExit -ne 0) { throw "RC100 release-range gitleaks failed with exit $gitleaksExit" }
 git diff --check
 $diffExit = $LASTEXITCODE
 if ($diffExit -ne 0) { throw "RC100 source diff check failed with exit $diffExit" }
-$statusLines = @(git status --porcelain=v1)
+$statusLines = @(git status --porcelain=v1 -- .)
 $statusExit = $LASTEXITCODE
 if ($statusExit -ne 0) { throw "RC100 git status failed with exit $statusExit" }
 if ($statusLines.Count -ne 0) { throw 'RC100 source worktree is dirty' }
@@ -254,7 +282,7 @@ $headExit = $LASTEXITCODE
 $tagHeadLines = @(git rev-parse --verify 'refs/tags/v0.1.0-rc110-signed^{}')
 $tagHeadExit = $LASTEXITCODE
 if ($worktreeExit -ne 0 -or $headExit -ne 0 -or $tagHeadExit -ne 0 -or
-    -not [string]::Equals(($worktreeLines -join '').Trim(), (Resolve-Path 'K:\发票\wt-XM-INV-AUTOLOGIN').Path, [StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]::Equals([IO.Path]::GetFullPath(($worktreeLines -join '').Trim()), (Resolve-Path 'G:\xingmang\09-wt\core-mono-cutover').Path, [StringComparison]::OrdinalIgnoreCase) -or
     ($headLines -join '').Trim() -cne ($tagHeadLines -join '').Trim()) { throw 'RC100 worktree/tag/HEAD binding failed' }
 $rc100ReleaseDirectory = 1..99 |
   ForEach-Object { "release\0.1.0-rc110-exact$_" } |
@@ -511,9 +539,29 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $releaseSignature -Path
 # 2026-09-06：**不要用 `Get-Content -Raw | ssh-keygen`**。签名算的是磁盘上的原始
 # 字节，而 PowerShell 把内容送进原生命令的管道时会重新编码，于是必然报
 # `Signature verification failed: incorrect signature`——签名其实是好的，坏的是
-# 验证方式。用重定向把原始字节喂进去（实测于 RC101 发布当天）：
-& cmd /c "ssh-keygen -Y verify -f \"%RELEASE_ALLOWED_SIGNERS%\" -I invoice-release@solov.cc -n solov-invoice-release-v1 -s \"%RELEASE_SIGNATURE%\" < \"%CHECKSUM_MANIFEST%\""
-if ($LASTEXITCODE -ne 0) { throw 'release artifact SHA256SUMS signature verification failed' }
+# 验证方式。把原始文件流直送 stdin，参数逐项传递；路径含空格/引号也不经 shell 拆分。
+$ErrorActionPreference = 'Stop'
+$verifyStart = [Diagnostics.ProcessStartInfo]::new()
+$verifyStart.FileName = (Get-Command ssh-keygen -ErrorAction Stop).Source
+$verifyStart.UseShellExecute = $false
+$verifyStart.RedirectStandardInput = $true
+foreach ($argument in @('-Y','verify','-f',$releaseAllowedSigners,'-I','invoice-release@solov.cc','-n','solov-invoice-release-v1','-s',$releaseSignature)) {
+    $verifyStart.ArgumentList.Add($argument)
+}
+$manifestInput = [IO.File]::OpenRead($checksumManifest)
+try {
+    $verifier = [Diagnostics.Process]::Start($verifyStart)
+    try {
+        $manifestInput.CopyTo($verifier.StandardInput.BaseStream)
+        $verifier.StandardInput.Close()
+        $verifier.WaitForExit()
+        if ($verifier.ExitCode -ne 0) { throw 'release artifact SHA256SUMS signature verification failed' }
+    } finally {
+        $verifier.Dispose()
+    }
+} finally {
+    $manifestInput.Dispose()
+}
 ```
 
 Only after this signature and its verification pass may the exact signed source
@@ -549,7 +597,7 @@ Refresh any base only through the full image scan/SBOM/review flow.
 > wait gives up — a recovery step that only runs on the happy path is not a
 > recovery step.
 
-Set `INVOICE_IMAGE_TAG` in `deploy/.env.production` only after the exact RC100
+Set `INVOICE_IMAGE_TAG` in the reviewed release-level `.env.production` only after the exact RC100
 manifest, signature and artifact verifier have passed. Production Compose has
 no image-tag fallback: all nine images (`invoice-system-api`,
 `invoice-system-pdf-scanner`, `invoice-system-tools`, `invoice-system-web`,
@@ -721,16 +769,19 @@ set must then exactly equal every `*.sql` file in the signed RC39 migration
 directory, including exactly one checksum-bound row for each of 0013 and 0014:
 
 ```bash
+export RC39_POST_MIGRATION_EVIDENCE_DIR="$RECORD_ROOT/<exact-rc39-post-migration-record>"
+(
+set -euo pipefail
 docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools \
   run --rm --pull never migrate
 
-export RC39_POST_MIGRATION_EVIDENCE_DIR="$RECORD_ROOT/<exact-rc39-post-migration-record>"
 install -d -m 0700 "$RC39_POST_MIGRATION_EVIDENCE_DIR"
 (
   cd backend/migrations
   for migration in *.sql; do
-    printf '%s|%s\n' "$migration" "$(sha256sum "$migration" | cut -d' ' -f1)"
+    checksum=$(sha256sum "$migration")
+    printf '%s|%s\n' "$migration" "${checksum%% *}"
   done | LC_ALL=C sort
 ) >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv"
 
@@ -746,6 +797,7 @@ grep -Fx "0013_source_readiness_active_index.sql|$(sha256sum backend/migrations/
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
 grep -Fx "0014_balance_carry_forward_proof.sql|$(sha256sum backend/migrations/0014_balance_carry_forward_proof.sql | cut -d' ' -f1)" \
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-actual.tsv"
+)
 ```
 
 Before API startup, use `invoice_owner` to replay the signed RC39 runtime-role
@@ -755,6 +807,8 @@ grant. Also prove `schema_migrations` remains exact after the permission
 transaction and that `invoice_app` retains SELECT-only access to it:
 
 ```bash
+(
+set -euo pipefail
 docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml exec -T postgres \
   psql -X -v ON_ERROR_STOP=1 -U invoice_owner -d invoice \
@@ -816,6 +870,7 @@ docker compose --env-file "$PRODUCTION_ENV_FILE" \
   >"$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
 cmp -s "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-expected.tsv" \
   "$RC39_POST_MIGRATION_EVIDENCE_DIR/schema-migrations-after-permissions.tsv"
+)
 ```
 
 Require exactly two lines in each carry-forward privilege evidence file, hash
@@ -908,6 +963,20 @@ non-zero identity/eligibility/carry/job state.
 
 ## 4. Host directories and secrets
 
+For the server commands in sections 4 through 7, use the approved invoice
+project root (`releases/<sha>/source/invoice` for a monorepo release, or
+`releases/<sha>/source` for a legacy standalone release). In the same shell,
+select the existing release-level environment file before any host command:
+
+```bash
+export PRODUCTION_ENV_FILE='/root/invoice-system/app/releases/<approved-release-sha>/.env.production'
+case "$PRODUCTION_ENV_FILE" in /*) ;; *) echo 'release env path must be absolute' >&2; exit 1 ;; esac
+test -s "$PRODUCTION_ENV_FILE" || { echo 'reviewed release environment is missing' >&2; exit 1; }
+```
+
+Keep this value for every Compose, provisioning and readability check below.
+Do not create a second environment file inside `source` or `source/invoice`.
+
 **Production change approval.** Create a new directory; do not reuse an
 upstream deployment directory:
 
@@ -992,7 +1061,7 @@ stat -c '%u:%g %a %n' /root/invoice-system/secrets/*
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \
   bash deploy/preflight-secret-permissions.sh
 SECRETS_DIR=/root/invoice-system/secrets POSTGRES_UID=70 \
-PRODUCTION_ENV_FILE=/root/invoice-system/app/deploy/.env.production \
+PRODUCTION_ENV_FILE="$PRODUCTION_ENV_FILE" \
 CHECK_CONTAINER_READABILITY=true bash deploy/preflight-secret-permissions.sh
 ```
 
@@ -1005,7 +1074,7 @@ umask 027
 openssl rand -hex 32 >/root/invoice-system/secrets/invoice_pdf_scanner_capability
 chown root:10000 /root/invoice-system/secrets/invoice_pdf_scanner_capability
 chmod 0440 /root/invoice-system/secrets/invoice_pdf_scanner_capability
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   up -d --no-build --force-recreate pdf-scanner api
 ```
 
@@ -1174,9 +1243,9 @@ bootstrap administrator environment variable or secret. For first initialization
 only, start it with `deploy/docker-compose.idp.bootstrap.yml`:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml up -d --no-build keycloak-postgres
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml \
   -f deploy/docker-compose.idp.bootstrap.yml up -d --no-build keycloak
 ```
@@ -1241,9 +1310,22 @@ the admin hostname and `https://auth.solov.cc/realms/master/` must return 403.
 Public discovery under `https://auth.solov.cc/realms/solov/` must still work.
 Do not expose Keycloak port `9000`.
 
-The optimized image uses a 2 GiB memory limit. Create the permanent master
-administrator with the create-only operator; do not type or pass a target email
-or SMTP value to it:
+The optimized image uses a 2 GiB memory limit. The permanent master administrator
+operator below is a **historical RC38-only** create-only procedure. It is not a
+runnable maintenance step for RC100, RC110 or the current monorepo candidate.
+Do not deploy an old RC38 image or manufacture new attestations merely to make
+its guard pass. Support for a newer release requires the owner's approval of
+the exact signed tag, image and attestation; the current allowlist stays fixed.
+
+Its existing signed identity inputs are:
+
+| Attestation field | Existing accepted value |
+| --- | --- |
+| `SOURCE_TAG` | `v0.1.0-rc38-signed` |
+| `KEYCLOAK_IMAGE.config_image` | `invoice-keycloak:0.1.0-rc38` |
+
+Historical command reference, usable only within that separately approved
+RC38 maintenance scope. Do not type or pass a target email or SMTP value to it:
 
 ```bash
 AGE_RECIPIENT_FILE=/root/invoice-system/config/backup-recipients.txt \
@@ -1257,7 +1339,7 @@ KEYCLOAK_BOOTSTRAP_PASSWORD_FILE=/root/invoice-system/secrets/keycloak_bootstrap
 The fixed `/root/invoice-system/keycloak-backups` directory must already be
 `root:root 0700` on a non-ephemeral filesystem. The age identity and
 Ed25519 signing key are temporarily mounted offline material and must not live
-under the backup directory. The RC100 installation must create root-only
+under the backup directory. The historical approved RC38 installation requires root-only
 `SOURCE_COMMIT`, `SOURCE_TAG`, `KEYCLOAK_IMAGE`, `SMTP_TRANSPORT` and an exact
 six-entry `RELEASE-TREE.sha256`, then sign it with the release key under the
 dedicated release-tree namespace. The production operator re-verifies this
@@ -1265,11 +1347,12 @@ attestation using the independent root-only release-tree trust file. This is a
 signed installed-tree attestation; the deployment wrapper must separately
 verify the Git tag signature and peeled tag commit before generating it.
 
-Before the mail window, rebuild/recreate the exact RC100 Keycloak container and
-prove its immutable image ID plus the explicit default TLS hostname verifier
-and disabled Kubernetes truststore environment. Run the negative wrong-hostname
-SMTP canary when available; do not use this operator to send from an older
-container or an unverified truststore-provider state.
+The current release's later TLS hardening does not change this operator's
+RC38-only identity check. Before any newly authorized mail window, the owner
+must settle the supported release identity and verify its immutable image ID,
+explicit default TLS hostname verifier and disabled Kubernetes truststore
+environment. Run the negative wrong-hostname SMTP canary when available; an
+unverified truststore-provider state is not an acceptable sending environment.
 
 The maintenance wrapper encrypts and signs the original administrator
 allowlist, atomically installs a loopback-only allowlist, tests/reloads Nginx
@@ -1352,12 +1435,12 @@ password file, remove its username from the host environment, and restart with
 the base file only:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml \
   -f deploy/docker-compose.idp.bootstrap.yml stop keycloak
 rm -f -- /root/invoice-system/secrets/keycloak_bootstrap_admin_password
 unset KEYCLOAK_BOOTSTRAP_ADMIN_USERNAME
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.idp.yml up -d --no-build --force-recreate keycloak
 ```
 
@@ -1454,7 +1537,7 @@ After DNS/TLS and the provider metadata are live, but before starting the
 invoice API, run the provider contract gate:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools \
   run --rm --pull never --no-deps oidc-preflight
 ```
@@ -1486,7 +1569,7 @@ addresses as exceptions.
 ## 6. Invoice database, migrations and initial settings
 
 **Production change approval.** Verify every explicit network in
-`deploy/.env.production` (`INVOICE_EDGE/DB/APP`, ClamAV/OIDC egress,
+the release-level `.env.production` selected by `PRODUCTION_ENV_FILE` (`INVOICE_EDGE/DB/APP`, ClamAV/OIDC egress,
 proxy/ingest, both projection networks, and Keycloak DB/edge) against every
 existing Docker network. Never let Compose auto-allocate one of these bridges.
 Set `INVOICE_PROXY_GATEWAY_IP` to one usable address inside the proxy subnet
@@ -1496,15 +1579,15 @@ positive `gw_priority`; static verification compares all three, and the API
 rejects subnets, multiple trusted proxies and every non-host prefix.
 
 Put the immutable release value exactly once in the root-owned
-`deploy/.env.production` (do not merely assign a non-exported shell variable),
+the release-level `.env.production` selected by `PRODUCTION_ENV_FILE` (do not merely assign a non-exported shell variable),
 keep that file mode `0600`, then prove Compose reads the same value:
 
 ```bash
-# deploy/.env.production contains this exact line:
+# "$PRODUCTION_ENV_FILE" contains this exact line:
 # ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00
-test "$(stat -c '%a' deploy/.env.production)" = 600
-test "$(grep -Fxc 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00' deploy/.env.production)" -eq 1
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+test "$(stat -c '%a' "$PRODUCTION_ENV_FILE")" = 600
+test "$(grep -Fxc 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00' "$PRODUCTION_ENV_FILE")" -eq 1
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   config --environment | grep -Fx 'ELIGIBILITY_START_AT=2026-09-01T00:00:00+08:00'
 ```
 
@@ -1631,22 +1714,22 @@ discard that fact and requires explicit financial approval.
 Run in this exact order while the old API/ingest remain stopped:
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build postgres clamav pdf-scanner
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never migrate
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never permissions
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-settings
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml --profile tools run --rm --pull never bootstrap-sources
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml exec -T postgres psql -X -v ON_ERROR_STOP=1 \
   -U invoice_owner -d invoice -At -F '|' -c \
   "SELECT to_char(eligibility_start_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),display_timezone,require_payment_at_or_after,require_usage_at_or_after,policy_version FROM invoice_eligibility_policy WHERE singleton_id=1"
@@ -1700,7 +1783,7 @@ env file, verifies any pre-existing network before reuse, and refuses a wrong
 alias:
 
 ```bash
-PRODUCTION_ENV_FILE=deploy/.env.production \
+PRODUCTION_ENV_FILE="$PRODUCTION_ENV_FILE" \
   bash deploy/provision-projection-networks.sh
 ```
 
@@ -1894,9 +1977,9 @@ Each of the ten `deploy/docker-compose.sources.yml` services (project
 the container every time `source-agent-prod run` exits. Check restart counts:
 
 ```bash
-docker compose -f deploy/docker-compose.sources.yml ps -a
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml ps -a
 docker inspect -f '{{.Name}}: {{.RestartCount}}' \
-  $(docker compose -f deploy/docker-compose.sources.yml ps -aq)
+  $(docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml ps -aq)
 ```
 
 A restart count that keeps climbing on one agent, together with
@@ -2041,6 +2124,13 @@ https://invoice.solov.cc/embed/newapi
 Never use `{key}` or append a New API model/API token.
 
 ## 9. Public invoice service and Nginx
+
+For an approved monorepo release, the working directory for this section is
+`/root/invoice-system/app/releases/<sha>/source/invoice`. Set
+`PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<sha>/.env.production`
+to the owner's reviewed release; do not move or regenerate that file.
+Thus project-relative Compose paths resolve beneath `source/invoice/deploy/`.
+The cutover rehearsal does not start or restart these services.
 
 Start the API process and internal mTLS ingress after migrations, permissions,
 settings, ten agent state directories and both encrypted cutover pairs are ready. The ingest proxy waits
@@ -2254,13 +2344,28 @@ Exit codes -- check them, do not just read the banner:
 | code | meaning |
 | ---: | --- |
 | 0 | the run completed: a dry run (which never writes), or an apply that went through |
-| 1 | the run failed -- database, migration check, secret file, or an unexpected error |
-| 2 | the invocation was rejected before touching anything (bad flag combination, non-absolute path, positional argument) |
+| 1 | the run failed -- includes an unknown kind, an incompatible kind/filter combination, a required filter or operator missing, database/migration/secret errors, or an unexpected error |
+| 2 | flag parsing failed (unknown flag or malformed flag value), or the pre-run path/positional check rejected a non-absolute path or extra positional argument |
 | 3 | `--kind=pending-reevaluate --apply` was **refused** by one of its own precondition checks; the report was printed and nothing was written |
 
 Code 3 exists because a refusal is neither success nor failure, and a wrapper
 running under `set -e` would otherwise read REFUSED as done. The other kinds
 do not have preconditions of this shape and never return it.
+
+Concrete invocation-error examples below assume the ordinary absolute path
+arguments from `invoice_eligibility_repair`; they are diagnostic examples, not
+repair requests. A missing operator is checked later in `run`, so exit 1 alone
+does not imply that no database or secret was accessed.
+
+| Additional arguments | Exit |
+| --- | ---: |
+| `--kind=unknown` | 1 |
+| `--kind=projection-requeue-dead --event=event-fixture` | 1 |
+| `--kind=pending-reevaluate` | 1 |
+| `--database-url-file=relative-path` | 2 |
+| `extra-positional-argument` | 2 |
+| `--unknown-flag` | 2 |
+| `--apply=not-a-boolean` | 2 |
 
 **Re-evaluating one parked account (XM-INV-PENDING-RECON, 2026-09-09).** An
 account in `not_invoiceable_pending_reconciliation` clears itself once two
@@ -2412,12 +2517,16 @@ rejected, so the event burns another retry round and dies again.
 
 > **`blocked` does not mean "try again later".** Nothing about waiting changes
 > a cycle's status. A dead event bound to a blocked cycle **cannot be
-> recovered by requeueing at all**, now or later. The options are to resolve
-> the cycle itself first, or to accept that this event's data is lost and
-> resolve its eligibility freeze through the normal path
-> (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`; see
-> `docs/ELIGIBILITY-OPERATIONS.md` for what that call requires). Requeueing it
-> "to see" costs a retry round and leaves everything exactly as it was.
+> recovered by requeueing at all**, now or later. Follow the earlier contained-dead
+> procedure. For an individually reviewed event confirmed unreplayable, first run
+> `invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<event-uuid>`
+> and review the dry-run report. Only after the owner approves writing off that fact,
+> run `invoice_eligibility_repair --kind=ingest-acknowledge-unreplayable --event=<event-uuid> --apply --operator-id=<admin-uuid>`.
+> Check success before using `POST /api/v1/admin/eligibility-freezes/{id}/resolve`;
+> the ordinary projection/freshness/latest-matched-evidence conditions in
+> `docs/ELIGIBILITY-OPERATIONS.md` still apply. A correlated row still in `dead`
+> is refused with `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED`; accepting the loss in a
+> ticket alone cannot clear that guard. Requeueing "to see" only burns retries.
 
 **As of 2026-09-08 this is the live case, not a hypothetical.** A dry run of
 the repair against production found all three dead events bound to blocked
@@ -2459,22 +2568,22 @@ contract.
 
 
 ```bash
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build api web ingest-proxy
 
 # Before any fresh V4 generation starts: prove all ten static and live checks.
 all_sources=(sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances)
 for service in "${all_sources[@]}"; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" check-db
 done
 
 # The create-only pairs were already captured/verified before migration 0011.
 # Never run cutover-init here. Re-check the exact same encrypted files, source
 # contracts and strict pre-policy clocks before registering trust.
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never sub2api-cutover-init check-cutover
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml \
   --profile cutover run --rm --pull never newapi-cutover-init check-cutover
 # Verify persisted contracts are exactly sub2api-economic-v4 and
 # newapi-economic-rc25-v4; fixture-v3 is forbidden in production.
@@ -2482,31 +2591,31 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.source
 # Initialize every independent cursor/sequence. Only V2 identities have a
 # deletion-reconciliation state file.
 for service in "${all_sources[@]}"; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-state
 done
 for service in sub2api-identities newapi-identities; do
-  docker compose --env-file deploy/.env.production \
+  docker compose --env-file "$PRODUCTION_ENV_FILE" \
     -f deploy/docker-compose.sources.yml run --rm --pull never "$service" init-reconcile
 done
 
 # Register trust first, then let manifest-only balances sequence 1 commit.
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-balances newapi-balances
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-payments sub2api-usage sub2api-credits newapi-payments newapi-usage newapi-credits
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml up -d --no-build --wait --wait-timeout 300 \
   sub2api-identities newapi-identities
 
 # Now wait for the source heartbeats, event drain, ClamAV/scanner and API health.
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.prod.yml up -d --no-build --wait --wait-timeout 300 \
   api web ingest-proxy
 
-docker compose --env-file deploy/.env.production \
+docker compose --env-file "$PRODUCTION_ENV_FILE" \
   -f deploy/docker-compose.sources.yml ps
 ```
 
@@ -3028,6 +3137,14 @@ Use one finance admin, one Sub2API user and one New API user.
 
 ## 11. Backup and restore
 
+This section is a separately approved production procedure, not part of the
+monorepo cutover rehearsal. Its server working directory is
+`/root/invoice-system/app/releases/<sha>/source/invoice`; from the monorepo
+source root the corresponding paths are `invoice/deploy/backup/backup.sh`,
+`invoice/deploy/backup/restore-drill.sh` and
+`invoice/deploy/rehearsal/shadow-eval.sh`. Keep `.env.production` at the release
+directory and supply its absolute path as `PRODUCTION_ENV_FILE`.
+
 Install `age` and OpenSSH, and keep the private age identity offline. Backup
 authenticity uses a different Ed25519 signing key and the fixed
 `solov-invoice-backup-v1` namespace. Generate it on an offline encrypted volume
@@ -3061,15 +3178,15 @@ rechecks the database immediately before each deletion, accepts only old
 `issued/*.pdf.enc` files and fsyncs the directory:
 
 ```bash
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml stop api ingest-proxy
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.sources.yml stop \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml stop api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.sources.yml stop \
   sub2api-payments sub2api-identities sub2api-usage sub2api-credits sub2api-balances \
   newapi-payments newapi-identities newapi-usage newapi-credits newapi-balances
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never document-gc \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --document-root /data/documents --minimum-age 24h --execute \
@@ -3079,14 +3196,23 @@ docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.y
 The backup command below owns the final write freeze and waits for the API and
 all source-agent health checks before returning them to service:
 
+First set `SOURCE_STATE_ROOT` to the reviewed current generation and
+`SOURCE_CUTOVER_ROOT` to that generation's `cutover` directory, using the same
+`PRODUCTION_ENV_FILE` and Compose project as the installed services. Do not
+substitute the retired unversioned source-state path. Before freezing writers,
+the script matches all ten source `/state` mounts, all eight economic-source
+`/cutover` mounts, and the API `/data/documents` volume against the supplied
+resources. Missing, ambiguous or mismatched container identities are rejected;
+stopped containers are inspected but are not started by this preflight.
+
 ```bash
 BACKUP_DIR=/root/invoice-system/backups \
 AGE_RECIPIENT_FILE=/root/invoice-system/config/backup-recipients.txt \
-SOURCE_STATE_ROOT=/root/invoice-system/source-state \
-SOURCE_CUTOVER_ROOT=/root/invoice-system/source-state/cutover \
+SOURCE_STATE_ROOT="${SOURCE_STATE_ROOT:?set the reviewed current source-state generation}" \
+SOURCE_CUTOVER_ROOT="${SOURCE_CUTOVER_ROOT:?set the generation cutover directory}" \
 BACKUP_SIGNING_KEY_FILE=/mnt/offline-signing/invoice-backup-signing-2026 \
 BACKUP_ALLOWED_SIGNERS_FILE=/root/invoice-system/config/backup-allowed-signers \
-PRODUCTION_ENV_FILE=/root/invoice-system/app/deploy/.env.production \
+PRODUCTION_ENV_FILE=/root/invoice-system/app/releases/<sha>/.env.production \
 BACKUP_QUIESCE_CONFIRMED=YES \
 BACKUP_LOCAL_KEYCLOAK=true \
   bash deploy/backup/backup.sh
@@ -3132,9 +3258,10 @@ chosen tmpfs ceiling plus a fixed 4 GiB reserve. An unreadable memory value or
 insufficient capacity fails closed. The detached PostgreSQL container uses
 `--rm`, and the exit trap force-removes its exact container and network names,
 so success, restore failure, or capacity failure leaves no restore database,
-container, network, or volume behind. An inspect error counts as “absent” only
-while an independent `docker info` still proves the daemon is reachable;
-otherwise cleanup itself fails critically instead of hiding unknown state. Run the drill on a host with more
+container, network, or volume behind. After an inspect error, cleanup requires
+both a reachable daemon and a successful resource inventory that excludes the
+exact name; a denied or failed inventory remains unknown and fails cleanup.
+Run the drill on a host with more
 available memory rather than substituting persistent storage without a
 separately reviewed encrypted-at-rest design.
 
@@ -3151,7 +3278,9 @@ AGE_IDENTITY_FILE=/offline/backup-age-identity.txt \
 FIELD_KEYRING_FILE=/offline/invoice_field_keyring.json \
 SOURCE_SPOOL_KEY_ROOT=/offline/source-spool-keys \
 SUB2API_SOURCE_ID="$SUB2API_SOURCE_ID" NEWAPI_SOURCE_ID="$NEWAPI_SOURCE_ID" \
-SUB2API_RUNTIME_VERSION=0.1.179 NEWAPI_RUNTIME_VERSION=v1.0.0-rc.25 \
+SUB2API_RUNTIME_VERSION="$SUB2API_RUNTIME_VERSION" NEWAPI_RUNTIME_VERSION="$NEWAPI_RUNTIME_VERSION" \
+SUB2API_CUTOVER_RUNTIME_VERSION="${SUB2API_CUTOVER_RUNTIME_VERSION:-$SUB2API_RUNTIME_VERSION}" \
+NEWAPI_CUTOVER_RUNTIME_VERSION="${NEWAPI_CUTOVER_RUNTIME_VERSION:-$NEWAPI_RUNTIME_VERSION}" \
 SUB2API_BALANCES_SIGNING_KEY_ID=2026-08-balances \
 NEWAPI_BALANCES_SIGNING_KEY_ID=2026-08-balances \
 RESTORE_POSTGRES_TMPFS_SIZE=16g \
@@ -3189,25 +3318,25 @@ The source agents do not write this table, but stop `ingest-proxy` as well so
 they spool safely while the API is down:
 
 ```bash
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml stop api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml stop api ingest-proxy
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml \
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml \
   --profile tools run --rm --pull never oidc-logout-retention \
   --database-url-file /run/secrets/invoice_owner_database_url \
   --retention 8760h --batch-size 500 --execute --maintenance-confirmed \
   --reason 'quarterly OIDC logout replay retention after verified backup'
 
-docker compose --env-file deploy/.env.production -f deploy/docker-compose.prod.yml up -d --no-build api ingest-proxy
+docker compose --env-file "$PRODUCTION_ENV_FILE" -f deploy/docker-compose.prod.yml up -d --no-build api ingest-proxy
 ```
 
 Record the emitted `request_id`, starting eligible count, deleted count, batch
@@ -3444,9 +3573,12 @@ other non-zero exit -- including a failed `invoice-migrate` step or the
 `tooling_failure` marker case above -- is an execution failure
 (decrypt/restore/signature/migration/Docker problem) with no verdict at all.
 
-**RC plan template step:** for any RC plan whose Task 1 scope matches the
-"when" list above, add this bullet to Task 1, after the full test suite and
-before the tag is created:
+**RC plan template step:** for any RC plan whose scope matches the "when" list
+above, place this gate after the signed candidate's image gate, artifact
+verification and separately approved transfer/load, and before deployment.
+This describes the existing release order; it adds no pre-tag image workflow.
+
+Placement: source gate → signed tag → image gate → verified image load → shadow evaluation → roll-forward.
 
 ```
 - [ ] Run deploy/rehearsal/shadow-eval.sh against the newest signed backup with
@@ -3454,14 +3586,22 @@ before the tag is created:
       changes the evaluator, the projection, or a migration feeding either
       (without it the rehearsal cannot exercise the change at all, and will
       still say "ready"); require verdict "ready" (exit 0). A
-      "not_ready" verdict (exit 3) blocks the tag until the report's
+      "not_ready" verdict (exit 3) blocks deployment until the report's
       new_freeze_reasons/round_errors/failed_accounts are root-caused and
       fixed, not silently re-run past. A failed invoice-migrate step inside
-      the rehearsal (exit 1, no verdict) blocks the tag the same way -- fix
-      the migration itself before retrying.
+      the rehearsal (exit 1, no verdict) blocks deployment the same way -- fix
+      the migration itself before retrying. Source changes require a new
+      candidate identity and rebuilt/reverified artifacts; never move the
+      existing signed tag or reuse its old image evidence for changed source.
 ```
 
 ## 12. Rollback
+
+After a separately approved source-root switch, run this section from
+`/root/invoice-system/app/releases/<sha>/source/invoice`; the roll-forward
+entry point from the monorepo root is `invoice/deploy/roll-forward.sh`.
+Keep the existing release-level `.env.production` location. No rollback or
+roll-forward is authorized by the cutover rehearsal.
 
 Before first public traffic, an image-only rollback is allowed only when the
 previous image explicitly declares the current migration set compatible.

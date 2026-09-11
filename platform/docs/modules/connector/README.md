@@ -125,8 +125,10 @@ go test ./connectors/... ./internal/platform/connector/
 
 ## 尚未做的事
 
-- 真实上游**未验证**：路由与响应形状按 `K:/sub2api-src` 的源码与
+- 真实上游**未验证**：路由与响应形状按原独立参考仓库 `sub2api-src` 的历史源码与
   `contracts/connectors/sub2api.read.v1.md` 确定，但没有对着真实实例跑过一次。
+  此处仅记录历史出处，未核验当前上游；当前工作区布局与交接见 monorepo 根目录的
+  `docs/MONOREPO-MIGRATION.md` 和 `docs/handoffs/MONOREPO-CUTOVER.md`。
   验证清单见 RUNBOOK「账号到位后的验证清单」；
 - 兼容矩阵 `SupportedUpstreamVersions` 只有一条线，等真实探测值回填；
 - 重试与退避没有做在 Connector 里：周期任务本身就是 5 分钟一轮，

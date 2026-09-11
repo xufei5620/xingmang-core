@@ -49,6 +49,7 @@ if ($releaseRoot.TrimEnd([IO.Path]::DirectorySeparatorChar).Equals($allowedRoot.
     -not ($releaseRoot + [IO.Path]::DirectorySeparatorChar).StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'release artifact directory must remain below the project release directory'
 }
+Assert-NoReleasePathReparsePoints -Path $releaseRoot | Out-Null
 if (((Get-Item -LiteralPath $releaseRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'release artifact directory cannot be a symlink/reparse point'
 }

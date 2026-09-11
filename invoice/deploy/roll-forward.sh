@@ -36,7 +36,21 @@ sha=${1:?usage: roll-forward.sh <release-commit-sha>}
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "release sha must be 40 hex chars" >&2; exit 2; }
 root=/root/invoice-system/app/releases/$sha
 env_file=$root/.env.production
-deploy_dir=$root/source/deploy
+if [[ -d "$root/source/deploy" && -d "$root/source/invoice/deploy" ]]; then
+  echo 'release contains ambiguous standalone and monorepo deploy roots' >&2; exit 2
+elif [[ -d "$root/source/invoice/deploy" ]]; then
+  deploy_dir=$root/source/invoice/deploy
+elif [[ -d "$root/source/deploy" ]]; then
+  deploy_dir=$root/source/deploy
+else
+  echo 'release has no supported invoice deploy root' >&2; exit 2
+fi
+[[ "$(realpath -e -- "$deploy_dir")" == "$deploy_dir" ]] || { echo 'release deploy root is not canonical' >&2; exit 2; }
+for asset in docker-compose.prod.yml docker-compose.idp.yml docker-compose.sources.yml \
+  postgres/apply-permissions.sh postgres/harden-runtime-role.sql postgres/010-invoice-roles.sh \
+  keycloak/010-keycloak-app-role.sh clamav-healthcheck.sh nginx/ingest-mtls.conf; do
+  [[ -f "$deploy_dir/$asset" && ! -L "$deploy_dir/$asset" ]] || { echo "release deploy asset missing or unsafe: $asset" >&2; exit 2; }
+done
 backup_max_age=${BACKUP_MAX_AGE_MINUTES:-120}
 readyz_wait=${READYZ_WAIT_SECONDS:-600}
 public_origin=${PUBLIC_ORIGIN:-https://invoice.solov.cc}
@@ -45,6 +59,12 @@ test -d "$root/source" || { echo "release source missing: $root/source" >&2; exi
 test -f "$env_file" || { echo "release env missing: $env_file" >&2; exit 2; }
 tag=$(sed -n 's/^INVOICE_IMAGE_TAG=//p' "$env_file")
 [[ "$tag" =~ ^0\.1\.0-rc[0-9]+$ ]] || { echo "INVOICE_IMAGE_TAG in $env_file is not an rc tag: '$tag'" >&2; exit 2; }
+if [[ ${INVOICE_IMAGE_TAG+x} && "$INVOICE_IMAGE_TAG" != "$tag" ]]; then
+  echo 'exported INVOICE_IMAGE_TAG conflicts with the approved release env' >&2
+  exit 2
+fi
+# Bind every Compose invocation to the same tag that the preflight inspected.
+export INVOICE_IMAGE_TAG=$tag
 for image in invoice-system-api invoice-system-pdf-scanner invoice-system-tools invoice-system-web \
              invoice-source-agent invoice-postgres invoice-clamav invoice-ingest-proxy invoice-keycloak; do
   docker image inspect "$image:$tag" >/dev/null 2>&1 || { echo "image not loaded: $image:$tag" >&2; exit 2; }
@@ -99,17 +119,27 @@ echo "==> [4/6] restart api (worker self-heal)"
 # next 27 minutes posting to an address the api no longer had.
 restart_ingest_proxy() {
   echo "==> [5/6] restart ingest-proxy (immediate re-resolve; the config also re-resolves at request time)"
-  docker restart invoice-system-prod-ingest-proxy-1 >/dev/null || true
+  docker restart invoice-system-prod-ingest-proxy-1 >/dev/null || return $?
   sleep 5
 }
-trap restart_ingest_proxy EXIT
+recover_ingest_proxy_on_exit() {
+  local original_status=$?
+  trap - EXIT
+  if restart_ingest_proxy; then
+    :
+  elif (( original_status == 0 )); then
+    original_status=1
+  fi
+  exit "$original_status"
+}
+trap recover_ingest_proxy_on_exit EXIT
 docker restart invoice-system-prod-api-1 >/dev/null
 # 120s, not 60s: a cold api on a loaded box has taken over a minute to bind.
 # `--since` widens with the loop so a line printed early is still matched.
 for _ in $(seq 1 60); do
-  docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' && break; sleep 2
+  docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep 'invoice API listening' >/dev/null && break; sleep 2
 done
-docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep -q 'invoice API listening' || { echo "api did not report listening" >&2; exit 1; }
+docker logs --since 180s invoice-system-prod-api-1 2>&1 | grep 'invoice API listening' >/dev/null || { echo "api did not report listening" >&2; exit 1; }
 restart_ingest_proxy
 trap - EXIT
 echo "==> [6/6] verify"

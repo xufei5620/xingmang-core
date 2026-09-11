@@ -62,8 +62,13 @@ require_command wc
 
 readonly OPERATOR_PATH="$(realpath -e -- "$0")"
 readonly PROJECT_ROOT="$(realpath -e -- "$(dirname -- "$OPERATOR_PATH")/../..")"
-readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/..")"
-[[ "$PROJECT_ROOT" == "$RELEASE_ROOT/source" ]] || die 'operator must run from an installed immutable release tree'
+case "$PROJECT_ROOT" in
+  */source/invoice) readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/../..")" SOURCE_RELATIVE_ROOT=source/invoice ;;
+  */source) readonly RELEASE_ROOT="$(realpath -e -- "$PROJECT_ROOT/..")" SOURCE_RELATIVE_ROOT=source ;;
+  *) die 'operator must run from an installed immutable release tree' ;;
+esac
+[[ "$PROJECT_ROOT" == "$RELEASE_ROOT/$SOURCE_RELATIVE_ROOT" ]] || die 'operator must run from an installed immutable release tree'
+[[ ! -d "$RELEASE_ROOT/source/deploy" || ! -d "$RELEASE_ROOT/source/invoice/deploy" ]] || die 'ambiguous installed invoice deploy roots'
 readonly SOURCE_COMMIT_FILE="$RELEASE_ROOT/SOURCE_COMMIT"
 readonly SOURCE_TAG_FILE="$RELEASE_ROOT/SOURCE_TAG"
 readonly KEYCLOAK_IMAGE_FILE="$RELEASE_ROOT/KEYCLOAK_IMAGE"
@@ -91,14 +96,14 @@ done <"$RELEASE_ALLOWED_SIGNERS_FILE"
 release_manifest_entries=0
 declare -A release_manifest_seen=()
 while IFS= read -r release_line || [[ -n "$release_line" ]]; do
-  [[ "$release_line" =~ ^[0-9a-f]{64}\ \ (SOURCE_COMMIT|SOURCE_TAG|KEYCLOAK_IMAGE|SMTP_TRANSPORT|source/deploy/keycloak/(invite-permanent-master-admin|run-permanent-master-admin-maintenance)\.sh)$ ]] ||
+  [[ "$release_line" =~ ^[0-9a-f]{64}\ \ (SOURCE_COMMIT|SOURCE_TAG|KEYCLOAK_IMAGE|SMTP_TRANSPORT|${SOURCE_RELATIVE_ROOT}/deploy/keycloak/(invite-permanent-master-admin|run-permanent-master-admin-maintenance)\.sh)$ ]] ||
     die 'installed release-tree manifest syntax is invalid'
   release_name="${BASH_REMATCH[1]}"
   [[ -z "${release_manifest_seen[$release_name]:-}" ]] || die 'installed release-tree manifest contains a duplicate'
   release_manifest_seen[$release_name]=1
   release_manifest_entries=$((release_manifest_entries+1))
 done <"$RELEASE_BINDING_MANIFEST"
-[[ "$release_manifest_entries" == 6 && -n "${release_manifest_seen[SOURCE_COMMIT]:-}" && -n "${release_manifest_seen[SOURCE_TAG]:-}" && -n "${release_manifest_seen[KEYCLOAK_IMAGE]:-}" && -n "${release_manifest_seen[SMTP_TRANSPORT]:-}" && -n "${release_manifest_seen[source/deploy/keycloak/invite-permanent-master-admin.sh]:-}" && -n "${release_manifest_seen[source/deploy/keycloak/run-permanent-master-admin-maintenance.sh]:-}" ]] ||
+[[ "$release_manifest_entries" == 6 && -n "${release_manifest_seen[SOURCE_COMMIT]:-}" && -n "${release_manifest_seen[SOURCE_TAG]:-}" && -n "${release_manifest_seen[KEYCLOAK_IMAGE]:-}" && -n "${release_manifest_seen[SMTP_TRANSPORT]:-}" && -n "${release_manifest_seen[$SOURCE_RELATIVE_ROOT/deploy/keycloak/invite-permanent-master-admin.sh]:-}" && -n "${release_manifest_seen[$SOURCE_RELATIVE_ROOT/deploy/keycloak/run-permanent-master-admin-maintenance.sh]:-}" ]] ||
   die 'installed release-tree manifest does not bind the exact source/operation tuple'
 (
   cd "$RELEASE_ROOT"
@@ -572,7 +577,7 @@ done
 ssh-keygen -Y verify -f "$OFFSITE_ALLOWED_SIGNERS_FILE" -I "$OFFSITE_SIGNER_IDENTITY" \
   -n "$OFFSITE_SIGNATURE_NAMESPACE" -s "$offsite_ack_signature" <"$offsite_ack" >/dev/null ||
   die 'off-site acknowledgement signature verification failed'
-jq -Rn --arg record "$record_id" --arg manifest "$backup_manifest_hash" '
+jq -eRn --arg record "$record_id" --arg manifest "$backup_manifest_hash" '
   [inputs] as $lines |
   ($lines | length == 3) and
   ($lines[0] == ("record_id=" + $record)) and

@@ -307,7 +307,8 @@ func TestRunNarrowingFlagsRejectedForWrongKind(t *testing.T) {
 // lost, so it is never allowed to run unnarrowed. Omitting --event must fail
 // closed rather than defaulting to "every unreplayable event".
 func TestRunAcknowledgeUnreplayableRequiresAnEvent(t *testing.T) {
-	databaseURLFile, keyringFile, migrationsDir := setupRepairCLIEnv(t)
+	absent := filepath.Join(t.TempDir(), "absent")
+	databaseURLFile, keyringFile, migrationsDir := absent, absent, absent
 	var out bytes.Buffer
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -326,10 +327,14 @@ func TestRunAcknowledgeUnreplayableRequiresAnEvent(t *testing.T) {
 	// --account is meaningless here and must not be accepted as a substitute
 	// for naming the event.
 	var accountOut bytes.Buffer
-	if err := run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "",
+	err = run(ctx, databaseURLFile, keyringFile, migrationsDir, false, "",
 		kindIngestAcknowledgeUnreplayable,
-		repairFilters{accountID: "40000000-0000-4000-8000-000000000001"}, &accountOut); err == nil {
-		t.Fatal("--account was accepted for the acknowledge kind")
+		repairFilters{eventID: "40000000-0000-4000-8000-000000000002", accountID: "40000000-0000-4000-8000-000000000001"}, &accountOut)
+	if err == nil || !strings.Contains(err.Error(), "--account is not valid") {
+		t.Fatalf("expected account-specific rejection with a valid event, got %v", err)
+	}
+	if accountOut.Len() != 0 {
+		t.Fatal("rejected account filter printed a repair summary")
 	}
 }
 

@@ -1,4 +1,27 @@
+[CmdletBinding()]
+param(
+    [switch]$MonorepoTestsOnly,
+    [ValidateSet('All', 'PinnedRoot', 'GitProvenance')]
+    [string]$MonorepoTestGroup = 'All',
+    [string]$MonorepoCase = '*',
+    [string]$MonorepoFixtureRoot = ''
+)
+
 $ErrorActionPreference = 'Stop'
+
+# Run the same behavior fixtures in both the complete gate and focused red/green
+# checks. Case IDs also allow every assertion to be checked against a mutation.
+if (-not $MonorepoTestsOnly -and ($MonorepoTestGroup -ne 'All' -or $MonorepoCase -ne '*')) {
+    throw 'Selecting a monorepo group/case requires -MonorepoTestsOnly'
+}
+& (Join-Path $PSScriptRoot 'test-monorepo-release-contract.ps1') `
+    -Group $MonorepoTestGroup -CaseId $MonorepoCase -FixtureRoot $MonorepoFixtureRoot
+if ($MonorepoTestsOnly) {
+    $global:LASTEXITCODE = 0
+    return
+}
+
+& (Join-Path $PSScriptRoot 'test-keycloak-source-build.ps1')
 
 $gateSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'release-image-gate.ps1')
 if ([regex]::Matches($gateSource, "'--timeout', '15m'").Count -lt 4) {
@@ -651,9 +674,10 @@ if (-not $clamavDockerfile.Contains($clamavBaseReference) -or
 }
 Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $keycloakBaseReference | Out-Null
 
-$keycloakLiteralPinFixture = "FROM $keycloakBaseReference AS builder`nFROM $keycloakBaseReference`n"
+$keycloakSourceBuildBaseReference = 'registry.access.redhat.com/ubi9/openjdk-21@sha256:cc8a30e9181b0135e6657ca3b824d7b32e4c7f6a664769ef641d4f7031339564'
+$keycloakLiteralPinFixture = "FROM $keycloakSourceBuildBaseReference AS source-build`nFROM $keycloakBaseReference AS builder`nFROM $keycloakBaseReference`n"
 Test-Task5ARequirement -Label 'literal Keycloak FROM pins with permitted leading whitespace' -Action {
-    $leadingWhitespaceFixture = "  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
+    $leadingWhitespaceFixture = "  FROM $keycloakSourceBuildBaseReference AS source-build`n  FROM $keycloakBaseReference AS builder`n`tFROM $keycloakBaseReference`n"
     Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $leadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
 }
 foreach ($unicodeWhitespaceFixture in @(
@@ -663,6 +687,7 @@ foreach ($unicodeWhitespaceFixture in @(
 )) {
     Test-Task5ARequirement -Label "literal Keycloak FROM pins with $($unicodeWhitespaceFixture.Label) leading whitespace" -Action {
         $unicodeLeadingWhitespaceFixture =
+            $unicodeWhitespaceFixture.Prefix + "FROM $keycloakSourceBuildBaseReference AS source-build`n" +
             $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference AS builder`n" +
             $unicodeWhitespaceFixture.Prefix + "FROM $keycloakBaseReference`n"
         Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $unicodeLeadingWhitespaceFixture -ExpectedBaseReference $keycloakBaseReference | Out-Null
@@ -670,7 +695,7 @@ foreach ($unicodeWhitespaceFixture in @(
 }
 foreach ($dockerfileMutation in @(
     [pscustomobject]@{
-        Label = 'indented mixed-case third FROM'
+        Label = 'indented mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + "  fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
@@ -682,19 +707,19 @@ foreach ($dockerfileMutation in @(
         Text = $keycloakLiteralPinFixture + '  FROM ${KEYCLOAK_BASE_IMAGE} AS bypass' + "`n"
     },
     [pscustomobject]@{
-        Label = 'vertical-tab-prefixed mixed-case third FROM'
+        Label = 'vertical-tab-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x000B + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'form-feed-prefixed mixed-case third FROM'
+        Label = 'form-feed-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x000C + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'NBSP-prefixed mixed-case third FROM'
+        Label = 'NBSP-prefixed mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + [string][char]0x00A0 + "fRoM scratch AS bypass`n"
     },
     [pscustomobject]@{
-        Label = 'vertical-tab-separated mixed-case third FROM'
+        Label = 'vertical-tab-separated mixed-case extra FROM'
         Text = $keycloakLiteralPinFixture + 'fRoM' + [string][char]0x000B + "scratch AS bypass`n"
     },
     [pscustomobject]@{
@@ -710,7 +735,7 @@ foreach ($dockerfileMutation in @(
 $verifySource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'verify.ps1')
 if (-not $verifySource.Contains('Assert-KeycloakDockerfileLiteralBasePins -DockerfileText $keycloakDockerfile -ExpectedBaseReference $expectedKeycloakBase', [StringComparison]::Ordinal) -or
     $verifySource -match 'KEYCLOAK_BASE_IMAGE') {
-    throw 'verify.ps1 does not enforce the literal-only two-stage Keycloak base pin contract'
+    throw 'verify.ps1 does not enforce the literal-only source-builder and runtime Keycloak base pin contract'
 }
 
 $productionCompose = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'deploy\docker-compose.prod.yml')
@@ -1070,11 +1095,51 @@ foreach ($invalidTagName in @(
     }
 }
 $productionRunbook = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'docs\PRODUCTION-RUNBOOK.md')
+function Assert-RunbookStrictTransferCommands {
+    param([Parameter(Mandatory)][string]$Text)
+    $strictCount = 0
+    # Historical RC38 maintenance warnings are separate from these executable
+    # verifier calls. Validate actual parameters, not words anywhere in the book.
+    $invocations = [regex]::Matches($Text, '(?m)^[ \t]*pwsh[ \t]+[^\r\n]*-File[ \t]+\.\\scripts\\verify-release-image-artifacts\.ps1[^\r\n]*$')
+    foreach ($invocation in $invocations) {
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($invocation.Value, [ref]$tokens, [ref]$errors)
+        if ($errors.Count) { throw 'production runbook verifier command has invalid PowerShell syntax' }
+        $command = $ast.Find({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'pwsh' }, $true)
+        $elements = @($command.CommandElements)
+        $ready = @($elements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'RequireTransferReady' })
+        $tag = @($elements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -ceq 'SignedReleaseTag' })
+        if ($ready.Count -eq 0 -and $tag.Count -eq 0) { continue } # Ordinary diagnostic verification remains legal.
+        $strictCount++
+        if ($ready.Count -ne 1 -or $tag.Count -ne 1 -or
+            ($ready[0].Argument -and $ready[0].Argument.Extent.Text -cne '$true')) {
+            throw 'production runbook strict verifier must enable transfer readiness and bind one signed tag'
+        }
+        $tagValue = $tag[0].Argument
+        if ($null -eq $tagValue) { $tagValue = $elements[[Array]::IndexOf($elements, $tag[0]) + 1] }
+        if ($tagValue -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $tagValue.Value -cne 'v0.1.0-rc110-signed') {
+            throw 'production runbook strict verifier must use the exact current signed release tag'
+        }
+    }
+    # Both the post-image-gate check and the pre-signing candidate check are mandatory.
+    if ($strictCount -ne 2) { throw 'production runbook must retain both strict transfer-ready verifier calls' }
+}
 Test-Task5ARequirement -Label 'production runbook invokes the exact RC100 strict transfer-ready verifier parameters' -Action {
-    if (-not $productionRunbook.Contains('-RequireTransferReady', [StringComparison]::Ordinal) -or
-        -not $productionRunbook.Contains('-SignedReleaseTag v0.1.0-rc110-signed', [StringComparison]::Ordinal) -or
-        $productionRunbook -match '\bRC(?:32|38)\b') {
-        throw 'production runbook does not invoke the exact strict transfer-ready verifier parameters'
+    Assert-RunbookStrictTransferCommands -Text $productionRunbook
+}
+foreach ($runbookStrictMutation in @(
+    @{ Label='missing transfer-ready switch'; Text=$productionRunbook.Replace(' -RequireTransferReady', '') }
+    @{ Label='missing signed tag parameter'; Text=$productionRunbook.Replace(' -SignedReleaseTag v0.1.0-rc110-signed', '') }
+    @{ Label='disabled transfer-ready switch'; Text=$productionRunbook.Replace('-RequireTransferReady', '-RequireTransferReady:$false') }
+    @{ Label='duplicate transfer-ready switch'; Text=$productionRunbook.Replace('-RequireTransferReady', '-RequireTransferReady -RequireTransferReady') }
+    @{ Label='duplicate signed tag parameter'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc110-signed -SignedReleaseTag v0.1.0-rc110-signed') }
+    @{ Label='old RC38 verifier tag'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc38-signed') }
+    @{ Label='old RC32 verifier tag'; Text=$productionRunbook.Replace('-SignedReleaseTag v0.1.0-rc110-signed', '-SignedReleaseTag v0.1.0-rc32-signed') }
+    @{ Label='ordinary mode substituted for both strict calls'; Text=$productionRunbook.Replace(' -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed', '') }
+    @{ Label='post-image strict call removed'; Text=$productionRunbook.Replace('pwsh -NoProfile -File .\scripts\verify-release-image-artifacts.ps1 -ReleaseDirectory $rc100ReleaseDirectory -RequireTransferReady -SignedReleaseTag v0.1.0-rc110-signed', '') }
+)) {
+    Test-Task5AMutationRejected -Label $runbookStrictMutation.Label -Action {
+        Assert-RunbookStrictTransferCommands -Text $runbookStrictMutation.Text
     }
 }
 

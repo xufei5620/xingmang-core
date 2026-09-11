@@ -5,20 +5,24 @@
 # 撞过一次——credentials 包的 DB 集成测试往 core.connector_config 写
 # (sub2api/newapi, staging) 这两行且不清理，与 jobs 包的同库测试撞了唯一键
 # （XM-DBTEST-FIX0 记录的三处夹具漂移之一）。本脚本让每个 worktree 拿到自己
-# 独立的 xm_test_<worktree 目录名> 库，从根上消除这类"跑测顺序/并发敏感"的
+# 独立的 xm_test_<短名>_<完整路径哈希> 库，从根上消除这类"跑测顺序/并发敏感"的
 # 耦合，而不是逐个包打补丁。
 #
 # 用法（默认动作）：
 #   scripts/dev/worktree-testdb.sh              # 建库（如不存在）+ 灌迁移，
 #                                                # 打印 export XM_TEST_DATABASE_URL=...
-#   eval "$(scripts/dev/worktree-testdb.sh)"     # 直接令当前 shell 生效
-#   export XM_TEST_DATABASE_URL=$(scripts/dev/worktree-testdb.sh --print-url)
+#   testdb_exports=$(bash scripts/dev/worktree-testdb.sh) || { echo 'test database provisioning failed' >&2; exit 1; }
+#   [[ -n "$testdb_exports" ]] || { echo 'test database environment is empty' >&2; exit 1; }
+#   eval "$testdb_exports"
+#   testdb_url=$(bash scripts/dev/worktree-testdb.sh --print-url) || { echo 'test database provisioning failed' >&2; exit 1; }
+#   [[ -n "$testdb_url" ]] || { echo 'test database URL is empty' >&2; exit 1; }
+#   export XM_TEST_DATABASE_URL="$testdb_url"
 #   scripts/dev/worktree-testdb.sh --list        # 列出所有 xm_test_* 库及大小
 #   scripts/dev/worktree-testdb.sh --drop        # 删除当前 worktree 的专属库
 #
 # 约定：本脚本对外只有两种输出通道——诊断/进度信息一律写 stderr；stdout 只在
 # 默认动作（含 --print-url）时输出那一行连接串/export 语句，--list 时输出查询
-# 结果表格。这样 `export X=$(... --print-url)` 之类的捕获不会被进度信息污染。
+# 结果表格。捕获时先独立赋值并检查退出码和非空，再 export/eval，避免掩盖建库失败。
 #
 # 可被 source：本文件把纯函数（sanitize_name / derive_db_name / build_db_url）
 # 和参数解析（parse_args）都写成不依赖数据库的普通函数，配合文件末尾的
@@ -45,22 +49,28 @@ sanitize_name() {
   printf '%s' "$out"
 }
 
-# derive_db_name：worktree 目录路径（或直接是名字）-> xm_test_ 前缀的库名，
-# 总长度不超过 63（Postgres 标识符上限）。超长时截断 sanitize 后的名字并补
-# 一段短哈希消歧——只截断不消歧会让两个不同的长 worktree 名悄悄撞成同一个
-# 库名，正好违背"每个 worktree 独立测试库"这件事本身。
+# derive_db_name：为 Git 返回的完整工作树路径始终附加 SHA-256 前 16 位，
+# 再截断可读短名，保证总长度不超过 63。词法清理 ./、../、重复斜杠；
+# 相对名字按当前目录展开，不访问目录内容。旧的 basename-only 库不会被选中。
 derive_db_name() {
-  local raw="$1" base sanitized prefix full max hash keep
-  base="$(basename -- "$raw")"
+  local raw="$1" identity base sanitized prefix max hash keep part
+  local -a parts=() cleaned=()
+  case "$raw" in /*|[a-zA-Z]:/*) ;; *) raw="$PWD/$raw" ;; esac
+  IFS=/ read -r -a parts <<< "$raw"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ''|.) ;;
+      ..) if [ "${#cleaned[@]}" -gt 0 ]; then unset 'cleaned[${#cleaned[@]}-1]'; fi ;;
+      *) cleaned+=("$part") ;;
+    esac
+  done
+  identity="$(IFS=/; printf '%s' "${cleaned[*]}")"
+  case "$raw" in /*) identity="/$identity" ;; esac
+  base="$(basename -- "$identity")"
   sanitized="$(sanitize_name "$base")"
   prefix="xm_test_"
-  full="${prefix}${sanitized}"
   max=63
-  if [ "${#full}" -le "$max" ]; then
-    printf '%s' "$full"
-    return 0
-  fi
-  hash="$(printf '%s' "$sanitized" | sha256sum | cut -c1-8)"
+  hash="$(printf '%s' "$identity" | sha256sum | cut -c1-16)"
   keep=$((max - ${#prefix} - ${#hash} - 1))
   printf '%s%s_%s' "$prefix" "${sanitized:0:$keep}" "$hash"
 }
@@ -227,7 +237,7 @@ cmd_ensure() {
   # 迁移只连本机已发布端口的真实 Postgres，不需要外部网络；这里仍然主动
   # unset 本机常见的转发代理变量，避免个别机器上代理抖动影响 go run 编译
   # cmd/migrate 时的模块解析（纯防御性操作，模块已在缓存时完全没有副作用）。
-  ( cd "$worktree_root" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+  ( cd "$project_root" && env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
       -u ALL_PROXY -u all_proxy -u NO_PROXY -u no_proxy \
       "$go_bin" run ./cmd/migrate -database "$migrate_url" -path db/migrations up ) \
     || die "迁移失败：$dbname"
@@ -252,6 +262,8 @@ main() {
   parse_args "$@"
   pg_admin_url="${pg_url_override:-$default_pg_admin_url}"
   worktree_root="$(find_worktree_root)"
+  project_root="$worktree_root"
+  [ ! -f "$worktree_root/platform/go.mod" ] || project_root="$worktree_root/platform"
   dbname="$(derive_db_name "$worktree_root")"
   case "$dbname" in
     xm_test_*) ;;

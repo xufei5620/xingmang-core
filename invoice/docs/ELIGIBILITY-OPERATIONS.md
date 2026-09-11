@@ -885,8 +885,8 @@ the same question first:
 | Door | What it resolves | What a refusal does |
 | --- | --- | --- |
 | the admin freeze queue (`POST /api/v1/admin/eligibility-freezes/{id}/resolve`) | one freeze | `409 ELIGIBILITY_DEAD_EVENT_UNREPAIRED` |
-| `invoice-eligibility-repair --kind=preanchor-usage` | `SOURCE_GAP` on usage/credit plus the correlated `EVENT_DEAD` freezes | aborts the run, nothing written |
-| `invoice-eligibility-repair --kind=anchor-balance` | `SOURCE_GAP` on `balance_checkpoint` / `balance_carry_forward_proof` | aborts the run, nothing written |
+| `invoice-eligibility-repair --kind=pre-anchor-usage` | `SOURCE_GAP` on usage/credit plus the correlated `EVENT_DEAD` freezes | aborts the run, nothing written |
+| `invoice-eligibility-repair --kind=balance-anchor` | `SOURCE_GAP` on `balance_checkpoint` / `balance_carry_forward_proof` | aborts the run, nothing written |
 | `invoice-eligibility-repair --kind=balance-blip` | `UNKNOWN_NEGATIVE_BALANCE` | aborts the run, nothing written |
 | `invoice-eligibility-repair --kind=queue-narrow` | `UNKNOWN_NEGATIVE_BALANCE`, `USAGE_EXCEEDS_LEDGER`, lot-less `LATE_FINALIZED_EVENT` | that one account is reported in the run's error list; every other account still repairs |
 

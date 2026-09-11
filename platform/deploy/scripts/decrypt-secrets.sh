@@ -19,14 +19,45 @@ command -v sops >/dev/null || { echo "需要安装 sops" >&2; exit 1; }
 python3 -c 'import yaml' 2>/dev/null || { echo "需要 python3 + pyyaml（pip install pyyaml）" >&2; exit 1; }
 
 umask 077
-rm -rf "$out_root" && mkdir -p "$out_root"
+out_parent="$(dirname -- "$out_root")"
+mkdir -p -- "$out_parent"
+[ ! -L "$out_root" ] && { [ ! -e "$out_root" ] || [ -d "$out_root" ]; } || {
+  echo "解密目标必须是普通目录" >&2; exit 1;
+}
+lock_dir="$out_parent/.${env_name}.decrypt.lock"
+mkdir -- "$lock_dir" 2>/dev/null || { echo "同一环境正在解密，停止" >&2; exit 75; }
+stage=""
+cleanup() {
+  local rc="$?"
+  if [ -n "$stage" ]; then
+    if [ -d "$stage/previous" ] && [ ! -e "$out_root" ]; then
+      if ! mv -T -- "$stage/previous" "$out_root"; then
+        echo "恢复原输出失败；原目录保留在 $stage/previous" >&2
+        rmdir -- "$lock_dir" 2>/dev/null || true
+        exit 1
+      fi
+    fi
+    # Do not discard the previous directory after an interrupted publication.
+    if [ "$rc" -ne 0 ] && [ -d "$stage/previous" ]; then
+      echo "原输出备份保留在 $stage/previous" >&2
+    else
+      rm -rf -- "$stage"
+    fi
+  fi
+  rmdir -- "$lock_dir" 2>/dev/null || true
+  exit "$rc"
+}
+trap cleanup EXIT
+stage="$(mktemp -d -- "$out_parent/.${env_name}.staging.XXXXXX")"
+mkdir -- "$stage/output"
+sops -d "$enc_file" > "$stage/payload.yaml"
 
 # 加密 YAML 结构约定（两层：scope → name → 值）:
 #   sub2api-prod:
 #     read-only-admin: "<值>"
 #   alerting:
 #     telegram-primary: "<值>"
-sops -d "$enc_file" | python3 - "$out_root" <<'PY'
+python3 - "$stage/output" 3< "$stage/payload.yaml" <<'PY'
 import os
 import re
 import sys
@@ -39,7 +70,8 @@ import yaml
 PART = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 out_root = os.path.realpath(sys.argv[1])
-data = yaml.safe_load(sys.stdin) or {}
+with os.fdopen(3, "r", encoding="utf-8") as payload:
+    data = yaml.safe_load(payload) or {}
 if not isinstance(data, dict):
     raise SystemExit("加密包顶层必须是 scope→(name→值) 映射")
 
@@ -60,5 +92,10 @@ for scope, entries in data.items():
         with open(p, "w", encoding="utf-8") as f:
             f.write(str(value))
         os.chmod(p, 0o600)
-print(f"decrypted -> {out_root}")
+
 PY
+
+# All entries were validated and written before touching the previous generation.
+if [ -d "$out_root" ]; then mv -T -- "$out_root" "$stage/previous"; fi
+mv -T -- "$stage/output" "$out_root"
+echo "decrypted -> $out_root"

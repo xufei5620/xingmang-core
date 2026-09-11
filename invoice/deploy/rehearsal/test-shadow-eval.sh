@@ -1005,6 +1005,31 @@ assert_vacuous no-freezes-ready.json false "pre-existing report without the new 
 assert_vacuous rc78-real-shadow-eval.json false "RC78 real report without the new fields"
 echo "reproject-all vacuity: ok"
 
+# Exercise the actual orchestrator's final decision, without restoring data or
+# running Docker. Function-only tests cannot detect a final unconditional exit 0.
+orchestrator_tail=$(sed -n '/^if \[\[ ! -s "$report_json" \]\]; then/,$p' "$shadow_eval")
+for spec in no-freezes-ready.json:0:0 new-reason-not-ready.json:3:3 \
+  no-freezes-ready.json:1:1 no-freezes-ready.json:125:1 \
+  no-freezes-ready.json:137:1 no-freezes-ready.json:3:1 \
+  new-reason-not-ready.json:0:1; do
+  IFS=: read -r fixture tool_status expected_status <<<"$spec"
+  set +e
+  (
+    set -Eeuo pipefail
+    docker() { echo 'unexpected Docker in final-decision fixture' >&2; return 99; }
+    report_json="$fixtures_dir/$fixture"
+    summary_txt="$fixtures_dir/orchestrator-summary.txt"
+    tool_log=/dev/null
+    tool_exit=$tool_status
+    eval "$orchestrator_tail"
+  ) >"$fixtures_dir/orchestrator-output.txt" 2>&1
+  actual_status=$?
+  set -e
+  if [[ "$actual_status" != "$expected_status" ]]; then
+    fail "orchestrator $fixture tool_exit=$tool_status: expected exit $expected_status, got $actual_status"
+  fi
+done
+
 if (( failures > 0 )); then
   echo "test-shadow-eval.sh: $failures failure(s)" >&2
   exit 1

@@ -1,6 +1,7 @@
 package consoleassertion
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -83,13 +84,30 @@ func TestNewSignerPropagatesResolveError(t *testing.T) {
 	}
 }
 
+// assertionClaimsForTest freezes the consumer's JSON names and types. Do not
+// alias wireClaims: a producer-only JSON tag change must fail this contract.
+type assertionClaimsForTest struct {
+	Issuer    string   `json:"iss"`
+	Audience  string   `json:"aud"`
+	Subject   string   `json:"sub"`
+	Username  string   `json:"username"`
+	Roles     []string `json:"roles"`
+	ACR       string   `json:"acr"`
+	AMR       []string `json:"amr"`
+	Scope     string   `json:"scope"`
+	Nonce     string   `json:"nonce"`
+	IssuedAt  int64    `json:"iat"`
+	NotBefore int64    `json:"nbf"`
+	ExpiresAt int64    `json:"exp"`
+}
+
 // verifyForTest independently reimplements the invoice side's verification
 // rules (per the frozen technical specification's §3.2/§3.3, not by
 // importing anything from this package's own signing path) -- this is the
 // "cross-check test" the slice's own scope calls for: proof that a JWS this
 // package produces is acceptable to a verifier built from the spec alone,
 // not merely self-consistent with this package's own signCompact.
-func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time.Time) wireClaims {
+func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time.Time) assertionClaimsForTest {
 	t.Helper()
 	parts := strings.Split(compact, ".")
 	if len(parts) != 3 {
@@ -99,8 +117,14 @@ func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time
 	if err != nil {
 		t.Fatalf("decode header: %v", err)
 	}
-	var header jwsHeader
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
+	var header struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+		Typ string `json:"typ"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(headerJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&header); err != nil {
 		t.Fatalf("unmarshal header: %v", err)
 	}
 	if header.Alg != "EdDSA" {
@@ -108,6 +132,9 @@ func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time
 	}
 	if header.Typ != "xm-console-assertion+jwt" {
 		t.Fatalf("typ = %q, want the dedicated xm-console-assertion+jwt value", header.Typ)
+	}
+	if header.Kid != "2026-09" {
+		t.Fatalf("kid = %q, want the selected signing key", header.Kid)
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
@@ -121,8 +148,10 @@ func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time
 	if err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
-	var claims wireClaims
-	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
+	var claims assertionClaimsForTest
+	decoder = json.NewDecoder(bytes.NewReader(payloadJSON))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&claims); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	if claims.ExpiresAt-claims.IssuedAt > 300 {
@@ -130,6 +159,9 @@ func verifyForTest(t *testing.T, compact string, pub ed25519.PublicKey, now time
 	}
 	if claims.NotBefore != claims.IssuedAt {
 		t.Fatalf("nbf (%d) != iat (%d)", claims.NotBefore, claims.IssuedAt)
+	}
+	if claims.IssuedAt != now.Unix() || claims.ExpiresAt != now.Add(5*time.Minute).Unix() {
+		t.Fatal("iat/exp must encode the signing time and the frozen five-minute lifetime")
 	}
 	return claims
 }
@@ -144,11 +176,11 @@ func TestSignProducesAssertionThatVerifiesAgainstAnIndependentVerifier(t *testin
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if expiresAt.Sub(now) != assertionTTL {
-		t.Fatalf("expiresAt-now = %s, want exactly %s", expiresAt.Sub(now), assertionTTL)
+	if expiresAt.Sub(now) != 5*time.Minute {
+		t.Fatalf("expiresAt-now = %s, want exactly five minutes", expiresAt.Sub(now))
 	}
 	claims := verifyForTest(t, compact, pub, now)
-	if claims.Issuer != "https://console.solov.cc" || claims.Audience != DefaultAudience {
+	if claims.Issuer != "https://console.solov.cc" || claims.Audience != "xingmang-console-assertion-v1" {
 		t.Fatalf("iss/aud mismatch: %+v", claims)
 	}
 	if claims.Subject != "staff-uuid" || claims.Username != "alice" {
@@ -157,8 +189,8 @@ func TestSignProducesAssertionThatVerifiesAgainstAnIndependentVerifier(t *testin
 	if len(claims.Roles) != 1 || claims.Roles[0] != "admin" {
 		t.Fatalf("roles mismatch: %+v", claims.Roles)
 	}
-	if claims.ACR != ACR {
-		t.Fatalf("acr = %q, want %q", claims.ACR, ACR)
+	if claims.ACR != "xingmang-console-totp-v1" {
+		t.Fatalf("acr = %q, want the frozen console TOTP domain", claims.ACR)
 	}
 	if len(claims.AMR) != 2 || claims.AMR[0] != "pwd" || claims.AMR[1] != "otp" {
 		t.Fatalf("amr mismatch: %+v", claims.AMR)
@@ -170,8 +202,8 @@ func TestSignProducesAssertionThatVerifiesAgainstAnIndependentVerifier(t *testin
 		t.Fatalf("Sign's returned nonce (%q) does not match the claim actually embedded (%q)", nonce, claims.Nonce)
 	}
 	decodedNonce, err := base64.RawURLEncoding.DecodeString(claims.Nonce)
-	if err != nil || len(decodedNonce) != nonceBytes {
-		t.Fatalf("nonce is not a %d-byte base64url value: %q", nonceBytes, claims.Nonce)
+	if err != nil || len(decodedNonce) != 32 {
+		t.Fatal("nonce is not a 32-byte base64url value")
 	}
 }
 

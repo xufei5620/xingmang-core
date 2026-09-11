@@ -153,16 +153,39 @@ if ($observedSub2Version -ne $ExpectedSub2Version) {
     throw "Sub2API runtime drift: expected $ExpectedSub2Version, got $observedSub2Version"
 }
 $newAPIContainer = $containers | Where-Object { $_ -like 'new-api|*' } | Select-Object -First 1
-if (-not $newAPIContainer -or $newAPIContainer -notmatch [regex]::Escape($ExpectedNewAPIImageVersion)) {
+$newAPIFields = @($newAPIContainer -split '\|')
+if ($newAPIFields.Count -ne 4) { throw "New API image drift: malformed container metadata" }
+# Inspect only the image field. An optional digest pins the same tag; neither
+# a longer tag nor a version string in the status/ports field is a match.
+$newAPIImageMatch = [regex]::Match($newAPIFields[1], '^[^\s|@]+:(?<tag>[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})(?:@sha256:[0-9a-fA-F]{64})?$')
+if (-not $newAPIImageMatch.Success -or $newAPIImageMatch.Groups['tag'].Value -cne $ExpectedNewAPIImageVersion) {
     throw "New API image drift: expected $ExpectedNewAPIImageVersion"
 }
 
-$disk = @(ssh -o BatchMode=yes $HostAlias "df -P / /var/lib/docker")
+$disk = @(ssh -o BatchMode=yes $HostAlias "LC_ALL=C df -P / /var/lib/docker")
 if ($LASTEXITCODE -ne 0) { throw 'cannot inspect host disk capacity' }
+# df was asked for two paths; both records are required even when they name
+# the same filesystem. Missing/malformed observations must never imply free space.
+if ($disk.Count -ne 3 -or $disk[0] -notmatch '^Filesystem\s+\S+\s+Used\s+Available\s+Capacity\s+Mounted on$') {
+    throw 'invalid host disk metadata: expected a header and two records'
+}
 $diskLines = @($disk | Select-Object -Skip 1)
 foreach ($line in $diskLines) {
-    $fields = @(($line -split '\s+') | Where-Object { $_ })
-    if ($fields.Count -ge 5 -and [int]($fields[4].TrimEnd('%')) -ge 80) {
+    $fields = @($line.Trim() -split '\s+', 6)
+    [uint64]$blocks = 0
+    [uint64]$used = 0
+    [int64]$available = 0
+    if ($fields.Count -ne 6 -or
+        -not [uint64]::TryParse($fields[1], [ref]$blocks) -or $blocks -eq 0 -or
+        -not [uint64]::TryParse($fields[2], [ref]$used) -or
+        -not [int64]::TryParse($fields[3], [ref]$available) -or
+        $fields[4] -notmatch '^(\d{1,3})%$' -or
+        -not $fields[5].StartsWith('/')) {
+        throw 'invalid host disk metadata: malformed filesystem record'
+    }
+    $percentage = [int]$fields[4].TrimEnd('%')
+    if ($percentage -gt 100) { throw 'invalid host disk metadata: invalid percentage' }
+    if ($percentage -ge 80) {
         throw "host filesystem is above 80% use: $line"
     }
 }
@@ -182,13 +205,30 @@ foreach ($port in $RequiredLoopbackPorts) {
 
 $networks = @(ssh -o BatchMode=yes $HostAlias "docker network inspect --format '{{.Name}}|{{.Internal}}|{{range .IPAM.Config}}{{.Subnet}},{{end}}' `$(docker network ls -q)")
 if ($LASTEXITCODE -ne 0) { throw 'cannot inspect Docker networks' }
+if ($networks.Count -eq 0) { throw 'invalid Docker network metadata: no records' }
 foreach ($line in $networks) {
-    $parts = $line -split '\|', 3
-    if ($parts.Count -ne 3) { continue }
+    $parts = @($line -split '\|')
+    if ($parts.Count -ne 3 -or $parts[0] -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*$' -or $parts[1] -cnotin @('true', 'false')) {
+        throw 'invalid Docker network metadata: malformed network record'
+    }
     $name = $parts[0]
     $isInternal = $parts[1] -eq 'true'
-    foreach ($existingCIDR in ($parts[2] -split ',' | Where-Object { $_ })) {
-        if ($existingCIDR -notmatch '^\d+\.\d+\.\d+\.\d+/\d+$') { continue }
+    # Empty IPAM is valid (notably Docker host/none); it is still a complete
+    # network record. Configured IPv6 subnets are valid but our plans are IPv4.
+    if ($parts[2] -eq '') { continue }
+    $existingCIDRs = @($parts[2] -split ',')
+    if ($existingCIDRs[-1] -eq '') { $existingCIDRs = @($existingCIDRs[0..($existingCIDRs.Count - 2)]) }
+    foreach ($existingCIDR in $existingCIDRs) {
+        if ($existingCIDR -notmatch '^([^/]+)/(\d{1,3})$') { throw 'invalid Docker network metadata: malformed subnet' }
+        $addressText = $Matches[1]
+        $prefix = [int]$Matches[2]
+        $address = $null
+        if (-not [System.Net.IPAddress]::TryParse($addressText, [ref]$address)) { throw 'invalid Docker network metadata: malformed address' }
+        if ($address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetworkV6) {
+            if ($prefix -gt 128) { throw 'invalid Docker network metadata: invalid IPv6 prefix' }
+            continue
+        }
+        if ($addressText -notmatch '^\d+\.\d+\.\d+\.\d+$' -or $prefix -gt 32) { throw 'invalid Docker network metadata: invalid IPv4 subnet' }
         $existing = Get-IPv4CIDRBounds $existingCIDR
         foreach ($planned in $plannedNetworks) {
             $overlaps = $existing.Start -le $planned.Bounds.End -and $planned.Bounds.Start -le $existing.End

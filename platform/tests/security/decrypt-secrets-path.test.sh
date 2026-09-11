@@ -24,7 +24,7 @@ mkdir -p "$out_root"
 run_case() {
   local desc="$1" yaml="$2"
   local rc
-  printf '%s' "$yaml" | python3 "$py" "$out_root" >/dev/null 2>&1
+  printf '%s' "$yaml" | python3 "$py" "$out_root" 3<&0 >/dev/null 2>&1
   rc=$?
   if [ "$rc" -eq 0 ]; then
     err "$desc：非法 scope/name 被接受（应非零退出）"
@@ -53,7 +53,7 @@ run_case "name 含斜杠" 'scope:
 '
 
 # 合法输入必须成功且落在正确位置
-printf 'sub2api-prod:\n  read-only-admin: test-value-ok\n' | python3 "$py" "$out_root" >/dev/null 2>&1 \
+printf 'sub2api-prod:\n  read-only-admin: test-value-ok\n' | python3 "$py" "$out_root" 3<&0 >/dev/null 2>&1 \
   || err "合法输入被拒绝"
 [ -f "$out_root/sub2api-prod/read-only-admin" ] || err "合法输入未写到 <root>/<scope>/<name>"
 

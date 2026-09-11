@@ -386,7 +386,7 @@ services:
       - /var/run:size=4m,noexec,nosuid,nodev
     depends_on:
       api:
-        # The API intentionally remains unready until all four source streams
+        # The API intentionally remains unready until all source streams
         # send heartbeats through this proxy. Waiting for API health here would
         # create a cold-start deadlock.
         condition: service_started

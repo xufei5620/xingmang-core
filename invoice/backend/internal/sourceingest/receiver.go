@@ -324,6 +324,9 @@ func decodeBatch(body []byte) (batchV2, error) {
 			!hasKeys(object, "stream_watermark_at", "source_cursor", "scan_ceiling_at", "scan_ceiling_cursor", "scan_cycle_id", "scan_complete") {
 			return batchV2{}, errors.New("invalid v3 scan metadata")
 		}
+		if _, ok := object["scan_complete"].(bool); !ok {
+			return batchV2{}, errors.New("invalid v3 scan_complete boolean")
+		}
 		if batch.StreamID == "balances" {
 			if !hexPattern.MatchString(batch.ScanSnapshotID) || batch.ScanSnapshotRowCount == nil ||
 				*batch.ScanSnapshotRowCount < 0 || *batch.ScanSnapshotRowCount > 2_000_000 ||
@@ -346,8 +349,8 @@ func decodeBatch(body []byte) (batchV2, error) {
 		return batchV2{}, errors.New("invalid previous batch hash")
 	}
 	seen := map[string]struct{}{}
-	recordValues, _ := object["records"].([]any)
-	if len(recordValues) != len(batch.Records) {
+	recordValues, ok := object["records"].([]any)
+	if !ok || len(recordValues) != len(batch.Records) {
 		return batchV2{}, errors.New("invalid records array")
 	}
 	for index, record := range batch.Records {

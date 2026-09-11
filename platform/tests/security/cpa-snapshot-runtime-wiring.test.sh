@@ -82,7 +82,8 @@ fi
 has "$deploy_local" 'phase="cpa-snapshot"' &&
   has "$deploy_local" 'install-cpa-snapshot.sh' &&
   has "$installer" 'systemctl start xingmang-cpa-snapshot.service' &&
-  has "$deploy_local" 'systemctl enable --now xingmang-cpa-snapshot.timer' \
+  has "$deploy_local" 'systemctl enable --now xingmang-cpa-snapshot.timer' &&
+  python3 "$repo_root/tests/security/cpa-snapshot-install-order.test.py" "$deploy_local" "$BASH" "$(command -v grep)" "$(command -v tail)" \
   && ok 'deploy-local installs first generation before app startup' || bad 'deploy-local installs first generation before app startup'
 has "$deploy_local" 'CPA file mode requires migrate in build service set' \
   && ok 'CPA file mode cannot reuse an unselected stale migrate image' || bad 'CPA file mode cannot reuse an unselected stale migrate image'

@@ -47,26 +47,98 @@ RETIRED = {
 }
 
 
+def service_environments(text: str) -> dict[str, set[str]]:
+    """Read the block mappings used by launch.yaml; reject unsupported target shapes.
+
+    This is deliberately not a general YAML parser. Anchors, merges, inline/list
+    environments and inherited target services need an explicit parser extension,
+    never a global string match that silently approves an unexplained shape.
+    """
+    targets = {pathlib.PurePosixPath(source).name for source in SOURCES}
+    result: dict[str, set[str]] = {}
+    in_services = False
+    service = None
+    in_environment = False
+    seen_environment: set[str] = set()
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip()
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        if '\t' in line[:len(line) - len(line.lstrip())]:
+            raise ValueError(f'line {number}: tabs in mapping indentation')
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            in_services = line == 'services:'
+            service = None
+            in_environment = False
+            continue
+        if not in_services:
+            continue
+        if indent == 2:
+            match = re.fullmatch(r'  ([a-zA-Z0-9_-]+):\s*(?:#.*)?', line)
+            if not match:
+                raise ValueError(f'line {number}: unsupported service mapping')
+            service = match[1]
+            in_environment = False
+            if service in targets:
+                if service in result:
+                    raise ValueError(f'line {number}: duplicate service {service}')
+                result[service] = set()
+            continue
+        if service not in targets:
+            continue
+        if indent == 4:
+            if re.match(r'    (?:<<|extends|env_file):', line):
+                raise ValueError(f'line {number}: inherited service environment unsupported')
+            if line.lstrip().startswith('environment:'):
+                if service in seen_environment:
+                    raise ValueError(f'line {number}: duplicate environment mapping')
+                seen_environment.add(service)
+                if not re.fullmatch(r'    environment:\s*(?:#.*)?', line):
+                    raise ValueError(f'line {number}: environment must be a block mapping')
+                in_environment = True
+            else:
+                in_environment = False
+            continue
+        if in_environment:
+            match = re.fullmatch(r'      ([A-Za-z_][A-Za-z0-9_]*):\s*(.+)', line)
+            if not match or match[2].startswith(('*', '&', '|', '>', '{', '[', '#')):
+                raise ValueError(f'line {number}: unsupported environment entry')
+            name, value = match.groups()
+            if value in ('null', '~') or name in result[service]:
+                raise ValueError(f'line {number}: null/duplicate environment entry')
+            result[service].add(name)
+    if result.keys() != targets:
+        raise ValueError('missing target services')
+    return result
+
+
 def main() -> int:
     if not COMPOSE.exists():
         print(f"check-compose-env: 找不到 {COMPOSE}", file=sys.stderr)
         return 1
     compose_text = COMPOSE.read_text(encoding="utf-8")
+    try:
+        environments = service_environments(compose_text)
+    except ValueError as exc:
+        print(f'check-compose-env: {exc}', file=sys.stderr)
+        return 1
 
-    wanted: dict[str, set[str]] = {}
+    wanted: dict[tuple[str, str], set[str]] = {}
     for source in SOURCES:
         directory = ROOT / source
         if not directory.is_dir():
-            continue
+            print(f'check-compose-env: missing source directory {source}', file=sys.stderr)
+            return 1
         for path in sorted(directory.glob("*.go")):
             if path.name.endswith("_test.go"):
                 continue
             for name in ENV_RE.findall(path.read_text(encoding="utf-8")):
-                wanted.setdefault(name, set()).add(f"{source}/{path.name}")
+                wanted.setdefault((directory.name, name), set()).add(f"{source}/{path.name}")
 
     failures = []
-    for name in sorted(wanted):
-        present = re.search(rf"^\s+{re.escape(name)}:", compose_text, re.M) is not None
+    for service, name in sorted(wanted):
+        present = name in environments[service]
         if name in RETIRED:
             if present:
                 failures.append(
@@ -75,9 +147,9 @@ def main() -> int:
                 )
             continue
         if not present:
-            readers = "、".join(sorted(wanted[name]))
+            readers = "、".join(sorted(wanted[service, name]))
             failures.append(
-                f"{name} 被 {readers} 读取，但 launch.yaml 没有透传它——"
+                f"{name} 被 {readers} 读取，但 launch.yaml 的 {service} 没有透传它——"
                 f"在 .env 里配它也进不了容器，而进程读到空串会安静地当作「没配」"
             )
 

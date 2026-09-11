@@ -4,6 +4,7 @@
 # 这些测试只在临时目录中模拟 receive hook、CI 执行器和安装命令；不会连接
 # 真实服务器、不会修改系统用户，也不会推送到任何远端。
 set -uo pipefail
+umask 077
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 ci_script="$repo_root/scripts/ci-local.sh"
@@ -344,8 +345,11 @@ expect_failure "post-receive 拒绝可信 CI 脚本哈希不匹配" env \
   POST_RECEIVE_WORK_DIR="$tmp/work-docker-bad-hash" \
   POST_RECEIVE_RELEASE_REF='refs/heads/release/v0.1-launch' \
   POST_RECEIVE_DOCKER_BIN="$fake_docker" \
+  DOCKER_ARGS_PATH="$tmp/bad-hash-docker-args" \
   bash -c 'cd "$1" && printf "%s\n" "$2 $3 refs/heads/release/v0.1-launch" | bash "$4"' _ \
   "$bare_repo" "$zero" "$commit_one" "$post_hook"
+assert_text "哈希负例到达目标校验" '可信 CI 脚本哈希不匹配' "$bad_hash_status/$commit_one.log"
+if [ ! -e "$tmp/bad-hash-docker-args" ]; then ok "坏哈希未启动 Docker"; else bad "坏哈希未启动 Docker"; fi
 
 expect_failure "post-receive 拒绝含空格的状态目录" env \
   POST_RECEIVE_STATUS_DIR="$tmp/status bad" \
@@ -385,8 +389,7 @@ if grep -Eq '^---(POST|PRE)' "$installer"; then
 else
   ok "安装脚本内容边界完整"
 fi
-grep -qF 'config xm.ci.script ' "$installer" && ok "安装脚本登记可信 CI 脚本" || bad "安装脚本登记可信 CI 脚本"
-grep -qF 'config receive.denyDeletes true' "$installer" && ok "安装脚本禁止删除分支" || bad "安装脚本禁止删除分支"
+expect_success "安装脚本实际调用可信 CI 与禁止删除配置" python3 "$repo_root/tests/deploy/installer-config.test.py"
 
 if [ "$fail" -eq 0 ]; then
   printf 'DEPLOY0-A-TEST-OK\n'

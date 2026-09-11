@@ -30,3 +30,6 @@ if ($goExit -ne 0) { throw "go test failed with exit code $goExit" }
 if ($output -match '(?m)^\s*--- SKIP:') {
   throw 'database test run skipped; refusing to report a green harness'
 }
+if (-not ($output -match '^\s*--- PASS:')) {
+  throw 'database test run had no tests passed; refusing to report a green harness'
+}

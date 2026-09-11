@@ -152,6 +152,7 @@ governance_deps=(
   scripts/check-governance.sh
   scripts/check-versions.py
   scripts/check-compose.py
+  scripts/check-compose-env.py
   scripts/guard-governance-files.sh
 )
 for dep in "${governance_deps[@]}"; do

@@ -257,7 +257,8 @@ suggested preflight/health-check follow-up.
 
 Both platforms fold "wrong password" and "unknown account" into one
 indistinguishable response by design (verified against
-`K:/sub2api-src`/`K:/newapi-src` as of 2026-08-31); the invoice-system side
+the reviewed upstream snapshots as of 2026-08-31, now identified by the exact
+G-drive paths and commits in `../UPSTREAM-INTEGRITY.md`); the invoice-system side
 preserves that and never surfaces which case occurred, matching CR-0004's
 "failure must not leak whether the account exists" requirement.
 

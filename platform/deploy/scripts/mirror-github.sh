@@ -128,7 +128,9 @@ case "$remote_name" in
 esac
 case "$git_bin" in
   */*) validate_path git-bin "$git_bin"; [ -x "$git_bin" ] || die "git-bin 不可执行" ;;
-  *) command -v "$git_bin" >/dev/null 2>&1 || die "git-bin 不可执行" ;;
+  *)
+    git_bin="$(type -P -- "$git_bin" 2>/dev/null || true)"
+    [ -n "$git_bin" ] && [ -x "$git_bin" ] || die "git-bin 不可执行" ;;
 esac
 
 if [ "$test_mode" -eq 0 ]; then
@@ -139,8 +141,10 @@ fi
 resolved_repo="$(readlink -f -- "$repo_path" 2>/dev/null || true)"
 [ "$resolved_repo" = "$repo_path" ] || die "repo 路径解析后越界或不可验证"
 
-"$git_bin" -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
+repo_top="$("$git_bin" -C "$repo_path" rev-parse --show-toplevel 2>/dev/null)" || \
   die "repo 不是 Git checkout"
+[ "$(cd -- "$repo_top" 2>/dev/null && pwd -P)" = "$resolved_repo" ] || \
+  die "repo must be the actual Git top-level"
 
 remote_url="$("$git_bin" -C "$repo_path" remote get-url "$remote_name" 2>/dev/null || true)"
 [ -n "$remote_url" ] || die "github remote 不存在或没有 URL"

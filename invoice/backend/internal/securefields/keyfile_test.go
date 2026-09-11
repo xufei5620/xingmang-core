@@ -26,10 +26,15 @@ func TestLoadKeyringFile(t *testing.T) {
 }
 
 func TestLoadKeyringFileRejectsUnknownInvalidAndTrailingData(t *testing.T) {
+	// Otherwise-valid, deterministic fixture material isolates each JSON guard.
+	// No generated or deployed key material is used or printed.
+	key := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("k", 32)))
+	index := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("i", 32)))
+	valid := `{"current_key_id":"fixture","encryption_keys":{"fixture":"` + key + `"},"index_key":"` + index + `"}`
 	for name, body := range map[string]string{
-		"unknown":  `{"current_key_id":"x","encryption_keys":{},"index_key":"x","secret":"leak"}`,
+		"unknown":  strings.TrimSuffix(valid, "}") + `,"unexpected":true}`,
 		"invalid":  `{"current_key_id":"x","encryption_keys":{"x":"not-base64"},"index_key":"not-base64"}`,
-		"trailing": `{"current_key_id":"x","encryption_keys":{},"index_key":"x"} {}`,
+		"trailing": valid + ` {}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "keyring.json")

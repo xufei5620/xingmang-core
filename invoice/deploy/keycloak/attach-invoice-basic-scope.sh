@@ -130,7 +130,7 @@ docker run --detach --name "$restore_container" --network none \
   --env POSTGRES_PASSWORD=restore-drill-only --env POSTGRES_DB=keycloak_restore \
   --volume "$restore_volume:/var/lib/postgresql" "$postgres_image" >/dev/null
 deadline=$((SECONDS+120))
-until docker logs "$restore_container" 2>&1 | grep -Fq 'PostgreSQL init process complete; ready for start up.'; do
+until docker logs "$restore_container" 2>&1 | grep -F 'PostgreSQL init process complete; ready for start up.' >/dev/null; do
   (( SECONDS < deadline )) || {
     printf 'isolated restore PostgreSQL did not become ready\n' >&2
     exit 1

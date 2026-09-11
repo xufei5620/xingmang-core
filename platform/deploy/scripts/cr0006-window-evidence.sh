@@ -18,6 +18,7 @@ set -Eeuo pipefail
 
 since=""
 until_ts="now()"
+until_value=""
 # 容器名**不写死**：两侧的 compose 项目名不同（平台是 --project-name
 # xingmang-launch，开票没给 --project-name、跟目录走），写死一个名字的下场是
 # 要么报"没这个容器"，要么更糟——连上另一个库把数字读错。所以按镜像/库名
@@ -40,14 +41,25 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --since) since=${2:?--since needs an RFC3339 timestamp}; shift 2 ;;
     --since=*) since=${1#*=}; shift ;;
-    --until) until_ts="'${2:?--until needs an RFC3339 timestamp}'::timestamptz"; shift 2 ;;
-    --until=*) until_ts="'${1#*=}'::timestamptz"; shift ;;
+    --until) until_value="${2:?--until needs an RFC3339 timestamp}"; shift 2 ;;
+    --until=*) until_value="${1#*=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
 [[ -n "$since" ]] || { echo "必须给 --since（窗口起点，RFC3339）" >&2; exit 1; }
+
+validate_timestamp() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$ ]] &&
+    date -u -d "$value" +%s >/dev/null 2>&1
+}
+validate_timestamp "$since" || { echo "--since 必须是有效 RFC3339 时间" >&2; exit 1; }
+if [ -n "$until_value" ]; then
+  validate_timestamp "$until_value" || { echo "--until 必须是有效 RFC3339 时间" >&2; exit 1; }
+  until_ts=":'window_until'::timestamptz"
+fi
 
 # 按"容器里有没有这个库"来认，而不是按名字猜。两个库名不同（xingmang /
 # invoice），所以这个判据是精确的。
@@ -87,14 +99,17 @@ fi
 # 只读会话：即便有人给了一个可写的角色，事务本身也拒绝写。
 psql_ro() {
   local container="$1" user="$2" db="$3" sql="$4"
+  # psql substitutes quoted variables on stdin, not inside a -c SQL argument.
   docker exec -i "$container" psql -X -qAt -v ON_ERROR_STOP=1 \
-    -U "$user" -d "$db" \
-    -c "SET default_transaction_read_only = on;" -c "$sql"
+    -U "$user" -d "$db" -v "window_since=$since" -v "window_until=$until_value" <<SQL
+SET default_transaction_read_only = on;
+$sql
+SQL
 }
 
 # 窗口是**左闭右开** [since, until)：逐日跑时相邻两天不会把同一行数一遍。
 echo "CR-0006 观察窗口证据"
-echo "窗口：$since → ${until_ts//\'/}"
+echo "窗口：$since → ${until_value:-now()}"
 echo "生成时刻：$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "平台库容器：$platform_container（$platform_db）"
 echo "开票库容器：$invoice_container（$invoice_db）"
@@ -106,7 +121,7 @@ psql_ro "$invoice_container" "$invoice_user" "$invoice_db" "
   SELECT 'oidc_actor_rows=' || count(*)
   FROM audit_events
   WHERE actor_type = 'oidc'
-    AND created_at >= '$since'::timestamptz
+    AND created_at >= :'window_since'::timestamptz
     AND created_at < $until_ts;"
 
 echo
@@ -116,7 +131,7 @@ psql_ro "$platform_container" "$platform_user" "$platform_db" "
   SELECT 'platform_issue_' || result || '=' || count(*)
   FROM audit.audit_event
   WHERE action_id = 'staff.console_assertion.issue'
-    AND occurred_at >= '$since'::timestamptz
+    AND occurred_at >= :'window_since'::timestamptz
     AND occurred_at < $until_ts
   GROUP BY result
   ORDER BY result;"
@@ -125,7 +140,7 @@ psql_ro "$invoice_container" "$invoice_user" "$invoice_db" "
   SELECT 'invoice_' || action || '=' || count(*)
   FROM audit_events
   WHERE action IN ('auth.console_assertion.exchanged', 'auth.console_assertion.rejected')
-    AND created_at >= '$since'::timestamptz
+    AND created_at >= :'window_since'::timestamptz
     AND created_at < $until_ts
   GROUP BY action
   ORDER BY action;"
@@ -139,7 +154,7 @@ psql_ro "$invoice_container" "$invoice_user" "$invoice_db" "
   SELECT 'rejected_reason[' || coalesce(nullif(reason, ''), '(empty)') || ']=' || count(*)
   FROM audit_events
   WHERE action = 'auth.console_assertion.rejected'
-    AND created_at >= '$since'::timestamptz
+    AND created_at >= :'window_since'::timestamptz
     AND created_at < $until_ts
   -- 按分组表达式本身分组，不能写 GROUP BY 1：那指向的是含 count(*) 的输出列，
   -- PostgreSQL 直接报「aggregate functions are not allowed in GROUP BY」。

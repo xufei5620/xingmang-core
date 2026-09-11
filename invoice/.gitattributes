@@ -3,3 +3,4 @@
 *.sql text eol=lf
 Dockerfile* text eol=lf
 contracts/examples/*.json text eol=lf
+web/src/lib/eligibility-wire.generated.ts text eol=crlf
