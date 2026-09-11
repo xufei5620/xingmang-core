@@ -11,7 +11,7 @@ import {
  *  翻译，不做任何资格判断——能不能投票、能不能执行由服务端裁决（前端隐藏
  *  不构成安全控制）。 */
 
-/** 审批相关的三个 scope（oidcauth/rolemap.go）。
+/** 审批相关的三个 scope（rolepermissions/rolemap.go）。
  *  写在这里是为了让「缺哪个权限」的提示能给出准确的名字。 */
 export const APPROVAL_READ_PERMISSION = "approval.read";
 export const APPROVAL_DECIDE_PERMISSION = "approval.decide";

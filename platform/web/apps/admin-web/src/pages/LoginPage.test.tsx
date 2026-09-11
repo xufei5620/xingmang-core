@@ -32,14 +32,8 @@ function stubLoginFetch(status: number, body: unknown) {
   );
 }
 
-const oidcConfig = {
-  authMode: "oidc",
-  oidcIssuer: "https://auth.example.test/realms/solov-staff",
-  oidcClientId: "xingmang-admin-web",
-};
-
 describe("登录页", () => {
-  beforeEach(() => devLogout());
+  beforeEach(() => { devLogout(); window.__XM_CONFIG__ = {authMode:"dev-header"}; });
   afterEach(() => {
     delete window.__XM_CONFIG__;
     vi.unstubAllGlobals();
@@ -65,69 +59,6 @@ describe("登录页", () => {
       renderLogin("?next=https%3A%2F%2Fevil.example%2F");
       fireEvent.click(screen.getByRole("button", { name: "开发模式进入" }));
       expect(await screen.findByText("工作台")).not.toBeNull();
-    });
-  });
-
-  describe("oidc 模式", () => {
-    it("只有一个「使用 solov 账号登录」按钮，没有开发模式入口", () => {
-      window.__XM_CONFIG__ = oidcConfig;
-      renderLogin();
-      expect(screen.getByRole("button", { name: "使用 solov 账号登录" })).not.toBeNull();
-      expect(screen.queryByRole("button", { name: "开发模式进入" })).toBeNull();
-      expect(screen.queryByText(/开发模式：无需登录/)).toBeNull();
-    });
-
-    it("按下按钮走发现文档并整页跳去授权端点", async () => {
-      window.__XM_CONFIG__ = oidcConfig;
-      const assign = vi.fn();
-      vi.stubGlobal("location", { ...window.location, origin: "http://localhost:3000", assign });
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(() =>
-          Promise.resolve({
-            ok: true,
-            status: 200,
-            json: () =>
-              Promise.resolve({
-                issuer: oidcConfig.oidcIssuer,
-                authorization_endpoint: `${oidcConfig.oidcIssuer}/protocol/openid-connect/auth`,
-                token_endpoint: `${oidcConfig.oidcIssuer}/protocol/openid-connect/token`,
-              }),
-          }),
-        ),
-      );
-      renderLogin("?next=%2Falerts");
-      fireEvent.click(screen.getByRole("button", { name: "使用 solov 账号登录" }));
-      await vi.waitFor(() => expect(assign).toHaveBeenCalledOnce());
-      const target = new URL(String(assign.mock.calls[0]?.[0]));
-      expect(target.pathname).toBe("/realms/solov-staff/protocol/openid-connect/auth");
-      expect(target.searchParams.get("code_challenge_method")).toBe("S256");
-      expect(target.searchParams.get("redirect_uri")).toBe("http://localhost:3000/auth/callback");
-    });
-
-    it("身份服务不可达时把错误写在页面上，按钮恢复可点", async () => {
-      // 换一个 issuer：应用级客户端是单例，上一个用例的发现文档还在它的缓存里
-      window.__XM_CONFIG__ = { ...oidcConfig, oidcIssuer: "https://down.example.test/realms/x" };
-      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new TypeError("Failed to fetch"))));
-      renderLogin();
-      fireEvent.click(screen.getByRole("button", { name: "使用 solov 账号登录" }));
-      const alert = await screen.findByRole("alert");
-      expect(alert.textContent).toContain("无法连接身份服务");
-      expect((screen.getByRole("button", { name: "使用 solov 账号登录" }) as HTMLButtonElement).disabled).toBe(false);
-    });
-
-    it("reason=session_expired 时说明为什么回到了登录页", () => {
-      window.__XM_CONFIG__ = oidcConfig;
-      renderLogin("?reason=session_expired");
-      expect(screen.getByRole("status").textContent).toContain("登录已过期");
-    });
-
-    it("配置不完整（缺 issuer）：按钮禁用并列出缺什么", () => {
-      window.__XM_CONFIG__ = { authMode: "oidc", oidcClientId: "xingmang-admin-web" };
-      renderLogin();
-      const button = screen.getByRole("button", { name: "使用 solov 账号登录" }) as HTMLButtonElement;
-      expect(button.disabled).toBe(true);
-      expect(screen.getByRole("alert").textContent).toContain("XM_WEB_OIDC_ISSUER");
     });
   });
 

@@ -1,12 +1,5 @@
 export { AdminShell, type AdminShellProps } from "./AdminShell";
 export {
-  EmbeddedConsoleFrame,
-  EmbeddedConsoleLegacyNotice,
-  type EmbeddedConsolePath,
-  type EmbeddedConsoleFrameProps,
-  type EmbeddedConsoleLegacyNoticeProps,
-} from "./EmbeddedConsoleFrame";
-export {
   CommandPalette,
   CommandPaletteTrigger,
   filterCommandItems,

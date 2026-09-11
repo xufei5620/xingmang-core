@@ -100,7 +100,7 @@ export interface AuthUser {
   // (Sub2API/New API), unlike `displayName` above which the backend always
   // backfills with a generic placeholder when there is nothing better to
   // show. Persisted encrypted on the session row (backend migration 0017),
-  // so it survives a reload; null only for an OIDC session, or a
+  // so it survives a reload; null only for a staff session, or a
   // platform-password session issued before that migration.
   username: string | null;
 }
@@ -133,17 +133,12 @@ export type AuthSession =
       authenticated: false;
       user?: never;
       csrfToken?: never;
-      // CR-0006 (XM-INV-CONSOLE-ASSERT): whether the OIDC administrator
-      // login entry should be offered at all. False once an operator turns
-      // OIDC_ADMIN_LOGIN_ENABLED off (phase 2 -- default stays true today).
-      oidcAdminLoginEnabled: boolean;
     }
   | {
       authenticated: true;
       user: AuthUser;
       csrfToken: string;
       adminStepUpRequired: boolean;
-      oidcAdminLoginEnabled: boolean;
     };
 
 export interface SourceAccount {
@@ -276,8 +271,8 @@ export interface ResolveEligibilityFreezeInput {
 }
 
 // CR-0009 (XM-INV-CR0009-LEDGER-VIEW): the operator "用户账本" view --
-// GET /api/v1/admin/accounts/ledger (list) and
-// GET /api/v1/admin/accounts/{external_account_id}/ledger (detail).
+// GET /invoice-api/v1/admin/accounts/ledger (list) and
+// GET /invoice-api/v1/admin/accounts/{external_account_id}/ledger (detail).
 // block_state is a read-only composition of existing signals server-side
 // (see docs/ELIGIBILITY-OPERATIONS.md's "管理员账本视图" section); this
 // frontend never computes it, only displays it.

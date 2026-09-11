@@ -44,7 +44,6 @@ import { AlertsPage } from "./pages/AlertsPage";
 import { CardsPage } from "./pages/CardsPage";
 import { SMSPage } from "./pages/SMSPage";
 import { AuditPage } from "./pages/AuditPage";
-import { AuthCallbackPage } from "./pages/AuthCallbackPage";
 import { ChangePasswordPage } from "./pages/ChangePasswordPage";
 import { ChannelDetailPage, isSupplyPlatform } from "./pages/ChannelDetailPage";
 import { IdentityPage } from "./pages/IdentityPage";
@@ -72,7 +71,7 @@ import { TotpEnrollPage } from "./pages/TotpEnrollPage";
 import { UpstreamDetailPage } from "./pages/UpstreamDetailPage";
 
 // 登录门禁见 ./auth/RequireAuth.tsx（XM-AUTH1）：dev-header 模式看 localStorage 的
-// 开发开关，oidc 模式看 sessionStorage 里有没有会话；没有就带着 next 去 /login。
+// 开发开关；本地登录按服务端 Cookie 会话与强制改密/二次验证结果裁决。
 
 // 导航项的样式由 ui-admin 给（navItemClass）：左栏在深色轨道上，用的是不随主题
 // 翻转的 nav-* 令牌，应用侧照着内容区的 surface/fg 再拼一份就会一半亮一半暗。
@@ -211,7 +210,7 @@ export function ShellLayout() {
       contextStrip={
         <ContextStrip crumbs={breadcrumbsFor(pathname)} environment={{ ...env, tone: "info" }} />
       }
-      // oidc 模式显示 id_token 里的用户名，退出走 Keycloak 的 end_session；
+      // 本地登录显示服务端返回的员工名字，退出撤销 Cookie 会话；
       // dev-header 模式保留「开发模式」四个字与本地开关（auth/session.ts）
       user={{ name: currentUserLabel() }}
       onLogout={() => signOut((to) => void navigate(to))}
@@ -353,8 +352,6 @@ const placeholderRoutes = NAV_GROUPS.flatMap((group) => group.items)
 
 export const routes = [
   { path: "/login", Component: LoginPage },
-  // Keycloak 授权码回调（XM-AUTH1）。在门禁**之外**：这一步正是为了拿到会话
-  { path: "/auth/callback", Component: AuthCallbackPage },
   {
     path: "/",
     // 无路径的门禁布局路由：没登录就 <Navigate> 去 /login，登录了渲染 <Outlet />

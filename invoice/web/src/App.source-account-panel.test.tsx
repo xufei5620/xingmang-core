@@ -39,9 +39,9 @@ afterAll(() => {
 
 const WIZARD_HEADING = "关联平台账号";
 const WIZARD_STEP = "打开原平台并使用原账号登录";
-const UNAVAILABLE_HEADING = "已关联账号暂时无法读取";
+const UNAVAILABLE_HEADING = "当前账号暂时无法读取";
 const UNAVAILABLE_BODY = "这只是本次读取失败";
-const CONNECTED_HEADING = "已关联的平台账号";
+const CONNECTED_HEADING = "当前平台账号";
 const UNKNOWN_PLATFORM_BADGE = "未识别的平台";
 
 const ACCOUNTS: SourceAccount[] = [
@@ -180,11 +180,13 @@ describe("SourceAccountStatus with a row on a platform this bundle does not know
   });
 });
 
-describe("positive control: the wizard strings above really are what the wizard renders", () => {
-  it("renders the wizard when the accounts request succeeded with nothing", () => {
+describe("empty customer account observation", () => {
+  it("shows synchronization guidance without the retired identity binding wizard", () => {
     const html = renderPanel({ sourceAccounts: [], failed: [], loadError: null });
-    expect(html).toContain(`<h2>${WIZARD_HEADING}</h2>`);
-    expect(html).toContain(WIZARD_STEP);
+    expect(html).toContain("账号数据待同步");
+    expect(html).toContain("正在核对当前账号的开票数据");
+    expect(html).not.toContain(WIZARD_STEP);
+    expect(html).not.toContain("我已绑定");
     expect(html).not.toContain(UNAVAILABLE_HEADING);
   });
 });

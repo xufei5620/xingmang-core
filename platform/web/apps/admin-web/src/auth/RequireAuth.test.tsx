@@ -3,7 +3,6 @@ import { RouterProvider, createMemoryRouter, useLocation, useNavigate } from "re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./devSession";
 import { setCachedLocalUser, type LocalUser } from "./localSession";
-import { SESSION_KEY } from "./oidc";
 import { RequireAuth } from "./RequireAuth";
 
 function LoginStub() {
@@ -27,6 +26,8 @@ function renderGate(path: string, signedIn?: () => boolean) {
 }
 
 describe("RequireAuth：路由门禁", () => {
+  beforeEach(() => { window.__XM_CONFIG__ = {authMode:"dev-header"}; });
+  afterEach(() => { delete window.__XM_CONFIG__; });
   it("没登录：去 /login，并把当前地址（含查询串）带在 next 里", async () => {
     renderGate("/dashboard?work=alerts", () => false);
     const login = await screen.findByText(/登录页/);
@@ -42,12 +43,10 @@ describe("RequireAuth：路由门禁", () => {
   describe("默认判定跟着 authMode 走", () => {
     beforeEach(() => {
       devLogout();
-      sessionStorage.removeItem(SESSION_KEY);
     });
     afterEach(() => {
       delete window.__XM_CONFIG__;
       devLogout();
-      sessionStorage.removeItem(SESSION_KEY);
     });
 
     it("dev-header：看 localStorage 的开发开关", async () => {
@@ -56,30 +55,7 @@ describe("RequireAuth：路由门禁", () => {
       expect(await screen.findByText("受保护内容")).not.toBeNull();
     });
 
-    it("oidc：开发开关不算数，没有 OIDC 会话就去登录", async () => {
-      window.__XM_CONFIG__ = {
-        authMode: "oidc",
-        oidcIssuer: "https://auth.example.test/realms/solov-staff",
-        oidcClientId: "xingmang-admin-web",
-      };
-      devLogin();
-      renderGate("/dashboard");
-      expect(await screen.findByText(/登录页/)).not.toBeNull();
-    });
 
-    it("oidc：sessionStorage 里有会话就放行", async () => {
-      window.__XM_CONFIG__ = {
-        authMode: "oidc",
-        oidcIssuer: "https://auth.example.test/realms/solov-staff",
-        oidcClientId: "xingmang-admin-web",
-      };
-      sessionStorage.setItem(
-        SESSION_KEY,
-        JSON.stringify({ access_token: "at", expires_at: Date.now() + 300_000 }),
-      );
-      renderGate("/dashboard");
-      expect(await screen.findByText("受保护内容")).not.toBeNull();
-    });
   });
 });
 

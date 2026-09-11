@@ -2,7 +2,7 @@ import { Button, FormField, Input } from "@xingmang/ui-primitives";
 import { useId, useState } from "react";
 import { Navigate, useNavigate, useSearchParams } from "react-router";
 import { changePassword } from "../auth/localSession";
-import { safeNextPath } from "../auth/oidc";
+import { safeNextPath } from "../auth/paths";
 import { authMode } from "../auth/session";
 import { ActionErrorNote } from "../components/ActionErrorNote";
 import {

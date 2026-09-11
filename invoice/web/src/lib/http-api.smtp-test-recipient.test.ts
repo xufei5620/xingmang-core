@@ -33,7 +33,7 @@ function stubFetch() {
         method: init?.method,
         body: typeof init?.body === "string" ? init.body : undefined,
       });
-      if (url.endsWith("/api/v1/auth/session")) {
+      if (url.endsWith("/invoice-api/v1/auth/session")) {
         return new Response(
           JSON.stringify({
             authenticated: true,

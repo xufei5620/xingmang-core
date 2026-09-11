@@ -6,6 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { devLogin, devLogout } from "./auth";
 import { routes } from "./router";
 
+// 模拟 app-config.js 在业务模块加载前提供显式开发身份。
+vi.hoisted(() => { window.__XM_CONFIG__ = {authMode:"dev-header"}; });
+
+// 路由渲染测试使用显式开发身份；本地会话门禁由 RequireAuth 独立覆盖。
+beforeEach(() => { window.__XM_CONFIG__ = {authMode:"dev-header"}; });
+afterEach(() => { delete window.__XM_CONFIG__; });
+
 // 指标键抽成常量而不是就地写字面量：`xxx_key: "……"` 这个形状会被 gitleaks 的
 // generic-api-key 规则当成泄露的密钥（同一条误报见 pages/OverviewPage.test.tsx
 // 与 api/platform.test.ts）。本仓禁止加 gitleaks allowlist（会顺手掩盖真报，
@@ -2602,15 +2609,12 @@ describe("支付与财务页签（框架）", () => {
     expect(await screen.findByText(/「用户充值」不是当期收入/)).not.toBeNull();
   });
 
-  it("开票格是嵌入式开票控制台，未配置来源时诚实显示未接入（CR-0005 第一阶段）", async () => {
-    // CR-0005 之前，这一格说的是「阻塞点是契约（CR-0002）」；现在阻塞点已经
-    // 不是契约——第一阶段直接嵌入开票系统管理端，不等 CR-0002。路由测试没有
-    // 注入 window.__XM_CONFIG__，所以看到的是「未配置」态，不是 iframe；
-    // iframe 本身的行为见 ui-admin/EmbeddedConsoleFrame.test.tsx 与
-    // components/InvoiceConsolePanel.test.tsx
+  it("开票格使用原生控制台，同源管理员会话无法读取时明确阻断", async () => {
+    // 未提供同源 staff-session 响应时显示错误，不创建 iframe 或签名交换。
     renderRoute("/platforms/sub2api?tab=finance&sub=invoices");
     expect(await screen.findByRole("tab", { name: "开票", selected: true })).not.toBeNull();
-    expect(screen.getByText(/未配置开票控制台来源（XM_INVOICE_CONSOLE_ORIGIN）/)).not.toBeNull();
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(document.querySelector("iframe")).toBeNull();
     expect(screen.queryByText(/CR-0002/)).toBeNull();
   });
 

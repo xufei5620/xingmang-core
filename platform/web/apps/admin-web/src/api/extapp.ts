@@ -74,7 +74,7 @@ export const EXT_APP_RELEASES_QUERY = "ext-app-releases";
  *  XM_WEB_AUTH_MODE——那是前端运行时真正认得的三个值。 */
 export const AUTH_MODE_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "未登记" },
-  { value: "oidc", label: "OIDC（Keycloak）" },
+  { value: "oidc", label: "OIDC" },
   { value: "local", label: "本地账号密码" },
   { value: "dev-header", label: "开发态身份头" },
 ];

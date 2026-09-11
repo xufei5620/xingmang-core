@@ -1,0 +1,37 @@
+.invoice-workspace.invoice-native {
+  --primary: var(--xm-color-accent);
+  --primary-dark: var(--xm-color-accent-strong);
+  --border: var(--xm-color-edge);
+  --muted: var(--xm-color-fg-muted);
+  --surface: var(--xm-color-surface);
+  --navy: var(--xm-color-nav-surface);
+  color: var(--xm-color-fg);
+  background: transparent;
+  font-family: var(--xm-font-sans);
+  min-width: 0;
+  min-height: 0;
+}
+.invoice-workspace .invoice-native-panel { min-width: 0; }
+.invoice-workspace .invoice-native-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--xm-space-2, 8px);
+  border-bottom: 1px solid var(--xm-color-edge);
+  padding-bottom: var(--xm-space-3, 12px);
+  margin-bottom: var(--xm-space-5, 20px);
+}
+.invoice-workspace .invoice-native-tab {
+  padding: var(--xm-space-2, 8px) var(--xm-space-3, 12px);
+  color: var(--xm-color-fg-muted);
+  border-radius: var(--xm-radius-md, 6px);
+}
+.invoice-workspace .invoice-native-tab.active {
+  color: var(--xm-color-accent);
+  background: var(--xm-color-accent-soft);
+}
+.invoice-workspace .invoice-native-tab:focus-visible {
+  outline: 2px solid var(--xm-color-accent);
+  outline-offset: 2px;
+}
+.invoice-workspace.invoice-native .auth-shell { min-height: 0; padding: var(--xm-space-6, 24px); }
+.invoice-workspace.invoice-native .toast { top: var(--xm-space-6, 24px); bottom: auto; }

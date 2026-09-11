@@ -1,5 +1,5 @@
 import { getRuntimeConfig } from "../auth/runtimeConfig";
-import { oidcBearerProvider, onLocalSessionLoss } from "../auth/session";
+import { onLocalSessionLoss } from "../auth/session";
 import { appApiConfig, type PlatformApiConfig } from "./config";
 import { httpStatusText } from "../lib/labels";
 
@@ -10,19 +10,10 @@ export const NETWORK_STATUS = 0;
 const NETWORK_CODE = "NETWORK_UNAVAILABLE";
 const BAD_RESPONSE_CODE = "BAD_RESPONSE";
 const UNKNOWN_CODE = "UNKNOWN";
-const UNAUTHENTICATED_CODE = "UNAUTHENTICATED";
 
 /** local 模式的 CSRF 头（后端契约：非 GET 请求必须带；GET 上带着也无害，
  *  所以统一发出，不必按 method 分支）。 */
 const LOCAL_CSRF_HEADER: Readonly<Record<string, string>> = { "X-Requested-With": "xingmang" };
-
-/** oidc 模式下服务端拒绝令牌时的两句**固定**文案（oidcauth/resolver.go）。
- *
- *  后端对 OIDC 失败一律回 403 而不是 401（AUTH-SWITCH.md 第八节：仓库的错误
- *  模型里没有 401），所以只盯 401 抓不到「令牌被拒」。文案是服务端常量，
- *  **逐字相等**才算；「缺少权限 xxx」那种真正的授权失败不在此列——那是登录
- *  了但没权限，跳登录页解决不了，该照常显示无权访问。 */
-const OIDC_REJECTED_MESSAGES: ReadonlySet<string> = new Set(["缺少身份", "身份令牌无效"]);
 
 /** 后端 403 文案形如「缺少权限 registry.read」（httpapi/authz.go）。
  *  从里面把 scope 名抠出来，才能在界面上告诉人「缺哪个权限」而不是干瞪眼。 */
@@ -118,31 +109,13 @@ export interface ApiClient {
   post<T>(path: string, body: unknown, options?: PostOptions): Promise<T>;
 }
 
-export type UnauthenticatedReason =
-  /** 手头没有可用令牌（没登录、或续期失败会话已被清空）。 */
-  | "no_token"
-  /** 带着令牌去了，服务端说不认（401，或 oidc 的固定拒绝文案）。 */
-  | "rejected";
-
-/** oidc 模式的令牌来源。客户端只管「拿令牌、贴到 Authorization 头、失败时通知」，
- *  会话怎么存、怎么续、往哪跳登录都是 auth/ 目录的事。 */
-export interface BearerTokenProvider {
-  /** 取可用的访问令牌；没有返回 null（不抛：「没登录」不是异常，是一种状态）。 */
-  getAccessToken(): Promise<string | null>;
-  /** 会话失效。实现方负责清会话并跳登录页；客户端随后照常抛 ApiError。 */
-  onUnauthenticated(reason: UnauthenticatedReason): void;
-}
-
 export interface ApiClientOptions {
   config: PlatformApiConfig;
   /** 注入点：测试传 mock fetch，不需要真后端。 */
   fetchImpl?: FetchLike;
-  /** 传入即走 oidc：`Authorization: Bearer` 取代三个开发头。
-   *  不传＝dev-header 模式，请求形状与 XM-AUTH1 之前逐字一致。 */
-  auth?: BearerTokenProvider;
   /** local 模式（XM-LOGIN）：会话是 HttpOnly Cookie，不发开发头也不发 Bearer。
    *  true 时每个请求都带 `credentials:"same-origin"` 与 `X-Requested-With: xingmang`
-   *  （CSRF 防护，GET 上带着也无害）。与 `auth` 互斥，调用方保证不会同传两个。 */
+   *  （CSRF 防护，GET 上带着也无害）。 */
   localCredentials?: boolean;
   /** local 模式下收到 401（会话缺失/失效）时触发；不传＝只抛错误、不跳转——
    *  auth/localSession.ts 的登录页探测请求用这个「只抛不跳」的形态，
@@ -150,12 +123,7 @@ export interface ApiClientOptions {
   onLocalSessionLoss?: () => void;
 }
 
-/** 开发期身份头。
- *
- *  TODO(XM-0008): 换成 OIDC —— 这三个头由 `Authorization: Bearer <token>` 取代，
- *  后端对应换掉 devHeaderResolver（httpapi/principal.go 已预留 PrincipalResolver
- *  接口，届时 handler 不用改）。生产环境后端硬拒这套头：用请求头自称身份
- *  等于没有鉴权。 */
+/** 仅供显式非生产开发模式使用的身份头。 */
 export function devPrincipalHeaders(config: PlatformApiConfig): Record<string, string> {
   return {
     "X-Dev-Principal-ID": config.principalId,
@@ -190,30 +158,13 @@ async function toApiError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, code, message, body?.error?.request_id ?? "");
 }
 
-function isSessionRejection(err: ApiError): boolean {
-  return err.status === 401 || (err.status === 403 && OIDC_REJECTED_MESSAGES.has(err.message));
-}
-
 /** 创建 API 客户端。所有请求都从这里出去，身份头只在这里注入一次。 */
 export function createApiClient({
   config,
   fetchImpl,
-  auth,
   localCredentials,
   onLocalSessionLoss,
 }: ApiClientOptions): ApiClient {
-  /** oidc 模式的身份头。取令牌可能要先续期，所以是异步的。 */
-  async function bearerHeaders(provider: BearerTokenProvider): Promise<Record<string, string>> {
-    const token = await provider.getAccessToken();
-    if (!token) {
-      // 不发请求：没有令牌的请求在 oidc 后端只会换来一句「缺少身份」，
-      // 而调用方真正需要的是被带去登录页
-      provider.onUnauthenticated("no_token");
-      throw new ApiError(401, UNAUTHENTICATED_CODE, "登录已过期，请重新登录");
-    }
-    return { Authorization: `Bearer ${token}` };
-  }
-
   async function request<T>(
     path: string,
     init: RequestInit & { headers: Record<string, string> },
@@ -225,11 +176,7 @@ export function createApiClient({
     const url = buildUrl(config, path, options.searchParams);
     // dev-header／local 分支刻意**不 await**：两者的身份头都是同步拼出来的，
     // fetch 要像以前一样在调用的同一个 tick 发出（有页面测试按这个时序数请求次数）
-    const identity = auth
-      ? await bearerHeaders(auth)
-      : localCredentials
-        ? LOCAL_CSRF_HEADER
-        : devPrincipalHeaders(config);
+    const identity = localCredentials ? LOCAL_CSRF_HEADER : devPrincipalHeaders(config);
     const headers = { ...init.headers, ...identity };
 
     let response: Response;
@@ -256,10 +203,6 @@ export function createApiClient({
 
     if (!response.ok) {
       const err = await toApiError(response);
-      // oidc 模式下令牌被拒＝会话没了：清掉并去登录页（带上 next 回来）。
-      // dev-header 模式没有这一步——那套头被拒说明后端配成了别的模式，
-      // 跳登录页解决不了，让 403 原样显示出来才看得见问题
-      if (auth && isSessionRejection(err)) auth.onUnauthenticated("rejected");
       // local 模式只认 401：403 是「登录了但没这个权限」（缺少权限 xxx），
       // 再跳一次登录页解决不了，应该照常显示「无权访问」。而且这里**不带**
       // 「传了 onLocalSessionLoss 才跳」之外的例外——登录页自己的 login()/me()
@@ -317,7 +260,6 @@ export function createApiClient({
  *  实例，理由见该文件顶部注释。 */
 export const apiClient: ApiClient = createApiClient({
   config: appApiConfig,
-  ...(getRuntimeConfig().authMode === "oidc" ? { auth: oidcBearerProvider } : {}),
   ...(getRuntimeConfig().authMode === "local"
     ? { localCredentials: true, onLocalSessionLoss }
     : {}),

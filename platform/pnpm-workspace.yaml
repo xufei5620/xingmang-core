@@ -1,6 +1,7 @@
 packages:
   - web/apps/*
   - web/packages/*
+  - ../invoice/web
 
 # pnpm v11 构建脚本白名单：仅允许 esbuild 的 postinstall（安装平台二进制）
 allowBuilds:

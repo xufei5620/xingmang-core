@@ -59,10 +59,9 @@ import {
   Routes,
   useLocation,
   useNavigate,
-} from "react-router-dom";
+} from "./lib/workspace-router";
 
 import { dateTime, dateTimeShanghai, maskTaxId, money } from "./lib/format";
-import { isAdminAreaPath, shouldShowAdminReturn } from "./lib/portal-navigation";
 import {
   isKnownSourceType,
   sourceName,
@@ -81,26 +80,9 @@ import {
   type UserDataRequestKey,
   type UserDataSetters,
 } from "./lib/user-data-load";
-import {
-  accountIdentityLabel,
-  appendEmbeddedParams,
-  parseEmbeddedPlatform,
-  resolveEmbeddedPlatform,
-  scopeBySource,
-} from "./lib/embedded-scope";
-import {
-  appendEmbeddedAdminParams,
-  buildXmEmbedHeightMessage,
-  measureEmbeddedAdminHeight,
-  shouldPostEmbeddedAdminHeight,
-  isAdminNavItemVisible,
-  parseEmbeddedAdminMode,
-  parseEmbeddedAdminScope,
-  resolvePlatformSourceInstanceId,
-  shouldSyncEmbeddedAdminHeight,
-  XM_EMBED_CONSOLE_ORIGIN,
-  type AdminNavItemKey,
-} from "./lib/embedded-admin-scope";
+import { accountIdentityLabel, scopeBySource } from "./lib/source-scope";
+import { isAdminNavItemVisible, resolvePlatformSourceInstanceId, type AdminNavItemKey } from "./lib/admin-scope";
+import { NativeAdminRouter, useNativeAdmin, useAdminPlatform, type NativeAdminMode } from "./lib/workspace-router";
 import { apiCapabilities, apiMode, invoiceApi } from "./lib/api";
 import { InvoiceApiError } from "./lib/api-contract";
 import {
@@ -114,6 +96,7 @@ import {
   userCancellationLabel,
 } from "./lib/workflow";
 import { AuthProvider, useAuth } from "./AuthProvider";
+import { SessionBoundary } from "./SessionBoundary";
 import type {
   AccountBlockState,
   AccountLedgerDetail,
@@ -143,67 +126,14 @@ import type {
   UserEligibilitySummary,
 } from "./types";
 
-const initialApplicationURL = new URL(window.location.href);
-const embeddedUserMode =
-  !initialApplicationURL.pathname.startsWith("/admin") &&
-  initialApplicationURL.searchParams.get("ui_mode") === "embedded";
-// XM-INV-EMBED-SCOPE: narrows the embedded view to one platform's data; see
-// lib/embedded-scope.ts. Parsed once from the initial URL, same as
-// embeddedUserMode above. XM-INV-PLATFORM-SCOPE (CR-0003) made the session's
-// own platform authoritative over this URL param wherever data is actually
-// scoped (useEmbeddedPlatform below) -- this raw URL-derived value survives
-// only as that fallback and to build in-app navigation links (userRoute),
-// which intentionally keep reflecting exactly what was in the original URL.
-const urlEmbeddedPlatform = parseEmbeddedPlatform(
-  initialApplicationURL.searchParams,
-  embeddedUserMode,
-);
-
-function userRoute(path: string) {
-  return appendEmbeddedParams(path, embeddedUserMode, urlEmbeddedPlatform);
+function userRoute(path: string) { return path; }
+function adminRoute(path: string) { return path; }
+function useUserPlatform(): SourceType | null {
+  return useAuth().user?.platform ?? null;
 }
 
-// XM-INV-PLATFORM-SCOPE: the effective embedded platform scope, session-first
-// (see resolveEmbeddedPlatform's own doc comment). Call this from any
-// component that scopes data or UI to one platform; do not read
-// urlEmbeddedPlatform directly for that purpose.
-function useEmbeddedPlatform(): SourceType | null {
-  const { user } = useAuth();
-  return resolveEmbeddedPlatform(user?.platform, urlEmbeddedPlatform);
-}
-
-// XM-INV-ADMIN-EMBED: the xingmang platform console embeds the *admin*
-// console (a separate embed from the user embed above) via
-// `?ui_mode=embedded_admin`; see lib/embedded-admin-scope.ts for why this is
-// a parallel module/constant pair rather than an extension of
-// embeddedUserMode/embeddedPlatform above.
-const embeddedAdminMode = parseEmbeddedAdminMode(
-  initialApplicationURL.searchParams,
-);
-const embeddedAdminScope = parseEmbeddedAdminScope(
-  initialApplicationURL.searchParams,
-  embeddedAdminMode,
-);
-
-function adminRoute(path: string) {
-  return appendEmbeddedAdminParams(path, embeddedAdminMode, embeddedAdminScope);
-}
-
-// The one platform a platform-scoped embedded admin session is allowed to
-// see, or null for global/standalone (nothing to resolve) and while a
-// platform scope's source_instance_id has not resolved yet.
-function embeddedAdminPlatform(): SourceType | null {
-  return embeddedAdminScope?.kind === "platform" ? embeddedAdminScope.platform : null;
-}
-
-// Resolves the current embedded-admin platform's source_instance_id from the
-// admin source-health report -- see resolvePlatformSourceInstanceId's doc
-// comment for why that endpoint and not a hardcoded UUID. null both before
-// it has loaded and when this isn't platform-scoped; callers in platform
-// scope must wait for a non-null value before issuing scoped list requests
-// rather than briefly requesting an unscoped (all-platform) page.
-function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
-  const platform = embeddedAdminPlatform();
+function useAdminSourceInstanceId(): string | null {
+  const platform = useAdminPlatform();
   const [sourceInstanceId, setSourceInstanceId] = useState<string | null>(null);
   useEffect(() => {
     if (!platform) {
@@ -224,61 +154,6 @@ function useEmbeddedAdminPlatformSourceInstanceId(): string | null {
     };
   }, [platform]);
   return sourceInstanceId;
-}
-
-// Posts this document's height to the hosting console (XM-INVCON0's
-// EmbeddedConsoleFrame, merged on the platform side) so it can size the
-// iframe: once right after mount, then again on every subsequent size
-// change, debounced ~100ms so a burst of layout changes (a page swap, data
-// loading in) collapses into one message instead of a flood. Gated by
-// shouldSyncEmbeddedAdminHeight so it only ever runs for this admin embed
-// while actually framed -- never standalone /admin, never the user embed,
-// and never posted at all (not even a single call) when neither holds.
-// Mounted once at the App root so it covers the whole embedded-admin
-// session regardless of which admin sub-page is showing, not re-created on
-// every route change.
-function useEmbeddedAdminHeightSync() {
-  useEffect(() => {
-    if (!shouldSyncEmbeddedAdminHeight(embeddedAdminMode, window.parent !== window)) return;
-    // XM-INV-EMBED-HEIGHT: only post when the value actually moved, and
-    // XM-INV-EMBED-LOOP: only when it moved by more than a pixel or two. The
-    // observers below fire for reasons that do not move the height, and a
-    // difference smaller than the dead band is never worth a console
-    // re-render -- which is also what stops a measurement that tracks the
-    // frame from walking the two of us upward forever.
-    let lastPosted = 0;
-    const sendHeight = () => {
-      const height = measureEmbeddedAdminHeight(document);
-      if (!shouldPostEmbeddedAdminHeight(height, lastPosted)) return;
-      lastPosted = height;
-      window.parent.postMessage(
-        buildXmEmbedHeightMessage(height),
-        XM_EMBED_CONSOLE_ORIGIN,
-      );
-    };
-    sendHeight();
-    let debounceTimer: number | undefined;
-    const schedule = () => {
-      if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
-      debounceTimer = window.setTimeout(sendHeight, 100);
-    };
-    const observer = new ResizeObserver(schedule);
-    // Both boxes: the root element can stop growing once the console has
-    // sized the frame, so observing it alone can go quiet exactly when a
-    // table starts filling in.
-    observer.observe(document.documentElement);
-    if (document.body) observer.observe(document.body);
-    // A slow safety net for growth neither observer reports -- an image
-    // decoding late, a font swapping, a panel expanding inside an already
-    // sized box. It posts only on change, so a stable page costs one
-    // measurement per second and no messages at all.
-    const poll = window.setInterval(sendHeight, 1000);
-    return () => {
-      observer.disconnect();
-      window.clearInterval(poll);
-      if (debounceTimer !== undefined) window.clearTimeout(debounceTimer);
-    };
-  }, []);
 }
 
 type AppData = {
@@ -338,6 +213,7 @@ function summarizeRequests(
 }
 
 function DataProvider({ children }: { children: ReactNode }) {
+  const adminPlatform = useAdminPlatform();
   const { user } = useAuth();
   const location = useLocation();
   const adminRoute = location.pathname.startsWith("/admin");
@@ -359,7 +235,7 @@ function DataProvider({ children }: { children: ReactNode }) {
   >();
   const [loadingMoreRequests, setLoadingMoreRequests] = useState(false);
   const refreshVersion = useRef(0);
-  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+  const platformSourceInstanceId = useAdminSourceInstanceId();
 
   const refresh = async () => {
     const version = ++refreshVersion.current;
@@ -411,7 +287,7 @@ function DataProvider({ children }: { children: ReactNode }) {
         // Platform-scoped embedded admin: wait for the platform's
         // source_instance_id to resolve rather than briefly requesting an
         // unscoped (all-platform) page and re-requesting a moment later.
-        if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+        if (adminPlatform && !platformSourceInstanceId) return;
         const requestPage = await invoiceApi.getAdminRequestPage(
           undefined,
           platformSourceInstanceId ?? undefined,
@@ -548,7 +424,6 @@ const adminNav = [
   { to: "/admin/source-health", label: "同步状态", icon: Network, scopeKey: "source-health" },
   { to: "/admin?view=issued", label: "发票档案", icon: FileCheck2, scopeKey: "review" },
   { to: "/admin/settings", label: "系统设置", icon: Settings2, scopeKey: "settings" },
-  { to: "/orders", label: "返回用户端", icon: UserRound, scopeKey: "return-to-user" },
 ] as const satisfies ReadonlyArray<{
   to: string;
   label: string;
@@ -566,32 +441,36 @@ function PortalLayout({
   const [mobileOpen, setMobileOpen] = useState(false);
   const { loadError, refresh, sourceAccounts } = useData();
   const { user, logout, stepUpRequired } = useAuth();
-  const embeddedPlatform = useEmbeddedPlatform();
+  const userPlatform = useUserPlatform();
   const toast = useContext(ToastContext);
   const location = useLocation();
+  const native = useNativeAdmin();
   const nav = admin
-    ? adminNav.filter((item) => isAdminNavItemVisible(item.scopeKey, embeddedAdminScope))
+    ? adminNav.filter((item) => isAdminNavItemVisible(item.scopeKey, native?.mode ?? null))
     : userNav;
-  const embedded = embeddedUserMode && !admin;
-  // Separate from `embedded` above (which is the user embed, and explicitly
-  // excludes admin): the admin console has its own embed, hosted by the
-  // platform console rather than a per-account iframe, so it gets its own
-  // chrome-hiding class (.portal-embedded-admin, styles.css) instead of
-  // reusing .portal-embedded's.
-  const embeddedAdmin = admin && embeddedAdminMode;
-  // The regular sidebar/topbar chrome that would otherwise show who is
-  // logged in is hidden in embedded mode (see .portal-embedded in
-  // styles.css) -- without this, the embedded view has no account identity
-  // at all.
   const accountLabel = user
-    ? accountIdentityLabel({ user, embeddedPlatform, sourceAccounts })
+    ? accountIdentityLabel({ user })
     : null;
 
   useEffect(() => setMobileOpen(false), [location.pathname, location.search]);
 
+  if (native && admin) {
+    return <section className="invoice-native-panel">
+      <nav className="invoice-native-nav" aria-label="开票管理">
+        {nav.map(item => <NavLink key={item.to} to={item.to} end={item.to === "/admin"}
+          className={({ isActive }) => isActive ? "invoice-native-tab active" : "invoice-native-tab"}>
+          {item.label}
+        </NavLink>)}
+      </nav>
+      {loadError && <div role="alert" className="api-error-banner"><span>{loadError}</span>
+        <button onClick={() => void refresh()}>重试</button></div>}
+      <div className="invoice-native-content">{children}</div>
+    </section>;
+  }
+
   return (
     <div
-      className={`portal ${admin ? "portal-admin" : ""} ${embedded ? "portal-embedded" : ""} ${embeddedAdmin ? "portal-embedded-admin" : ""}`}
+      className={`portal ${admin ? "portal-admin" : ""}`}
     >
       <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
         <div className="brand">
@@ -649,18 +528,7 @@ function PortalLayout({
               </NavLink>
             );
           })}
-          {shouldShowAdminReturn(admin, user?.role, stepUpRequired) && (
-            <NavLink
-              to="/admin"
-              target={embedded ? "_top" : undefined}
-              className={({ isActive }) =>
-                isActive ? "nav-item nav-item-active" : "nav-item"
-              }
-            >
-              <ShieldCheck size={18} />
-              <span>返回管理端</span>
-            </NavLink>
-          )}
+
         </nav>
 
         <div className="sidebar-spacer" />
@@ -685,11 +553,8 @@ function PortalLayout({
           <LogOut size={18} />
           <span>退出登录</span>
         </button>
-        {embedded && accountLabel && (
-          // Rightmost on purpose: the embedding platform pages float their
-          // own "新窗口打开" overlay over the iframe's top-right corner, and
-          // it was covering the logout button. The badge is display-only, so
-          // it is the element allowed to sit under that overlay.
+        {accountLabel && (
+          // Display the current source account beside the customer logout control.
           <div className="embedded-account-badge" title="当前登录账号">
             <UserRound size={14} />
             <span>{accountLabel}</span>
@@ -783,14 +648,15 @@ function PageHeader({
 }
 
 function SummaryCards() {
+  const { user } = useAuth();
   const { summary, sourceAccounts: allSourceAccounts } = useData();
-  const embeddedPlatform = useEmbeddedPlatform();
+  const userPlatform = useUserPlatform();
   // Embedded views collapse the big "已关联的平台账号" panel into this
   // compact card once every (scoped) account is connected -- the panel's
   // remaining job there is binding guidance, which only matters while an
   // account is NOT connected yet (see SourceAccountStatus).
-  const connectedAccounts = embeddedUserMode
-    ? scopeBySource(allSourceAccounts, embeddedPlatform).filter(
+  const connectedAccounts = user?.platform
+    ? scopeBySource(allSourceAccounts, userPlatform).filter(
         (account) => account.status === "verified",
       )
     : [];
@@ -818,7 +684,7 @@ function SummaryCards() {
     },
   ];
   if (connectedAccounts.length === 1) {
-    const account = connectedAccounts[0];
+    const account = connectedAccounts[0]!;
     cards.push({
       label: "关联账号",
       value: account.sourceLabel,
@@ -908,32 +774,21 @@ export function SourceAccountStatus() {
     refresh,
     failedRequests,
   } = useData();
-  const embeddedPlatform = useEmbeddedPlatform();
-  const sourceAccounts = scopeBySource(allSourceAccounts, embeddedPlatform);
+  const userPlatform = useUserPlatform();
+  const sourceAccounts = scopeBySource(allSourceAccounts, userPlatform);
   const mode = sourceAccountPanelMode({
     accountCount: sourceAccounts.length,
     failed: failedRequests,
   });
   if (loading) return null;
-  if (
-    embeddedUserMode &&
-    sourceAccounts.length > 0 &&
-    sourceAccounts.every((account) => account.status === "verified")
-  ) {
-    // The connected state lives in SummaryCards' compact "关联账号" card;
-    // this panel stays only while binding guidance is still needed.
-    return null;
-  }
-  const showSub2APILink = !embeddedPlatform || embeddedPlatform === "sub2api";
-  const showNewAPILink = !embeddedPlatform || embeddedPlatform === "newapi";
   return (
     <section className="card source-account-card" aria-label="源平台账号连接">
       <div className="card-heading compact">
         <div>
           <h2>
-            {mode === "onboarding" ? "关联平台账号" : "已关联的平台账号"}
+            {mode === "onboarding" ? "账号数据待同步" : "当前平台账号"}
           </h2>
-          <p>仅展示由统一登录主体明确绑定的账号，不会按邮箱自动匹配。</p>
+          <p>仅展示当前登录平台已核验的账号，两个平台的数据分别显示。</p>
         </div>
         <Network size={20} />
       </div>
@@ -974,9 +829,9 @@ export function SourceAccountStatus() {
             <div className="binding-step">
               <CircleAlert size={18} />
               <div>
-                <strong>已关联账号暂时无法读取</strong>
+                <strong>当前账号暂时无法读取</strong>
                 <p>
-                  这只是本次读取失败，不代表你的绑定已失效或被撤销，也不需要重新绑定。请稍后点击下方「重试」。
+                  这只是本次读取失败，不代表账号核验已失效或被撤销。请稍后点击下方「重试」。
                 </p>
                 <div className="binding-site-links">
                   <button
@@ -992,59 +847,12 @@ export function SourceAccountStatus() {
           </div>
         )}
         {mode === "onboarding" && (
-          <div className="source-binding-empty">
-            <div className="binding-step">
-              <span>1</span>
-              <div>
-                <strong>打开原平台并使用原账号登录</strong>
-                <p>
-                  {embeddedPlatform
-                    ? `进入你在${sourceName[embeddedPlatform]}实际使用的站点。`
-                    : "分别进入你实际使用的 Sub2API 或 New API 站点。"}
-                </p>
-                <div className="binding-site-links">
-                  {showSub2APILink && (
-                    <a
-                      href="https://api.solov.cc/"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      打开 Sub2API
-                    </a>
-                  )}
-                  {showNewAPILink && (
-                    <a
-                      href="https://xm.solov.cc/"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      打开 New API
-                    </a>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="binding-step">
-              <span>2</span>
-              <div>
-                <strong>绑定“SoloV 统一登录”</strong>
-                <p>在原平台账号设置中确认绑定；不要使用另一个邮箱账号代替。</p>
-              </div>
-            </div>
-            <div className="binding-step">
-              <span>3</span>
-              <div>
-                <strong>返回这里刷新</strong>
-                <p>同步完成后，属于该原账号的充值记录才会安全显示。</p>
-                <button
-                  className="button button-secondary"
-                  onClick={() => void refresh()}
-                >
-                  <RefreshCcw size={15} />
-                  我已绑定，刷新状态
-                </button>
-              </div>
-            </div>
+          <div className="source-binding-empty" role="status">
+            <strong>正在核对当前账号的开票数据</strong>
+            <p>你已通过平台账号登录，无需另行绑定统一登录账号。数据同步完成后即可显示；若持续为空，请联系管理员核对当前平台账号。</p>
+            <button className="button button-secondary" onClick={() => void refresh()}>
+              <RefreshCcw size={15} />刷新数据
+            </button>
           </div>
         )}
       </div>
@@ -1204,9 +1012,9 @@ function OrdersPage() {
   const { loading, orders, profiles, eligibilitySummaries, refresh } = useData();
   const toast = useContext(ToastContext);
   const navigate = useNavigate();
-  const embeddedPlatform = useEmbeddedPlatform();
+  const userPlatform = useUserPlatform();
   const [source, setSource] = useState<"all" | SourceType>(
-    embeddedPlatform ?? "all",
+    userPlatform ?? "all",
   );
   const [selected, setSelected] = useState<Record<string, number>>({});
   const [profileId, setProfileId] = useState("");
@@ -1247,7 +1055,7 @@ function OrdersPage() {
   useEffect(() => {
     if (!profileId && profiles.length)
       setProfileId(
-        profiles.find((profile) => profile.isDefault)?.id ?? profiles[0].id,
+        profiles.find((profile) => profile.isDefault)?.id ?? profiles[0]?.id ?? "",
       );
   }, [profileId, profiles]);
 
@@ -1292,7 +1100,7 @@ function OrdersPage() {
   // scopeBySource is a no-op when the embedded view is unscoped; when scoped
   // it is the authority (the source tabs below are hidden in that case, but
   // this keeps filteredOrders correct even if `source` state ever drifted).
-  const filteredOrders = scopeBySource(orders, embeddedPlatform).filter(
+  const filteredOrders = scopeBySource(orders, userPlatform).filter(
     (order) => source === "all" || order.source === source,
   );
   const selectedTotal = Object.values(selected).reduce(
@@ -1401,7 +1209,7 @@ function OrdersPage() {
       <SummaryCards />
       <SourceAccountStatus />
       <EligibilitySummaryPanel
-        items={scopeBySource(eligibilitySummaries, embeddedPlatform)}
+        items={scopeBySource(eligibilitySummaries, userPlatform)}
         loading={loading}
       />
       {policyError && (
@@ -1426,7 +1234,7 @@ function OrdersPage() {
               刷新
             </button>
           </div>
-          {!embeddedPlatform && (
+          {!userPlatform && (
             <div className="segmented">
               {(
                 [
@@ -1556,7 +1364,7 @@ function OrdersPage() {
                         <div>
                           <span>¥</span>
                           <input
-                            value={(selected[order.id] / 100).toFixed(2)}
+                            value={((selected[order.id] ?? 0) / 100).toFixed(2)}
                             onChange={(event) =>
                               updateAmount(order, event.target.value)
                             }
@@ -2248,6 +2056,7 @@ function RecordsPage() {
 }
 
 function AdminPage() {
+  const adminPlatform = useAdminPlatform();
   const {
     requests,
     summary,
@@ -2264,7 +2073,7 @@ function AdminPage() {
   // initialized to match and its control is hidden below (CR-0005 (c)), same
   // defense-in-depth pattern as the user embed's OrdersPage source scoping.
   const [source, setSource] = useState<"all" | SourceType>(
-    embeddedAdminPlatform() ?? "all",
+    adminPlatform ?? "all",
   );
   const [selected, setSelected] = useState<InvoiceRequest | null>(null);
   const query = new URLSearchParams(useLocation().search);
@@ -2356,7 +2165,7 @@ function AdminPage() {
             <option value="returned">已退回</option>
             <option value="issued">已开具</option>
           </select>
-          {!embeddedAdminPlatform() && (
+          {!adminPlatform && (
             <select
               value={source}
               onChange={(event) => setSource(event.target.value as typeof source)}
@@ -2502,6 +2311,7 @@ function AdminDrawer({
   requestId: string;
   onClose: () => void;
 }) {
+  const adminPlatform = useAdminPlatform();
   const { requests, refresh } = useData();
   const toast = useContext(ToastContext);
   const request = requests.find((item) => item.id === requestId);
@@ -2588,7 +2398,7 @@ function AdminDrawer({
   // platform mode, so this is unreachable through normal navigation -- kept
   // as defense in depth against any future path that could select an id
   // from outside the currently-loaded (and filtered) list.
-  if (embeddedAdminPlatform() && request.source !== embeddedAdminPlatform()) {
+  if (adminPlatform && request.source !== adminPlatform) {
     return (
       <div className="drawer-layer">
         <button className="drawer-backdrop" onClick={onClose} aria-label="关闭" />
@@ -3145,16 +2955,12 @@ function freezeReasonLabel(reason: EligibilityFreeze["reason"]) {
 }
 
 function EligibilityFreezesPage() {
+  const adminPlatform = useAdminPlatform();
   const toast = useContext(ToastContext);
   const [filters, setFilters] = useState<EligibilityFreezeFilters>({
     status: "open",
   });
-  // CR-0007 problem one: local, immediately-editable input state, committed
-  // into filters.externalUserId (which actually triggers the server refetch
-  // below) after a short pause in typing -- this codebase has no existing
-  // free-text filter that hits the server, so this reuses the same debounce
-  // idiom already established for height-sync above (useEmbeddedAdminHeightSync)
-  // rather than refetching on every keystroke.
+  // Commit the editable account filter after a short pause in typing.
   const [externalUserIdInput, setExternalUserIdInput] = useState("");
   useEffect(() => {
     const trimmed = externalUserIdInput.trim();
@@ -3189,14 +2995,14 @@ function EligibilityFreezesPage() {
   );
   const hiddenCount = items.length - visibleItems.length;
   const loadVersion = useRef(0);
-  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+  const platformSourceInstanceId = useAdminSourceInstanceId();
 
   // Platform-scoped embedded admin forces the filter to the resolved
   // platform and hides the control below (CR-0005 (c)); it cannot be
   // overridden by a click on a control that no longer exists, only by a
   // filters.sourceInstanceId set from elsewhere -- there is none.
   useEffect(() => {
-    if (!embeddedAdminPlatform() || !platformSourceInstanceId) return;
+    if (!adminPlatform || !platformSourceInstanceId) return;
     setFilters((current) =>
       current.sourceInstanceId === platformSourceInstanceId
         ? current
@@ -3207,7 +3013,7 @@ function EligibilityFreezesPage() {
   const load = async (cursor?: string) => {
     // Wait for the platform's source_instance_id rather than briefly
     // requesting an unscoped page.
-    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+    if (adminPlatform && !platformSourceInstanceId) return;
     const version = cursor ? loadVersion.current : ++loadVersion.current;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
@@ -3339,7 +3145,7 @@ function EligibilityFreezesPage() {
               </option>
             ))}
           </select>
-          {!embeddedAdminPlatform() && (
+          {!adminPlatform && (
             <select
               aria-label="来源平台实例"
               value={filters.sourceInstanceId ?? ""}
@@ -3517,12 +3323,7 @@ function EligibilityFreezeDrawer({
   const [evidenceReference, setEvidenceReference] = useState("");
   const [note, setNote] = useState("");
   const [working, setWorking] = useState(false);
-  // CR-0007 problem two: the embedded console can stretch this page's iframe
-  // to up to 4000px while the browser viewport stays much shorter, so a
-  // toast anchored to the iframe's own document corner can land outside the
-  // visible area -- an operator sees no feedback and assumes the click did
-  // nothing. This mirrors the same failure into the drawer's own visible
-  // area (in addition to, not instead of, the toast).
+  // Keep action errors visible beside the drawer form as well as in the toast.
   const [resolveError, setResolveError] = useState<{
     message: string;
     code: string;
@@ -3725,6 +3526,7 @@ function accountBlockStateTone(state: AccountBlockState) {
 }
 
 function AccountLedgerPage() {
+  const adminPlatform = useAdminPlatform();
   const toast = useContext(ToastContext);
   const [filters, setFilters] = useState<AccountLedgerFilters>({});
   // Same debounce idiom as EligibilityFreezesPage's own externalUserIdInput
@@ -3749,7 +3551,7 @@ function AccountLedgerPage() {
   const [pageError, setPageError] = useState<string | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const loadVersion = useRef(0);
-  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+  const platformSourceInstanceId = useAdminSourceInstanceId();
 
   // Platform-scoped embedded admin forces the filter to the resolved
   // platform, same as EligibilityFreezesPage's own identical effect (CR-0005
@@ -3757,7 +3559,7 @@ function AccountLedgerPage() {
   // override it with (task brief item 4 does not ask for one), so scoping
   // here is entirely invisible/automatic.
   useEffect(() => {
-    if (!embeddedAdminPlatform() || !platformSourceInstanceId) return;
+    if (!adminPlatform || !platformSourceInstanceId) return;
     setFilters((current) =>
       current.sourceInstanceId === platformSourceInstanceId
         ? current
@@ -3766,7 +3568,7 @@ function AccountLedgerPage() {
   }, [platformSourceInstanceId]);
 
   const load = async (cursor?: string) => {
-    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+    if (adminPlatform && !platformSourceInstanceId) return;
     const version = cursor ? loadVersion.current : ++loadVersion.current;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
@@ -4129,6 +3931,7 @@ function AccountLedgerDetailDrawer({
 }
 
 function PaymentCandidatesPage() {
+  const adminPlatform = useAdminPlatform();
   const toast = useContext(ToastContext);
   const [items, setItems] = useState<PaymentCandidate[]>([]);
   const [nextCursor, setNextCursor] = useState<string | undefined>();
@@ -4141,7 +3944,7 @@ function PaymentCandidatesPage() {
   const [evidenceReference, setEvidenceReference] = useState("");
   const [reason, setReason] = useState("");
   const [working, setWorking] = useState(false);
-  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+  const platformSourceInstanceId = useAdminSourceInstanceId();
 
   const load = async (cursor?: string) => {
     // Wait for the platform's source_instance_id rather than briefly
@@ -4151,7 +3954,7 @@ function PaymentCandidatesPage() {
     // route under Sub2API scope -- that resolves to a real (sub2api)
     // source_instance_id, which the newapi-only queue then correctly (not
     // an error) returns zero rows for.
-    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+    if (adminPlatform && !platformSourceInstanceId) return;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
       const page = await invoiceApi.getPaymentCandidates(
@@ -4537,6 +4340,7 @@ const refundStatusMeta: Record<
 };
 
 function RefundCasesPage() {
+  const adminPlatform = useAdminPlatform();
   const toast = useContext(ToastContext);
   const [status, setStatus] = useState<RefundCaseStatus>("open");
   const [items, setItems] = useState<RefundCase[]>([]);
@@ -4552,12 +4356,12 @@ function RefundCasesPage() {
   const [note, setNote] = useState("");
   const [working, setWorking] = useState(false);
   const loadVersion = useRef(0);
-  const platformSourceInstanceId = useEmbeddedAdminPlatformSourceInstanceId();
+  const platformSourceInstanceId = useAdminSourceInstanceId();
 
   const load = async (cursor?: string) => {
     // Wait for the platform's source_instance_id rather than briefly
     // requesting an unscoped page (CR-0005 (c)).
-    if (embeddedAdminPlatform() && !platformSourceInstanceId) return;
+    if (adminPlatform && !platformSourceInstanceId) return;
     const version = cursor ? loadVersion.current : ++loadVersion.current;
     cursor ? setLoadingMore(true) : setLoading(true);
     try {
@@ -5624,21 +5428,13 @@ function EmptyState({
 }
 
 function LoginPage() {
-  const { login, error, refresh, oidcAdminLoginEnabled } = useAuth();
-  const location = useLocation();
-  // XM-INV-HIDE-ADMIN-LOGIN: only the admin area's own login screen (direct
-  // /admin navigation, or the console embed, which always lands on /admin --
-  // see lib/portal-navigation.ts) still offers the administrator-OIDC entry
-  // point below. Every user-facing path (/, /orders, /profiles, /records,
-  // and the user embed's /?ui_mode=embedded&source=...) never shows it.
-  const showAdminLoginEntry = isAdminAreaPath(location.pathname);
+  const { error, refresh } = useAuth();
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [tempToken, setTempToken] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-  const [showAdminLogin, setShowAdminLogin] = useState(false);
 
   async function handleCredentialsSubmit(event: FormEvent) {
     event.preventDefault();
@@ -5778,32 +5574,7 @@ function LoginPage() {
             </button>
           </form>
         )}
-        {/* CR-0006 (XM-INV-CONSOLE-ASSERT): once OIDC_ADMIN_LOGIN_ENABLED is
-            turned off, this OIDC entry point is hidden entirely -- it would
-            only lead to a 404 (the route is no longer registered; see
-            production_auth.go's Register). In embedded-admin mode there is
-            nothing else to show here: the console posts a signed assertion
-            in automatically (AuthProvider's listener) with no button needed.
-            Standalone /admin gets an explicit pointer to the console instead
-            of silently offering nothing. */}
-        {showAdminLoginEntry && oidcAdminLoginEnabled &&
-          (showAdminLogin ? (
-            <button className="button button-dark button-wide" onClick={login}>
-              <ShieldCheck size={17} />
-              使用统一身份账号登录
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="button button-ghost button-wide"
-              onClick={() => setShowAdminLogin(true)}
-            >
-              管理员登录
-            </button>
-          ))}
-        {showAdminLoginEntry && !oidcAdminLoginEnabled && !embeddedAdminMode && (
-          <p>请通过星芒控制台登录后使用开票管理功能。</p>
-        )}
+
       </section>
     </main>
   );
@@ -5821,44 +5592,13 @@ function SessionLoadingPage() {
 }
 
 function StepUpPage() {
-  const { stepUp, oidcAdminLoginEnabled } = useAuth();
-  // XM-INV-ASSERT-STEPUP: when the console assertion is the admin login (the
-  // Keycloak step-up route is gone), renewal needs no popup and no gesture --
-  // it is a postMessage to the framing console, and the automatic handshake
-  // in AuthProvider is already asking. Say so, and keep the button as the
-  // manual path rather than the only one.
-  const assertionRenewal = embeddedAdminMode && oidcAdminLoginEnabled === false;
-  useEffect(() => {
-    // Embedded admin mode opens step-up in a popup (see AuthProvider),
-    // which browsers block unless it is triggered by a direct user gesture
-    // -- auto-firing here would silently fail. Standalone/non-embedded keeps
-    // the existing auto-trigger: `_top` navigation is never popup-blocked.
-    if (!embeddedAdminMode) stepUp();
-  }, [stepUp]);
-  return (
-    <main className="auth-shell">
-      <section className="auth-card">
-        <ShieldCheck className="auth-shield" size={34} />
-        <span className="eyebrow">ADMIN STEP-UP</span>
-        <h1>需要管理员二次验证</h1>
-        <p>
-          {assertionRenewal
-            ? "此操作涉及支付证据或开票设置，正在向控制台申请新的登录凭证，稍候即可自动恢复。"
-            : embeddedAdminMode
-              ? "此操作涉及支付证据或开票设置，请点击下方按钮在弹出窗口中完成强化认证。"
-              : "此操作涉及支付证据或开票设置，请在顶层页面完成强化认证后返回。"}
-        </p>
-        <button className="button button-dark button-wide" onClick={stepUp}>
-          <KeyRound size={17} />
-          {assertionRenewal
-            ? "立即重新验证"
-            : embeddedAdminMode
-              ? "重新验证"
-              : "继续管理员验证"}
-        </button>
-      </section>
-    </main>
-  );
+  const { stepUp } = useAuth();
+  return <section className="auth-card">
+    <ShieldCheck className="auth-shield" size={34} />
+    <h1>需要管理员二次验证</h1>
+    <p>请验证当前控制台身份后继续。开票页面会重新向服务端核对权限。</p>
+    <button className="button button-primary" onClick={stepUp}>继续管理员验证</button>
+  </section>;
 }
 
 // AccountEmailLine renders the account's verified email under its upstream
@@ -6093,7 +5833,7 @@ function SourceHealthPage() {
   // client-side view filter -- the report already carries both platforms'
   // rows in one cheap, already-fetched response; there is no server-side
   // filter to add for this endpoint.
-  const platform = embeddedAdminPlatform();
+  const platform = useAdminPlatform();
   const visibleItems = platform
     ? (report?.items ?? []).filter((item) => item.sourceType === platform)
     : (report?.items ?? []);
@@ -6243,7 +5983,7 @@ function RequireAdmin({ children }: { children: ReactNode }) {
   const { user, stepUpRequired } = useAuth();
   if (stepUpRequired) return <StepUpPage />;
   if (user?.role !== "admin")
-    return <Navigate to={userRoute("/orders")} replace />;
+    return <div role="alert">当前账号无开票管理权限。</div>;
   return children;
 }
 
@@ -6258,62 +5998,6 @@ function AuthenticatedApplication() {
         <Route path="/orders" element={<OrdersPage />} />
         <Route path="/profiles" element={<ProfilesPage />} />
         <Route path="/records" element={<RecordsPage />} />
-        <Route
-          path="/admin"
-          element={
-            <RequireAdmin>
-              <AdminPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/payment-candidates"
-          element={
-            <RequireAdmin>
-              <PaymentCandidatesPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/eligibility-freezes"
-          element={
-            <RequireAdmin>
-              <EligibilityFreezesPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/accounts/ledger"
-          element={
-            <RequireAdmin>
-              <AccountLedgerPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/refund-cases"
-          element={
-            <RequireAdmin>
-              <RefundCasesPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/source-health"
-          element={
-            <RequireAdmin>
-              <SourceHealthPage />
-            </RequireAdmin>
-          }
-        />
-        <Route
-          path="/admin/settings"
-          element={
-            <RequireAdmin>
-              <SystemSettingsPage />
-            </RequireAdmin>
-          }
-        />
         <Route path="*" element={<Navigate to={userRoute("/orders")} replace />} />
       </Routes>
     </DataProvider>
@@ -6329,24 +6013,13 @@ function App() {
     setToast({ message, tone });
     window.setTimeout(() => setToast(null), 3200);
   };
-  // Mounted at the root (not inside AuthenticatedApplication) so the console
-  // can size the iframe correctly even before login -- the hook itself is a
-  // no-op unless embedded-admin mode is on and the page is actually framed.
-  useEmbeddedAdminHeightSync();
   return (
     <AuthProvider>
       <ToastContext.Provider value={showToast}>
         <AuthenticatedApplication />
-        {/* CR-0007 problem two: .toast is position:fixed against this
-            page's OWN document, not the browser viewport. The embedded
-            console can stretch this admin iframe up to 4000px tall while
-            the real viewport stays much shorter, so a toast anchored to
-            the document's bottom-right corner can land below the visible
-            area. Anchoring to the top instead keeps it inside the part of
-            the iframe that is always scrolled into view on load. */}
         {toast && (
           <div
-            className={`toast toast-${toast.tone}${embeddedAdminMode ? " toast-anchor-top" : ""}`}
+            className={`toast toast-${toast.tone}`}
           >
             {toast.tone === "success" ? (
               <CheckCircle2 size={18} />
@@ -6362,3 +6035,41 @@ function App() {
 }
 
 export default App;
+
+
+function NativeAdminApplication() {
+  const auth = useAuth();
+  const location = useLocation();
+  const pages: Record<string, ReactNode> = {
+    "/admin": <AdminPage />, "/admin/payment-candidates": <PaymentCandidatesPage />,
+    "/admin/eligibility-freezes": <EligibilityFreezesPage />, "/admin/accounts/ledger": <AccountLedgerPage />,
+    "/admin/refund-cases": <RefundCasesPage />, "/admin/source-health": <SourceHealthPage />,
+    "/admin/settings": <SystemSettingsPage />,
+  };
+  return <SessionBoundary {...auth} retry={() => void auth.refresh()} pending={<SessionLoadingPage />}
+    login={<section role="alert"><p>{auth.error || "控制台管理员会话无效，请重新登录控制台。"}</p>
+      <button onClick={() => void auth.refresh()}>重新核对登录状态</button></section>}>
+    <RequireAdmin><DataProvider>{pages[location.pathname]}</DataProvider></RequireAdmin>
+  </SessionBoundary>;
+}
+
+export function NativeAdminWorkspace({ mode, onStepUp, sessionRevision = 0 }: {
+  mode: NativeAdminMode; onStepUp: () => void; sessionRevision?: number;
+}) {
+  const [toast, setToast] = useState<ToastState>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+  return <div className="invoice-workspace invoice-native">
+    <NativeAdminRouter mode={mode}>
+      <AuthProvider key={mode} staff onStepUp={onStepUp} sessionRevision={sessionRevision}>
+        <ToastContext.Provider value={(message, tone = "success") => setToast({ message, tone })}>
+          <NativeAdminApplication />
+          {toast && <div role="status" className={`toast toast-${toast.tone}`}>{toast.message}</div>}
+        </ToastContext.Provider>
+      </AuthProvider>
+    </NativeAdminRouter>
+  </div>;
+}

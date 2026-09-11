@@ -5,7 +5,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { ApiError } from "../api/client";
 import { confirmTotp, enrollTotp, type EnrollTotpResult } from "../api/totp";
 import { cachedLocalUser, setCachedLocalUser, type LocalUser } from "../auth/localSession";
-import { safeNextPath } from "../auth/oidc";
+import { safeNextPath } from "../auth/paths";
 import { validateTotpCode } from "../lib/totpForm";
 import { errorCodeNote } from "../lib/labels";
 

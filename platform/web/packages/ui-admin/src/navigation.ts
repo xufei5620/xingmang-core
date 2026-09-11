@@ -446,11 +446,7 @@ export const PLATFORM_NAV_ITEMS: readonly PlatformNavSpec[] = [
     prototypeId: "newapi",
     label: "NewAPI",
     stage: "M1",
-    // NewAPI 的「支付与财务」原型只画了 2 个子页签且没有开票，ADMIN-IA §8.2 #2
-    // 曾裁定维持原型、不替它「修好」。CR-0005（2026-09-02，产品负责人指令）
-    // 推翻了这条裁定：NewAPI 与 Sub2API 一样加「开票」子页签，但内容是嵌入开票
-    // 系统管理端（EmbeddedConsoleFrame，/embed/admin/newapi），不是原生列表——
-    // 原生列表仍属于第二阶段，等只读连接器与 CR-0002 冻结（ADMIN-IA §8.2 #2）。
+    // 与 Sub2API 共用原生开票管理工作区，入口固定保留各自平台的视图范围。
     tabs: apiPlatformTabs(
       sub(["orders", "资金与订单"], ["profit", "利润核算"], ["invoices", "开票"]),
     ),

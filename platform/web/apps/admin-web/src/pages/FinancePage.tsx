@@ -191,9 +191,7 @@ function subTabContent(
   if (tabId === "overview") {
     return <FinanceOverviewTab daily={daily} businessDay={businessDay} metricsQuery={metricsQuery} />;
   }
-  // CR-0005 平台线 g：开票集成这一格由开票系统自己的控制台承载。
-  // 这一支从 PlaceholderPage 的 governanceSubTabOverride 原样搬过来——
-  // 平台侧不读、不展示任何开票数字，iframe 内部的内容对本页永远不透明。
+  // CR-0010：原生开票管理复用同一个 Router，全局视角仅开放配置与同步状态。
   if (tabId === "invoicing") return <InvoiceConsolePanel mode="global" />;
   if (tabId === "settings") return <FinanceSettingsTab />;
   return <FinancePendingTab tabId={tabId} label={label} />;

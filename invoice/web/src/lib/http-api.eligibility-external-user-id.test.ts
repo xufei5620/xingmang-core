@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { httpInvoiceApi } from "./http-api";
 
 // CR-0007 problem one: external_user_id is a new, always-present field on
-// GET /api/v1/admin/eligibility-freezes items, and a new optional exact-match
+// GET /invoice-api/v1/admin/eligibility-freezes items, and a new optional exact-match
 // query filter on the same endpoint. This follows the same mocked-fetch
 // style as http-api.source-instance-filter.test.ts (the only existing
 // precedent for a fetch-level test in this codebase, which also explains why

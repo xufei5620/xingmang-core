@@ -136,7 +136,8 @@ describe("人员与权限：其余三格从「尚未实现」换成蓝图列头 
       "状态",
     ]);
     expect(screen.getByText(/core\.staff_session（迁移 000021，XM-LOGIN）/)).toBeTruthy();
-    expect(screen.getByText(/oidc 模式下的会话在 Keycloak 里/)).toBeTruthy();
+    expect(screen.getByText(/当前员工会话均由平台本地账号系统管理/)).toBeTruthy();
+    expect(screen.queryByText(/oidc 模式下的会话在 Keycloak 里/)).toBeNull();
     expect(screen.queryByText(/随 F-A 上线/)).toBeNull();
   });
 });

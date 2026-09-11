@@ -195,10 +195,10 @@ describe("request recovery and document routes", () => {
 
   it("keeps administrator downloads on the administrator authorization edge", () => {
     expect(invoiceDocumentPath("request/unsafe", true)).toBe(
-      "/api/v1/admin/invoice-requests/request%2Funsafe/document",
+      "/invoice-api/v1/admin/invoice-requests/request%2Funsafe/document",
     );
     expect(invoiceDocumentPath("request-1", false)).toBe(
-      "/api/v1/user/invoice-requests/request-1/document",
+      "/invoice-api/v1/user/invoice-requests/request-1/document",
     );
   });
 

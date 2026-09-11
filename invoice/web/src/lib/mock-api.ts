@@ -50,7 +50,6 @@ const mockSession: AuthSession = {
   },
   csrfToken: "mock-csrf-token",
   adminStepUpRequired: false,
-  oidcAdminLoginEnabled: true,
 };
 
 // Demo rows are always one of the two platforms this bundle knows (the
@@ -194,7 +193,7 @@ let requests: InvoiceRequest[] = [
     userEmail: "chenyuan@example.com",
     source: "newapi",
     amountMinor: 20000,
-    profileSnapshot: profiles[0],
+    profileSnapshot: profiles[0]!,
     allocations: [
       {
         orderId: "ord_102",
@@ -215,7 +214,7 @@ let requests: InvoiceRequest[] = [
     userEmail: "chenyuan@example.com",
     source: "sub2api",
     amountMinor: 20000,
-    profileSnapshot: profiles[0],
+    profileSnapshot: profiles[0]!,
     allocations: [
       {
         orderId: "ord_104",
@@ -240,7 +239,7 @@ let requests: InvoiceRequest[] = [
     source: "newapi",
     amountMinor: 58000,
     profileSnapshot: {
-      ...profiles[0],
+      ...profiles[0]!,
       id: "snapshot_997",
       title: "杭州云帆网络有限公司",
       taxId: "91330106MA2AXY8K7Q",
@@ -650,17 +649,8 @@ export const mockInvoiceApi: InvoiceApiClient = {
     await delay(80);
     return null;
   },
-  loginURL(returnTo) {
-    return returnTo;
-  },
-  adminStepUpURL(returnTo) {
-    return returnTo;
-  },
-  // Demo mode has no real console counterpart to receive a postMessage
-  // from, and mockSession is already authenticated -- nothing ever calls
-  // this in practice, but the interface must still be implemented.
-  async exchangeConsoleAssertion() {
-    await delay(80);
+  async getStaffSession() {
+    return structuredClone(mockSession);
   },
   async platformLogin() {
     await delay(80);

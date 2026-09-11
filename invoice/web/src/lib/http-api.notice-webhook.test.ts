@@ -31,7 +31,7 @@ function stubFetch() {
         body: typeof init?.body === "string" ? init.body : undefined,
       });
       // 写操作要 CSRF 令牌，而令牌只在建立会话时拿到。先让 getSession 走一遍。
-      if (url.endsWith("/api/v1/auth/session")) {
+      if (url.endsWith("/invoice-api/v1/auth/session")) {
         return new Response(
           JSON.stringify({
             authenticated: true,
@@ -134,7 +134,7 @@ describe("通知地址的写", () => {
     await withSession(calls);
     const address = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=super-secret";
     await httpInvoiceApi.saveNoticeWebhook(address);
-    expect(calls[0]?.url).toBe("/api/v1/admin/settings/notice-webhook");
+    expect(calls[0]?.url).toBe("/invoice-api/v1/admin/settings/notice-webhook");
     expect(calls[0]?.method).toBe("PUT");
     // **地址绝不能进 URL**：URL 会进访问日志、进 Referer、进浏览器历史。
     expect(calls[0]?.url).not.toContain("key=");
@@ -147,9 +147,9 @@ describe("通知地址的写", () => {
     await httpInvoiceApi.clearNoticeWebhook();
     await httpInvoiceApi.sendNoticeWebhookTest();
     expect(calls[0]?.method).toBe("DELETE");
-    expect(calls[0]?.url).toBe("/api/v1/admin/settings/notice-webhook");
+    expect(calls[0]?.url).toBe("/invoice-api/v1/admin/settings/notice-webhook");
     expect(calls[1]?.method).toBe("POST");
-    expect(calls[1]?.url).toBe("/api/v1/admin/settings/notice-webhook/test");
+    expect(calls[1]?.url).toBe("/invoice-api/v1/admin/settings/notice-webhook/test");
     expect(calls[1]?.body).toBe("{}");
   });
 });

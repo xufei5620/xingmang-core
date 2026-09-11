@@ -130,11 +130,11 @@ function IdentityAccountsPage() {
  *  这条做法本身照抄 pages/ChangesPage.tsx 的 TAB_SOURCE。 */
 const TAB_SOURCE: Readonly<Record<string, string>> = {
   rules:
-    "平台今天没有「授权策略」这个可编辑对象：没有规则表、没有只读端点，也没有任何 policy.* / rule.* Action。授权由两样**部署期**的东西决定——路由上写死的 RequireScope（internal/platform/httpapi/router.go）与「角色 → 平台 scope」的翻译表（internal/platform/oidcauth/rolemap.go 的 DefaultRoleScopeMap，可由环境变量 XM_OIDC_ROLE_SCOPES 覆盖；local 与 oidc 两种登录模式共用这张表）。两者都改代码或改部署配置才动得了，不是后台里能编辑的规则。所以这一格等的不是排期，是先要有那个对象。下面那条恒定的 DENY 是个例外：它今天**已经生效**，但生效点在审批内核里（internal/platform/approval：非 HUMAN 主体投票直接被拒），不在任何规则表里。",
+    "平台今天没有「授权策略」这个可编辑对象：没有规则表、没有只读端点，也没有任何 policy.* / rule.* Action。授权由两样**部署期**的东西决定——路由上写死的 RequireScope（internal/platform/httpapi/router.go）与「角色 → 平台 scope」的翻译表（internal/platform/rolepermissions/rolemap.go 的 DefaultRoleScopeMap，可由环境变量 XM_AUTH_ROLE_SCOPES 覆盖；本地员工登录使用这张表）。两者都改代码或改部署配置才动得了，不是后台里能编辑的规则。所以这一格等的不是排期，是先要有那个对象。下面那条恒定的 DENY 是个例外：它今天**已经生效**，但生效点在审批内核里（internal/platform/approval：非 HUMAN 主体投票直接被拒），不在任何规则表里。",
   scopes:
-    "矩阵的数据今天存在，但取不出来：DefaultRoleScopeMap（internal/platform/oidcauth/rolemap.go）就是「角色集合 × scope」那张表，local 模式也走它（localauth.RoleScopesFrom）。缺的是一条把它读出来的只读 Query——外加定它归 staff.manage 还是另开一个 scope。注意它与「设置 → 身份与权限（只读）」不是一回事：那一块显示的是**前端这一侧带着哪些 scope 去请求**，不是服务端认可的权限，更不是全平台的角色矩阵。",
+    "矩阵的数据今天存在，但取不出来：DefaultRoleScopeMap（internal/platform/rolepermissions/rolemap.go）就是「角色集合 × scope」那张表，local 模式也走它（localauth.RoleScopesFrom）。缺的是一条把它读出来的只读 Query——外加定它归 staff.manage 还是另开一个 scope。注意它与「设置 → 身份与权限（只读）」不是一回事：那一块显示的是**前端这一侧带着哪些 scope 去请求**，不是服务端认可的权限，更不是全平台的角色矩阵。",
   sessions:
-    "库表已经有了，端点还没有：core.staff_session（迁移 000021，XM-LOGIN）存着本地登录会话，000024 又给它加了 mfa_at（最近一次 TOTP 校验通过的时刻）。但路由里搜不到任何列会话的端点，LocalAuthHandlers 接口上也只有登录/登出/查自己/改密码/列账号/TOTP 那几项——没有「列出所有活跃会话」。缺的是一条只读 Query 加它的权限归属。另外：oidc 模式下的会话在 Keycloak 里，平台这边根本不落库，那一半要另说。",
+    "库表已经有了，端点还没有：core.staff_session（迁移 000021，XM-LOGIN）存着本地登录会话，000024 又给它加了 mfa_at（最近一次 TOTP 校验通过的时刻）。但路由里搜不到任何列会话的端点，LocalAuthHandlers 接口上也只有登录/登出/查自己/改密码/列账号/TOTP 那几项——没有「列出所有活跃会话」。缺的是一条只读 Query 加它的权限归属。当前员工会话均由平台本地账号系统管理。",
 };
 
 /** 页头那一行的一句话结论。与 TAB_SOURCE 分开写：落款那段有一百多字，摆在

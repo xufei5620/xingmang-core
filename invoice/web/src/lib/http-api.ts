@@ -57,10 +57,6 @@ type BackendError = { error?: { code?: string; message?: string } };
 type BackendSession = {
   authenticated: boolean;
   admin_step_up_required?: boolean;
-  // CR-0006 (XM-INV-CONSOLE-ASSERT). Optional on the wire only so an older
-  // cached response shape never hard-fails mapSession; treated as true
-  // (today's actual default) when absent -- see mapSession below.
-  oidc_admin_login_enabled?: boolean;
   user?: {
     id: string;
     display_name: string;
@@ -415,24 +411,29 @@ export type BackendInvoicePolicy = {
   eligibility_rule: "payment_and_usage_at_or_after";
 };
 
-const baseUrl = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 const requestTimeoutMs = 15_000;
 export const requiredEligibilityStartAt = "2026-08-31T16:00:00Z";
 let sessionCSRFToken = "";
 const documentUploadCheckpoints = new Map<string, number>();
 
-if (
-  import.meta.env.PROD &&
-  baseUrl &&
-  new URL(baseUrl, window.location.origin).origin !== window.location.origin
-) {
-  throw new Error(
-    "VITE_API_BASE_URL must be same-origin in production; proxy /api at the invoice origin.",
-  );
+let sessionEpoch = 0;
+let observedSession = "";
+function retireSessionBoundary() { sessionEpoch += 1; }
+function observeSessionBoundary(identity: string) {
+  if (identity !== observedSession) { retireSessionBoundary(); observedSession = identity; }
 }
-
+function assertCurrentAuthResponse(epoch: number, isCurrent?: () => boolean) {
+  if (epoch !== sessionEpoch || (isCurrent && !isCurrent())) {
+    throw new InvoiceApiError("较早的身份响应已忽略。", { code: "STALE_AUTH_RESPONSE" });
+  }
+}
+// Retire pending requests when leaving a native source workspace.
+export function retireInvoiceSession() {
+  retireSessionBoundary(); sessionCSRFToken = ""; documentUploadCheckpoints.clear();
+}
 function endpointURL(path: string) {
-  return `${baseUrl}${path}`;
+  if (!path.startsWith("/invoice-api/v1/")) throw new Error("Invoice API path is outside the unified namespace.");
+  return path;
 }
 
 function isMutation(method: string) {
@@ -1231,8 +1232,10 @@ async function requestJSON<T>(
     // Only for the pre-session platform-login endpoints, which by
     // definition cannot hold a synchronizer CSRF token yet.
     skipCSRF?: boolean;
+    isCurrent?: () => boolean;
   } = {},
 ): Promise<T> {
+  const epoch = sessionEpoch;
   const headers = new Headers(options.headers);
   const method = options.method ?? "GET";
   headers.set("Accept", "application/json");
@@ -1241,6 +1244,7 @@ async function requestJSON<T>(
 
   if (isMutation(method) && !options.skipCSRF) {
     headers.set("X-CSRF-Token", csrfTokenForMutation());
+    headers.set("X-Requested-With", "xingmang");
   }
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -1251,17 +1255,20 @@ async function requestJSON<T>(
       headers,
       body:
         options.body === undefined ? undefined : JSON.stringify(options.body),
-      credentials: "include",
+      credentials: "same-origin",
       redirect: "error",
       signal: controller.signal,
     });
+    assertCurrentAuthResponse(epoch, options.isCurrent);
     const rotatedCSRF = response.headers.get("X-CSRF-Token");
     if (rotatedCSRF) sessionCSRFToken = rotatedCSRF;
     const contentType = response.headers.get("content-type") ?? "";
     const payload = contentType.includes("application/json")
       ? ((await response.json()) as T & BackendError)
       : undefined;
+    assertCurrentAuthResponse(epoch, options.isCurrent);
     if (!response.ok) {
+      assertCurrentAuthResponse(epoch);
       throw responseError(response.status, payload);
     }
     if (response.status === 204) return undefined as T;
@@ -1534,7 +1541,7 @@ export function profileMutationBody(
 
 export function invoiceDocumentPath(requestId: string, admin = false) {
   const role = admin ? "admin" : "user";
-  return `/api/v1/${role}/invoice-requests/${encodeURIComponent(requestId)}/document`;
+  return `/invoice-api/v1/${role}/invoice-requests/${encodeURIComponent(requestId)}/document`;
 }
 
 function mapStatus(status: BackendInvoiceRequest["status"]): InvoiceStatus {
@@ -1635,7 +1642,7 @@ function mapRequest(
 
 async function getBackendLots() {
   const response = await requestJSON<ItemsResponse<BackendFundingLot>>(
-    "/api/v1/user/funding-lots",
+    "/invoice-api/v1/user/funding-lots",
   );
   return response.items;
 }
@@ -1681,7 +1688,7 @@ async function getRequestPage(
     next_before_submitted_at?: string;
     next_before_id?: string;
   }>(
-    `${admin ? "/api/v1/admin" : "/api/v1/user"}/invoice-requests?${query.toString()}`,
+    `${admin ? "/invoice-api/v1/admin" : "/invoice-api/v1/user"}/invoice-requests?${query.toString()}`,
     { role: admin ? "admin" : "user" },
   );
   // An administrator must never read the funding lots belonging to their own
@@ -1718,7 +1725,7 @@ async function getRequests(admin: boolean) {
 
 async function getRequestDetail(requestId: string, admin: boolean) {
   const request = await requestJSON<BackendInvoiceRequest>(
-    `${admin ? "/api/v1/admin" : "/api/v1/user"}/invoice-requests/${encodeURIComponent(requestId)}`,
+    `${admin ? "/invoice-api/v1/admin" : "/invoice-api/v1/user"}/invoice-requests/${encodeURIComponent(requestId)}`,
     { role: admin ? "admin" : "user" },
   );
   const lots = admin ? [] : await getBackendLots();
@@ -1726,10 +1733,10 @@ async function getRequestDetail(requestId: string, admin: boolean) {
 }
 
 function mapSession(value: BackendSession): AuthSession {
-  const oidcAdminLoginEnabled = value.oidc_admin_login_enabled !== false;
   if (!value.authenticated) {
+    observeSessionBoundary("");
     sessionCSRFToken = "";
-    return { authenticated: false, oidcAdminLoginEnabled };
+    return { authenticated: false };
   }
   if (!value.user || !value.csrf_token) {
     throw new InvoiceApiError("服务返回的安全会话不完整。", {
@@ -1746,10 +1753,11 @@ function mapSession(value: BackendSession): AuthSession {
       code: "INVALID_SESSION_RESPONSE",
     });
   }
-  // Unlike an OIDC identity, a platform account is not guaranteed to carry an
+  // A platform account is not guaranteed to carry an
   // email (e.g. a username-only New API account): display_name always has a
   // server-side fallback (see maskedEmailName in production_auth.go), so an
   // empty email here is not itself an invalid session.
+  observeSessionBoundary(`${value.user.role}:${value.user.id}:${value.user.platform ?? ""}`);
   sessionCSRFToken = value.csrf_token;
   return {
     authenticated: true,
@@ -1765,7 +1773,6 @@ function mapSession(value: BackendSession): AuthSession {
     },
     csrfToken: value.csrf_token,
     adminStepUpRequired: value.admin_step_up_required === true,
-    oidcAdminLoginEnabled,
   };
 }
 
@@ -2066,16 +2073,18 @@ function mapEligibilityProjectionHealth(
 }
 
 async function requestSourceHealth() {
+  const epoch = sessionEpoch;
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
-    const response = await fetch(endpointURL("/api/v1/admin/source-health"), {
+    const response = await fetch(endpointURL("/invoice-api/v1/admin/source-health"), {
       method: "GET",
       headers: { Accept: "application/json" },
-      credentials: "include",
+      credentials: "same-origin",
       redirect: "error",
       signal: controller.signal,
     });
+    assertCurrentAuthResponse(epoch);
     const rotatedCSRF = response.headers.get("X-CSRF-Token");
     if (rotatedCSRF) sessionCSRFToken = rotatedCSRF;
     const contentType = response.headers.get("content-type") ?? "";
@@ -2083,6 +2092,7 @@ async function requestSourceHealth() {
       ? ((await response.json()) as BackendSourceHealth & BackendError)
       : undefined;
     if (response.status !== 200 && response.status !== 503) {
+      assertCurrentAuthResponse(epoch);
       throw responseError(response.status, payload);
     }
     if (!payload) {
@@ -2120,95 +2130,41 @@ export const httpInvoiceApi: InvoiceApiClient = {
     mailResend: true,
   },
 
-  async getSession() {
+  async getSession(isCurrent) {
     try {
-      const value = await requestJSON<BackendSession>("/api/v1/auth/session");
+      const epoch = sessionEpoch;
+      const value = await requestJSON<BackendSession>("/invoice-api/v1/auth/session", { isCurrent });
+      assertCurrentAuthResponse(epoch, isCurrent);
       return mapSession(value);
     } catch (error) {
       if (error instanceof InvoiceApiError && error.requiresLogin) {
         sessionCSRFToken = "";
-        // The request itself failed, so there is no oidc_admin_login_enabled
-        // to read -- default true (today's actual default): worst case an
-        // operator briefly sees a login button that leads nowhere useful,
-        // never a security issue either way.
-        return { authenticated: false, oidcAdminLoginEnabled: true };
+        return { authenticated: false };
       }
       throw error;
     }
   },
-
+  async getStaffSession(isCurrent) {
+    const epoch = sessionEpoch;
+    const value = await requestJSON<BackendSession>("/invoice-api/v1/auth/staff-session", { isCurrent });
+    assertCurrentAuthResponse(epoch, isCurrent);
+    if (value.authenticated && (value.user?.role !== "admin" || !uuidPattern.test(value.user.id) || typeof value.admin_step_up_required !== "boolean")) {
+      throw new InvoiceApiError("管理员会话身份无效。", { code: "INVALID_STAFF_SESSION_RESPONSE" });
+    }
+    return mapSession(value);
+  },
   async logout() {
-    const result = await requestJSON<{ ok: boolean; logout_url?: string }>(
-      "/api/v1/auth/logout",
-      { method: "POST" },
-    );
-    if (result.ok !== true) {
-      throw new InvoiceApiError("退出登录响应无效。", {
-        code: "INVALID_LOGOUT_RESPONSE",
-      });
-    }
-    // A platform-password session (see AuthUser.platform) never went through
-    // the identity provider, so logout omits logout_url entirely: there is
-    // nowhere else to send the browser.
-    if (result.logout_url === undefined) {
-      sessionCSRFToken = "";
-      documentUploadCheckpoints.clear();
-      return null;
-    }
-    let logoutURL: URL;
-    try {
-      logoutURL = new URL(result.logout_url);
-    } catch {
-      throw new InvoiceApiError("身份提供商退出地址无效。", {
-        code: "INVALID_LOGOUT_URL",
-      });
-    }
-    if (
-      logoutURL.protocol !== "https:" ||
-      logoutURL.username !== "" ||
-      logoutURL.password !== "" ||
-      logoutURL.hash !== "" ||
-      result.logout_url.length > 4096 ||
-      /[\r\n\0]/.test(result.logout_url)
-    ) {
-      throw new InvoiceApiError("身份提供商退出地址无效。", {
-        code: "INVALID_LOGOUT_URL",
-      });
-    }
-    sessionCSRFToken = "";
-    documentUploadCheckpoints.clear();
-    return logoutURL.toString();
-  },
-
-  loginURL(returnTo) {
-    return endpointURL(
-      `/api/v1/auth/login?return_to=${encodeURIComponent(returnTo)}`,
-    );
-  },
-
-  adminStepUpURL(returnTo) {
-    return endpointURL(
-      `/api/v1/auth/admin/step-up?return_to=${encodeURIComponent(returnTo)}`,
-    );
-  },
-
-  // CR-0006 (XM-INV-CONSOLE-ASSERT): skipCSRF for the same reason
-  // platformLogin below does -- there is no pre-existing session yet, so no
-  // synchronizer token exists to send. The backend's own defense here is an
-  // exact Origin check, not CSRF (see production_auth.go's
-  // consoleAssertionExchange).
-  async exchangeConsoleAssertion(assertion) {
-    await requestJSON<{ ok: boolean }>("/api/v1/auth/console-assertion", {
-      method: "POST",
-      skipCSRF: true,
-      body: { assertion },
-    });
+    retireSessionBoundary();
+    const result = await requestJSON<{ ok: boolean }>("/invoice-api/v1/auth/logout", { method: "POST" });
+    if (result.ok !== true) throw new InvoiceApiError("退出登录响应无效。", { code: "INVALID_LOGOUT_RESPONSE" });
+    sessionCSRFToken = ""; documentUploadCheckpoints.clear();
+    return null;
   },
 
   async platformLogin(input) {
     return mapPlatformLoginOutcome(
       await requestJSON<BackendPlatformLoginOutcome>(
-        "/api/v1/auth/platform-login",
+        "/invoice-api/v1/auth/platform-login",
         {
           method: "POST",
           skipCSRF: true,
@@ -2221,7 +2177,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   async verifyPlatformLoginTwoFA(input) {
     return mapPlatformLoginOutcome(
       await requestJSON<BackendPlatformLoginOutcome>(
-        "/api/v1/auth/platform-login/2fa",
+        "/invoice-api/v1/auth/platform-login/2fa",
         {
           method: "POST",
           skipCSRF: true,
@@ -2233,7 +2189,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async getSourceAccounts() {
     const response = await requestJSON<ItemsResponse<BackendSourceAccount>>(
-      "/api/v1/user/source-accounts",
+      "/invoice-api/v1/user/source-accounts",
     );
     return response.items.map(mapSourceAccount);
   },
@@ -2244,7 +2200,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async getUserEligibilitySummary() {
     const response = await requestJSON<unknown>(
-      "/api/v1/user/eligibility-summary",
+      "/invoice-api/v1/user/eligibility-summary",
     );
     // The envelope gets the same tolerance as the items inside it. It was the
     // last strict key set on this request: a top-level `generated_at` (or any
@@ -2272,20 +2228,20 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async getInvoicePolicy() {
     const policy = await requestJSON<BackendInvoicePolicy>(
-      "/api/v1/user/invoice-policy",
+      "/invoice-api/v1/user/invoice-policy",
     );
     return mapInvoicePolicy(policy);
   },
 
   async getProfiles() {
     const response = await requestJSON<ItemsResponse<BackendProfile>>(
-      "/api/v1/user/profiles",
+      "/invoice-api/v1/user/profiles",
     );
     return response.items.map(mapProfile);
   },
 
   async saveProfile(profile) {
-    const saved = await requestJSON<BackendProfile>("/api/v1/user/profiles", {
+    const saved = await requestJSON<BackendProfile>("/invoice-api/v1/user/profiles", {
       method: "POST",
       body: profileMutationBody(profile),
     });
@@ -2353,7 +2309,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       });
     }
     const created = await requestJSON<BackendInvoiceRequest>(
-      "/api/v1/user/invoice-requests",
+      "/invoice-api/v1/user/invoice-requests",
       {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID() },
@@ -2378,7 +2334,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
     }
     const lots = await getBackendLots();
     const cancelled = await requestJSON<BackendInvoiceRequest>(
-      `/api/v1/user/invoice-requests/${encodeURIComponent(request.id)}/cancel`,
+      `/invoice-api/v1/user/invoice-requests/${encodeURIComponent(request.id)}/cancel`,
       {
         method: "POST",
         body: { version: request.version },
@@ -2423,7 +2379,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       has_more: boolean;
       next_before_observed_at?: string;
       next_before_id?: string;
-    }>(`/api/v1/admin/payment-candidates?${query.toString()}`, {
+    }>(`/invoice-api/v1/admin/payment-candidates?${query.toString()}`, {
       role: "admin",
     });
     const nextCursor =
@@ -2443,7 +2399,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async verifyPayment(candidateId, input) {
 		const response = await requestJSON<BackendFundingLot>(
-      `/api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/verify-payment`,
+      `/invoice-api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/verify-payment`,
       {
         method: "POST",
         role: "admin",
@@ -2459,7 +2415,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async rejectPayment(candidateId, input) {
     await requestJSON(
-      `/api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/reject-payment`,
+      `/invoice-api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/reject-payment`,
       {
         method: "POST",
         role: "admin",
@@ -2473,7 +2429,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
 	async applyManualPaymentCap(candidateId, input) {
 		await requestJSON(
-			`/api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/manual-cap-adjustment`,
+			`/invoice-api/v1/admin/funding-lots/${encodeURIComponent(candidateId)}/manual-cap-adjustment`,
 			{
 				method: "POST",
 				role: "admin",
@@ -2523,7 +2479,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       has_more: boolean;
       next_before_opened_at?: string;
       next_before_id?: string;
-    }>(`/api/v1/admin/refund-cases?${query.toString()}`, {
+    }>(`/invoice-api/v1/admin/refund-cases?${query.toString()}`, {
       role: "admin",
     });
     const nextCursor =
@@ -2543,7 +2499,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async resolveRefundCase(caseId, input) {
     const resolved = await requestJSON<BackendRefundCase>(
-      `/api/v1/admin/refund-cases/${encodeURIComponent(caseId)}/resolve`,
+      `/invoice-api/v1/admin/refund-cases/${encodeURIComponent(caseId)}/resolve`,
       {
         method: "POST",
         role: "admin",
@@ -2588,7 +2544,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       query.set("before_id", decoded.beforeId);
     }
     const response = await requestJSON<unknown>(
-      `/api/v1/admin/eligibility-freezes?${query.toString()}`,
+      `/invoice-api/v1/admin/eligibility-freezes?${query.toString()}`,
       { role: "admin" },
     );
     exactObjectKeys(
@@ -2655,7 +2611,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       });
     }
     const response = await requestJSON<unknown>(
-      `/api/v1/admin/eligibility-freezes/${encodeURIComponent(freezeId)}/resolve`,
+      `/invoice-api/v1/admin/eligibility-freezes/${encodeURIComponent(freezeId)}/resolve`,
       {
         method: "POST",
         role: "admin",
@@ -2700,7 +2656,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       query.set("before_id", decoded.beforeId);
     }
     const response = await requestJSON<unknown>(
-      `/api/v1/admin/accounts/ledger?${query.toString()}`,
+      `/invoice-api/v1/admin/accounts/ledger?${query.toString()}`,
       { role: "admin" },
     );
     exactObjectKeys(
@@ -2745,7 +2701,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       });
     }
     const response = await requestJSON<unknown>(
-      `/api/v1/admin/accounts/${encodeURIComponent(externalAccountId)}/ledger`,
+      `/invoice-api/v1/admin/accounts/${encodeURIComponent(externalAccountId)}/ledger`,
       { role: "admin" },
     );
     return mapAccountLedgerDetail(response as BackendAccountLedgerDetail);
@@ -2758,7 +2714,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       });
     }
     await requestJSON(
-      `/api/v1/admin/invoice-requests/${encodeURIComponent(payload.requestId)}/review`,
+      `/invoice-api/v1/admin/invoice-requests/${encodeURIComponent(payload.requestId)}/review`,
       {
         method: "POST",
         role: "admin",
@@ -2784,7 +2740,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
       documentUploadCheckpoints.set(request.id, uploadVersion);
     } else if (!documentUploadCheckpoints.has(request.id)) {
       const confirmed = await requestJSON<BackendInvoiceRequest>(
-        `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/confirm-manual-issue`,
+        `/invoice-api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/confirm-manual-issue`,
         { method: "POST", role: "admin", body: { version: request.version } },
       );
       uploadVersion = confirmed.version;
@@ -2799,7 +2755,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
     form.set("issued_at", issuedAt);
     form.set("file", file, file.name);
     await requestMultipart(
-      `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/documents/upload`,
+      `/invoice-api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/documents/upload`,
       form,
       "admin",
     );
@@ -2808,7 +2764,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async resendMail(request) {
     await requestJSON(
-      `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/email/requeue`,
+      `/invoice-api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/email/requeue`,
       {
         method: "POST",
         role: "admin",
@@ -2818,7 +2774,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async getDeliveryState(request, admin = false) {
-    const prefix = admin ? "/api/v1/admin" : "/api/v1/user";
+    const prefix = admin ? "/invoice-api/v1/admin" : "/invoice-api/v1/user";
     const value = await requestJSON<{
       document_available: boolean;
       invoice_number?: string;
@@ -2885,7 +2841,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
         created_at?: string | null;
       }> | null;
     }>(
-      `/api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/notices`,
+      `/invoice-api/v1/admin/invoice-requests/${encodeURIComponent(request.id)}/notices`,
       { role: "admin" },
     );
     return (value.items ?? []).map((item) => {
@@ -2943,7 +2899,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async saveNoticeWebhook(webhookURL) {
-    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+    await requestJSON<unknown>("/invoice-api/v1/admin/settings/notice-webhook", {
       method: "PUT",
       role: "admin",
       body: { webhook_url: webhookURL },
@@ -2951,14 +2907,14 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async clearNoticeWebhook() {
-    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook", {
+    await requestJSON<unknown>("/invoice-api/v1/admin/settings/notice-webhook", {
       method: "DELETE",
       role: "admin",
     });
   },
 
   async sendNoticeWebhookTest() {
-    await requestJSON<unknown>("/api/v1/admin/settings/notice-webhook/test", {
+    await requestJSON<unknown>("/invoice-api/v1/admin/settings/notice-webhook/test", {
       method: "POST",
       role: "admin",
       body: {},
@@ -2967,14 +2923,14 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async getAdminSettings() {
     const settings = await requestJSON<BackendSystemSettings>(
-      "/api/v1/admin/settings",
+      "/invoice-api/v1/admin/settings",
       { role: "admin" },
     );
     return mapAdminSettings(settings);
   },
 
   async saveInvoiceRules(input) {
-    await requestJSON("/api/v1/admin/settings/invoice", {
+    await requestJSON("/invoice-api/v1/admin/settings/invoice", {
       method: "PUT",
       role: "admin",
       body: {
@@ -2986,7 +2942,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async saveSMTPSettings(input) {
-    await requestJSON("/api/v1/admin/settings/smtp", {
+    await requestJSON("/invoice-api/v1/admin/settings/smtp", {
       method: "PUT",
       role: "admin",
       body: {
@@ -3010,7 +2966,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
 
   async sendSMTPTest() {
     try {
-      await requestJSON("/api/v1/admin/settings/smtp/test", {
+      await requestJSON("/invoice-api/v1/admin/settings/smtp/test", {
         method: "POST",
         role: "admin",
         body: {},
@@ -3028,7 +2984,7 @@ export const httpInvoiceApi: InvoiceApiClient = {
   },
 
   async saveAdminAccess(input) {
-    await requestJSON("/api/v1/admin/settings/admin-access", {
+    await requestJSON("/invoice-api/v1/admin/settings/admin-access", {
       method: "PUT",
       role: "admin",
       body: { revision: input.revision, cidrs: input.cidrs },
@@ -3041,9 +2997,11 @@ async function requestMultipart(
   body: FormData,
   _role: RequestRole,
 ) {
+  const epoch = sessionEpoch;
   const headers = new Headers({
     Accept: "application/json",
     "X-CSRF-Token": csrfTokenForMutation(),
+    "X-Requested-With": "xingmang",
   });
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), requestTimeoutMs);
@@ -3052,16 +3010,18 @@ async function requestMultipart(
       method: "POST",
       headers,
       body,
-      credentials: "include",
+      credentials: "same-origin",
       redirect: "error",
       signal: controller.signal,
     });
+    assertCurrentAuthResponse(epoch);
     const rotatedCSRF = response.headers.get("X-CSRF-Token");
     if (rotatedCSRF) sessionCSRFToken = rotatedCSRF;
     if (!response.ok) {
       const payload = (await response.json().catch(() => undefined)) as
         | BackendError
         | undefined;
+      assertCurrentAuthResponse(epoch);
       throw responseError(response.status, payload);
     }
   } catch (error) {
@@ -3086,16 +3046,19 @@ async function requestBinary(
   _role: RequestRole,
   method: "GET" | "POST" = "GET",
 ) {
+  const epoch = sessionEpoch;
   const headers = new Headers();
   if (isMutation(method)) {
     headers.set("X-CSRF-Token", csrfTokenForMutation());
+    headers.set("X-Requested-With", "xingmang");
   }
   const response = await fetch(endpointURL(path), {
     method,
     headers,
-    credentials: "include",
+    credentials: "same-origin",
     redirect: "error",
   });
+  assertCurrentAuthResponse(epoch);
   const rotatedCSRF = response.headers.get("X-CSRF-Token");
   if (rotatedCSRF) sessionCSRFToken = rotatedCSRF;
   if (
@@ -3106,6 +3069,7 @@ async function requestBinary(
       const payload = (await response.json().catch(() => undefined)) as
         | BackendError
         | undefined;
+      assertCurrentAuthResponse(epoch);
       throw responseError(response.status, payload);
     }
     throw new InvoiceApiError("发票 PDF 暂时无法下载，请稍后重试。", {

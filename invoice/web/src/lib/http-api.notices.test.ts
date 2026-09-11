@@ -42,8 +42,8 @@ describe("listRequestNotices", () => {
   it("打的是 admin 路径，不是 user——后端没有 user 变体", async () => {
     const calls = stubFetch({ items: [] });
     await httpInvoiceApi.listRequestNotices(REQUEST);
-    expect(calls[0]).toContain(`/api/v1/admin/invoice-requests/${REQUEST.id}/notices`);
-    expect(calls[0]).not.toContain("/api/v1/user/");
+    expect(calls[0]).toContain(`/invoice-api/v1/admin/invoice-requests/${REQUEST.id}/notices`);
+    expect(calls[0]).not.toContain("/invoice-api/v1/user/");
   });
 
   it("送达与未送达：null 归成 undefined，不是零时刻也不是空串", async () => {

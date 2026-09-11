@@ -1,3 +1,4 @@
+vi.mock("../components/InvoiceConsolePanel", () => ({ InvoiceConsolePanel: ({ mode }: { mode: string }) => <section aria-label={`native-invoice-${mode}`} /> }));
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
@@ -365,22 +366,11 @@ describe("后端还不存在的三格：蓝图 + 一句「今天为什么填不�
   });
 });
 
-describe("开票集成：由开票系统自己的控制台承载", () => {
-  it("配置了来源时嵌入 global 模式的控制台", async () => {
-    window.__XM_CONFIG__ = { invoiceConsoleOrigin: INVOICE_ORIGIN };
+describe("开票集成：原生管理工作区", () => {
+  it("the global finance tab renders the native invoice workspace", async () => {
     renderFinance("/finance?sub=invoicing");
-    const frame = (await screen.findByTitle("开票")) as HTMLIFrameElement;
-    expect(frame.tagName).toBe("IFRAME");
-    expect(frame.src).toBe(`${INVOICE_ORIGIN}/embed/admin/global`);
-  });
-
-  it("未配置来源时如实说缺哪个环境变量，而不是回落到蓝图卡", async () => {
-    renderFinance("/finance?sub=invoicing");
-    expect(
-      await screen.findByText(/未配置开票控制台来源（XM_INVOICE_CONSOLE_ORIGIN）/),
-    ).toBeTruthy();
-    // 蓝图那张「集成契约状态」卡不该在这一格出现——它是被真实组件接管的
-    expect(screen.queryByText("集成契约状态")).toBeNull();
+    expect(await screen.findByRole("region", { name: "native-invoice-global" })).toBeTruthy();
+    expect(document.querySelector("iframe")).toBeNull();
   });
 });
 

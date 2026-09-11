@@ -3,7 +3,7 @@
  *  会话是服务端签发的 HttpOnly Cookie（`xm_session`）：前端拿不到、也不需要
  *  拿到令牌本身，只需要在每次请求上带 `credentials:"same-origin"` 让浏览器
  *  自动附上 Cookie。登录态因此天然不能被 XSS 读走（HttpOnly），代价是前端
- *  没法像 oidc 那样自己判断「有没有会话」——唯一的真相来源是服务端对
+ *  不能仅凭浏览器存储判断「有没有会话」——唯一的真相来源是服务端对
  *  GET /api/v1/auth/me 的回答，这也是 RequireAuth 每次挂载都要问一次的原因。
  *
  *  这个模块只做四件事（login/me/logout/changePassword）与一份**内存**当前

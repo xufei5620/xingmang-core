@@ -3,7 +3,7 @@ import { httpInvoiceApi } from "./http-api";
 import { mockInvoiceApi } from "./mock-api";
 
 const configuredMode = (
-  import.meta.env.VITE_API_MODE || (import.meta.env.DEV ? "mock" : "http")
+  import.meta.env.VITE_API_MODE || "http"
 ).toLowerCase();
 
 if (configuredMode !== "mock" && configuredMode !== "http") {

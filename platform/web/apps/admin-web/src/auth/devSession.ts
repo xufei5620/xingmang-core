@@ -1,9 +1,5 @@
-/** DEV-ONLY 登录壳（dev-header 模式）。仅为 UI 骨架提供前后壳切换；不是安全控制
- *  （宪法：前端隐藏不构成安全控制；服务端为最终裁决）。
- *
- *  XM-AUTH1 之后它只在 authMode=dev-header 时生效；oidc 模式走 ./oidc.ts。
- *  没有删掉，是因为 development / staging 的后端仍按 X-Dev-* 头认身份，
- *  本地开发不该被迫连一个真 Keycloak。 */
+/** 仅供显式非生产 dev-header 模式使用的开发登录开关。
+ *  服务端仍是身份与权限的最终裁决者；生产拒绝开发头。 */
 const KEY = "xm_dev_auth";
 
 export function isAuthenticated(): boolean {

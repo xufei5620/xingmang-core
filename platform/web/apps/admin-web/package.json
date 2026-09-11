@@ -16,7 +16,8 @@
     "@xingmang/ui-primitives": "workspace:*",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-router": "7.18.2"
+    "react-router": "7.18.2",
+    "solov-invoice-web": "workspace:*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",

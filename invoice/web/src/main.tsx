@@ -1,14 +1,13 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter } from 'react-router'
 
 import App from './App'
 import './styles.css'
+import './user-shell.css'
 
-// Sub2API's custom-page integration may append its own bearer token to an
-// iframe URL. The invoice application never consumes or persists upstream
-// credentials. Production Nginx strips them before serving the SPA; this is a
-// second browser-side defense for direct or misconfigured entry URLs.
+// Customer entry URLs must not retain upstream credentials. Keep this
+// browser-side defense for direct or misconfigured links.
 const currentURL = new URL(window.location.href)
 let removedSensitiveParameter = false
 for (const name of ['token', 'access_token', 'id_token', 'api_key', 'key']) {
@@ -24,7 +23,7 @@ if (removedSensitiveParameter) {
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <App />
+      <div className="invoice-workspace"><App /></div>
     </BrowserRouter>
   </React.StrictMode>,
 )
