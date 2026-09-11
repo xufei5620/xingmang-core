@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# XM-UNIFIED: retired independent production entry.
+printf '%s\n' 'Independent deployment is retired. Use the monorepo scripts/unified-service.py check/build. Production cutover is not validated or authorized.' >&2
+exit 64
 # roll-forward.sh — roll the three production Compose projects to an already
 # transferred, verified and unpacked release, in the order that the 2026-09-01
 # release day proved necessary, and stop on the first honest failure.

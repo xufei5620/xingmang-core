@@ -1,0 +1,1011 @@
+{
+  "name": "xingmang-unified",
+  "x-release-status": "local-validated-definition; production-deployment-not-authorized",
+  "services": {
+    "postgres": {
+      "image": "docker.io/library/postgres:18@sha256:7341002d2b8c7c5bdd7542a671a95b36196c0b5b888daf454ae4fc33ba5346d7",
+      "platform": "linux/amd64",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "${POSTGRES_DB:-xingmang}",
+        "POSTGRES_USER": "${POSTGRES_USER:-xingmang}",
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/database__postgres_password"
+      },
+      "secrets": [
+        {
+          "source": "database__postgres_password",
+          "target": "database__postgres_password"
+        }
+      ],
+      "volumes": [
+        "postgres18-data:/var/lib/postgresql"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 20
+      },
+      "pull_policy": "never"
+    },
+    "migrate": {
+      "image": "xingmang-unified/platform-migrate:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "no",
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": "postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable",
+        "DATABASE_PASSWORD_REF": "${DATABASE_PASSWORD_REF:-secret://database/postgres-password}",
+        "DATABASE_PASSWORD": "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required, see deploy/compose/.env.example}"
+      },
+      "volumes": [],
+      "pull_policy": "never"
+    },
+    "runway-threshold-bootstrap": {
+      "profiles": [
+        "tools"
+      ],
+      "image": "xingmang-unified/platform-migrate:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "no",
+      "depends_on": {
+        "migrate": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "entrypoint": [
+        "/usr/local/bin/runway-threshold-bootstrap"
+      ],
+      "command": [
+        "up"
+      ],
+      "environment": {
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": "postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable",
+        "DATABASE_PASSWORD_REF": "${DATABASE_PASSWORD_REF:-secret://database/postgres-password}",
+        "DATABASE_PASSWORD": "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}",
+        "XM_FINANCE_RUNWAY_WARN_DAYS": "${XM_FINANCE_RUNWAY_WARN_DAYS:-}",
+        "XM_FINANCE_RUNWAY_CRIT_DAYS": "${XM_FINANCE_RUNWAY_CRIT_DAYS:-}"
+      },
+      "volumes": [],
+      "pull_policy": "never"
+    },
+    "staff-bootstrap": {
+      "profiles": [
+        "tools"
+      ],
+      "image": "xingmang-unified/platform-migrate:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "no",
+      "depends_on": {
+        "migrate": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "entrypoint": [
+        "/usr/local/bin/staff-bootstrap"
+      ],
+      "command": [
+        "up"
+      ],
+      "environment": {
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": "postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable",
+        "DATABASE_PASSWORD_REF": "${DATABASE_PASSWORD_REF:-secret://database/postgres-password}",
+        "DATABASE_PASSWORD": "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}",
+        "XM_STAFF_BOOTSTRAP_USERNAME": "${XM_STAFF_BOOTSTRAP_USERNAME:-}",
+        "XM_STAFF_BOOTSTRAP_PASSWORD": "${XM_STAFF_BOOTSTRAP_PASSWORD:-}"
+      },
+      "volumes": [],
+      "pull_policy": "never"
+    },
+    "platform-api": {
+      "image": "xingmang-unified/platform-api:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "unless-stopped",
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy"
+        },
+        "migrate": {
+          "condition": "service_completed_successfully"
+        },
+        "invoice-migrate": {
+          "condition": "service_completed_successfully"
+        },
+        "invoice-permissions": {
+          "condition": "service_completed_successfully"
+        },
+        "clamav": {
+          "condition": "service_healthy"
+        },
+        "pdf-scanner": {
+          "condition": "service_healthy"
+        }
+      },
+      "environment": {
+        "ENVIRONMENT": "production",
+        "LISTEN_ADDR": "0.0.0.0:8080",
+        "DATABASE_URL": "postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable",
+        "DATABASE_PASSWORD_REF": "${DATABASE_PASSWORD_REF:-secret://database/postgres-password}",
+        "DATABASE_PASSWORD": "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}",
+        "REQUEST_TIMEOUT": "${REQUEST_TIMEOUT:-30s}",
+        "XM_RATE_LIMIT_PER_MINUTE": "${XM_RATE_LIMIT_PER_MINUTE:-120}",
+        "XM_RATE_LIMIT_BURST": "${XM_RATE_LIMIT_BURST:-20}",
+        "XM_FINANCE_FAKE_SEED": "false",
+        "XM_AUTH_MODE": "local",
+        "XM_CONSOLE_ADMIN_IP_ALLOWLIST": "${XM_CONSOLE_ADMIN_IP_ALLOWLIST:-}",
+        "XM_REQLOG_MODE": "${XM_REQLOG_MODE:-off}",
+        "XM_CARDS_MODE": "${XM_CARDS_MODE:-off}",
+        "XM_CARDS_BASE_URL": "${XM_CARDS_BASE_URL:-}",
+        "XM_CARDS_ACCOUNTS": "${XM_CARDS_ACCOUNTS:-}",
+        "XM_CARDS_CHRIS_LIMIT_PER_OPERATION": "${XM_CARDS_CHRIS_LIMIT_PER_OPERATION:-}",
+        "XM_CARDS_CHRIS_LIMIT_PER_DAY": "${XM_CARDS_CHRIS_LIMIT_PER_DAY:-}",
+        "XM_CARDS_LINFENG_LIMIT_PER_OPERATION": "${XM_CARDS_LINFENG_LIMIT_PER_OPERATION:-}",
+        "XM_CARDS_LINFENG_LIMIT_PER_DAY": "${XM_CARDS_LINFENG_LIMIT_PER_DAY:-}",
+        "XM_PLATFORM_USERS_MODE": "${XM_PLATFORM_USERS_MODE:-}",
+        "XM_PLATFORM_PAYMENTS_MODE": "${XM_PLATFORM_PAYMENTS_MODE:-}",
+        "XM_SUB2API_ENDPOINT": "${XM_SUB2API_ENDPOINT:-}",
+        "XM_SUB2API_TARGET_ALLOWLIST": "${XM_SUB2API_TARGET_ALLOWLIST:-}",
+        "XM_SUB2API_CREDENTIAL_REF": "${XM_SUB2API_CREDENTIAL_REF:-}",
+        "XM_SUB2API_INSTANCE_ID": "${XM_SUB2API_INSTANCE_ID:-sub2api-staging}",
+        "XM_NEWAPI_ENDPOINT": "${XM_NEWAPI_ENDPOINT:-}",
+        "XM_NEWAPI_TARGET_ALLOWLIST": "${XM_NEWAPI_TARGET_ALLOWLIST:-}",
+        "XM_NEWAPI_CREDENTIAL_REF": "${XM_NEWAPI_CREDENTIAL_REF:-}",
+        "XM_NEWAPI_INSTANCE_ID": "${XM_NEWAPI_INSTANCE_ID:-newapi-staging}",
+        "XM_NEWAPI_USER_ID": "${XM_NEWAPI_USER_ID:-}",
+        "XM_SMS_MODE": "${XM_SMS_MODE:-off}",
+        "XM_ASSURE_PROBE_ENABLED": "${XM_ASSURE_PROBE_ENABLED:-}",
+        "XM_ASSURE_PROBE_DAILY_BUDGET": "${XM_ASSURE_PROBE_DAILY_BUDGET:-}",
+        "XM_REQLOG_ENDPOINT": "${XM_REQLOG_ENDPOINT:-}",
+        "XM_REQLOG_TOKENMAP_V2": "${XM_REQLOG_TOKENMAP_V2:-/var/lib/xm/reqlog-tokenmap-v2.json}",
+        "XM_REQLOG_TARGET_ALLOWLIST": "${XM_REQLOG_TARGET_ALLOWLIST:-}",
+        "XM_REQLOG_CREDENTIAL_REF": "${XM_REQLOG_CREDENTIAL_REF:-}",
+        "XM_REQLOG_TOKEN": "${XM_REQLOG_TOKEN:-}",
+        "XM_REQLOG_TIMEOUT": "${XM_REQLOG_TIMEOUT:-30s}",
+        "XM_REQLOG_DATA_DIR": "${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}",
+        "XM_REQLOG_TOKENMAP": "${XM_REQLOG_TOKENMAP:-/var/lib/xm/reqlog-tokenmap.json}",
+        "XM_CPA_MODE": "${XM_CPA_MODE:-off}",
+        "XM_CPA_DATA_DIR": "/var/lib/xm/cpa",
+        "XM_CPA_FILE_NAME": "usage.sqlite",
+        "XM_SECRET_ROOT": "${XM_SECRET_ROOT:-/run/xm/secrets}",
+        "XM_ALERT_TELEGRAM_BOT_REF": "${XM_ALERT_TELEGRAM_BOT_REF:-}",
+        "XM_ALERT_TELEGRAM_CHAT_ID": "${XM_ALERT_TELEGRAM_CHAT_ID:-}",
+        "XM_ALERT_WEBHOOK_URL": "${XM_ALERT_WEBHOOK_URL:-}",
+        "HEARTBEAT_INTERVAL": "${HEARTBEAT_INTERVAL:-1m}",
+        "XM_SUB2API_SYNC_ENABLED": "${XM_SUB2API_SYNC_ENABLED:-true}",
+        "XM_SUB2API_SYNC_INTERVAL": "${XM_SUB2API_SYNC_INTERVAL:-300s}",
+        "XM_NEWAPI_SYNC_ENABLED": "${XM_NEWAPI_SYNC_ENABLED:-true}",
+        "XM_NEWAPI_SYNC_INTERVAL": "${XM_NEWAPI_SYNC_INTERVAL:-300s}",
+        "XM_FINANCE_COLLECT_ENABLED": "${XM_FINANCE_COLLECT_ENABLED:-true}",
+        "XM_FINANCE_COLLECT_INTERVAL": "${XM_FINANCE_COLLECT_INTERVAL:-300s}",
+        "XM_RETENTION_ENABLED": "${XM_RETENTION_ENABLED:-true}",
+        "XM_RETENTION_INTERVAL": "${XM_RETENTION_INTERVAL:-24h}",
+        "XM_APPROVAL_EXPIRE_ENABLED": "${XM_APPROVAL_EXPIRE_ENABLED:-true}",
+        "XM_APPROVAL_EXPIRE_INTERVAL": "${XM_APPROVAL_EXPIRE_INTERVAL:-5m}",
+        "XM_ALERT_EVALUATE_ENABLED": "${XM_ALERT_EVALUATE_ENABLED:-true}",
+        "XM_ALERT_EVALUATE_INTERVAL": "${XM_ALERT_EVALUATE_INTERVAL:-60s}",
+        "XM_CONNECTOR_PROBE_ENABLED": "${XM_CONNECTOR_PROBE_ENABLED:-true}",
+        "XM_CONNECTOR_PROBE_INTERVAL": "${XM_CONNECTOR_PROBE_INTERVAL:-5m}",
+        "XM_REQLOG_METRICS_INTERVAL": "${XM_REQLOG_METRICS_INTERVAL:-5m}",
+        "XM_CPA_SYNC_ENABLED": "${XM_CPA_SYNC_ENABLED:-}",
+        "XM_CPA_SYNC_INTERVAL": "${XM_CPA_SYNC_INTERVAL:-300s}",
+        "APP_ENV": "production",
+        "AUTH_MODE": "session",
+        "SOURCE_MODE": "agent",
+        "PUBLIC_ORIGIN": "${PUBLIC_ORIGIN:?set invoice user public origin}",
+        "SMTP_TEST_RECIPIENT": "${SMTP_TEST_RECIPIENT:?set a dedicated test recipient different from the SMTP sender}",
+        "ELIGIBILITY_START_AT": "${ELIGIBILITY_START_AT:?set the immutable invoice eligibility start}",
+        "DATABASE_URL_FILE": "/run/secrets/invoice_app_database_url",
+        "FIELD_KEYRING_FILE": "/run/secrets/invoice_field_keyring",
+        "SESSION_BINDING_KEY_FILE": "/run/secrets/invoice_session_binding_key",
+        "ADMIN_BREAK_GLASS_CIDRS_FILE": "/run/secrets/invoice_admin_break_glass_cidrs",
+        "TRUSTED_PROXY_CIDRS": "${UNIFIED_WEB_PROXY_CIDR:?set exact unified web container IPv4 /32}",
+        "SUB2API_LOGIN_BASE_URL": "${SUB2API_LOGIN_BASE_URL:-https://api.solov.cc}",
+        "NEWAPI_LOGIN_BASE_URL": "${NEWAPI_LOGIN_BASE_URL:-https://xm.solov.cc}",
+        "PLATFORM_LOGIN_TIMEOUT": "${PLATFORM_LOGIN_TIMEOUT:-10s}",
+        "PLATFORM_LOGIN_MAX_ATTEMPTS": "${PLATFORM_LOGIN_MAX_ATTEMPTS:-8}",
+        "PLATFORM_LOGIN_LOCKOUT_WINDOW": "${PLATFORM_LOGIN_LOCKOUT_WINDOW:-15m}",
+        "DOCUMENT_ROOT": "/data/documents",
+        "DOCUMENT_QUARANTINE_ROOT": "/quarantine",
+        "TMPDIR": "/quarantine",
+        "CLAMAV_ADDRESS": "clamav:3310",
+        "CLAMAV_DATABASE_ROOT": "/clamav-db",
+        "CLAMAV_MAX_SIGNATURE_AGE": "${CLAMAV_MAX_SIGNATURE_AGE:-48h}",
+        "PDF_SCANNER_SOCKET": "/scanner/qpdf.sock",
+        "PDF_SCANNER_CAPABILITY_FILE": "/run/secrets/invoice_pdf_scanner_capability",
+        "SOURCE_TRUST_FILE": "/config/source-trust.json",
+        "SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS": "${SOURCE_ECONOMIC_HEARTBEAT_MAX_STALENESS:-5m}",
+        "SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS": "${SOURCE_ECONOMIC_WATERMARK_MAX_STALENESS:-15m}",
+        "SOURCE_ECONOMIC_SAFETY_DELAY": "${SOURCE_ECONOMIC_SAFETY_DELAY:-5m}",
+        "SOURCE_POLL_INTERVAL": "${SOURCE_POLL_INTERVAL:-1m}",
+        "SOURCE_IDENTITIES_MAX_STALENESS": "${SOURCE_IDENTITIES_MAX_STALENESS:-15m}",
+        "ELIGIBILITY_EVIDENCE_BATCH_LIMIT": "${ELIGIBILITY_EVIDENCE_BATCH_LIMIT:-0}",
+        "INGEST_PROXY_CIDRS": "${INVOICE_INGEST_PROXY_CIDR:?set the exact ingest-proxy /32}",
+        "MIGRATIONS_DIR": "/app/migrations",
+        "INVOICE_STAFF_ORIGIN": "${INVOICE_STAFF_ORIGIN:?set unchanged public staff origin}",
+        "ADMIN_ROLE": "${ADMIN_ROLE:?set actual local staff invoice role}",
+        "XM_AUTH_ROLE_SCOPES": "${XM_AUTH_ROLE_SCOPES:-}"
+      },
+      "volumes": [
+        "xm-secrets:/run/xm/secrets",
+        {
+          "type": "bind",
+          "source": "${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}",
+          "target": "/var/lib/xm/reqlog",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "${XM_REQLOG_HOST_TOKENMAP:-/root/reqlog/tokenmap.json}",
+          "target": "/var/lib/xm/reqlog-tokenmap.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "${XM_REQLOG_HOST_TOKENMAP_V2:-/root/reqlog/tokenmap.v2.json}",
+          "target": "/var/lib/xm/reqlog-tokenmap-v2.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/var/lib/xingmang/cpa-snapshot/published",
+          "target": "/var/lib/xm/cpa",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        "invoice_document_data:/data/documents",
+        "clamav_database:/clamav-db:ro",
+        "invoice_pdf_scanner_socket:/scanner:ro",
+        {
+          "type": "bind",
+          "source": "${SOURCE_TRUST_CONFIG_FILE:?set SOURCE_TRUST_CONFIG_FILE}",
+          "target": "/config/source-trust.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -q -O- http://127.0.0.1:8080/readyz || exit 1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "10s"
+      },
+      "pull_policy": "never",
+      "secrets": [
+        "invoice_app_database_url",
+        "invoice_field_keyring",
+        "invoice_session_binding_key",
+        "invoice_admin_break_glass_cidrs",
+        "invoice_pdf_scanner_capability"
+      ],
+      "group_add": [
+        "10000"
+      ],
+      "tmpfs": [
+        "/tmp:size=32m,noexec,nosuid,nodev",
+        "/quarantine:size=128m,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "read_only": true,
+      "networks": {
+        "default": {},
+        "invoice_proxy": {
+          "gw_priority": 1
+        },
+        "invoice_db": {},
+        "invoice_app": {},
+        "invoice_ingest": {}
+      },
+      "mem_limit": "1536m",
+      "pids_limit": 256
+    },
+    "platform-worker": {
+      "image": "xingmang-unified/platform-worker:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "unless-stopped",
+      "depends_on": {
+        "postgres": {
+          "condition": "service_healthy"
+        },
+        "migrate": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "environment": {
+        "ENVIRONMENT": "production",
+        "DATABASE_URL": "postgres://${POSTGRES_USER:-xingmang}@postgres:5432/${POSTGRES_DB:-xingmang}?sslmode=disable",
+        "DATABASE_PASSWORD_REF": "${DATABASE_PASSWORD_REF:-secret://database/postgres-password}",
+        "DATABASE_PASSWORD": "${DATABASE_PASSWORD:?DATABASE_PASSWORD is required}",
+        "HEARTBEAT_INTERVAL": "${HEARTBEAT_INTERVAL:-1m}",
+        "XM_SUB2API_MODE": "${XM_SUB2API_MODE:?XM_SUB2API_MODE must be explicitly set (real or fake with sync disabled)}",
+        "XM_SUB2API_ENDPOINT": "${XM_SUB2API_ENDPOINT:-}",
+        "XM_SUB2API_TARGET_ALLOWLIST": "${XM_SUB2API_TARGET_ALLOWLIST:-}",
+        "XM_SUB2API_CREDENTIAL_REF": "${XM_SUB2API_CREDENTIAL_REF:-}",
+        "XM_SUB2API_TOKEN": "${XM_SUB2API_TOKEN:-}",
+        "XM_NEWAPI_MODE": "${XM_NEWAPI_MODE:?XM_NEWAPI_MODE must be explicitly set (real or fake with sync disabled)}",
+        "XM_SUB2API_SYNC_ENABLED": "${XM_SUB2API_SYNC_ENABLED:-true}",
+        "XM_SUB2API_SYNC_INTERVAL": "${XM_SUB2API_SYNC_INTERVAL:-300s}",
+        "XM_SUB2API_INSTANCE_ID": "${XM_SUB2API_INSTANCE_ID:?XM_SUB2API_INSTANCE_ID is required for production}",
+        "XM_NEWAPI_SYNC_ENABLED": "${XM_NEWAPI_SYNC_ENABLED:-true}",
+        "XM_NEWAPI_SYNC_INTERVAL": "${XM_NEWAPI_SYNC_INTERVAL:-300s}",
+        "XM_NEWAPI_INSTANCE_ID": "${XM_NEWAPI_INSTANCE_ID:?XM_NEWAPI_INSTANCE_ID is required for production}",
+        "XM_NEWAPI_ENDPOINT": "${XM_NEWAPI_ENDPOINT:-}",
+        "XM_NEWAPI_TARGET_ALLOWLIST": "${XM_NEWAPI_TARGET_ALLOWLIST:-}",
+        "XM_NEWAPI_CREDENTIAL_REF": "${XM_NEWAPI_CREDENTIAL_REF:-}",
+        "XM_NEWAPI_TOKEN": "${XM_NEWAPI_TOKEN:-}",
+        "XM_NEWAPI_USER_ID": "${XM_NEWAPI_USER_ID:-}",
+        "XM_NEWAPI_REVENUE_DSN": "${XM_NEWAPI_REVENUE_DSN:-}",
+        "XM_NEWAPI_REVENUE_PASSWORD_REF": "${XM_NEWAPI_REVENUE_PASSWORD_REF:-}",
+        "XM_NEWAPI_REVENUE_PASSWORD": "${XM_NEWAPI_REVENUE_PASSWORD:-}",
+        "XM_CONNECTOR_PROBE_ENABLED": "${XM_CONNECTOR_PROBE_ENABLED:-true}",
+        "XM_CONNECTOR_PROBE_INTERVAL": "${XM_CONNECTOR_PROBE_INTERVAL:-5m}",
+        "XM_FINANCE_COLLECT_MODE": "${XM_FINANCE_COLLECT_MODE:?XM_FINANCE_COLLECT_MODE must be explicitly set (real or fake with collection disabled)}",
+        "XM_FINANCE_COLLECT_ENABLED": "${XM_FINANCE_COLLECT_ENABLED:-true}",
+        "XM_FINANCE_COLLECT_INTERVAL": "${XM_FINANCE_COLLECT_INTERVAL:-300s}",
+        "XM_FINANCE_COLLECT_INSTANCE_ID": "${XM_FINANCE_COLLECT_INSTANCE_ID:?XM_FINANCE_COLLECT_INSTANCE_ID is required for production}",
+        "XM_FINANCE_COLLECT_TARGET_ALLOWLIST": "${XM_FINANCE_COLLECT_TARGET_ALLOWLIST:-}",
+        "XM_FINANCE_COLLECT_REQUEST_TIMEOUT": "${XM_FINANCE_COLLECT_REQUEST_TIMEOUT:-30s}",
+        "XM_FINANCE_COLLECT_SECRET_PROVIDER": "${XM_FINANCE_COLLECT_SECRET_PROVIDER:-}",
+        "XM_FINANCE_COLLECT_SECRET_ROOT": "${XM_FINANCE_COLLECT_SECRET_ROOT:-/run/xm/finance-secrets}",
+        "XM_FINANCE_COLLECT_SECRET_SCOPES": "${XM_FINANCE_COLLECT_SECRET_SCOPES:-}",
+        "XM_RETENTION_ENABLED": "${XM_RETENTION_ENABLED:-true}",
+        "XM_RETENTION_INTERVAL": "${XM_RETENTION_INTERVAL:-24h}",
+        "XM_APPROVAL_EXPIRE_ENABLED": "${XM_APPROVAL_EXPIRE_ENABLED:-true}",
+        "XM_APPROVAL_EXPIRE_INTERVAL": "${XM_APPROVAL_EXPIRE_INTERVAL:-5m}",
+        "XM_METRIC_SAMPLE_RETENTION_DAYS": "${XM_METRIC_SAMPLE_RETENTION_DAYS:-90}",
+        "XM_ALERT_RETENTION_DAYS": "${XM_ALERT_RETENTION_DAYS:-180}",
+        "XM_ALERT_EVALUATE_ENABLED": "${XM_ALERT_EVALUATE_ENABLED:-true}",
+        "XM_ALERT_EVALUATE_INTERVAL": "${XM_ALERT_EVALUATE_INTERVAL:-60s}",
+        "XM_ALERT_TELEGRAM_BOT_REF": "${XM_ALERT_TELEGRAM_BOT_REF:-}",
+        "XM_ALERT_TELEGRAM_CHAT_ID": "${XM_ALERT_TELEGRAM_CHAT_ID:-}",
+        "XM_ALERT_TELEGRAM_TOKEN": "${XM_ALERT_TELEGRAM_TOKEN:-}",
+        "XM_ALERT_WEBHOOK_URL": "${XM_ALERT_WEBHOOK_URL:-}",
+        "XM_ALERT_WECOM_WEBHOOK_REF": "${XM_ALERT_WECOM_WEBHOOK_REF:-}",
+        "XM_ALERT_WECOM_WEBHOOK": "${XM_ALERT_WECOM_WEBHOOK:-}",
+        "XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS": "${XM_ALERT_BALANCE_THRESHOLD_MINOR_UNITS:-500000}",
+        "XM_ASSURE_PROBE_ENABLED": "${XM_ASSURE_PROBE_ENABLED:-}",
+        "XM_ASSURE_PROBE_DAILY_BUDGET": "${XM_ASSURE_PROBE_DAILY_BUDGET:-}",
+        "XM_REQLOG_MODE": "${XM_REQLOG_MODE:-off}",
+        "XM_REQLOG_DATA_DIR": "${XM_REQLOG_DATA_DIR:-/var/lib/xm/reqlog}",
+        "XM_REQLOG_METRICS_INTERVAL": "${XM_REQLOG_METRICS_INTERVAL:-5m}",
+        "XM_CPA_MODE": "${XM_CPA_MODE:-off}",
+        "XM_CPA_DATA_DIR": "/var/lib/xm/cpa",
+        "XM_CPA_FILE_NAME": "usage.sqlite",
+        "XM_CPA_SYNC_ENABLED": "${XM_CPA_SYNC_ENABLED:-}",
+        "XM_CPA_SYNC_INTERVAL": "${XM_CPA_SYNC_INTERVAL:-300s}",
+        "XM_CARDS_MODE": "${XM_CARDS_MODE:-off}",
+        "XM_CARDS_BASE_URL": "${XM_CARDS_BASE_URL:-}",
+        "XM_CARDS_ACCOUNTS": "${XM_CARDS_ACCOUNTS:-}",
+        "XM_CARDS_UNKNOWN_GRACE": "${XM_CARDS_UNKNOWN_GRACE:-}",
+        "XM_CARDS_SYNC_TRANSACTIONS": "${XM_CARDS_SYNC_TRANSACTIONS:-}",
+        "XM_SMS_MODE": "${XM_SMS_MODE:-off}",
+        "XM_SMS_PROBE_INTERVAL": "${XM_SMS_PROBE_INTERVAL:-}",
+        "XM_CPA_INSTANCE_ID": "${XM_CPA_INSTANCE_ID:-cpa-cli-proxy-api}",
+        "XM_SECRET_ROOT": "${XM_SECRET_ROOT:-/run/xm/secrets}",
+        "HEARTBEAT_RUN_ON_START": "${HEARTBEAT_RUN_ON_START:-true}"
+      },
+      "volumes": [
+        "xm-secrets:/run/xm/secrets:ro",
+        {
+          "type": "bind",
+          "source": "${XM_REQLOG_HOST_DATA_DIR:-/root/reqlog/data}",
+          "target": "/var/lib/xm/reqlog",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "/var/lib/xingmang/cpa-snapshot/published",
+          "target": "/var/lib/xm/cpa",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "pull_policy": "never",
+      "networks": {
+        "default": {},
+        "platform_egress": {
+          "gw_priority": 1
+        }
+      }
+    },
+    "web": {
+      "image": "xingmang-unified/web:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "restart": "unless-stopped",
+      "depends_on": {
+        "platform-api": {
+          "condition": "service_started"
+        }
+      },
+      "environment": {
+        "XM_WEB_AUTH_MODE": "local",
+        "UNIFIED_HOST_PROXY_CIDR": "${INVOICE_PROXY_GATEWAY_IP:?set exact host gateway IPv4}/32"
+      },
+      "ports": [
+        "127.0.0.1:${WEB_PORT:-8088}:80",
+        "127.0.0.1:${INVOICE_WEB_PORT:-58090}:8081"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "wget -q -O- http://127.0.0.1/index.html >/dev/null || exit 1"
+        ],
+        "interval": "10s",
+        "timeout": "5s",
+        "retries": 12,
+        "start_period": "5s"
+      },
+      "volumes": [],
+      "pull_policy": "never",
+      "read_only": true,
+      "tmpfs": [
+        "/var/cache/nginx:size=16m,noexec,nosuid,nodev",
+        "/var/run:size=4m,noexec,nosuid,nodev",
+        "/etc/nginx/runtime:size=1m,noexec,nosuid,nodev"
+      ],
+      "networks": {
+        "invoice_proxy": {
+          "ipv4_address": "${UNIFIED_WEB_PROXY_IP:?set reserved unified web proxy IPv4}"
+        }
+      }
+    },
+    "invoice-postgres": {
+      "image": "postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "environment": {
+        "POSTGRES_DB": "invoice",
+        "POSTGRES_USER": "invoice_owner",
+        "POSTGRES_PASSWORD_FILE": "/run/secrets/invoice_owner_db_password"
+      },
+      "secrets": [
+        "invoice_owner_db_password",
+        "invoice_app_db_password"
+      ],
+      "volumes": [
+        "invoice_postgres_data:/var/lib/postgresql",
+        {
+          "type": "bind",
+          "source": "../../invoice/deploy/postgres/010-invoice-roles.sh",
+          "target": "/docker-entrypoint-initdb.d/010-invoice-roles.sh",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "pg_isready -U invoice_owner -d invoice"
+        ],
+        "interval": "5s",
+        "timeout": "3s",
+        "retries": 30
+      },
+      "networks": [
+        "invoice_db"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "cap_add": [
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "FOWNER",
+        "SETGID",
+        "SETUID"
+      ]
+    },
+    "invoice-migrate": {
+      "image": "xingmang-unified/invoice-tools:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "no",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "entrypoint": [
+        "/usr/local/bin/invoice-migrate"
+      ],
+      "environment": {
+        "APP_ENV": "production",
+        "ELIGIBILITY_START_AT": "${ELIGIBILITY_START_AT:?set immutable invoice eligibility start}",
+        "DATABASE_URL_FILE": "/run/secrets/invoice_owner_database_url",
+        "MIGRATIONS_DIR": "/app/migrations"
+      },
+      "secrets": [
+        "invoice_owner_database_url"
+      ],
+      "depends_on": {
+        "invoice-postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": [
+        "invoice_db"
+      ],
+      "volumes": []
+    },
+    "invoice-permissions": {
+      "image": "postgres:18.6-alpine@sha256:d3e1620b530c944afa6e887d22eb899824da68e19c52024bf98f5220c88a65b2",
+      "pull_policy": "never",
+      "restart": "no",
+      "user": "10001:10001",
+      "entrypoint": [
+        "/bin/sh",
+        "/config/apply-permissions.sh"
+      ],
+      "secrets": [
+        "invoice_owner_database_url"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "../../invoice/deploy/postgres/apply-permissions.sh",
+          "target": "/config/apply-permissions.sh",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        },
+        {
+          "type": "bind",
+          "source": "../../invoice/deploy/postgres/harden-runtime-role.sql",
+          "target": "/config/harden-runtime-role.sql",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "depends_on": {
+        "invoice-postgres": {
+          "condition": "service_healthy"
+        },
+        "invoice-migrate": {
+          "condition": "service_completed_successfully"
+        }
+      },
+      "networks": [
+        "invoice_db"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ]
+    },
+    "invoice-bootstrap-settings": {
+      "image": "xingmang-unified/invoice-tools:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "no",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "profiles": [
+        "tools"
+      ],
+      "entrypoint": [
+        "/usr/local/bin/invoice-bootstrap-settings",
+        "--database-url-file",
+        "/run/secrets/invoice_owner_database_url",
+        "--settings-file",
+        "/config/admin-settings.bootstrap.json"
+      ],
+      "secrets": [
+        "invoice_owner_database_url"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${ADMIN_SETTINGS_BOOTSTRAP_FILE:?set ADMIN_SETTINGS_BOOTSTRAP_FILE}",
+          "target": "/config/admin-settings.bootstrap.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "depends_on": {
+        "invoice-postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": [
+        "invoice_db"
+      ]
+    },
+    "invoice-bootstrap-sources": {
+      "image": "xingmang-unified/invoice-tools:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "no",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "profiles": [
+        "tools"
+      ],
+      "entrypoint": [
+        "/usr/local/bin/invoice-bootstrap-sources",
+        "--database-url-file",
+        "/run/secrets/invoice_owner_database_url",
+        "--config-file",
+        "/config/source-instances.json"
+      ],
+      "secrets": [
+        "invoice_owner_database_url"
+      ],
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${SOURCE_INSTANCES_CONFIG_FILE:?set SOURCE_INSTANCES_CONFIG_FILE}",
+          "target": "/config/source-instances.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "depends_on": {
+        "invoice-postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": [
+        "invoice_db"
+      ]
+    },
+    "invoice-document-gc": {
+      "image": "xingmang-unified/invoice-tools:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "no",
+      "read_only": true,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "profiles": [
+        "tools"
+      ],
+      "entrypoint": [
+        "/usr/local/bin/invoice-document-gc"
+      ],
+      "secrets": [
+        "invoice_owner_database_url"
+      ],
+      "volumes": [
+        "invoice_document_data:/data/documents"
+      ],
+      "depends_on": {
+        "invoice-postgres": {
+          "condition": "service_healthy"
+        }
+      },
+      "networks": [
+        "invoice_db"
+      ]
+    },
+    "pdf-scanner": {
+      "image": "xingmang-unified/pdf-scanner:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "read_only": true,
+      "network_mode": "none",
+      "mem_limit": "256m",
+      "cpus": 0.5,
+      "pids_limit": 32,
+      "environment": {
+        "HOME": "/nonexistent",
+        "TMPDIR": "/scan-tmp"
+      },
+      "secrets": [
+        "invoice_pdf_scanner_capability"
+      ],
+      "volumes": [
+        "invoice_pdf_scanner_socket:/scanner"
+      ],
+      "tmpfs": [
+        "/scan-tmp:size=64m,noexec,nosuid,nodev,mode=0700,uid=10002,gid=10000"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/local/bin/invoice-pdf-scanner",
+          "-healthcheck",
+          "-socket",
+          "/scanner/qpdf.sock",
+          "-token-file",
+          "/run/secrets/invoice_pdf_scanner_capability"
+        ],
+        "interval": "10s",
+        "timeout": "6s",
+        "retries": 6,
+        "start_period": "10s"
+      }
+    },
+    "clamav": {
+      "image": "xingmang-unified/clamav:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "mem_limit": "4g",
+      "cpus": 2.0,
+      "pids_limit": 256,
+      "environment": {
+        "CLAMAV_DATABASE_ROOT": "/var/lib/clamav",
+        "CLAMAV_MAX_SIGNATURE_AGE": "${CLAMAV_MAX_SIGNATURE_AGE:-48h}"
+      },
+      "volumes": [
+        "clamav_database:/var/lib/clamav",
+        {
+          "type": "bind",
+          "source": "../../invoice/deploy/clamav-healthcheck.sh",
+          "target": "/usr/local/bin/invoice-clamav-healthcheck",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/bin/sh",
+          "/usr/local/bin/invoice-clamav-healthcheck"
+        ],
+        "interval": "30s",
+        "timeout": "10s",
+        "retries": 20,
+        "start_period": "3m"
+      },
+      "networks": {
+        "invoice_app": {},
+        "clamav_egress": {
+          "gw_priority": 1
+        }
+      },
+      "security_opt": [
+        "no-new-privileges:true"
+      ]
+    },
+    "ingest-proxy": {
+      "image": "xingmang-unified/ingest-proxy:${UNIFIED_IMAGE_TAG:?set exact reviewed unified tag}",
+      "pull_policy": "never",
+      "restart": "unless-stopped",
+      "read_only": true,
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "../../invoice/deploy/nginx/ingest-mtls.conf",
+          "target": "/etc/nginx/nginx.conf",
+          "read_only": true,
+          "bind": {
+            "create_host_path": false
+          }
+        }
+      ],
+      "secrets": [
+        "ingest_server_cert",
+        "ingest_server_key",
+        "source_agent_ca"
+      ],
+      "tmpfs": [
+        "/var/cache/nginx:size=16m,noexec,nosuid,nodev",
+        "/var/run:size=4m,noexec,nosuid,nodev"
+      ],
+      "depends_on": {
+        "platform-api": {
+          "condition": "service_started"
+        }
+      },
+      "networks": {
+        "invoice_ingest": {
+          "ipv4_address": "${INVOICE_INGEST_PROXY_IP:?set the dedicated ingest-proxy IP}",
+          "aliases": [
+            "invoice-ingest.internal"
+          ]
+        }
+      },
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "cap_drop": [
+        "ALL"
+      ],
+      "cap_add": [
+        "CHOWN",
+        "SETGID",
+        "SETUID"
+      ]
+    }
+  },
+  "networks": {
+    "invoice_proxy": {
+      "driver": "bridge",
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${INVOICE_PROXY_SUBNET:?set a non-conflicting proxy subnet}",
+            "gateway": "${INVOICE_PROXY_GATEWAY_IP:?set the exact invoice proxy bridge gateway}"
+          }
+        ]
+      }
+    },
+    "invoice_app": {
+      "driver": "bridge",
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${INVOICE_APP_SUBNET:?set a non-conflicting internal application subnet}"
+          }
+        ]
+      }
+    },
+    "clamav_egress": {
+      "driver": "bridge",
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${CLAMAV_EGRESS_SUBNET:?set a non-conflicting ClamAV egress subnet}"
+          }
+        ]
+      }
+    },
+    "invoice_db": {
+      "driver": "bridge",
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${INVOICE_DB_SUBNET:?set a non-conflicting internal database subnet}"
+          }
+        ]
+      }
+    },
+    "invoice_ingest": {
+      "name": "${INVOICE_INGEST_NETWORK:-invoice-system-ingest}",
+      "driver": "bridge",
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${INVOICE_INGEST_SUBNET:?set a non-conflicting ingestion subnet}",
+            "ip_range": "${INVOICE_INGEST_DYNAMIC_RANGE:?set a dynamic range that excludes the proxy IP}"
+          }
+        ]
+      }
+    },
+    "default": {
+      "driver": "bridge",
+      "internal": true
+    },
+    "platform_egress": {
+      "driver": "bridge",
+      "ipam": {
+        "config": [
+          {
+            "subnet": "${PLATFORM_EGRESS_SUBNET:?set non-conflicting platform worker egress subnet}"
+          }
+        ]
+      }
+    }
+  },
+  "volumes": {
+    "postgres18-data": {
+      "external": true,
+      "name": "${PLATFORM_POSTGRES_VOLUME:?set existing verified volume name}"
+    },
+    "xm-secrets": {
+      "external": true,
+      "name": "${PLATFORM_SECRETS_VOLUME:?set existing verified volume name}"
+    },
+    "invoice_postgres_data": {
+      "external": true,
+      "name": "${INVOICE_POSTGRES_DATA_VOLUME:?set existing verified volume name}"
+    },
+    "invoice_document_data": {
+      "external": true,
+      "name": "${INVOICE_DOCUMENT_DATA_VOLUME:?set existing verified volume name}"
+    },
+    "clamav_database": {
+      "external": true,
+      "name": "${CLAMAV_DATABASE_VOLUME:?set existing verified volume name}"
+    },
+    "invoice_pdf_scanner_socket": {
+      "external": true,
+      "name": "${INVOICE_PDF_SCANNER_SOCKET_VOLUME:?set existing verified volume name}"
+    }
+  },
+  "secrets": {
+    "database__postgres_password": {
+      "environment": "DATABASE_PASSWORD"
+    },
+    "invoice_owner_db_password": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_owner_db_password"
+    },
+    "invoice_app_db_password": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_app_db_password"
+    },
+    "invoice_owner_database_url": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_owner_database_url"
+    },
+    "invoice_app_database_url": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_app_database_url"
+    },
+    "invoice_field_keyring": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_field_keyring.json"
+    },
+    "invoice_session_binding_key": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_session_binding_key"
+    },
+    "invoice_admin_break_glass_cidrs": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_admin_break_glass_cidrs"
+    },
+    "invoice_pdf_scanner_capability": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_pdf_scanner_capability"
+    },
+    "ingest_server_cert": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/ingest_server_cert.pem"
+    },
+    "ingest_server_key": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/ingest_server_key.pem"
+    },
+    "source_agent_ca": {
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/source_agent_ca.pem"
+    }
+  }
+}

@@ -7,17 +7,19 @@
 # compose 的三个服务只是选不同的 target，重的那层被复用。
 #
 # 版本纪律（宪法 §4 / VERSIONS.lock）：镜像必须钉版本，禁止 latest。
-# golang:1.27-alpine 内是 go1.27.0，与 VERSIONS.lock 的 toolchain.go 一致。
+# 精确 patch 与 digest 同时锁定，避免同名浮动标签偏离 VERSIONS.lock。
 
 # ---------- 构建阶段 ----------
-FROM golang:1.27-alpine AS builder
-WORKDIR /src
+FROM golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
+WORKDIR /src/platform
 
 # 先只拷依赖清单：源码改动不会让下载层失效
-COPY go.mod go.sum ./
+COPY platform/go.mod platform/go.sum ./
+COPY invoice/backend/go.mod invoice/backend/go.sum /src/invoice/backend/
 RUN go mod download
 
-COPY . .
+COPY platform/ /src/platform/
+COPY invoice/backend/ /src/invoice/backend/
 
 # CGO_ENABLED=0：静态链接，运行阶段的 alpine 不需要 libc 兼容层。
 # -trimpath：产物里不留构建机的绝对路径。
@@ -26,8 +28,8 @@ COPY . .
 # 明确给的，而不是「碰巧构建上下文里有个 .git」（宪法 21 条：可追溯）。
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown
-ENV CGO_ENABLED=0 GOOS=linux
-RUN go build -trimpath -buildvcs=false \
+ENV CGO_ENABLED=0 GOOS=linux GOWORK=off
+RUN go build -mod=readonly -trimpath -buildvcs=false \
       -ldflags "-s -w -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Version=${BUILD_VERSION} -X github.com/xufei5620/xingmang-platform/internal/platform/buildinfo.Commit=${BUILD_COMMIT}" \
       -o /out/ ./cmd/platform-api ./cmd/platform-worker ./cmd/migrate ./cmd/runway-threshold-bootstrap ./cmd/staff-bootstrap ./cmd/cpa-snapshot
 
@@ -39,9 +41,11 @@ FROM alpine:3.22 AS runtime-base
 # 运行用户：命名卷首次创建时会继承镜像里这个目录的属主，否则 root:root 的
 # 挂载点会让以 10001 运行的 platform-api 一个文件都写不进去。
 RUN apk add --no-cache ca-certificates tzdata \
+ && addgroup -S -g 10000 scanner-share \
  && adduser -D -u 10001 -h /app xingmang \
- && mkdir -p /run/xm/secrets \
- && chown 10001:10001 /run/xm/secrets \
+ && mkdir -p /run/xm/secrets /data/documents /scanner \
+ && chown 10001:10001 /run/xm/secrets /data/documents \
+ && chown 10002:10000 /scanner && chmod 0750 /scanner \
  && chmod 0700 /run/xm/secrets
 WORKDIR /app
 USER 10001:10001
@@ -50,6 +54,7 @@ ENV TZ=UTC
 # ---------- platform-api ----------
 FROM runtime-base AS platform-api
 COPY --from=builder /out/platform-api /usr/local/bin/platform-api
+COPY invoice/backend/migrations /app/migrations
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/platform-api"]
 
@@ -74,8 +79,8 @@ COPY --from=builder /out/staff-bootstrap /usr/local/bin/staff-bootstrap
 # cpa-snapshot 是宿主机 Platform Lifecycle Operation。部署脚本只从已完成
 # migrate 的精确镜像提取这一个静态二进制；服务器不安装 Go/sqlite 工具链。
 COPY --from=builder /out/cpa-snapshot /usr/local/bin/cpa-snapshot
-COPY --chown=10001:10001 db/migrations /app/db/migrations
+COPY --chown=10001:10001 platform/db/migrations /app/db/migrations
 # --chmod 而不是 RUN chmod：Windows 检出的文件没有可执行位，
 # 靠 git 保留 mode 在这条链路上不可靠
-COPY --chmod=0755 deploy/docker/migrate-entrypoint.sh /usr/local/bin/xm-migrate-all
+COPY --chmod=0755 platform/deploy/docker/migrate-entrypoint.sh /usr/local/bin/xm-migrate-all
 ENTRYPOINT ["/usr/local/bin/xm-migrate-all"]

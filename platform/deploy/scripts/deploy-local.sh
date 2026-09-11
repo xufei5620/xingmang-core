@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# XM-UNIFIED: retired independent production entry.
+printf '%s\n' 'Independent deployment is retired. Use the monorepo scripts/unified-service.py check/build. Production cutover is not validated or authorized.' >&2
+exit 64
 # 星芒统一控制平台本地 staging 部署入口。
 #
 # 本脚本只管理本机的 xingmang-launch Compose 项目：

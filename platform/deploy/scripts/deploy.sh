@@ -1,4 +1,7 @@
 #!/bin/bash -p
+# XM-UNIFIED: retired independent production entry.
+printf '%s\n' 'Independent deployment is retired. Use the monorepo scripts/unified-service.py check/build. Production cutover is not validated or authorized.' >&2
+exit 64
 # 星芒统一控制平台受控部署入口（XM-C-DEPLOY0-b）。
 #
 # 只接受 staging/prod 两档。脚本先读取 receive hook 产生的 exact SHA 状态，

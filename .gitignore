@@ -1,1 +1,4 @@
 desktop.ini
+
+# Local Python verification bytecode; never a build input.
+__pycache__/

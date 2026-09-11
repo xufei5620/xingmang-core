@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# XM-UNIFIED: retired independent production entry.
+printf '%s\n' 'Independent deployment is retired. Use the monorepo scripts/unified-service.py check/build. Production cutover is not validated or authorized.' >&2
+exit 64
 set -Eeuo pipefail
 umask 077
 

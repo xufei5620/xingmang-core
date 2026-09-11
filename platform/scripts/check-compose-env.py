@@ -2,7 +2,7 @@
 """进程读的每一个环境变量，compose 里都必须透传。
 
 2026-09-06 的教训：接码（XM-SMS0）整个做完、合入、推送之后，产品负责人问
-「我要去哪里删那个变量」，一查才发现 XM_SMS_MODE 从来没接进 launch.yaml——
+「我要去哪里删那个变量」，一查才发现 XM_SMS_MODE 从来没接进 {COMPOSE.name}——
 也就是说这个功能**部署不了**：在 .env 里写 XM_SMS_MODE=real 也进不了容器，
 进程读到空串，接码端点整组不挂载，页面显示「当前环境未启用」。同一次检查
 还翻出另外四个早就存在的同类洞（保障探测的两个、平台支付、reqlog 的 v2
@@ -24,11 +24,14 @@ api 段是显式清单，从未透传 ELIGIBILITY_EVIDENCE_BATCH_LIMIT，于是 
 """
 
 import pathlib
+import json
 import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-COMPOSE = ROOT / "deploy" / "compose" / "launch.yaml"
+COMPOSE = ROOT.parent / "deploy/unified/compose.json"
+if not COMPOSE.is_file():
+    COMPOSE = ROOT / "deploy/compose/launch.yaml"
 SOURCES = ["cmd/platform-api", "cmd/platform-worker"]
 
 # 读到的字面量环境变量名。只认字面量：动态拼出来的（XM_CARDS_<账号>_LIMIT_…）
@@ -113,13 +116,39 @@ def service_environments(text: str) -> dict[str, set[str]]:
     return result
 
 
+def json_service_environments(text: str) -> dict[str, set[str]]:
+    """Canonical Compose JSON still requires each process's explicit mapping."""
+    def unique_pairs(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj: raise ValueError(f'duplicate JSON key {key}')
+            obj[key] = value
+        return obj
+    doc = json.loads(text, object_pairs_hook=unique_pairs)
+    if not isinstance(doc, dict) or not isinstance(doc.get('services'), dict):
+        raise ValueError('services must be a mapping')
+    result = {}
+    for source in SOURCES:
+        name = pathlib.PurePosixPath(source).name
+        service = doc['services'].get(name)
+        if not isinstance(service, dict) or any(key in service for key in ('<<','extends','env_file')):
+            raise ValueError(f'{name}: missing or inherited service environment')
+        env = service.get('environment')
+        if not isinstance(env, dict):
+            raise ValueError(f'{name}: environment must be an explicit mapping')
+        if any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key) or not isinstance(value, str) for key,value in env.items()):
+            raise ValueError(f'{name}: environment keys and values must be explicit strings')
+        result[name] = set(env)
+    return result
+
+
 def main() -> int:
     if not COMPOSE.exists():
         print(f"check-compose-env: 找不到 {COMPOSE}", file=sys.stderr)
         return 1
     compose_text = COMPOSE.read_text(encoding="utf-8")
     try:
-        environments = service_environments(compose_text)
+        environments = json_service_environments(compose_text) if COMPOSE.suffix == ".json" else service_environments(compose_text)
     except ValueError as exc:
         print(f'check-compose-env: {exc}', file=sys.stderr)
         return 1
@@ -142,14 +171,14 @@ def main() -> int:
         if name in RETIRED:
             if present:
                 failures.append(
-                    f"{name} 已废弃却出现在 launch.yaml——透传它等于把它复活；"
+                    f"{name} 已废弃却出现在 {COMPOSE.name}——透传它等于把它复活；"
                     f"读它的代码只是为了在它还留在配置里时让启动失败"
                 )
             continue
         if not present:
             readers = "、".join(sorted(wanted[service, name]))
             failures.append(
-                f"{name} 被 {readers} 读取，但 launch.yaml 的 {service} 没有透传它——"
+                f"{name} 被 {readers} 读取，但 {COMPOSE.name} 的 {service} 没有透传它——"
                 f"在 .env 里配它也进不了容器，而进程读到空串会安静地当作「没配」"
             )
 
