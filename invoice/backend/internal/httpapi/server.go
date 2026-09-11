@@ -53,7 +53,7 @@ type Server struct {
 	operations         OperationsService
 	sourceMode         string
 	readiness          func(context.Context) (ReadinessOutcome, error)
-	readinessLog       readinessOutcomeLog
+	readinessLog       ReadinessDiagnostics
 	smtpTestSender     mailer.Sender
 	smtpTestRecipient  string
 	publicOrigin       string
@@ -127,12 +127,12 @@ func NewWithConfig(service InvoiceService, cfg Config, logger *slog.Logger) (*Se
 		if cfg.ProductionAuth != nil || cfg.PlatformLogin != nil {
 			return nil, errors.New("production authentication cannot be enabled in mock mode")
 		}
-	case "oidc":
+	case "session":
 		if cfg.ProductionAuth == nil {
-			return nil, errors.New("OIDC authentication runtime is required")
+			return nil, errors.New("session authentication runtime is required")
 		}
 		if err := cfg.ProductionAuth.Validate(); err != nil {
-			return nil, fmt.Errorf("OIDC authentication runtime: %w", err)
+			return nil, fmt.Errorf("session authentication runtime: %w", err)
 		}
 		if cfg.PlatformLogin != nil {
 			if cfg.PlatformLogin.Auth != cfg.ProductionAuth {
@@ -183,18 +183,11 @@ func (s *Server) routes() {
 				s.writeNotReady(w, err)
 				return
 			}
-			if s.readinessLog.record("", time.Now().UTC()) {
-				s.logger.Info("readiness recovered")
-			}
+			report := s.readinessLog.Report(outcome, nil, s.logger)
 			// XM-INV-DEAD-CONTAINMENT: a ready-but-degraded evaluation is
 			// still a 200 -- the service can serve -- but the body says so.
-			if degraded, rejected := outcome.publishableDegraded(); len(degraded) > 0 || rejected {
-				if rejected {
-					s.logger.Error("readiness check failed", "check", readinessRejectedCheck)
-				}
-				if len(degraded) > 0 {
-					body["degraded"] = degraded
-				}
+			if len(report.Degraded) > 0 {
+				body["degraded"] = report.Degraded
 			}
 		}
 		writeJSON(w, http.StatusOK, body)
@@ -258,7 +251,7 @@ func (s *Server) require(role string, next http.Handler) http.Handler {
 			return
 		}
 		if s.authMode != "mock" {
-			writeError(w, http.StatusServiceUnavailable, "AUTH_NOT_CONFIGURED", "OIDC authentication is not configured")
+			writeError(w, http.StatusServiceUnavailable, "AUTH_NOT_CONFIGURED", "session authentication is not configured")
 			return
 		}
 		userID := strings.TrimSpace(r.Header.Get("X-Mock-User-ID"))
@@ -1230,16 +1223,13 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 // patterns. An unclassified or rejected failure publishes the byte-identical
 // body this endpoint returned before this slice.
 func (s *Server) writeNotReady(w http.ResponseWriter, err error) {
-	logCheck, publishCheck, publishSummary := readinessFailureFields(err)
-	if s.readinessLog.record(logCheck, time.Now().UTC()) {
-		s.logger.Error("readiness check failed", "check", logCheck, "error", err)
-	}
-	if publishCheck == "" {
-		writeError(w, http.StatusServiceUnavailable, "NOT_READY", "required dependencies are unavailable")
+	report := s.readinessLog.Report(ReadinessOutcome{}, err, s.logger)
+	if report.Check == "" {
+		writeError(w, http.StatusServiceUnavailable, "NOT_READY", report.Summary)
 		return
 	}
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-		"error": map[string]string{"code": "NOT_READY", "message": publishSummary, "check": publishCheck},
+		"error": map[string]string{"code": "NOT_READY", "message": report.Summary, "check": report.Check},
 	})
 }
 func handleDomainError(w http.ResponseWriter, err error) {

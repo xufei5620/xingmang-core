@@ -92,15 +92,9 @@ func (c PlatformEndpointConfig) timeout() time.Duration {
 	return c.Timeout
 }
 
-// platformHTTPClient pins outbound calls to one exact HTTPS host. It reuses
-// the OIDC client's SSRF-safe dial and response-bounding transport
-// (protectedOIDCDialContext/boundedOIDCTransport in client.go): that logic is
-// not actually OIDC-specific, only co-located with the OIDC client.
-// platformHTTPClient always host-pins and bounds the response body; base lets
-// a test substitute an httptest server's own already-TLS-trusted client
-// (e.g. server.Client()) in place of the SSRF-safe dial context, exactly like
-// strictOIDCHTTPClient in client.go -- production code (platformHTTPClient's
-// public wrapper, base=nil) always takes the hardened path.
+// platformHTTPClient pins outbound calls to one exact HTTPS host and uses
+// the shared SSRF-safe dialer and bounded response transport. Tests may supply
+// their own TLS-trusted transport; production always uses the protected dialer.
 func platformHTTPClient(baseURL string, timeout time.Duration, base *http.Client) (*http.Client, error) {
 	parsedHost, err := hostOf(baseURL)
 	if err != nil {
@@ -113,7 +107,7 @@ func platformHTTPClient(baseURL string, timeout time.Duration, base *http.Client
 	if base != nil && base.Transport != nil {
 		transport = base.Transport
 	} else {
-		dialContext, dialErr := protectedOIDCDialContext(nil)
+		dialContext, dialErr := protectedEndpointDialContext(nil)
 		if dialErr != nil {
 			return nil, dialErr
 		}
@@ -130,7 +124,7 @@ func platformHTTPClient(baseURL string, timeout time.Duration, base *http.Client
 		}
 	}
 	return &http.Client{
-		Transport: &boundedOIDCTransport{base: transport, allowedHosts: map[string]struct{}{strings.ToLower(parsedHost): {}}, maxBytes: 256 * 1024},
+		Transport: &boundedEndpointTransport{base: transport, allowedHosts: map[string]struct{}{strings.ToLower(parsedHost): {}}, maxBytes: 256 * 1024},
 		Timeout:   timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return errors.New("platform login HTTP redirects are not allowed")

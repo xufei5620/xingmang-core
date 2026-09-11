@@ -1,0 +1,296 @@
+package rolepermissions
+
+import (
+	"encoding/json"
+	"fmt"
+	"slices"
+	"sort"
+	"strings"
+)
+
+// platformScopePrefixes 区分员工角色与细粒度权限，避免把配置映射方向写反。
+var platformScopePrefixes = []string{
+	"registry.", "ops.", "audit.", "platform.", "action.", "connector.",
+	"request.", "ui.", "credential.", "staff.", "publishing.",
+}
+
+// looksLikePlatformScope 判断一个角色名是否长成平台细粒度权限的样子。
+func looksLikePlatformScope(role string) bool {
+	r := strings.ToLower(strings.TrimSpace(role))
+	for _, p := range platformScopePrefixes {
+		if strings.HasPrefix(r, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultRoleScopeMap 是员工角色到平台权限的默认映射。
+// 从原认证模块保留，权限与独立资金操作角色未改变；部署覆盖使用
+// XM_AUTH_ROLE_SCOPES。保守授权边界由 rolemap_policy_test.go 验证。
+func DefaultRoleScopeMap() map[string][]string {
+	return map[string][]string{
+		// ui.saved_view.manage 只读写调用者自己的低影响偏好；owner 与 Environment
+		// 均由 Principal 派生，所以给 staff 不会扩大到任何其他人的视图或业务数据。
+		"staff": {"registry.read", "ops.read", "ui.saved_view.manage"},
+		"admin": {
+			"registry.read",
+			"ops.read",
+			"audit.read",
+			// XM-ACTIONS0：跨 Action 执行记录列表。比 audit.read 低一档（不含
+			// before/after 正文），管理员默认可读；staff 仍不给。
+			"action.read",
+			"registry.service.manage",
+			"registry.connector.manage",
+			"registry.connection.manage",
+			// request.read 在这里，request.content.read **刻意不在**——
+			// 元数据列表回答「这个人用得多不多」，正文回答「这个人问了什么」。
+			// 见上面第 4 条。
+			"request.read",
+			// XM-0046：逐用户资金清单，与 request.read 同一档（见上面第 5 条）
+			"platform.users.read",
+			"ui.saved_view.manage",
+			// XM-LOGIN：见上面第 6 条——bootstrap 管理员需要一上线就能管
+			// 账号、凭据与连接器，不必先登录再手动申请第二个角色。
+			"staff.manage",
+			"credential.manage",
+			"connector.manage",
+			// 生产上线（2026-08-31）：bootstrap 管理员就是运营负责人，成本看板、
+			// 登记簿与告警处理不能再要求第二个角色——否则平台详情页的成本面板
+			// 对唯一的管理员也是 403。finance.read 与各 manage 仍不给 staff：
+			// 金额与凭据来源是高敏信息，普通运营按需单独授予。
+			// finance.platform_channel_binding.manage **刻意不在**：渠道绑定的
+			// L1 写权限按既有裁定必须人工显式授予（resolver_test 钉住）。
+			"finance.read",
+			"finance.upstream_account.manage",
+			"finance.recharge_ratio.manage",
+			"finance.token_map.manage",
+			"finance.subscription.manage",
+			"alerts.alert.manage",
+			"alerts.silence.manage",
+			// XM-SERVER0（2026-08-31）：服务器登记簿的写权限。**与
+			// finance.platform_channel_binding.manage 不是同一类**，所以进
+			// admin 而不是像那条一样刻意排除：渠道绑定写的是「哪个上游账号
+			// 在给哪个平台供给」，绑错会让成本记到错误渠道且不报错，属于
+			// 设计稿裁定必须人工显式授予的高风险面；服务器登记簿写的是
+			// 主机名/规格/供应商/到期日这类纯记录字段（拍板「服务器只做
+			// 记录」），不触碰任何第三方系统、不影响任何成本或收入归属，
+			// 改错了改回来即可——与已经在这张表里的
+			// finance.upstream_account.manage 等同一档（登记簿，不是执行）。
+			// resolver_test 的 TestDefaultRoleScopeMapIsConservative 断言
+			// admin 含它、staff 不含它。
+			"server.manage",
+			// XM-EXT-APP（2026-09-08）：前端应用登记簿的写权限。与
+			// server.manage 同一档、同一条理由——登记的是我们自己部署的
+			// 前端站点的域名/负责人/登录方式/状态与「哪次发布上了哪个版本」，
+			// 全是纯记录字段：**不触碰任何第三方系统、不影响任何成本或收入
+			// 归属、也不会让任何站点发生变化**（平台没有发布通道，发布是
+			// Platform Lifecycle Operation），改错了改回来即可。
+			//
+			// 不给 staff：staff 依然不该有任何 .manage 能力
+			// （见 TestDefaultRoleScopeMapIsConservative 对 staff 的断言）。
+			"extapp.manage",
+			// XM-ASSURE1-core（渠道主动探测/检测任务）：declare/cancel/run 三个
+			// L1 Action 与 finance.upstream_account.manage 等同一档——纯配置写
+			// / 触发一次受多重闸约束的探测批次，进 admin。**probe.kill_switch
+			// 刻意不在这里**：ADR-019 决策·四·#4 明确要求"允许这个平台探测
+			// 花钱"是一个独立可授予/可审计的权限，与本行放宽 admin 的其它
+			// scope 不是同一类判断——见下面专门角色 assurance-probe-admin。
+			"assurance.probe.manage",
+			"assurance.probe.run",
+			// XM-0030（2026-09-07 产品负责人指示启用）：审批中心的两个常规权限。
+			//
+			// approval.read（看队列）本该比 approval.decide 面更宽——提交人要能
+			// 查自己那张单的进度，值班的人要能看见积压。但本表今天只有
+			// staff/admin 两档，没有承载「只读审批队列」的第三档，所以两个都进
+			// admin，**staff 仍然一个都不给**：一个看板角色能看见「谁在申请改
+			// 什么」，等于把变更意图提前泄漏给不需要知道的人。
+			//
+			// **approval.l4 刻意不在这里**——理由与 assurance.probe.kill_switch
+			// 完全相同：设计稿 §7 写明「首批特权票仅产品负责人」，写进 admin
+			// 等于发给每一个管理员。见下面专门的 approval-l4 角色。
+			"approval.read",
+			"approval.decide",
+			// XM-CARD0（2026-09-04）：Infini 虚拟卡的四个权限档。
+			//
+			// 全部给 admin，理由与上面 credential.manage 同一条：本地登录的
+			// bootstrap 管理员就是运营负责人，不给就等于这个功能对唯一能用它
+			// 的人也是 403，而平台今天没有第二个角色可以申请。上线当天就是
+			// 这么撞上的——页面报「需要权限: card.read」。
+			//
+			// 四档分开定义的意义不在今天这张表，而在**对外开放时**：那时
+			// 外部用户走另一个角色，只给 card.read，开卡与卡面都不下放。
+			// staff 一档都不给：开卡花真钱，卡面是明文卡号。
+			"card.read",
+			"card.issue",
+			"card.manage",
+			"card.reveal",
+			// **提现权限（fund.withdraw）刻意不在这里**（XM-CARD6）。
+			//
+			// 卡片四权限给 admin 的理由是「不给就等于功能对唯一能用它的人
+			// 403」。提现不适用：它把钱转出平台、不可逆，而 admin 是日常
+			// 操作账号——一个被盗用的 admin 会话不该能把资金池搬空。
+			// 见下面的 fund-operator。
+			//
+			// 但**调整额度**（fund.limit.manage）在这里，而且刻意就该在
+			// 这里。额度 2026-09-05 从环境变量搬进了数据库、改成后台可调
+			// （产品负责人决定：要登服务器改文件再重启才能动的数字，实际上
+			// 没人会去动）。搬完之后「改不了」这道物理屏障就没有了，能替代
+			// 它的只有两把钥匙分持：
+			//
+			//   fund.limit.manage（admin）        —— 能抬高天花板，不能提现
+			//   fund.withdraw    （fund-operator）—— 能提现，抬不高天花板
+			//
+			// 拿到任一把都搬不空资金池，要两把都拿到才行。今天同一个人两个
+			// 角色都持有，这个分离在实践上是名义的；但审计里两件事是两条
+			// 独立记录，而且想拆给两个人时拆得开——并成一个权限就再也拆
+			// 不开了。
+			"fund.limit.manage",
+			// XM-SMS0（2026-09-05）：接码中心。三个日常权限给 admin
+			// ——看清单、看号码与验证码、连接测试与人工核对都是运营要做的
+			// 事，不给就等于这个功能对唯一能用它的人 403（卡片上线当天
+			// 就是这么撞上的）。
+			//
+			// **sms.purchase 刻意不在这里**：买号花真钱且不可退，
+			// 与 fund.withdraw 同一档，见下面的 sms-operator。
+			//
+			// sms.reveal 与 card.reveal 同档：号码在库里是明文列（本仓
+			// 没有列加密工具，而 PAN/CVV 已经是明文列），这道闸是
+			// 「谁能看号码」剩下的唯一约束。
+			"sms.read",
+			"sms.reveal",
+			"sms.manage",
+			// XM-EXT-INTEGRATION（2026-09-08）：「接口与自动化」的两张登记簿。
+			//
+			// 两个都给 admin，理由与上面 server.manage 同一条：登记簿写的是
+			// 纯记录字段——调用方登记簿**不是授权面**（登记不发凭据、不授权、
+			// 不限流），规则登记簿**没有执行器**（登记一条规则不会让任何
+			// Action 跑起来）。改错了改回即可，不触碰任何第三方系统。
+			//
+			// **两个都不给 staff**，理由与 audit.read 那一档同向：
+			// integration.read 返回的是「哪些机器身份该来调我们、期望持有
+			// 哪些 scope」外加 action_run 里观测到的调用方——那是一张授权面
+			// 的地图，看板角色不该顺带拿到。resolver_test 的
+			// TestDefaultRoleScopeMapIsConservative 断言 admin 含这两个、
+			// staff 一个都不含。
+			//
+			// 哪天规则引擎真接上执行器，integration.manage 必须重新审定：
+			// 那时候「改一条规则」等于改一条会自己跑起来的链路，不再是
+			// 登记簿那一档（ADMIN-IA §5.4.1 把那件事留给了单独的裁定）。
+			"integration.read",
+			"integration.manage",
+			// XM-EXT-PUBLISHING（2026-09-08）：内容发布的读与编辑。
+			//
+			// 与卡片/接码同一条理由：不给就等于这个功能对唯一能用它的人也是
+			// 403。publishing.manage 写的是草稿、素材与渠道**登记**（凭据只经
+			// CredentialRef，明文另由 credential.manage 管），一件都发不出去。
+			//
+			// **publishing.publish 刻意不在这里**——理由与 fund.withdraw /
+			// sms.purchase 完全相同：把「对外不可逆」的动作从日常操作角色里
+			// 拿出来。发布本身是 L3（两票且审批人≠提交人），但审批拦的是
+			// 「这一篇发不发」，权限拦的是「谁能提起这件事」；给 admin 等于
+			// 把第一道闸拆掉，只剩审批一道。见下面的 content-publisher。
+			"publishing.read",
+			"publishing.manage",
+		},
+		// KEY_SCOPE_APPROVAL：元数据-only 的 Key 清单由专门角色授予；不要把它
+		// 加进 staff/admin，否则一个普通运营角色会顺带看到全平台凭据库存。
+		"key-metadata-reader": {"platform.user_keys.read"},
+		// XM-0039 / 2026-08-28 裁定：用户与模型的完整对话正文由专门角色显式授予
+		// （客诉 / 风控岗），admin 刻意不带。生产上线后请求详情已接真实数据
+		// （XM-REQLOG-MERGE），运营负责人要看正文就给自己加这个角色——授予动作
+		// 本身走 staff.account.set_roles 进审计链，而不是把 scope 悄悄塞进 admin。
+		"request-content-reader": {"request.content.read"},
+		// XM-CRED0：粘贴 / 轮换 / 吊销上游凭据与把连接器切到真实上游，由专门角色
+		// 授予。**不进 staff/admin**：credential.manage 会把明文写进 SecretProvider
+		// 目录，connector.manage 决定 worker 下一轮连哪台上游——两者都不是
+		// 「管理员顺带获得」的能力，要给就在 Realm 里建这个角色并人工审定。
+		"credential-admin": {"credential.manage", "connector.manage"},
+		// XM-ASSURE1-core：谁能打开"这个平台允许探测花钱"的开关，由专门角色
+		// 独立授予（ADR-019 决策·四·#4）——不进 admin，即便 admin 已经拿到了
+		// assurance.probe.manage/run（上面的裁定：declare/cancel/run 是普通
+		// 配置写与受闸约束的触发，kill_switch 是"批准花真钱"本身，两者不是
+		// 同一类判断，一并给 admin 会让这条独立授权的设计意图落空）。
+		"assurance-probe-admin": {"assurance.probe.kill_switch"},
+		// XM-0030：L4 的特权票。**默认不发给任何人**——设计稿 §7 写明「具体
+		// 人选映射进 RoleScopeMap，不进 Keycloak」，且「首批特权票仅产品负责人」。
+		//
+		// 没有人持有它时，L4 的审批单会一直停在 PENDING（Settle 要求至少一张
+		// 特权票），直到过期。**这是刻意的 fail closed，不是缺陷**：L4 是拉闸级
+		// 操作，宁可等一个人回来，也不要让它被凑够普通票批掉。处置见
+		// docs/runbooks/APPROVAL-QUEUE.md §3.3。
+		//
+		// 这个角色顺带包含 approval.decide：持特权票的人当然也要能投普通票，
+		// 否则他必须同时被授予 admin 才投得了。
+		"approval-l4": {"approval.decide", "approval.l4"},
+		// XM-CARD6（2026-09-05）：资金提现。与 assurance-probe-admin 同一条
+		// 设计意图——把「批准花真钱」这类判断从日常操作角色里拿出来。
+		//
+		// 提现比那还重一档：它把钱转到**平台之外**，不可逆、不可追回。
+		// cards.withdraw.execute 现在是 L3（XM-RISK-RESTORE），发起提现要过
+		// 审批中心的两票且审批人≠提交人；但「谁持有这个权限」仍是第一道闸
+		// ——审批拦的是「这一笔做不做」，权限拦的是「谁能提起这件事」。
+		// 给 admin 等于把第一道闸拆掉，只剩审批一道。
+		//
+		// 两个权限一起给：登记地址决定「钱能去哪儿」，提现决定「什么时候去」，
+		// 分开成两个串是为了以后想拆的时候拆得开，今天由同一个角色持有。
+		"fund-operator": {"fund.withdraw", "fund.address.manage"},
+		// XM-SMS0（2026-09-05）：买号。与 fund-operator 同一条设计意图
+		// ——把「花真钱」从日常操作角色里拿出来。
+		//
+		// 接码的钱比提现小得多（一个号几毛到几块），但它的花法更容易失控：
+		// 数量上限 200，一次手滑就是两百个号；而买到的号不可退。
+		// 独立角色让「谁能花这笔钱」是一次显式授予。
+		"sms-operator": {"sms.purchase"},
+		// XM-EXT-PUBLISHING（2026-09-08）：对外发布。与 fund-operator /
+		// sms-operator 同一条设计意图——把「对外不可逆」从日常操作角色里拿出来。
+		//
+		// 它不花钱，但它比那两个更公开：发出去的内容即便删除也已经被抓取、
+		// 被截图。**「谁能以公司的名义说话」是一次显式的组织授予**，不该由
+		// 「他是管理员」顺带获得。
+		//
+		// 顺带包含 publishing.read：不给的话，持发布权的人看不到自己要发的
+		// 草稿与渠道，必须同时被授予 admin 才用得起来——那正是这次拆分想
+		// 避免的。读的泄漏面（草稿正文 + 渠道引用）本来就窄于发布权本身。
+		"content-publisher": {"publishing.read", "publishing.publish"},
+	}
+}
+
+// ParseRoleScopeMap 解析 XM_AUTH_ROLE_SCOPES，例如 {"staff":["registry.read"]}。
+// 左边必须是员工角色，右边才是细粒度平台权限；错误配置必须拒绝启动。
+func ParseRoleScopeMap(s string) (map[string][]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var raw map[string][]string
+	if err := json.Unmarshal([]byte(s), &raw); err != nil {
+		return nil, fmt.Errorf("解析角色映射表失败（应为 {\"role\":[\"scope\",...]} 形态）: %w", err)
+	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("角色映射表为空：留空环境变量用默认表，别显式配一个空表")
+	}
+	out := make(map[string][]string, len(raw))
+	for role, scopes := range raw {
+		role = strings.TrimSpace(role)
+		if role == "" {
+			return nil, fmt.Errorf("角色名为空")
+		}
+		if looksLikePlatformScope(role) {
+			return nil, fmt.Errorf("角色名 %q 长成平台细粒度权限的样子："+
+				"ADR-016 禁止把平台 scope 当作员工角色，映射表左边应是 staff 这类粗粒度角色", role)
+		}
+		clean := make([]string, 0, len(scopes))
+		for _, sc := range scopes {
+			if sc = strings.TrimSpace(sc); sc != "" {
+				clean = append(clean, sc)
+			}
+		}
+		if len(clean) == 0 {
+			return nil, fmt.Errorf("角色 %q 没有映射到任何 scope：要表达「不给权限」就别列这个角色", role)
+		}
+		sort.Strings(clean)
+		out[role] = slices.Compact(clean)
+	}
+	return out, nil
+}

@@ -35,10 +35,6 @@ func TestOpaqueSessionCookieRotationRevocationBindingAndCSRF(t *testing.T) {
 	if cookie.Name != "__Host-invoice_session" || !cookie.Secure || !cookie.HttpOnly || cookie.Path != "/" || cookie.Domain != "" || cookie.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("unsafe session cookie: %+v", cookie)
 	}
-	flowCookie, err := OIDCFlowCookie("abcdefghijklmnopqrstuvwxyzABCDEFGH0123456789-ab", now.Add(10*time.Minute))
-	if err != nil || !flowCookie.Secure || !flowCookie.HttpOnly || flowCookie.Domain != "" || flowCookie.SameSite != http.SameSiteLaxMode || ClearOIDCFlowCookie().MaxAge != -1 {
-		t.Fatalf("unsafe OIDC flow cookie: %+v err=%v", flowCookie, err)
-	}
 	if _, err = manager.Authenticate(context.Background(), credentials.Token, ClientBinding{IPHash: sha256Hex("203.0.113.9"), UserAgentHash: binding.UserAgentHash}); !errors.Is(err, ErrSessionInvalid) {
 		t.Fatalf("wrong client binding error=%v", err)
 	}

@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,7 +28,7 @@ func testSessionKeyring() securefields.Keyring {
 	}
 }
 
-func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
+func TestPostgresSessionIdentityBindingAndAudit(t *testing.T) {
 	// testdb.URL rewrites the shared default "invoice_test" database to a
 	// per-git-worktree database (created on first use), so concurrent
 	// worktrees never race the DROP SCHEMA CASCADE below.
@@ -64,23 +63,10 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 		t.Fatalf("identity rows=%d err=%v", users, err)
 	}
 
-	flowStore := NewPostgresFlowStore(pool)
-	flow := AuthorizationFlow{
-		StateHash: sha256Hex("state"), NonceHash: sha256Hex("nonce"), BrowserBindingHash: sha256Hex("browser"),
-		CodeVerifierCiphertext: []byte("encrypted-code-verifier-value-1234567890"), CodeVerifierKeyVersion: "key-1",
-		Purpose: FlowLogin, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	var identityActor string
+	if err = pool.QueryRow(ctx, `SELECT actor_type FROM audit_events WHERE action='auth.identity.create' AND object_id=$1`, identity.UserID).Scan(&identityActor); err != nil || identityActor != "staff" {
+		t.Fatalf("new trusted staff identity audit source=%q err=%v", identityActor, err)
 	}
-	if err = flowStore.Create(ctx, flow); err != nil {
-		t.Fatal(err)
-	}
-	consumed, err := flowStore.Consume(ctx, flow.StateHash, flow.BrowserBindingHash, now.Add(time.Second))
-	if err != nil || consumed.ConsumedAt == nil {
-		t.Fatalf("consume=%+v err=%v", consumed, err)
-	}
-	if _, err = flowStore.Consume(ctx, flow.StateHash, flow.BrowserBindingHash, now.Add(2*time.Second)); !errors.Is(err, ErrInvalidFlow) {
-		t.Fatalf("flow replay error=%v", err)
-	}
-
 	audit := NewPostgresSecurityAuditSink(pool)
 	sessionStore := NewPostgresSessionStore(pool, testSessionKeyring())
 	manager, err := NewSessionManager(sessionStore, SessionConfig{IdleTTL: time.Hour, AbsoluteTTL: 4 * time.Hour}, audit)
@@ -143,37 +129,11 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	if _, err = manager.Authenticate(ctx, activeLeaf.Token, ClientBinding{}); err != nil {
 		t.Fatal(err)
 	}
-	backchannel, err := NewBackchannelLogoutService(NewPostgresBackchannelLogoutRepository(pool))
-	if err != nil {
+	if err = manager.RevokeToken(ctx, activeLeaf.Token, "user logout", "req-logout"); err != nil {
 		t.Fatal(err)
 	}
-	logoutEvent := VerifiedBackchannelLogout{Issuer: principal.Issuer, Subject: principal.Subject, SessionID: principal.ProviderSID, TokenID: "logout-jti-1", IssuedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
-	type logoutCall struct {
-		result BackchannelLogoutResult
-		err    error
-	}
-	logoutCalls := make(chan logoutCall, 2)
-	logoutStart := make(chan struct{})
-	for index := range 2 {
-		go func() {
-			<-logoutStart
-			result, callErr := backchannel.Process(ctx, logoutEvent, BackchannelLogoutActor{RequestID: fmt.Sprintf("req-backchannel-%d", index)})
-			logoutCalls <- logoutCall{result: result, err: callErr}
-		}()
-	}
-	close(logoutStart)
-	firstCall, secondCall := <-logoutCalls, <-logoutCalls
-	close(logoutCalls)
-	if firstCall.err != nil || secondCall.err != nil || firstCall.result.EventID == "" || firstCall.result.EventID != secondCall.result.EventID ||
-		firstCall.result.RevokedSessions != 1 || secondCall.result.RevokedSessions != 1 || firstCall.result.Replay == secondCall.result.Replay {
-		t.Fatalf("concurrent logout calls=%+v %+v", firstCall, secondCall)
-	}
 	if _, err = manager.Authenticate(ctx, activeLeaf.Token, ClientBinding{}); !errors.Is(err, ErrSessionInvalid) {
-		t.Fatal("back-channel sid logout did not revoke the active session")
-	}
-	replay, err := backchannel.Process(ctx, logoutEvent, BackchannelLogoutActor{RequestID: "req-backchannel-replay"})
-	if err != nil || !replay.Replay || replay.EventID != firstCall.result.EventID || replay.RevokedSessions != firstCall.result.RevokedSessions {
-		t.Fatalf("logout replay=%+v err=%v", replay, err)
+		t.Fatal("local logout did not revoke session")
 	}
 	deleted, err = sessionStore.DeleteExpired(ctx, now.Add(4*time.Minute))
 	if err != nil || deleted != 3 {
@@ -188,13 +148,11 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	subjectLogout := VerifiedBackchannelLogout{Issuer: principal.Issuer, Subject: principal.Subject, TokenID: "logout-jti-2", IssuedAt: now, ExpiresAt: now.Add(5 * time.Minute)}
-	subjectResult, err := backchannel.Process(ctx, subjectLogout, BackchannelLogoutActor{RequestID: "req-backchannel-2"})
-	if err != nil || subjectResult.RevokedSessions != 1 {
-		t.Fatalf("subject logout result=%+v err=%v", subjectResult, err)
+	if err = manager.RevokeToken(ctx, second.Token, "user logout", "req-logout-2"); err != nil {
+		t.Fatal(err)
 	}
 	if _, err = manager.Authenticate(ctx, second.Token, ClientBinding{}); !errors.Is(err, ErrSessionInvalid) {
-		t.Fatal("back-channel subject logout did not revoke the active session")
+		t.Fatal("second local logout did not revoke session")
 	}
 
 	if _, err = pool.Exec(ctx, `INSERT INTO source_instances(id,source_type,name) VALUES('10000000-0000-4000-8000-000000000001','sub2api','fixture')`); err != nil {
@@ -228,7 +186,7 @@ func TestPostgresOIDCFlowSessionIdentityBindingAndAudit(t *testing.T) {
 	}
 
 	var audits int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE action IN ('auth.identity.create','auth.session.issue','auth.session.rotate','auth.backchannel_logout.process','external_account.binding_proof.verify')`).Scan(&audits); err != nil {
+	if err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE action IN ('auth.identity.create','auth.session.issue','auth.session.rotate','auth.session.revoke','external_account.binding_proof.verify')`).Scan(&audits); err != nil {
 		t.Fatal(err)
 	}
 	if audits != 8 {
@@ -473,91 +431,5 @@ func TestPostgresSessionDisplayNameEncryptedRotatedAndBackwardCompatible(t *test
 	}
 	if preMigration.DisplayName != "" {
 		t.Fatalf("a pre-migration session must decrypt to an empty display name, got %q", preMigration.DisplayName)
-	}
-}
-
-// TestPostgresConsoleAssertionNonceStoreSingleUseAndRetention exercises the
-// real INSERT...ON CONFLICT DO NOTHING semantics ConsumeNonce depends on
-// (console_assertion.go's pure verifier deliberately does not cover this --
-// it is a storage-layer, not a claims-verification, concern) and the
-// retention sweep's boundary.
-func TestPostgresConsoleAssertionNonceStoreSingleUseAndRetention(t *testing.T) {
-	databaseURL := testdb.URL(t)
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if _, err = pool.Exec(ctx, `DROP SCHEMA public CASCADE;CREATE SCHEMA public`); err != nil {
-		t.Fatal(err)
-	}
-	if err = migrate.Up(ctx, pool, filepath.Join("..", "..", "migrations")); err != nil {
-		t.Fatal(err)
-	}
-
-	store := NewPostgresConsoleAssertionNonceStore(pool)
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	nonceHash := sha256Hex("nonce-1")
-
-	ok, err := store.ConsumeNonce(ctx, nonceHash, now.Add(5*time.Minute))
-	if err != nil || !ok {
-		t.Fatalf("first consume: ok=%v err=%v", ok, err)
-	}
-	ok, err = store.ConsumeNonce(ctx, nonceHash, now.Add(5*time.Minute))
-	if err != nil || ok {
-		t.Fatalf("replayed nonce must observe ok=false with no error: ok=%v err=%v", ok, err)
-	}
-
-	// Concurrent race on a distinct nonce: exactly one of two simultaneous
-	// callers may win, matching the "first-to-arrive wins" contract the
-	// exchange handler relies on to fold a replay into ASSERTION_INVALID
-	// without a second round trip.
-	raceNonce := sha256Hex("nonce-race")
-	var wins atomic.Int64
-	var wait sync.WaitGroup
-	for range 5 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			won, raceErr := store.ConsumeNonce(ctx, raceNonce, now.Add(5*time.Minute))
-			if raceErr != nil {
-				t.Errorf("unexpected concurrent consume error: %v", raceErr)
-				return
-			}
-			if won {
-				wins.Add(1)
-			}
-		}()
-	}
-	wait.Wait()
-	if wins.Load() != 1 {
-		t.Fatalf("expected exactly one winner of the concurrent nonce race, got %d", wins.Load())
-	}
-
-	// Retention: a nonce whose expiry is more than an hour in the past is
-	// swept; one within the hour, or not yet expired, is kept.
-	longExpired := sha256Hex("nonce-long-expired")
-	recentlyExpired := sha256Hex("nonce-recently-expired")
-	stillValid := sha256Hex("nonce-still-valid")
-	for hash, expiresAt := range map[string]time.Time{
-		longExpired:     now.Add(-2 * time.Hour),
-		recentlyExpired: now.Add(-30 * time.Minute),
-		stillValid:      now.Add(time.Minute),
-	} {
-		if ok, err = store.ConsumeNonce(ctx, hash, expiresAt); err != nil || !ok {
-			t.Fatalf("seed consume for %q: ok=%v err=%v", hash, ok, err)
-		}
-	}
-	deleted, err := store.DeleteExpired(ctx, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if deleted != 1 {
-		t.Fatalf("expected exactly the long-expired row to be swept, got %d", deleted)
-	}
-	var remaining int
-	if err = pool.QueryRow(ctx, `SELECT count(*) FROM console_assertion_nonces WHERE nonce_hash IN ($1,$2)`, recentlyExpired, stillValid).Scan(&remaining); err != nil || remaining != 2 {
-		t.Fatalf("expected the recently-expired and still-valid rows to survive: remaining=%d err=%v", remaining, err)
 	}
 }

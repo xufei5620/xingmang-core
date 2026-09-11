@@ -71,7 +71,7 @@ func (s *PostgresIdentityStore) ResolveOrCreate(ctx context.Context, principal P
 		if err != nil {
 			return InvoiceIdentity{}, err
 		}
-		actorType := "oidc"
+		actorType := "staff"
 		if principal.Platform != "" {
 			actorType = "platform"
 		}

@@ -289,19 +289,6 @@ func (m *SessionManager) ClearSessionCookie() *http.Cookie {
 	return &http.Cookie{Name: m.config.CookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), Secure: true, HttpOnly: true, SameSite: m.config.SameSite}
 }
 
-// OIDCFlowCookie is first-party, short-lived and HttpOnly. SameSite=Lax allows
-// the top-level callback navigation while still working for same-site embeds.
-func OIDCFlowCookie(browserBinding string, expires time.Time) (*http.Cookie, error) {
-	if !validOpaqueToken(browserBinding) {
-		return nil, errors.New("invalid OIDC browser binding")
-	}
-	return &http.Cookie{Name: "__Host-invoice_oidc_flow", Value: browserBinding, Path: "/", Expires: expires, MaxAge: int(time.Until(expires).Seconds()), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}, nil
-}
-
-func ClearOIDCFlowCookie() *http.Cookie {
-	return &http.Cookie{Name: "__Host-invoice_oidc_flow", Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
-}
-
 func newSessionSecrets() (string, string, error) {
 	token, err := randomURLToken(32)
 	if err != nil {

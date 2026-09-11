@@ -16,6 +16,7 @@ import (
 
 	"invoice-system/backend/internal/auth"
 	"invoice-system/backend/internal/ledger"
+	"invoice-system/backend/staffauth"
 )
 
 // fakePlatformAuthenticator is a scriptable test double for
@@ -65,9 +66,8 @@ func rejectingAuthenticator() *fakePlatformAuthenticator {
 	}
 }
 
-// platformLoginServer builds a full production-mode Server with both OIDC
-// (unused by these tests, but required by PlatformLogin.Validate's shared
-// ProductionAuth) and platform-password login wired up. ProvisionUser is
+// platformLoginServer builds a production session Server with isolated
+// platform-password login wired up. ProvisionUser is
 // deliberately keyed by (platform, platform_user_id) -- exactly like the real
 // PostgresIdentityStore.ResolveOrCreate -- so tests can prove two different
 // platform accounts never collapse onto the same local session identity.
@@ -89,10 +89,10 @@ func platformLoginServer(t *testing.T, sub2api, newapi auth.PlatformAuthenticato
 	if err != nil {
 		t.Fatal(err)
 	}
-	oidc := &fakeOIDCFlowClient{}
 	runtime := &ProductionAuth{
-		OIDC: oidc, Logout: oidc, BackchannelLogout: &fakeBackchannelLogoutProcessor{}, Sessions: sessions, BindingHasher: hasher, CSRF: csrf,
-		Admin: auth.AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:test:mfa", RequiredAMR: []string{"otp"}, StepUpMaxAge: 10 * time.Minute},
+		Sessions: sessions, BindingHasher: hasher, CSRF: csrf,
+		Admin:         auth.AdminPolicy{Role: "invoice-admin", RequiredACR: "urn:test:mfa", RequiredAMR: []string{"otp"}, StepUpMaxAge: 10 * time.Minute},
+		StaffResolver: func(*http.Request) (staffauth.Identity, error) { return staffauth.Identity{}, auth.ErrSessionInvalid },
 		ProvisionUser: func(_ context.Context, principal auth.Principal, _ string) (SessionUser, error) {
 			return SessionUser{ID: string(principal.Platform) + ":" + principal.PlatformUserID, Email: principal.Email, EmailVerified: principal.EmailVerified}, nil
 		},
@@ -108,7 +108,7 @@ func platformLoginServer(t *testing.T, sub2api, newapi auth.PlatformAuthenticato
 		Auth:           runtime,
 	}
 	server, err := NewWithConfig(ledger.NewService(), Config{
-		AuthMode: "oidc", AdminIPAllowlist: []string{"127.0.0.1/32"}, ProductionAuth: runtime, PlatformLogin: platformLogin,
+		AuthMode: "session", AdminIPAllowlist: []string{"127.0.0.1/32"}, ProductionAuth: runtime, PlatformLogin: platformLogin,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
