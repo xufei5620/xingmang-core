@@ -2092,3 +2092,27 @@ Git Bash 的符号链接设置仅应用于本次验证进程；两个 Unix 权�
 尚未执行修复。本节与上表将随逐finding提交更新，每条记录失败测试、修复后绿色、逐断言变异红、还原绿色、精确UTC/退出码和提交哈希。
 最终必跑：invoice/scripts/verify.ps1（经run-detached启动）；platform的go test -race -p 1、go vet、pnpm install --config.verify-deps-before-run=false、pnpm -r typecheck/test、governance（有效基线必须可解析）。
 无生产roll-forward/备份/影子评估/重启/env修改/服务器目录操作，无GitHub推送、签名tag改动或旧盘操作。
+
+
+## 2026-09-12 最终 HEAD 七道门禁完整重跑
+
+本节为完成阶段二修复后的新增实测记录；前文原始审查快照保持原样。被测分支 `ai/codex/XM-FULL-AUDIT-20260911`，七道门禁均在最终代码 HEAD `fb2853740a77dfc74262355554f5f057a2ff8d8b` 的干净工作树上完整执行。下表时间为实际 UTC（本地日期已为 2026-09-12），没有以定向补验替代完整命令。
+
+| 门禁 | UTC 开始 | UTC 结束 | 退出码 | 原始记录与输出 |
+|---|---|---|---:|---|
+| 开票 scripts/verify.ps1（经 run-detached） | 2026-09-11T17:07:41.215527+00:00 | 2026-09-11T17:25:21.008445+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/invoice/verify.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/invoice/verify.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/invoice/verify.stderr.log) |
+| 平台 go test -race -p 1 ./... | 2026-09-11T17:24:08.160436+00:00 | 2026-09-11T17:24:33.405859+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-test.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-test.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-test.stderr.log) |
+| 平台 go vet ./... | 2026-09-11T17:24:33.751722+00:00 | 2026-09-11T17:24:42.270703+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-vet.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-vet.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-go-vet.stderr.log) |
+| 平台 pnpm install --config.verify-deps-before-run=false --frozen-lockfile | 2026-09-11T17:24:42.550667+00:00 | 2026-09-11T17:24:42.918154+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-pnpm-install.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-pnpm-install.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-pnpm-install.stderr.log) |
+| 平台 pnpm -r run typecheck | 2026-09-11T17:24:43.214521+00:00 | 2026-09-11T17:24:52.281391+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-typecheck.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-typecheck.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-typecheck.stderr.log) |
+| 平台 pnpm -r run test | 2026-09-11T17:24:52.636243+00:00 | 2026-09-11T17:25:25.117325+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-test.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-test.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-test.stderr.log) |
+| 平台 bash scripts/check-governance.sh | 2026-09-11T17:25:25.358490+00:00 | 2026-09-11T17:25:32.833050+00:00 | 0 | [JSON](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-governance.json) / [stdout](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-governance.stdout.log) / [stderr](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/platform-governance.stderr.log) |
+
+平台六项总包装：UTC `2026-09-11T17:24:07.908192+00:00` → `2026-09-11T17:25:33.063626+00:00`，**exit 0**，恰好六项且全部 exit 0；[suite.json](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/suite.json)，独立 detached [exitcode.txt](G:/xingmang/logs/full-audit-exact-head-20260912/platform-r2/detached/audit-fb285374-platform-r2-20260911T172407Z-7ca0/exitcode.txt)。
+开票 verify 原始退出码与 recorder 均为 0；独立 detached [exitcode.txt](G:/xingmang/logs/full-audit-exact-head-20260912/detached/audit-fb285374-invoice-20260911T170740Z-9610/exitcode.txt) 为 0。完整日志包含 PG15/PG18 隔离集成验证、四棵上游钉版核对和 `All local verification gates passed.`。
+
+环境失败首轮亦完整保留：平台 UTC `2026-09-11T17:22:14.358601+00:00` → `2026-09-11T17:23:30.419271+00:00`，总 exit 1，race/vet 因 Windows 裸 go.exe 解析到 Go 1.25.7 而被 go.mod 的 >=1.27.0 要求拒绝，其余四项 exit 0；[首轮 suite.json](G:/xingmang/logs/full-audit-exact-head-20260912/platform/suite.json)。仅在仓库外 recorder 固定既有 Go 1.27.0 绝对路径与父进程 PATH，随后重新执行了全部六项，未改仓库代码、依赖或全局配置。
+
+证据复核：七道通过门禁的前后 HEAD/分支/clean 状态均一致，首轮与通过轮共 26 份 stdout/stderr 的 SHA256 全部与 receipt 一致；写本节前全部 25 个本地分支引用未变。[复核记录](G:/xingmang/logs/full-audit-exact-head-20260912/EVIDENCE-VERIFIED.json)。
+
+本次交付提交只追加本交接文档。门禁绑定上述代码 HEAD；后续文档提交不冒称已在新提交号上重跑。未推送、未部署、未操作生产。基础镜像 CVE 不作为本次阻塞，亦未新增相关修复或验收项。
