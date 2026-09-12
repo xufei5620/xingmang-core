@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError,
-                       atomic_json, digest, inherited_preflight_pass, plain_path, read_public_json, require, utc)
+                       atomic_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, require, utc)
 
 
 SUFFIXES = {"database": ".postgres.dump.age", "documents": ".documents.tar.age",
@@ -163,7 +163,7 @@ def cleanup_temporary_identities(driver, value):
 def rehearsal_driver(driver):
     value = copy.deepcopy(driver.config["rehearsal"])
     keys = {"owner_id", "projects", "jobs", "ready_url", "smoke_config", "volumes", "tools_image", "databases", "verification_jobs", "shred_binary", "temporary_identity_paths", "archive_tmpfs_bytes"}
-    require(keys <= set(value) <= keys | {"readonly_input_volumes", "identity_copy_binary"}, "rehearsal contract keys are incomplete")
+    require(keys <= set(value) <= keys | {"readonly_input_volumes", "identity_copy_binary", "host_preflight"}, "rehearsal contract keys are incomplete")
     require(re.fullmatch(r"[a-f0-9]{32}", value["owner_id"]), "rehearsal owner must be a unique UUID without hyphens")
     require(IMAGE_ID.fullmatch(value["tools_image"]), "restore tools require an immutable image")
     required_volumes = {"platform_database", "invoice_database", "documents", "source_state", "invoice_metadata", "platform_metadata"}
@@ -171,10 +171,16 @@ def rehearsal_driver(driver):
     require(type(value["archive_tmpfs_bytes"]) is int and 134217728 <= value["archive_tmpfs_bytes"] <= 34359738368, "archive tmpfs must be explicitly bounded between 128 MiB and 32 GiB")
     volume_names = list(value["volumes"].values())
     require(len(volume_names) == len(set(volume_names)) and all(NAME.fullmatch(v) and v.startswith("xm-rehearsal-") for v in volume_names), "frozen-copy volume names must be unique and rehearsal-prefixed")
-    require({p["kind"] for p in value["projects"]} == {"unified", "sources"} and all(p["name"].startswith("xm-rehearsal-") for p in value["projects"]), "rehearsal projects must be independently named")
+    require(len(value["projects"]) == 2 and {p["kind"] for p in value["projects"]} == {"unified", "sources"} and all(p["name"].startswith("xm-rehearsal-") for p in value["projects"]), "rehearsal projects must be independently named")
+    require(not {p["name"] for p in value["projects"]}.intersection(p["name"] for p in driver.config["previous"]["projects"]), "frozen projects cannot reuse an original online project name")
     config = copy.deepcopy(driver.config)
     config["candidate"].update(projects=value["projects"], jobs=value["jobs"], ready_url=value["ready_url"], databases=value["databases"])
+    candidate_job_plan(config)
+    verification = job_plan(config, value["verification_jobs"], "candidate")
+    require([service for _, service in verification] == ["verify-invoice-restore"], "the existing invoice document decrypt verification job is mandatory")
     config["smoke_config"] = value["smoke_config"]
+    if "host_preflight" in value:
+        config["host_preflight"] = copy.deepcopy(value["host_preflight"])
     configure_temporary_identities(config, value, driver.state)
     trial = DockerDriver(config, record_root=driver.output)
     trial.verify_local_engine()
@@ -442,6 +448,52 @@ def verify_frozen_source_state(driver):
             ["run", "--rm", "--no-deps", "--pull", "never", "--entrypoint", "/source-agent-prod", service, "check-state"])
         require(response.returncode == 0, "native restored source state verification failed")
         result.append({"role": row["role"], "exit_code": response.returncode})
+    return result
+
+
+def preview_candidate(driver):
+    """Run a fresh D on isolated copies before E stops any original writer.
+
+    This is an actual execution, never acceptance of an earlier D receipt.
+    The existing frozen-mount, no-egress and owned-resource guards still apply.
+    No ingress switch or production data volume is used by the preview.
+    """
+    from smoke import validate_config as validate_smoke, loopback_target
+    import ipaddress
+    import urllib.parse
+    config = copy.deepcopy(driver.config)
+    value = config["rehearsal"]
+    require(isinstance(value.get("host_preflight"), dict), "preview requires its independently reviewed host/network/port configuration")
+    config["host_preflight"] = copy.deepcopy(value["host_preflight"])
+    live_names = {p["name"] for side in ("previous", "candidate") for p in config[side]["projects"]}
+    require(not live_names.intersection(p["name"] for p in value["projects"]),
+            "candidate preview projects must differ from both live topologies")
+    smoke_config = read_public_json(value["smoke_config"])
+    validate_smoke(smoke_config)
+    preview_mode = "local-synthetic" if config["mode"] == "local-synthetic" else "server-rehearsal"
+    require(smoke_config["mode"] == preview_mode, "preview smoke must declare the isolated rehearsal mode")
+    for role, url in smoke_config["origins"].items():
+        if role in smoke_config.get("connect_to", {}):
+            loopback_target(smoke_config["connect_to"][role])
+        else:
+            host = urllib.parse.urlsplit(url).hostname
+            try:
+                local = host == "localhost" or ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                local = False
+            require(local, "preview must pin the configured origin to a loopback TLS listener")
+    root = driver.output / "candidate-precheck"
+    require(not root.exists(), "candidate preview evidence directory already exists")
+    temporary_identity_map(value, driver.state)  # Validate original paths before deriving new ones.
+    config["state_root"] = str(root / "state")
+    config["mode"] = preview_mode
+    if value["temporary_identity_paths"]:
+        value["temporary_identity_paths"] = [str(Path(config["state_root"]) / "tmpfs" / value["owner_id"] / (kind + ".age-identity")) for kind in BACKUP_ANCHORS]
+    preview = DockerDriver(config, record_root=root)
+    result = rehearse(preview)
+    require(result.get("status") == "PASS" and result.get("exit_code") == 0 and result.get("cleanup_complete") is True and
+            result.get("source_head") == config["candidate"]["head"] and result.get("manifest_sha256") == config["candidate"]["manifest_sha256"],
+            "candidate preview did not execute and clean up this exact artifact")
     return result
 
 

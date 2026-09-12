@@ -175,6 +175,26 @@ def require_snapshot_files(snapshot):
             require(digest(source["path"]) == source["sha256"], "old original Compose bytes changed")
 
 
+def job_plan(config, descriptors, side, kind=None):
+    require(side in ("candidate", "previous"), "invalid lifecycle job side")
+    require(isinstance(descriptors, list) and descriptors, "ordered permission/migration jobs are required")
+    selected = []
+    for row in descriptors:
+        require(isinstance(row, dict) and set(row) == {"project", "service"} and isinstance(row["service"], str) and NAME.fullmatch(row["service"]), "invalid lifecycle job")
+        matches = [p for p in config[side]["projects"] if p["name"] == row["project"] and (kind is None or p["kind"] == kind)]
+        require(len(matches) == 1, "lifecycle job is outside its permitted deployment side or project kind")
+        selected.append((matches[0], row["service"]))
+    return selected
+
+
+def candidate_job_plan(config):
+    rows = config["candidate"]["jobs"]
+    plan = job_plan(config, rows, "candidate", "unified")
+    require([service for _, service in plan] == ["migrate", "invoice-migrate", "invoice-permissions"],
+            "lifecycle ordering must be platform migrate, invoice migrate, permissions")
+    return plan
+
+
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +209,8 @@ def atomic_json(path, value):
 
 def rollback(driver, snapshot, *, original_failure=False, dry_run=False):
     if dry_run:
-        return {"status": "DRY_RUN", "executed": False, "operation": "rollback"}
+        return {"status": "DRY_RUN", "executed": False, "operation": "rollback",
+                "steps": ["stop_new", "restore_permissions", "start_old", "check_old", "restore_nginx"]}
     result = {"status": "ROLLING_BACK", "start_utc": utc(), "snapshot": snapshot}
     driver.record(result)
     try:
@@ -211,12 +232,13 @@ def rollback(driver, snapshot, *, original_failure=False, dry_run=False):
 def cutover(driver, *, dry_run=False):
     if dry_run:
         return {"status": "DRY_RUN", "executed": False, "operation": "cutover",
-                "steps": ["preflight", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "smoke"],
-                "on_failure": "stop_new, restore_permissions, start_old, check_old; return nonzero"}
+                "steps": ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "smoke"],
+                "on_failure": "stop_new, restore_permissions, start_old, check_old, restore_nginx; return nonzero"}
     result = {"status": "PREFLIGHT", "start_utc": utc()}
     frozen = False
     try:
         driver.preflight()
+        driver.precheck_new()
         snapshot = driver.snapshot()
         result.update(status="PREPARED", snapshot=snapshot)
         # The recovery identity is durable before the first stop is attempted.
@@ -550,16 +572,16 @@ class DockerDriver:
         self.compose(project, "start-new-databases", ["up", "-d", "--wait", "--wait-timeout", "120", "--no-deps", "--pull", "never", *services])
 
     def jobs(self, descriptors, prefix):
-        require(isinstance(descriptors, list) and descriptors, "ordered permission/migration jobs are required")
-        for row in descriptors:
-            require(set(row) == {"project", "service"} and NAME.fullmatch(row["service"]), "invalid lifecycle job")
-            project = next((p for p in self.projects("candidate") + self.projects("previous") if p["name"] == row["project"]), None)
-            require(project is not None, "lifecycle job project is unknown")
-            self.compose(project, prefix + "-" + row["service"], ["run", "--rm", "--no-deps", "--pull", "never", row["service"]])
+        policies = {"prerequisite": ("candidate", "unified"), "verify-frozen-snapshot": ("candidate", None), "restore-permissions": ("previous", None)}
+        require(prefix in policies, "unknown lifecycle job purpose")
+        side, kind = policies[prefix]
+        # Resolve the entire list before dispatch, including its final entry.
+        for project, service in job_plan(self.config, descriptors, side, kind):
+            self.compose(project, prefix + "-" + service, ["run", "--rm", "--no-deps", "--pull", "never", service])
 
     def migrate_and_permissions(self):
         rows = self.config["candidate"]["jobs"]
-        require([r["service"] for r in rows] == ["migrate", "invoice-migrate", "invoice-permissions"], "lifecycle ordering must be platform migrate, invoice migrate, permissions")
+        candidate_job_plan(self.config)
         self.jobs(rows, "prerequisite")
         record_path = self.state / "deployment-record.json"
         if record_path.is_file():
@@ -569,9 +591,14 @@ class DockerDriver:
                 require(self.platform_permissions_snapshot("candidate") == record["snapshot"]["platform_permissions"], "platform existing permissions changed during cutover")
 
     def start_new(self):
+        # A restored API can only become strictly ready after fresh source
+        # heartbeats arrive. Start both projects before waiting on any latch.
         for kind in ("unified", "sources"):
             project = next(p for p in self.projects("candidate") if p["kind"] == kind)
-            self.compose(project, "start-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-deps", "--pull", "never", *project["services"]])
+            self.compose(project, "start-new-" + kind, ["up", "-d", "--no-deps", "--pull", "never", *project["services"]])
+        for kind in ("unified", "sources"):
+            project = next(p for p in self.projects("candidate") if p["kind"] == kind)
+            self.compose(project, "wait-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-recreate", "--no-deps", "--pull", "never", *project["services"]])
 
     def check_new(self):
         self.inventory("candidate")
@@ -600,12 +627,24 @@ class DockerDriver:
                     raise OperatorError("local readiness did not recover") from None
                 time.sleep(2)
 
+    def precheck_new(self):
+        from restore import preview_candidate
+        return preview_candidate(self)
+
     def smoke(self):
+        from smoke import REQUIRED, validate_config as validate_smoke
         script = Path(__file__).with_name("smoke.py")
         require(script.is_file(), "the actual HTTP smoke implementation is missing")
+        config = read_public_json(self.config["smoke_config"])
+        validate_smoke(config)
+        require(config["mode"] == self.config["mode"], "smoke mode differs from the actual operation")
         self.command("http-smoke", [sys.executable, str(script), "--config", self.config["smoke_config"], "--output", str(self.output / "smoke.json")])
         result = read_public_json(self.output / "smoke.json")
-        required_steps = ["readiness.before", "sub.login", "new.login", "source.isolation", "staff.totp", "staff.page", "legacy.rejected", "sub.submit", "staff.approve-upload-download", "readiness.after"]
+        required_steps = list(REQUIRED)
+        expected_digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        require(result.get("mode") == self.config["mode"] and result.get("origins") == config["origins"] and
+                result.get("configuration_sha256") == expected_digest and result.get("financial_writes_permitted") is False,
+                "smoke evidence does not match the read-only configured operation")
         require(result.get("status") == "PASS" and result.get("exit_code") == 0 and result.get("evidence_kind") == "actual-http-smoke" and
                 [s.get("name") for s in result.get("steps", [])] == required_steps and
                 all(s.get("status") == "PASS" and s.get("exit_code") == 0 for s in result["steps"]), "actual HTTP smoke did not pass every required step")
@@ -617,6 +656,7 @@ class DockerDriver:
         self.assert_stopped("candidate")
 
     def restore_permissions(self):
+        job_plan(self.config, self.config["previous"]["permission_jobs"], "previous")
         # Identical ledgers include 0032 unchanged. Do not remove ledger rows
         # merely to coax an older binary into starting.
         require(self.config["previous"]["migration_digest"] == self.config["candidate"]["migration_digest"], "rollback ledger is incompatible")
@@ -667,6 +707,8 @@ def main():
             result = {"status": "DRY_RUN", "executed": False, "operation": args.operation, "source_head": config["candidate"]["head"],
                       "previous_invoice_containers": 18, "candidate_projects": [p["name"] for p in config["candidate"]["projects"]],
                       "original_projects": [p["name"] for p in config["previous"]["projects"]]}
+            if args.operation == "cutover": result.update(cutover(None, dry_run=True))
+            elif args.operation == "rollback": result.update(rollback(None, {}, dry_run=True))
             print(json.dumps(result))
             return 0
         state = plain_path(config["state_root"], exists=False, directory=True)

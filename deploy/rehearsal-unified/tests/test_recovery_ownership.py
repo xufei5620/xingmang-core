@@ -33,7 +33,7 @@ class RecoveryOwnershipTests(unittest.TestCase):
             snap={"project_files":[{"env_file":str(file),"env_sha256":"0"*64,"compose":[]}],"containers":[],"ledger_hashes":{},"platform_permissions":[]}
             (path/"deployment-record.json").write_text(json.dumps({"snapshot":snap}))
             driver=object.__new__(lifecycle.DockerDriver);driver.state=path
-            driver.config={"candidate":{"migration_digest":"same"},"previous":{"migration_digest":"same","permission_jobs":[]}}
+            driver.config={"candidate":{"migration_digest":"same"},"previous":{"migration_digest":"same","permission_jobs":[{"project":"old-invoice","service":"permissions"}],"projects":[{"name":"old-invoice","kind":"invoice"}]}}
             driver.verify_original_plan=lambda _: None
             driver.projects=lambda _: [{"kind":k,"services":{"postgres":{"role":r}}} for k,r in (("platform","platform-postgres"),("invoice","invoice-postgres"),("idp","keycloak-postgres"))]
             writes=[];driver.compose=lambda *args: writes.append(args);driver.jobs=lambda *args: None

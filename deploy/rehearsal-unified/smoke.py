@@ -1,21 +1,25 @@
-"""06 D HTTP smoke. Uses restored profiles and baseline wallet eligibility.
+"""Read-only D/E HTTP smoke for explicitly configured HTTPS origins.
 
-No database writes, shell commands, identity fabrication, TLS bypass, or remote
-origins. Credentials are consumed only from named restricted files at runtime.
+Only authentication sessions are created and then revoked. No financial write,
+shell command, identity fabrication or TLS bypass is permitted.
+Credentials are consumed only from named restricted files at runtime.
 Unit simulations do not qualify a deployment; only this CLI's real HTTP run does.
 """
 import argparse
 import base64
+import copy
 import datetime as dt
 import hashlib
 import hmac
 import http.cookiejar
+import http.client
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import ssl
+import socket
 import stat
 import struct
 import time
@@ -27,8 +31,8 @@ import uuid
 
 SCHEMA = "xingmang.unified.smoke/v1"
 REQUIRED = ("readiness.before", "sub.login", "new.login", "source.isolation",
-            "staff.totp", "staff.page", "legacy.rejected", "sub.submit",
-            "staff.approve-upload-download", "readiness.after")
+            "staff.totp", "staff.page", "legacy.rejected", "requests.read",
+            "readiness.after", "sessions.revoked")
 OLD_ROUTES = (
     ("GET", "/invoice-api/v1/auth/login"),
     ("GET", "/invoice-api/v1/auth/callback"),
@@ -37,6 +41,9 @@ OLD_ROUTES = (
     ("POST", "/invoice-api/v1/auth/console-assertion"),
     ("POST", "/api/v1/auth/console-assertion"),
 )
+AUTH_WRITES = frozenset(("POST", path) for path in (
+    "/invoice-api/v1/auth/platform-login", "/invoice-api/v1/auth/logout",
+    "/api/v1/auth/login", "/api/v1/auth/login/totp", "/api/v1/auth/logout"))
 
 
 class SmokeFailure(Exception):
@@ -90,17 +97,6 @@ def check_profile(value, principal_id, email):
     require(value.get("email") == email, "PROFILE_RECEIVER_MISMATCH")
 
 
-def check_request(value, source_id, amount, lot_id, state, prior_version=0):
-    require(isinstance(value, dict) and is_uuid(value.get("id")), "REQUEST_ID_INVALID")
-    require(value.get("source_instance_id") == source_id and value.get("source_type") == "sub2api", "REQUEST_SOURCE_CHANGED")
-    require(type(value.get("amount_minor")) is int and value["amount_minor"] == amount, "REQUEST_AMOUNT_CHANGED")
-    require(value.get("status") == state, "REQUEST_STATE_WRONG")
-    require(positive(value.get("version")) and value["version"] > prior_version, "REQUEST_VERSION_STALE")
-    items = value.get("allocations")
-    require(isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict), "REQUEST_ALLOCATION_CHANGED")
-    require(items[0].get("funding_lot_id") == lot_id and type(items[0].get("amount_minor")) is int and items[0]["amount_minor"] == amount, "REQUEST_ALLOCATION_CHANGED")
-
-
 def check_staff(value):
     require(isinstance(value, dict) and value.get("authenticated") is True, "STAFF_NOT_AUTHENTICATED")
     require(value.get("admin_step_up_required") is False, "STAFF_MFA_NOT_FRESH")
@@ -108,11 +104,6 @@ def check_staff(value):
     require(isinstance(user, dict) and user.get("role") == "admin" and is_uuid(user.get("id")), "STAFF_ROLE_INVALID")
     token = value.get("csrf_token")
     require(isinstance(token, str) and 43 <= len(token) <= 128 and re.fullmatch(r"[A-Za-z0-9_-]+", token) is not None, "STAFF_CSRF_INVALID")
-
-
-def check_download(body, expected):
-    require(isinstance(body, bytes) and body.startswith(b"%PDF-"), "DOWNLOAD_NOT_PDF")
-    require(hmac.compare_digest(hashlib.sha256(body).digest(), hashlib.sha256(expected).digest()), "DOWNLOAD_HASH_MISMATCH")
 
 
 def utc():
@@ -168,25 +159,45 @@ def credential(raw):
 def origin(raw):
     try:
         parsed = urllib.parse.urlsplit(raw)
-        if not isinstance(raw, str) or parsed.scheme != "https" or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password or parsed.port is None:
+        if not isinstance(raw, str) or parsed.scheme != "https" or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
             raise ValueError()
         host = parsed.hostname
-        if host != "localhost" and not ipaddress.ip_address(host).is_loopback:
+        if not host or (parsed.port is not None and not 1 <= parsed.port <= 65535):
             raise ValueError()
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            if host != "localhost" and ("." not in host or any(re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label) is None for label in host.split("."))):
+                raise ValueError()
         if any(c in raw for c in "\\\r\n\t "):
             raise ValueError()
         return raw
     except (TypeError, ValueError, AttributeError):
-        raise InputFailure("HTTPS_LOOPBACK_ORIGIN_REQUIRED") from None
+        raise InputFailure("EXPLICIT_HTTPS_ORIGIN_REQUIRED") from None
+
+
+def loopback_target(value):
+    try:
+        if set(value) != {"address", "port"} or not ipaddress.ip_address(value["address"]).is_loopback or type(value["port"]) is not int or not 1 <= value["port"] <= 65535:
+            raise ValueError()
+        return value["address"], value["port"]
+    except (KeyError, TypeError, ValueError):
+        raise InputFailure("LOOPBACK_TRANSPORT_REQUIRED") from None
 
 
 def validate_config(config):
     try:
-        if config["schema"] != SCHEMA or config["mode"] not in ("local-synthetic", "server-rehearsal"):
+        if config["schema"] != SCHEMA or config["mode"] not in ("local-synthetic", "server-rehearsal", "production"):
             raise InputFailure("CONFIG_SCHEMA_MODE_INVALID")
         for role in ("admin", "user"):
             origin(config["origins"][role])
-        checked_file(config["ca_file"])
+        if config.get("ca_file") is not None:
+            checked_file(config["ca_file"])
+        if "connect_to" in config:
+            if set(config["connect_to"]) != {"admin", "user"}:
+                raise InputFailure("BOTH_TRANSPORT_TARGETS_REQUIRED")
+            for value in config["connect_to"].values():
+                loopback_target(value)
         creds = config["credentials"]
         for role in ("staff", "sub2api", "newapi"):
             item = creds[role]
@@ -201,8 +212,6 @@ def validate_config(config):
         if any(not is_uuid(value) for value in ids) or ids[0] == ids[1]:
             raise InputFailure("DISTINCT_SOURCE_IDS_REQUIRED")
         expected = config["expected"]
-        if not positive(expected["request_amount_minor"]) or not positive(expected["minimum_available_minor"]) or expected["minimum_available_minor"] < expected["request_amount_minor"]:
-            raise InputFailure("AMOUNT_CONFIG_INVALID")
         if not isinstance(expected.get("required_staff_role", "admin"), str) or not expected.get("required_staff_role", "admin"):
             raise InputFailure("STAFF_ROLE_CONFIG_INVALID")
     except (KeyError, TypeError):
@@ -214,18 +223,67 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         raise SmokeFailure("HTTP_REDIRECT_REJECTED")
 
 
+class LoopbackHTTPSConnection(http.client.HTTPSConnection):
+    """Keep configured Host, Origin, TLS SNI and verification; pin only the socket."""
+    def __init__(self, host, *, target, **kwargs):
+        self.target = target
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        require(self._tunnel_host is None, "HTTP_TUNNEL_FORBIDDEN")
+        self.sock = socket.create_connection(self.target, self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class LoopbackHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, context, target):
+        self.target = target
+        super().__init__(context=context)
+
+    def https_open(self, request):
+        def connection(host, **kwargs):
+            return LoopbackHTTPSConnection(host, target=self.target, **kwargs)
+        return self.do_open(connection, request, context=self._context)
+
+
 class Client:
-    def __init__(self, base, ca_file, records):
+    def __init__(self, base, ca_file, records, connect_to=None):
         self.base = origin(base)
         self.records = records
         self.csrf = ""
-        context = ssl.create_default_context(cafile=str(checked_file(ca_file)))
+        context = ssl.create_default_context(cafile=str(checked_file(ca_file)) if ca_file is not None else None)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
+        handler = LoopbackHTTPSHandler(context, loopback_target(connect_to)) if connect_to is not None else urllib.request.HTTPSHandler(context=context)
+        self.cookies = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), urllib.request.HTTPSHandler(context=context))
+            urllib.request.HTTPCookieProcessor(self.cookies), handler)
 
-    def raw(self, method, path, payload=None, expected=(200,), content_type="application/json"):
+    def revoke(self, kind):
+        prefix = "/api/v1/auth" if kind == "staff" else "/invoice-api/v1/auth"
+        previous = [copy.copy(cookie) for cookie in self.cookies]
+        try:
+            body, media, status = self.raw("POST", prefix + "/logout", b"{}", expected=(200,) if kind == "staff" else (200, 401), with_status=True)
+            require(media == "application/json", "LOGOUT_VERDICT_MISSING")
+            verdict = json_object(body)
+            if status == 200:
+                require(verdict.get("ok") is True and "error" not in verdict, "LOGOUT_VERDICT_MISSING")
+            else:
+                require(kind == "user" and isinstance(verdict.get("error"), dict) and verdict["error"].get("code") == "AUTH_REQUIRED", "LOGOUT_VERDICT_MISSING")
+            # Replay the original cookie, so clearing it in the logout response
+            # cannot masquerade as actual server-side revocation.
+            self.cookies.clear()
+            for cookie in previous:
+                self.cookies.set_cookie(cookie)
+            path = "/invoice-api/v1/auth/staff-session" if kind == "staff" else prefix + "/session"
+            body, media = self.raw("GET", path, expected=(200,))
+            verdict = json_object(body)
+            require(media == "application/json" and verdict.get("authenticated") is False and "error" not in verdict, "SESSION_STILL_AUTHENTICATED")
+        finally:
+            self.cookies.clear()
+
+    def raw(self, method, path, payload=None, expected=(200,), content_type="application/json", *, with_status=False):
         require(path.startswith("/") and not path.startswith("//") and not urllib.parse.urlsplit(path).netloc and "\\" not in path, "HTTP_PATH_REJECTED")
+        require(method in ("GET", "HEAD") or (method, path) in AUTH_WRITES or ((method, path) in OLD_ROUTES and payload in (None, b"{}")), "SMOKE_WRITE_FORBIDDEN")
         headers = {"Accept": "application/json, application/pdf, text/html", "User-Agent": "xingmang-rehearsal-smoke/1", "Origin": self.base, "Sec-Fetch-Site": "same-origin"}
         if method not in ("GET", "HEAD"):
             headers["Content-Type"] = content_type
@@ -246,7 +304,7 @@ class Client:
                 media = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             require(len(body) <= 12 << 20, "HTTP_BODY_TOO_LARGE")
             require(status in expected and not 300 <= status < 400, "HTTP_STATUS_UNEXPECTED")
-            return body, media
+            return (body, media, status) if with_status else (body, media)
         except (OSError, urllib.error.URLError, TimeoutError):
             raise SmokeFailure("HTTP_TRANSPORT_FAILED") from None
         finally:
@@ -274,32 +332,6 @@ def totp(secret, at=None):
         return f"{number % 1000000:06d}"
     except (ValueError, TypeError):
         raise InputFailure("TOTP_FILE_FORMAT_INVALID") from None
-
-
-def synthetic_pdf():
-    objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"]
-    text = b"BT /F1 18 Tf 72 720 Td (Synthetic rehearsal invoice) Tj ET\n"
-    objects += [b"<< /Length " + str(len(text)).encode() + b" >>\nstream\n" + text + b"endstream", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
-    body = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = []
-    for index, obj in enumerate(objects, 1):
-        offsets.append(len(body))
-        body.extend(f"{index} 0 obj\n".encode() + obj + b"\nendobj\n")
-    xref = len(body)
-    body.extend(b"xref\n0 6\n0000000000 65535 f \n")
-    for offset in offsets:
-        body.extend(f"{offset:010d} 00000 n \n".encode())
-    body.extend(f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
-    return bytes(body)
-
-
-def multipart(fields, pdf):
-    boundary = "rehearsal-" + uuid.uuid4().hex
-    chunks = []
-    for name, value in fields.items():
-        chunks.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode())
-    chunks += [f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="synthetic.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode(), pdf, f"\r\n--{boundary}--\r\n".encode()]
-    return b"".join(chunks), "multipart/form-data; boundary=" + boundary
 
 
 def login_user(client, item, kind):
@@ -335,16 +367,22 @@ def run(config):
             return value
         finally:
             record["utc_end"] = utc()
+    sessions = []
     try:
         validate_config(config)
         result["mode"] = config["mode"]
         creds, expected = config["credentials"], config["expected"]
-        admin = Client(config["origins"]["admin"], config["ca_file"], result["http"])
-        sub = Client(config["origins"]["user"], config["ca_file"], result["http"])
-        new = Client(config["origins"]["user"], config["ca_file"], result["http"])
+        def client(role):
+            return Client(config["origins"][role], config.get("ca_file"), result["http"], config.get("connect_to", {}).get(role))
+        admin, sub, new = client("admin"), client("user"), client("user")
+        result.update(origins=config["origins"], financial_writes_permitted=False,
+                      configuration_sha256=hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        def with_session(client, kind, action):
+            sessions.append((client, kind))
+            return action()
         step("readiness.before", lambda: check_ready(admin.call("GET", "/readyz")))
-        sub_principal = step("sub.login", lambda: login_user(sub, creds["sub2api"], "sub2api"))
-        new_principal = step("new.login", lambda: login_user(new, creds["newapi"], "newapi"))
+        sub_principal = step("sub.login", lambda: with_session(sub, "user", lambda: login_user(sub, creds["sub2api"], "sub2api")))
+        new_principal = step("new.login", lambda: with_session(new, "user", lambda: login_user(new, creds["newapi"], "newapi")))
         def isolation():
             require(sub_principal != new_principal, "PRINCIPAL_ISOLATION_FAILED")
             pools = {}
@@ -358,11 +396,8 @@ def run(config):
             matching = [p for p in profiles if p.get("id") == creds["sub2api"]["existing_profile_id"]]
             require(len(matching) == 1, "EXISTING_PROFILE_MISSING")
             check_profile(matching[0], sub_principal, credential(creds["sub2api"]["expected_email_file"]))
-            choices = [p for p in pools["sub2api"] if p.get("eligibility_kind") == "wallet" and p.get("verification") == "verified" and p.get("refund_frozen") is False and p.get("eligibility_status") == "active" and positive(p.get("consumed_cash_minor")) and type(p.get("available_minor")) is int and p["consumed_cash_minor"] >= p["available_minor"] >= expected["minimum_available_minor"]]
-            require(bool(choices), "BASELINE_CONSUMED_WALLET_REQUIRED")
-            return sorted(choices, key=lambda p: p["id"])[0]["id"]
-        lot_id = step("source.isolation", isolation)
-        step("staff.totp", lambda: login_staff(admin, creds["staff"], expected.get("required_staff_role", "admin")))
+        step("source.isolation", isolation)
+        step("staff.totp", lambda: with_session(admin, "staff", lambda: login_staff(admin, creds["staff"], expected.get("required_staff_role", "admin"))))
         def page():
             body, media = admin.raw("GET", "/finance?sub=invoicing")
             require(media == "text/html" and b"<html" in body.lower(), "MANAGEMENT_SHELL_UNAVAILABLE")
@@ -373,50 +408,25 @@ def run(config):
             for method, path in OLD_ROUTES:
                 admin.denied(method, path, {} if method == "POST" else None, expected=(404, 405, 410))
         step("legacy.rejected", retired)
-        amount, source_id = expected["request_amount_minor"], creds["sub2api"]["source_id"]
-        def submit():
-            value = sub.call("POST", "/invoice-api/v1/user/invoice-requests", {"profile_id": creds["sub2api"]["existing_profile_id"], "source_instance_id": source_id, "idempotency_key": str(uuid.uuid4()), "allocations": [{"funding_lot_id": lot_id, "amount_minor": amount}]}, expected=(201,))
-            check_request(value, source_id, amount, lot_id, "pending_review")
-            new.denied("GET", "/invoice-api/v1/user/invoice-requests/" + value["id"], expected=(403, 404))
-            result["request_id"] = value["id"]
-            return value
-        submitted = step("sub.submit", submit)
-        def issue():
-            path = "/invoice-api/v1/admin/invoice-requests/" + submitted["id"]
-            sub.denied("POST", path + "/review", {"action": "approve", "version": submitted["version"]}, expected=(401, 403))
-            current = submitted
-            for suffix, state in (("/review", "approved"), ("/begin-manual-issue", "manual_issuing"), ("/confirm-manual-issue", "issued_awaiting_document")):
-                payload = {"version": current["version"]}
-                if suffix == "/review":
-                    payload.update(action="approve", note="Isolated rehearsal")
-                value = admin.call("POST", path + suffix, payload)
-                check_request(value, source_id, amount, lot_id, state, current["version"])
-                require(value["id"] == submitted["id"], "REQUEST_ID_CHANGED")
-                current = value
-            # Use the actual server transition time, preserving subsecond
-            # precision and avoiding host/server clock disagreement.
-            issued_at = current.get("updated_at")
-            require(isinstance(issued_at, str) and dt.datetime.fromisoformat(issued_at.replace("Z", "+00:00")).utcoffset() is not None, "SERVER_ISSUED_TIME_MISSING")
-            pdf = synthetic_pdf()
-            data, media = multipart({"version": str(current["version"]), "invoice_number": "REHEARSAL-" + uuid.uuid4().hex[:16], "issued_at": issued_at}, pdf)
-            body, response_media = admin.raw("POST", path + "/documents/upload", data, (201,), media)
-            require(response_media == "application/json", "UPLOAD_RESPONSE_INVALID")
-            uploaded = json_object(body)
-            check_request(uploaded.get("request"), source_id, amount, lot_id, "issued", current["version"])
-            require(uploaded["request"]["id"] == submitted["id"], "REQUEST_ID_CHANGED")
-            document = uploaded.get("document", {})
-            sha = hashlib.sha256(pdf).hexdigest()
-            require(is_uuid(document.get("id")) and document.get("request_id") == submitted["id"] and document.get("scan_status") == "clean" and document.get("sha256") == sha, "SCANNED_DOCUMENT_INVALID")
-            user_path = "/invoice-api/v1/user/invoice-requests/" + submitted["id"] + "/document"
-            for client, download_path in ((sub, user_path), (admin, path + "/document")):
-                downloaded, mime = client.raw("GET", download_path)
-                require(mime == "application/pdf", "DOWNLOAD_CONTENT_TYPE_INVALID")
-                check_download(downloaded, pdf)
-            new.denied("GET", user_path, expected=(403, 404))
-            result.update(amount_minor=amount, document_sha256=sha, document_id=document["id"])
-        step("staff.approve-upload-download", issue)
+        def requests_read():
+            seen = set()
+            for client, other, kind in ((sub, new, "sub2api"), (new, sub, "newapi")):
+                items = client.call("GET", "/invoice-api/v1/user/invoice-requests").get("items")
+                require(isinstance(items, list), "REQUEST_LIST_INVALID")
+                for item in items:
+                    require(isinstance(item, dict) and is_uuid(item.get("id")), "REQUEST_ID_INVALID")
+                    require(item.get("source_instance_id") == creds[kind]["source_id"] and item.get("source_type") == kind, "REQUEST_SOURCE_CHANGED")
+                    require(item["id"] not in seen, "REQUEST_ISOLATION_FAILED")
+                    seen.add(item["id"])
+                # The first existing record suffices for actual cross-user denial.
+                # An empty account is never funded or issued an invoice by smoke.
+                if items:
+                    other.denied("GET", "/invoice-api/v1/user/invoice-requests/" + items[0]["id"], expected=(403, 404))
+            result["existing_request_count"] = len(seen)
+            result["invoice_write_coverage"] = "not performed: production-safe read-only probes"
+        step("requests.read", requests_read)
         step("readiness.after", lambda: check_ready(admin.call("GET", "/readyz")))
-        require(tuple(item["name"] for item in result["steps"] if item["status"] == "PASS") == REQUIRED, "INCOMPLETE_SMOKE")
+        require(tuple(item["name"] for item in result["steps"] if item["status"] == "PASS") == REQUIRED[:-1], "INCOMPLETE_SMOKE")
         result.update(status="PASS", exit_code=0)
     except BaseException as exc:
         result.update(status="FAIL", exit_code=2 if isinstance(exc, InputFailure) else 1,
@@ -428,6 +438,21 @@ def run(config):
             exc.smoke_result = result
             raise
     finally:
+        if sessions:
+            def revoke_sessions():
+                failed = False
+                for client, kind in reversed(sessions):
+                    try:
+                        client.revoke(kind)
+                    except Exception:
+                        failed = True
+                require(not failed, "SESSION_CLEANUP_FAILED")
+            try:
+                step("sessions.revoked", revoke_sessions)
+            except Exception:
+                result.update(status="FAIL", exit_code=1, failure_code="SESSION_CLEANUP_FAILED")
+        if result["status"] == "PASS" and tuple(x["name"] for x in result["steps"] if x["status"] == "PASS") != REQUIRED:
+            result.update(status="FAIL", exit_code=1, failure_code="INCOMPLETE_SMOKE")
         result["utc_end"] = utc()
     return result
 

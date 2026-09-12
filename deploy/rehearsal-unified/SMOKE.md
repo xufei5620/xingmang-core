@@ -1,66 +1,48 @@
-# D HTTP smoke 候选交接
+# D/E 只读冒烟与切换前预检
 
-本文件记录本轮独立候选的接口与验证来源。旧分支、工作树源码/index、数据库、服务器、旧验收证据均未改动。本轮没有启动真实服务，不能标 D PASS。
+P0-2 修复后，D、E 和生产模式使用同一套只读冒烟。绝不创建申请、审核、开具或上传发票，也不为测试修改余额、抬头、邮箱证明。唯一写操作是登录、TOTP 完成与本次会话撤销；这些操作可能产生正常登录审计记录。
 
-## 文件
+## 配置
 
-- `smoke.py`：仅 Python 标准库，`run(config) -> dict`，以及 `--config <JSON路径> --output <报告路径>`。
-- `test_smoke.py`：合同负例、内存 HTTP 协议边界夹具及 CLI/中断收口测试；没有把它们写成实际业务验收。
-- 候选 SHA256：`50a24fa26a522ac9decc5a892560460f7ad727c7f624ff56d63b59fa88be6ef3`。
-- 测试 SHA256：`8b2c80537b28601c707cc8224b1f3911de62e697522fa1d35d6488736ad1103c`。
+schema=xingmang.unified.smoke/v1；mode=local-synthetic|server-rehearsal|production，必须与调用者实际模式一致。
 
-## 配置接口
+origins.admin 与 origins.user 填实际配置的 HTTPS origin，例如 https://console.example.com，不带路径、查询、凭据或通配符。允许默认 443。默认使用系统 CA；私有 CA 可用 ca_file 指定公开证书。禁止 TLS 跳过验证、自动重定向和环境 HTTP 代理。
 
-顶层：`schema="xingmang.unified.smoke/v1"`、`mode=local-synthetic|server-rehearsal`、`origins={admin,user}`、`ca_file`、`credentials`、`expected`。
+隔离预检可通过 connect_to 把两个 origin 的 TCP 连接限定到本机 TLS 监听器：
 
-`origins` 必须是带显式端口的 HTTPS loopback origin；服务器调用也经本机演练代理入口。CA 为公开证书文件。禁止远端 origin、自动 redirect、环境 HTTP 代理或 TLS 校验旁路。
+```json
+{"connect_to":{"admin":{"address":"127.0.0.1","port":18443},"user":{"address":"127.0.0.1","port":18444}}}
+```
 
-- `credentials.staff`：`username`、`password_file`、`totp_file`；TOTP 文件为该合成员工的 Base32 种子，只在客户端运行时读取，聊天/日志不输出。必须已经注册 TOTP、完成首改密，真实密码登录必须返回 TOTP challenge。
-- `credentials.sub2api`：`identifier`、`password_file`、`source_id`、`existing_profile_id`、`expected_email_file`。
-- `credentials.newapi`：`identifier`、`password_file`、`source_id`。本次 NEW 登录与隔离，不额外要求 NEW 提交或抬头。
-- `expected`：`minimum_available_minor`、`request_amount_minor`、可选 `required_staff_role`（默认 admin）。金额必须正整数，minimum 不能小于 request。
+只替换 TCP 目的地，URL、Host、Origin、TLS SNI 和证书域名验证仍采用配置的真实域名。监听器必须使用匹配域名的有效证书；不以 HTTP loopback 端口冒充 HTTPS，不修改公网 DNS 或生产 nginx。预检不得把请求送往公网 origin。
 
-所有文件路径必须为存在的绝对常规文件，不能为符号链接；POSIX 上凭据需 0600/0400 等 owner-only 权限。Windows ACL 由演练 engine 建立并核对。配置只传命名凭据路径，不嵌入密码/TOTP/收件邮箱正文。
+- credentials.staff：已注册 TOTP、已完成首改密的专用账户 username,password_file,totp_file。
+- credentials.sub2api：现有测试账户 identifier,password_file,source_id,existing_profile_id,expected_email_file。
+- credentials.newapi：另一个现有测试账户 identifier,password_file,source_id。
+- expected.required_staff_role：实际配置的管理员角色；默认 admin。原金额字段不再决定通过与否；脚本不要求正余额或创建充值。
 
-固定旧路由清单不能由配置削减。`expected.old_routes` 不决定验收内容。
+凭据仅通过绝对常规文件路径交给运行时消费，不在配置或证据中写入密码、TOTP、邮箱证明内容。两个来源必须有可区分的已有资金记录；SUB 抬头的 owner、已验证状态和接收邮箱必须匹配现有证明。
 
-## 真实执行内容与边界
+## 固定步骤与结果
 
-固定 `steps` 顺序（每项有 name/status/exit_code/utc_start/utc_end）：
+顺序为 readiness.before → sub.login → new.login → source.isolation → staff.totp → staff.page → legacy.rejected → requests.read → readiness.after → sessions.revoked。
 
-1. `readiness.before`
-2. `sub.login`
-3. `new.login`
-4. `source.isolation`
-5. `staff.totp`
-6. `staff.page`
-7. `legacy.rejected`
-8. `sub.submit`
-9. `staff.approve-upload-download`
-10. `readiness.after`
+来源隔离核对两套真实登录、资金列表及客户读取管理员接口被拒绝。管理端经过真实 password/TOTP，读取页面 shell 和管理员列表。旧登录路由固定检查，不能由配置删减。读取现有申请时核来源归属与跨用户拒绝；空申请列表保持为空。这里不宣称发票写流程或浏览器 DOM 已通过验收。
 
-每个 readyz 要求 modules.platform/invoice_sources/invoice_projection.ready 与 invoice_ready 精确为 true。SUB/NEW 使用独立 cookie jar、明确平台登录与各自来源 ID，资金列表必须非空且不串来源/ID，两个用户 principal 必须不同。只选基线已核验且已消费、未退款、active 的钱包资金，available 不得高于 consumed，不要求 funding v2/套餐 cap/分路摘要。
+登录一旦尝试，成功、失败和中断路径都执行会话清理。正常 logout 必须返回 JSON 200 且 `ok=true`；仅客户 logout 的 JSON 401 `AUTH_REQUIRED` 可表示会话此前已失效。随后重放登出前的 cookie，客户 `/invoice-api/v1/auth/session` 或员工 `/invoice-api/v1/auth/staff-session` 必须返回 JSON 200、`authenticated=false` 且无 error。403、普通错误、缺字段或非布尔值不证明撤销。最后清空内存 cookie；不能仅凭浏览器清 cookie 声称撤销成功。清理失败使整轮失败。
 
-SUB 抬头必须来自恢复副本已有 profile，API 返回 owner 与登录 principal 相同、email_verified=true、邮箱与命名文件一致。脚本不创建验证证明、不 SQL 插入、不调用 0038 challenge，也不声称新收件邮箱验证通过。合成备份的身份/抬头起源由 engine 单独记录；未满足即阻断。
+结果包含模式、origin、公开配置的规范化 SHA256、financial_writes_permitted=false、步骤/HTTP 的 UTC 和退出码。请求 body、cookie、凭据和原始异常文本不进入日志。引擎核对这些绑定及完整固定步骤。0 为全部通过，1 为探测/执行失败，2 为输入错误；中断保留 FAIL 证据。
 
-工作人员实际 password→TOTP challenge→TOTP completion→typed staff-session，不用 dev headers、bearer 或 mock 登录。随后核原生管理页 HTTP shell 和受保护管理列表；**此项不是浏览器 DOM/视觉验收**，报告内明确标注。SUB 真实提交→审核→开始开具→确认→真实扫描上传→用户与管理员下载 SHA 比对；NEW 越权读取该申请和 PDF 必须拒绝，用户管理权限也必须拒绝。附件 issued_at 采用确认响应的服务器 updated_at 并保留精度，避免擅改业务时间规则。
+## E 在停旧栈前的实际预检
 
-## 结果与失败
+顺序为 preflight → precheck_new → snapshot → stop_old → 原迁移/权限 → 新栈检查 → 切换/冒烟。precheck_new 重新执行一次 D 冻结副本恢复、原始迁移/11 闩检查和上述只读 HTTP 冒烟，不能复用旧 PASS 代替本次执行。
 
-顶层结果包含 schema/status/exit_code/utc_start/utc_end/mode/steps/http；成功另含 request_id/amount_minor/document_id/document_sha256。HTTP 记录仅 method/path/status/UTC，不记录 body/header、邮箱、账户名、凭据或原始异常文本。
+预检的项目名与新旧在线项目均不同；数据卷必须新建且受原有所有权检查；原卷不作为可写副本；网络保持原有隔离规则。证据、临时解密身份和清理记录位于本次 candidate-precheck 子目录。清理不完整或镜像/HEAD 不匹配即拒绝；此前旧栈保持运行，不切流量。预检容量、独立 loopback TLS 入口和已签名备份由负责人提前准备，不能在生产预检中临时扩大权限。
 
-0 仅全部步骤明确 PASS；1 实际边界/HTTP/执行失败；2 配置或必需文件输入错误。中断写 FAIL/1 后原样抛出；不能由已完成业务步骤推导最终 PASS。engine 必须同时校验 OS 退出码、status、10 项精确完整列表，且为每轮提供独立输出目录。
+数据库/权限完成后，先启动 unified 中的 API、ingest 及其余常驻服务，再启动 sources；两边都已发起启动后才等待原严格健康检查，最后仍核完整 inventory 和全部 readiness 闩。合法恢复资料的源心跳可能已过时，不能先等 API 的源流闩通过才启动负责刷新它的采集器。没有放宽健康规则，最终等待非零仍按原失败清理/回滚路径处理。
 
-## 本轮实测
+作业在执行前整组核对归属：三个 migrate/permissions 固定属于当次 candidate unified，冻结 verification_jobs 只能属于当次冻结 candidate；旧回滚权限作业只属于 previous。冻结项目不得重用旧在线项目名，错误的最后一条作业也会在第一条执行前拒绝。该校验先于冻结 driver/数据恢复，不以执行后的 ledger 相同代替隔离。
 
-| 项 | UTC 起止 | 退出码 | 说明 |
-|---|---|---:|---|
-| 01-contract-red | 2026-09-11 17:41:38.141354 → 17:41:38.239569 | 1 | 6 个测试、42 个实际断言失败，空校验器不能挡坏响应 |
-| 02-full-unit-green | 17:48:18.934765 → 17:48:19.158148 | 0 | 17 单元测试，协议边界模拟，不是真服务 |
-| 03-wallet-red | 17:49:50.242854 → 17:49:50.400193 | 1 | consumed 小于 available 的响应被原脚本误接受，新增负例真实报红 |
-| 04-mutations | 17:50:38.694785 → 17:50:41.495550 | 每项 1 | 14 个隔离副本有效行为变异全红，候选原字节未改 |
-| 05-restored-green | 17:51:11.073198 → 17:51:11.298818 | 0 | 17 测试、19 类关键流程故障注入通过 |
+单元/变异结果仅证明代码边界。最终 HEAD 的本地 D/E 原始证据及服务器待执行事项统一见 F 交接单。
 
-变异覆盖模块 verdict、来源隔离、抬头 owner/验证/邮箱、申请金额/版本、MFA、实际 TOTP challenge、下载 SHA、固定旧路由、钱包消费上限、真实 HTTP status、中断收口。原始 stdout/stderr 与 JSON 元数据均同目录；逐项变异见 `04-mutations.json` 和 `mutations/*/result.json`。
-
-API 路径/DTO 查自 d0adca1a 基线；同进程 staff-session/前缀按本轮约定；PDF/HTTP流程仅参考旧公开 integration-qualification 源码，没有复用旧 PASS。待新版镜像与合成恢复环境就绪，由 Locke 运行真实 HTTP，再据真实结果处理适配问题。
+E 配置中的 rehearsal.host_preflight 必须提供独立预检副本的完整主机/网络/端口/环境清单，不沿用在线候选的项目名和端口。该项仍经过原 preflight 的全部校验。

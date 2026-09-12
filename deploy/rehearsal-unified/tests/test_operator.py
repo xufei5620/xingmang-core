@@ -110,6 +110,7 @@ class FakeDriver:
             raise RuntimeError("synthetic operation failed")
 
     def preflight(self): self.step("preflight")
+    def precheck_new(self): self.step("precheck_new")
     def snapshot(self): self.step("snapshot"); return {"actual_invoice_containers": 18}
     def stop_old(self): self.step("stop_old")
     def start_new_databases(self): self.step("start_new_databases")
@@ -141,7 +142,7 @@ class StateMachineTests(unittest.TestCase):
         m = module(self); driver = FakeDriver()
         result = m.cutover(driver)
         self.assertEqual(result["status"], "COMMITTED")
-        self.assertEqual(driver.calls, ["preflight", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "smoke"])
+        self.assertEqual(driver.calls, ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "smoke"])
 
     def test_preflight_failure_never_stops_old_services(self):
         m = module(self); driver = FakeDriver("preflight")

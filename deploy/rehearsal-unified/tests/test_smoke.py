@@ -51,13 +51,6 @@ class ContractTests(unittest.TestCase):
             with self.subTest(delta=delta), self.assertRaises(smoke.SmokeFailure):
                 smoke.check_profile({**base, **delta}, USER, "synthetic@example.test")
 
-    def test_submitted_request_preserves_exact_amount_source_allocation_and_version(self):
-        base = {"id": REQUEST, "source_instance_id": SOURCE, "source_type": "sub2api", "amount_minor": 20000, "status": "pending_review", "version": 2, "allocations": [{"funding_lot_id": LOT, "amount_minor": 20000}]}
-        smoke.check_request(base, SOURCE, 20000, LOT, "pending_review", 1)
-        for delta in ({"id": "bad"}, {"source_instance_id": "other"}, {"source_type": "newapi"}, {"amount_minor": 19999}, {"version": 1}, {"version": True}, {"status": "issued"}, {"allocations": []}, {"allocations": [{"funding_lot_id": LOT, "amount_minor": 1}]}):
-            with self.subTest(delta=delta), self.assertRaises(smoke.SmokeFailure):
-                smoke.check_request({**base, **delta}, SOURCE, 20000, LOT, "pending_review", 1)
-
     def test_staff_requires_actual_admin_session_fresh_mfa_and_csrf(self):
         base = {"authenticated": True, "admin_step_up_required": False, "csrf_token": "x" * 43, "user": {"id": USER, "role": "admin"}}
         smoke.check_staff(base)
@@ -65,19 +58,12 @@ class ContractTests(unittest.TestCase):
             with self.subTest(delta=delta), self.assertRaises(smoke.SmokeFailure):
                 smoke.check_staff({**base, **delta})
 
-    def test_download_requires_exact_pdf_bytes(self):
-        pdf = b"%PDF-1.4\nsynthetic\n%%EOF\n"
-        smoke.check_download(pdf, pdf)
-        for bad in (b"", b"<html>login</html>", pdf + b"changed"):
-            with self.subTest(length=len(bad)), self.assertRaises(smoke.SmokeFailure):
-                smoke.check_download(bad, pdf)
-
     def test_totp_rfc_vector_not_recovery_code(self):
         self.assertEqual(smoke.totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59), "287082")
 
-    def test_origins_cannot_send_credentials_outside_loopback_or_over_http(self):
+    def test_origins_require_explicit_valid_https_without_redirect_components(self):
         self.assertEqual(smoke.origin("https://localhost:18443"), "https://localhost:18443")
-        for value in ("http://localhost:18443", "https://api.example:443", "https://localhost.example:443", "https://user:pass@localhost:443", "https://localhost:443/path", "https://127.0.0.1:443?x=1", "https://localhost:443/#fragment", "https://localhost", "https://localhost:443\n"):
+        for value in ("http://localhost:18443", "https://*.example:443", "https://user:pass@localhost:443", "https://localhost:443/path", "https://127.0.0.1:443?x=1", "https://localhost:443/#fragment", "https://localhost:443\n"):
             with self.subTest(value=value), self.assertRaises(smoke.InputFailure):
                 smoke.origin(value)
 
@@ -96,7 +82,7 @@ class ContractTests(unittest.TestCase):
         client = smoke.Client.__new__(smoke.Client)
         client.base, client.csrf, client.records, client.opener = "https://localhost:443", "x" * 43, [], Opener()
         with self.assertRaises(smoke.SmokeFailure):
-            client.denied("POST", "/invoice-api/v1/auth/console-assertion", {"password": "synthetic-private-value"}, (404,))
+            client.denied("POST", "/api/v1/auth/login", {"password": "synthetic-private-value"}, (404,))
         self.assertEqual(client.records[0]["status"], 200)
         self.assertNotIn("synthetic-private-value", json.dumps(client.records))
         headers = dict((key.lower(), value) for key, value in client.opener.request.header_items())
@@ -119,7 +105,7 @@ class ProtocolFixture:
         self.request = None
         self.ready_calls = 0
 
-    def factory(self, base, ca_file, records):
+    def factory(self, base, ca_file, records, connect_to=None):
         client = self.Client(self, ("admin", "sub", "new")[len(self.clients)])
         self.clients.append(client)
         return client
@@ -127,6 +113,11 @@ class ProtocolFixture:
     class Client:
         def __init__(self, fixture, role):
             self.fixture, self.role, self.csrf = fixture, role, ""
+
+        def revoke(self, kind):
+            prefix = "/api/v1/auth" if kind == "staff" else "/invoice-api/v1/auth"
+            self.fixture.calls.append((self.role, "POST", prefix + "/logout"))
+            smoke.require(self.fixture.fault != "logout_failed", "SESSION_STILL_AUTHENTICATED")
 
         def denied(self, method, path, payload=None, expected=(401, 403, 404)):
             self.fixture.calls.append((self.role, method, path))
@@ -185,17 +176,10 @@ class ProtocolFixture:
             if path == "/invoice-api/v1/admin/invoice-requests":
                 return {"items": []}
             if path == "/invoice-api/v1/user/invoice-requests":
-                f.request = {"id": REQUEST, "source_instance_id": SOURCE, "source_type": "sub2api", "amount_minor": 20000, "status": "pending_review", "version": 1, "allocations": [{"funding_lot_id": LOT, "amount_minor": 20000}], "updated_at": "2026-09-12T00:00:00.123456Z"}
-                if f.fault == "amount_shrunk":
-                    f.request["amount_minor"] = 19999
-                return copy.deepcopy(f.request)
-            suffix = path.rsplit("/", 1)[-1]
-            states = {"review": "approved", "begin-manual-issue": "manual_issuing", "confirm-manual-issue": "issued_awaiting_document"}
-            if suffix in states:
-                f.request["status"] = states[suffix]
-                if f.fault != "version_stale":
-                    f.request["version"] += 1
-                return copy.deepcopy(f.request)
+                if method == "GET":
+                    if self.role == "new":
+                        return {"items": []}
+                    return {"items": [{"id": REQUEST, "source_instance_id": SOURCE, "source_type": "sub2api"}]}
             raise AssertionError("unexpected protocol operation")
 
         def raw(self, method, path, payload=None, expected=(200,), content_type="application/json"):
@@ -203,17 +187,6 @@ class ProtocolFixture:
             f.calls.append((self.role, method, path))
             if path.startswith("/finance"):
                 return b"<html>local management shell</html>", "text/html"
-            if path.endswith("/documents/upload"):
-                f.request.update(status="issued", version=f.request["version"] + 1)
-                document = {"id": DOC, "request_id": REQUEST, "scan_status": "clean", "sha256": hashlib.sha256(smoke.synthetic_pdf()).hexdigest()}
-                if f.fault == "scan_failed":
-                    document["scan_status"] = "infected"
-                return json.dumps({"request": f.request, "document": document}).encode(), "application/json"
-            if path.endswith("/document"):
-                pdf = smoke.synthetic_pdf()
-                if f.fault == "download_changed":
-                    pdf += b"changed"
-                return pdf, "application/pdf"
             raise AssertionError("unexpected raw operation")
 
 
@@ -243,15 +216,15 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS", result.get("failure_code"))
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(tuple(x["name"] for x in result["steps"]), smoke.REQUIRED)
-        self.assertEqual(result["document_sha256"], hashlib.sha256(smoke.synthetic_pdf()).hexdigest())
-        for operation in (("admin", "POST", "/api/v1/auth/login/totp"), ("sub", "POST", "/invoice-api/v1/user/invoice-requests"), ("admin", "POST", "/invoice-api/v1/admin/invoice-requests/" + REQUEST + "/documents/upload")):
+        self.assertFalse(result["financial_writes_permitted"])
+        for operation in (("admin", "POST", "/api/v1/auth/login/totp"), ("sub", "GET", "/invoice-api/v1/user/invoice-requests"), ("admin", "POST", "/api/v1/auth/logout")):
             self.assertIn(operation, fixture.calls)
         serialized = json.dumps(result)
         for private in ("synthetic-test-password", "private-test-token", "synthetic@example.test", "GEZDGNBV"):
             self.assertNotIn(private, serialized)
 
     def test_each_critical_failed_boundary_prevents_pass(self):
-        for fault in ("projection_down", "source_login_pending", "same_principal", "source_crossed", "empty_new", "subscription_only", "unconsumed_wallet", "inflated_wallet_available", "unverified_profile", "totp_bypassed", "mfa_stale", "legacy_active", "cross_access", "customer_admin", "amount_shrunk", "version_stale", "scan_failed", "download_changed", "final_not_ready"):
+        for fault in ("projection_down", "source_login_pending", "same_principal", "source_crossed", "empty_new", "unverified_profile", "totp_bypassed", "mfa_stale", "legacy_active", "cross_access", "customer_admin", "final_not_ready", "logout_failed"):
             with self.subTest(fault=fault):
                 result, _ = self.execute(fault)
                 self.assertEqual(result["status"], "FAIL")
@@ -271,7 +244,8 @@ class ExecutionTests(unittest.TestCase):
             smoke.run(self.config)
         result = caught.exception.smoke_result
         self.assertEqual((result["status"], result["exit_code"]), ("FAIL", 1))
-        self.assertEqual(result["steps"][-1]["status"], "FAIL")
+        self.assertEqual(result["steps"][-2]["status"], "FAIL")
+        self.assertEqual(result["steps"][-1]["name"], "sessions.revoked")
 
     def test_cli_failure_output_overwrites_no_pass_and_contains_no_private_data(self):
         config_path = Path(self.temp.name) / "config.json"

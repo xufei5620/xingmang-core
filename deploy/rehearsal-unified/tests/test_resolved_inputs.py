@@ -22,8 +22,9 @@ class ResolvedInputTests(unittest.TestCase):
         driver.projects = lambda side: candidate if side == "candidate" else previous
         calls = []; driver.compose = lambda p,n,args: calls.append(args)
         driver.start_new(); driver.start_old()
-        self.assertEqual(len(calls), 6)
-        for call in calls: self.assertIn("--wait", call)
+        self.assertEqual(len(calls), 8)
+        for call in calls[:2]: self.assertNotIn("--wait", call)
+        for call in calls[2:]: self.assertIn("--wait", call)
 
     def test_in_place_cutover_binds_data_sources_not_only_equal_ledgers(self):
         self.assertTrue(hasattr(lifecycle, "require_original_data"))
