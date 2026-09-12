@@ -30,7 +30,7 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 2. 依次停止旧 source agents、旧 invoice、旧 platform、旧 idp，确认各项目没有仍在运行的容器并确认接管端口空闲。保留旧容器/卷/文件。
 3. 启动新两个数据库并等待健康；按顺序执行平台 migrate（业务 + River）、invoice-migrate、invoice-permissions。平台沿用原角色/授权，目录只读快照必须前后一致；没有把 migrate 叫作权限重放，也不在本次实施 DBR1。
 4. 比较两库实际迁移 ledger 与冻结时的 SHA，再启动统一 API/独立 worker、扫描器及十个新 source agents。
-5. 要求 `/readyz` 的 modules.platform、invoice_sources、invoice_projection 都 ready=true/status=ready，并且 invoice_ready=true。公共 HTTP 200 只表示平台就绪，不能代替开票 11 闩通过。not_evaluated 必须视为未就绪。
+5. 要求 `/readyz` 的 modules.platform、invoice_sources、invoice_projection 都 ready=true/status=ready，并且 invoice_ready=true。统一外部 `/readyz` 只有平台和开票原 11 闩同时通过才返回 HTTP 200；任意开票失败返回 503，容器 healthcheck 消费同一端点。not_evaluated 必须视为未就绪。
 6. 将已审主机 vhost 原子改为新 web 端口，断网命名空间中 `nginx -T` 成功后 reload。按实际配置域名执行[固定十步只读冒烟](../../deploy/rehearsal-unified/SMOKE.md)：真实登录/TOTP、列表/来源隔离/越权拒绝、原生管理页 HTTP、旧入口拒绝和会话撤销；绝不创建、审核、开具或上传发票。全部通过才写 COMMITTED。
 
 停机窗口由“停旧”到“模块和冒烟通过”构成。先以本次本地实测给量级，服务器 D 再给主机量级；数据量、镜像已缓存、来源追数和扫描签名年龄都会影响耗时。没有服务器实测时不承诺固定分钟数，负责人应明确低峰窗口和超时回滚阈值。
@@ -62,7 +62,7 @@ shred --iterations=3 --zero --remove=unlink -- EXACT_RETIRED_CONSOLE_ASSERTION_K
 
 切换成功后负责人禁用旧平台 hook/旧开票独立发布入口，保留只读历史材料。统一产物仅用最终源码构建清单、完整镜像档案和已审 stage 文件；签名、传输、校验、load 由原 artifact 流程完成，切换脚本不在线构建、不 pull、不 fetch、不 push。旧入口已返回明确退役非零，不应另留一个可写生产的旧真相源。
 
-API 为单进程，两端 HTTP/会话/后台开票任务共享进程故障面；API 崩溃影响平台 API 与开票 API。平台 worker、十个采集器、PDF 扫描器、ClamAV 与数据库仍独立。平台公共 readiness 不被开票追数据拖红，开票申请/发票流程继续 fail-closed；切换判据同时检查全部模块与原 invoice_ready，避免掩盖源/投影/扫描器失败。
+API 为单进程，两端 HTTP/会话/后台开票任务共享进程故障面；API 崩溃影响平台 API 与开票 API。平台 worker、十个采集器、PDF 扫描器、ClamAV 与数据库仍独立。平台业务路由在开票未就绪时仍可访问，但统一 readiness 与容器健康必须变为失败；开票申请/发票流程继续 fail-closed。切换判据同时检查全部模块与原 invoice_ready，避免掩盖源/投影/扫描器失败。统一生产进程没有关闭开票却报告整体健康的模式；缺少模块拒绝构造，未配置 readiness 或停止中的模块均不可报告 ready。
 
 基础镜像 CVE 原样进入 F 的待拍板；本脚本不引入“漏洞清零”附加门，也不忽略或谎报现有风险。服务器 D、生产 MFA/历史身份映射、主机真实网络/来源、停机窗口与 Keycloak 删除时间仍需负责人完成。完整旧 18 容器回滚的本地结果必须是本轮真跑，旧三二进制结果不算替代证据。
 

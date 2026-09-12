@@ -11,7 +11,7 @@ SUB 与 NEW 共用开票应用，登录后的平台隔离继续有效。控制�
 ## 运行与身份契约
 
 - `platform/cmd/platform-api` 是唯一 API 监听入口；直接装配 `invoice-system/backend/service`，不启动子 API 进程、不转发 HTTP 到另一个后端。后台 worker、源采集器和文件扫描隔离进程保留各自职责。
-- 平台 API 为 `/api/v1`，开票 API 为同源 `/invoice-api/v1`。组合层只映射路由路径，保留方法、查询、正文和原有安全验证。统一 `/readyz` 分别报告平台、开票来源、开票投影；HTTP 状态取决于平台。开票未运行到的短路检查明确标 not_evaluated，不冒称就绪。`/invoice-api/readyz` 保留开票自己的严格状态。D/E 要求三个模块和完整 invoice_ready 同时通过。
+- 平台 API 为 `/api/v1`，开票 API 为同源 `/invoice-api/v1`。组合层只映射路由路径，保留方法、查询、正文和原有安全验证。统一 `/readyz` 分别报告平台、开票来源、开票投影；平台和开票原 11 闩同时通过才返回 HTTP 200，否则 503，两个外部入口与容器健康检查消费同一严格端点。平台业务路由不会因开票探针失败而被中止。开票未运行到的短路检查不冒称就绪，数据库、设置、开票主体、ClamAV 和 PDF 扫描器的前置失败明确标记受影响模块 not_ready。内部 `/invoice-api/readyz` 保留开票自己的严格状态。D/E 要求三个模块和完整 invoice_ready 同时通过；统一生产进程不提供缺少开票模块却报告整体健康的模式。
 - 生产必须同时为 `ENVIRONMENT=production`、`APP_ENV=production`、`XM_AUTH_MODE=local`、`AUTH_MODE=session`，开票模块不可静默关闭。
 - 原生管理页面读取 `/invoice-api/v1/auth/staff-session`。身份由进程内 typed resolver 每请求读取当前平台 HttpOnly 会话；校验员工 UUID、真实角色、`finance.read`，继续强制 MFA 新鲜度、管理员 IP、精确 Origin、CSRF。任何调用方 HTTP 头不能直接注入员工身份。
 - 管理员不再另发开票会话。同步 CSRF 值通过每次启动的内存随机密钥与平台会话 token 作域分隔 HMAC 派生，不输出原 token。退出登录、禁用账号或调整角色在后续请求即时生效。

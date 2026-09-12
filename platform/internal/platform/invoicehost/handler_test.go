@@ -68,13 +68,13 @@ func TestUnifiedHandlerRoutesWithoutNetworkOrBodyRewrite(t *testing.T) {
 		}
 	}
 }
-func TestUnifiedReadyKeepsPlatformAvailableDuringInvoiceCatchup(t *testing.T) {
+func TestUnifiedReadyIsStrictWhilePlatformBusinessRemainsAvailable(t *testing.T) {
 	for _, tc := range []struct {
 		name                    string
 		platformErr, invoiceErr error
 		want                    int
 	}{
-		{"ready", nil, nil, 200}, {"platform-down", errors.New("private database address"), nil, 503}, {"invoice-down", nil, errors.New("private source address"), 200},
+		{"ready", nil, nil, 200}, {"platform-down", errors.New("private database address"), nil, 503}, {"invoice-down", nil, errors.New("private source address"), 503},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &testModule{handler: http.NotFoundHandler(), err: tc.invoiceErr}
@@ -92,6 +92,11 @@ func TestUnifiedReadyKeepsPlatformAvailableDuringInvoiceCatchup(t *testing.T) {
 			}
 			if m.readyCalls != 1 {
 				t.Fatal("invoice readiness was not checked")
+			}
+			business := httptest.NewRecorder()
+			h.ServeHTTP(business, httptest.NewRequest("GET", "/api/v1/ops/summary", nil))
+			if business.Code != 200 || m.readyCalls != 1 {
+				t.Fatal("invoice readiness blocked or intercepted a platform business route")
 			}
 		})
 	}
@@ -118,7 +123,7 @@ func TestUnifiedHeadReadinessChecksInvoiceWithoutResponseBody(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("HEAD", "/readyz", nil))
-	if w.Code != 200 || m.readyCalls != 1 || w.Body.Len() != 0 {
+	if w.Code != 503 || m.readyCalls != 1 || w.Body.Len() != 0 {
 		t.Fatalf("HEAD probe bypassed invoice: status=%d probes=%d body=%s", w.Code, m.readyCalls, w.Body.String())
 	}
 }
@@ -126,12 +131,12 @@ func TestUnifiedHeadReadinessChecksInvoiceWithoutResponseBody(t *testing.T) {
 func TestUnifiedReadyReportsEachModuleWithoutInventingUnrunChecks(t *testing.T) {
 	for _, tc := range []struct{ check, sources, projection string }{
 		{"", "ready", "ready"},
-		{"database", "not_evaluated", "not_evaluated"},
-		{"admin_settings", "not_evaluated", "not_evaluated"},
-		{"invoice_issuer", "not_evaluated", "not_evaluated"},
-		{"clamav_daemon", "not_evaluated", "not_evaluated"},
-		{"clamav_signatures", "not_evaluated", "not_evaluated"},
-		{"pdf_scanner", "not_evaluated", "not_evaluated"},
+		{"database", "not_ready", "not_ready"},
+		{"admin_settings", "not_ready", "not_ready"},
+		{"invoice_issuer", "not_ready", "not_ready"},
+		{"clamav_daemon", "not_ready", "not_ready"},
+		{"clamav_signatures", "not_ready", "not_ready"},
+		{"pdf_scanner", "not_ready", "not_ready"},
 		{"source_health_query", "not_ready", "not_evaluated"},
 		{"source_ingest", "not_ready", "not_evaluated"},
 		{"source_ingest_dead_events", "not_ready", "not_evaluated"},
@@ -141,6 +146,7 @@ func TestUnifiedReadyReportsEachModuleWithoutInventingUnrunChecks(t *testing.T) 
 		{"eligibility_projection_stuck", "not_evaluated", "not_ready"},
 		{"source_streams", "not_ready", "ready"},
 		{"source_stream_dead_events", "not_ready", "ready"},
+		{"unrecognized_dependency", "not_ready", "not_ready"},
 	} {
 		t.Run(tc.check, func(t *testing.T) {
 			m := &testModule{handler: http.NotFoundHandler(), check: tc.check}
@@ -164,7 +170,11 @@ func TestUnifiedReadyReportsEachModuleWithoutInventingUnrunChecks(t *testing.T) 
 			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}
-			if w.Code != 200 || body.Status != "ready" || body.InvoiceReady != (tc.check == "") {
+			wantCode, wantStatus := 503, "unavailable"
+			if tc.check == "" {
+				wantCode, wantStatus = 200, "ready"
+			}
+			if w.Code != wantCode || body.Status != wantStatus || body.InvoiceReady != (tc.check == "") {
 				t.Fatalf("platform availability or complete invoice verdict lost: status=%d body=%s", w.Code, w.Body.String())
 			}
 			if len(body.Modules) != 3 || !body.Modules["platform"].Ready || body.Modules["platform"].Status != "ready" {

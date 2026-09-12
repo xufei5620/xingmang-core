@@ -37,13 +37,16 @@ func NewHandler(platform http.Handler, invoice Module, platformReady func(contex
 				platformState = "not_ready"
 				code = http.StatusServiceUnavailable
 			}
+			if !invoiceReport.Ready {
+				code = http.StatusServiceUnavailable
+			}
 			sources, projection := invoiceModuleStates(invoiceReport)
 			w.WriteHeader(code)
 			if r.Method == http.MethodHead {
 				return
 			}
 			status := "ready"
-			if platformErr != nil {
+			if code != http.StatusOK {
 				status = "unavailable"
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -95,6 +98,10 @@ func invoiceModuleStates(report invoiceservice.ReadinessReport) (sources, projec
 		return moduleState{Ready: true, Status: "ready"}, moduleState{Ready: true, Status: "ready"}
 	}
 	switch report.Check {
+	case "database", "admin_settings", "invoice_issuer", "clamav_daemon", "clamav_signatures", "pdf_scanner":
+		// Shared invoice prerequisites failed. Both invoice capabilities are
+		// unavailable; this does not claim their later checks were executed.
+		sources.Status, projection.Status = "not_ready", "not_ready"
 	case "source_health_query", "source_ingest", "source_ingest_dead_events":
 		sources.Status = "not_ready"
 	case "eligibility_health_query", "eligibility_projection", "eligibility_projection_dead_jobs", "eligibility_projection_stuck":
@@ -102,6 +109,10 @@ func invoiceModuleStates(report invoiceservice.ReadinessReport) (sources, projec
 	case "source_streams", "source_stream_dead_events":
 		sources.Status = "not_ready"
 		projection = moduleState{Ready: true, Status: "ready"}
+	default:
+		// Unconfigured/stopping runtime and unclassified failures must remain
+		// visibly unavailable, never a platform-only healthy response.
+		sources.Status, projection.Status = "not_ready", "not_ready"
 	}
 	return sources, projection
 }
