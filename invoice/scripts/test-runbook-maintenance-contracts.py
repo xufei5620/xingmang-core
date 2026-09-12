@@ -49,7 +49,7 @@ def unified_order(project, source_root):
     source_checks=['verify-restored-state-'+role for role in source_roles]
     def restore_case(failure=None):
         with tempfile.TemporaryDirectory(prefix='unified-order-') as temp:
-            base=Path(temp);calls=[];records=[]
+            base=Path(temp);calls=[];records=[];frozen_endpoint=object()
             def step(name):
                 calls.append(name)
                 if name==failure:raise m.OperatorError('inert failed '+name)
@@ -92,14 +92,25 @@ def unified_order(project, source_root):
                     assert [j['service'] for j in jobs]==['verify-invoice-restore']
                     step('verify-document-source-job')
                 def migrate_and_permissions(self):step('permissions')
-                def start_new(self):step('start-new')
-                def check_new(self):step('readiness')
+                def start_new(self,*,rehearsal):
+                    assert rehearsal is True,'D lost its explicit rehearsal phase'
+                    step('start-new')
+                def check_new(self):
+                    assert self._frozen_ready_endpoint is frozen_endpoint,'D readiness skipped its trusted endpoint boundary'
+                    step('readiness')
                 def preview_smoke(self, deployment_config):step('preview-write-smoke')
-                def inventory(self,*args):step('inventory');return []
+                def inventory(self,which,*,allow_deferred_invoice_health):
+                    assert which=='candidate' and allow_deferred_invoice_health is True,'D inventory lost its explicit base-readiness scope'
+                    step('inventory');return []
             trial=Trial()
             proof=dict(status='PASS',exit_code=0,mode='local-synthetic',qualification_scope='local-synthetic-host-preflight',
                        checks=[dict(name=n,status='PASS') for n in ('source-versions','host-mode-guards','network-addressing','compose-environment')],inherited_server_checks_requires_server=['inert server boundary'])
             def captured_json(path,data):records.append((Path(path).name,copy.deepcopy(data)))
+            def attest_endpoint(driver,descriptor):
+                assert driver is trial and descriptor is value,'endpoint attestation escaped the frozen trial'
+                assert calls[-1]=='start-new','endpoint attestation must follow actual candidate start'
+                step('attest-frozen-endpoint')
+                return frozen_endpoint
             with patch.object(r,'rehearsal_driver',return_value=(trial,value)),patch.object(r,'invalidate_receipt',side_effect=lambda *_:step('invalidate-prior-pass')),\
                  patch.object(pre,'run',return_value=proof),patch.object(r,'read_public_json',return_value={'images':[{'name':'invoice-tools','imageId':value['tools_image']}]}),\
                  patch.object(r,'verify_backups',side_effect=lambda *_:step('signatures')),patch.object(r,'validate_frozen_mounts',side_effect=lambda *_:step('mounts')),\
@@ -107,6 +118,7 @@ def unified_order(project, source_root):
                  patch.object(r,'extract_archive',side_effect=lambda d,v,domain,kind:step('extract-'+domain+'-'+kind)),\
                  patch.object(r,'restore_database',side_effect=lambda d,v,domain:step('restore-'+domain)),\
                  patch.object(r,'verify_snapshot_metadata',side_effect=lambda *_:step('metadata-match')),\
+                 patch.object(r,'bind_frozen_readiness_endpoint',side_effect=attest_endpoint),\
                  patch.object(r,'cleanup',side_effect=lambda *_:step('cleanup')),patch.object(r,'atomic_json',side_effect=captured_json):
                 try:result=r.rehearse(trial)
                 except m.OperatorError:assert failure is not None,'valid current D sequence unexpectedly rejected'
@@ -115,7 +127,7 @@ def unified_order(project, source_root):
                     assert result['status']=='PASS' and result['cleanup_complete'] is True and result['exit_code']==0
                     assert result['actual_operator_source']==trial.operator_source
                     assert result['restored_source_state']==[dict(role=role,exit_code=0) for role in source_roles]
-            expected=['invalidate-prior-pass','artifact','signatures','mounts','create-volumes','extract-invoice-documents','extract-invoice-source_state','extract-invoice-metadata','extract-platform-metadata','start-databases','restore-platform','restore-invoice','metadata-match','verify-document-source-job','prepare-restored-source-networks',*source_checks,'permissions','start-new','readiness','preview-write-smoke','inventory','cleanup']
+            expected=['invalidate-prior-pass','artifact','signatures','mounts','create-volumes','extract-invoice-documents','extract-invoice-source_state','extract-invoice-metadata','extract-platform-metadata','start-databases','restore-platform','restore-invoice','metadata-match','verify-document-source-job','prepare-restored-source-networks',*source_checks,'permissions','start-new','attest-frozen-endpoint','readiness','preview-write-smoke','inventory','cleanup']
             if failure is None:assert calls==expected,('D current sequence changed',calls)
             else:
                 assert failure in calls
@@ -126,7 +138,7 @@ def unified_order(project, source_root):
                 assert calls==reached,('work continued after failed D prerequisite',failure,calls)
                 assert not any(name=='rehearsal-pass.json' and row.get('status')=='PASS' for name,row in records)
                 assert records[-1][1]['status']=='FAIL' and records[-1][1]['exit_code']==1
-    failures=['artifact','signatures','create-volumes','extract-invoice-documents','restore-platform','metadata-match','verify-document-source-job','prepare-restored-source-networks','permissions','readiness','preview-write-smoke','cleanup']
+    failures=['artifact','signatures','create-volumes','extract-invoice-documents','restore-platform','metadata-match','verify-document-source-job','prepare-restored-source-networks','permissions','start-new','attest-frozen-endpoint','readiness','preview-write-smoke','cleanup']
     restore_case()
     for failure in failures+source_checks:restore_case(failure)
 
@@ -146,6 +158,7 @@ def unified_order(project, source_root):
         def switch_nginx(self,snapshot):
             assert snapshot=={'actual_invoice_containers':18}
             self.step('switch-nginx')
+        def wait_source_freshness(self):self.step('freshness')
         def smoke(self):self.step('smoke')
         def stop_new(self):self.step('stop-new')
         def restore_permissions(self):self.step('restore-permissions')
@@ -155,8 +168,8 @@ def unified_order(project, source_root):
             assert snapshot=={'actual_invoice_containers':18}
             self.step('restore-nginx')
         def record(self,row):self.records.append(copy.deepcopy(row))
-    expected=['signed-preflight','isolated-candidate-preview','snapshot','stop-old','start-databases','permissions','start-new','readiness','switch-nginx','smoke']
-    for failure in (None,'signed-preflight','isolated-candidate-preview','permissions','readiness','switch-nginx','smoke'):
+    expected=['signed-preflight','isolated-candidate-preview','snapshot','stop-old','start-databases','permissions','start-new','readiness','switch-nginx','freshness','smoke']
+    for failure in (None,'signed-preflight','isolated-candidate-preview','permissions','readiness','switch-nginx','freshness','smoke'):
         trial=Cutover(failure)
         try:result=m.cutover(trial)
         except m.OperatorError:assert failure is not None
@@ -167,7 +180,7 @@ def unified_order(project, source_root):
         else:
             assert trial.calls==expected[:expected.index(failure)+1]+['stop-new','restore-permissions','start-old','check-old','restore-nginx']
             assert trial.records[-1]['status']=='ROLLED_BACK' and trial.records[-1]['exit_code']==1
-    print('INV-DOC-04 actual unified D 23 cases and E 7 cases: signatures/restore/metadata/document verification/stopped API create/ten native check-state commands/permissions/readiness/smoke/cleanup ordering and per-stream nonzero propagation; isolated preview before old stop and nginx switch/restore ordering; no Docker/HTTP/key operation.')
+    print('INV-DOC-04 actual unified D 25 cases and E 8 cases: signatures/restore/metadata/document verification/stopped API create/ten native check-state commands/permissions/explicit rehearsal/trusted endpoint/readiness/smoke/cleanup ordering and per-stream nonzero propagation; isolated preview before old stop and nginx switch/freshness/restore ordering; no Docker/HTTP/key operation.')
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event','shadow-order','unified-order'],required=True)
