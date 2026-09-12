@@ -34,6 +34,8 @@ P1-7 把主机 nginx 纳入实际 operator。统一容器内 nginx 保留；公�
 
 主配置可在原 AST 位置明确 include 已审 vhost 绝对路径，或直接用一个绝对目录的 `*.conf` glob 加载它们。后一种情形只在 staged main 的原 include 位置，按实际 `nginx -T` 首次加载顺序展开完整冻结成员，替换其中已审 vhost；真实 main 字节不改，其他成员仍引用原文件。展开成员必须各自只被引用一次，显式/include glob 重叠、间接包含受管 vhost、glob 父目录含通配、未知成员、作用域/顺序变化均拒绝。`-T` 本身只给每个文件的原文和首次加载顺序；operator 另遍历完整 include 图校验引用次数、上下文、无环与成员，不把文件列表误当作已展开 AST。
 
+词法层区分参数与结构标记：JSON `log_format` 中引号内单独的 `{`、`}`、`;` 是参数；未知转义保留原反斜线，不用通用 shell 去转义改变 nginx 含义。已存在于其他站点的 `set_by_lua_block` 使用专门的边界扫描，处理短字符串/转义、行注释、精确等号层级的长字符串/长注释和嵌套表；整个原体（包括注释、空白和行尾）的 UTF-8 SHA 与字节数存为独立 typed opaque 节点，原作用域保持。operator 不执行或解释 Lua，其中出现 `include`、`proxy_pass` 等文本不会变成 nginx 指令，也不会被 staged main 替换。未知 Lua block 指令、截断字符串/注释/块均拒绝；受管 HTTPS server 下任何层级的 Lua handler（含 inline/file/block）仍拒绝。共享 Lua 任意字节变化仍由原文件 SHA 与 opaque 节点发现，不得因不解释 Lua 就跳过保全。
+
 首次 preflight 冻结全部已加载公开配置的 SHA、mode/owner，以及所有 glob 父目录的完整直接成员（包括不匹配 glob 的条目）；snapshot 不能重新接受其间产生的共享策略变化。文件上限 256、单文件 1 MiB、总计 8 MiB、引用上限 2048、深度 32；超出即拒绝。安装前后及 reload 前重复核对；受管 live 只允许本轮已审旧/新字节，安装后严格要求本次目标字节。原有共享安全头仅限 server/location 直接 literal include，最多 64 次引用、单片 64 KiB、总计 256 KiB，只展开 `add_header`、`proxy_set_header`、`proxy_hide_header`、`proxy_http_version` 供路由验证，仍绑定原文件 SHA；嵌套 include、block 或 handler 均拒绝。候选文件保留原 include 指令和全部策略原文。
 
 只要原 include 图包含相对路径（例如 `mime.types`、`proxy.conf`），提供的 staged main 必须与真实 main 同目录；nginx 用 main 的目录解析相对 include。operator 后续临时 main 也使用这个目录的独占 `.tmp` 文件，候选临时 vhost 放独占子目录。staged main、候选 vhost 均不得放在任何已冻结 glob 的父目录中，避免自身成为新成员。准备时可调用 `staged_main(original_bytes, exact_pairs, frozen_layout['expanded_globs'])`；该函数只返回临时内容，再以 AST 比对证明替换位置和完整顺序。不要永久展开或改写真实 main。

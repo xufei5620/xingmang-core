@@ -5,47 +5,20 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import shlex
 import stat
 import time
 import urllib.parse
 import uuid
 
 from lifecycle import OperatorError, require, plain_path, digest, read_public_json, atomic_json, utc, NAME, IMAGE_ID
-
-
-def parse(value):
-    lexer = shlex.shlex(value, posix=True, punctuation_chars='{};')
-    lexer.whitespace_split = True
-    tokens = []
-    for token in lexer:
-        tokens.extend(token if token and set(token) <= set('{};') else [token])
-    cursor = iter(tokens)
-    def block(nested=False):
-        result, args = [], []
-        for token in cursor:
-            if token == '}':
-                require(nested and not args, 'invalid public nginx block')
-                return result
-            if token in (';', '{'):
-                require(bool(args), 'invalid public nginx directive')
-                result.append((tuple(args), None if token == ';' else block(True)))
-                args = []
-            else:
-                args.append(token)
-        require(not nested and not args, 'incomplete public nginx configuration')
-        return result
-    try:
-        return block()
-    except ValueError:
-        raise OperatorError('invalid public nginx configuration') from None
+from nginx_syntax import parse, document, OpaqueLua
 
 
 def normalize(nodes, *, proxy=False):
     result = []
     for args, children in nodes:
         head = ('proxy_pass', '<reviewed-loopback>') if proxy and args[0] == 'proxy_pass' else args
-        result.append((head, None if children is None else normalize(children, proxy=proxy)))
+        result.append((head, children if children is None or isinstance(children,OpaqueLua) else normalize(children, proxy=proxy)))
     return result
 
 
@@ -67,7 +40,7 @@ def replace_reviewed_includes(nodes, pairs, glob_members=None):
             if args[0] == 'include' and len(args) == 2 and args[1] in mapping:
                 seen.add(args[1])
                 args = ('include', mapping[args[1]])
-            result.append((args, None if children is None else visit(children)))
+            result.append((args, children if children is None or isinstance(children,OpaqueLua) else visit(children)))
         return result
     result = visit(nodes)
     require(seen == set(mapping), 'each reviewed vhost must have an explicit include at its original main-config position')
@@ -91,7 +64,7 @@ def check_routes(value, origins, ports, *, header_files=None, main_prefix=''):
         for args, children in nodes:
             if args == ('server',) and children is not None:
                 servers.append(children)
-            elif children is not None:
+            elif children is not None and not isinstance(children,OpaqueLua):
                 collect(children)
     nodes=parse(value)
     if header_files is not None:
@@ -108,6 +81,12 @@ def check_routes(value, origins, ports, *, header_files=None, main_prefix=''):
             if url.hostname in names and any('ssl' in args and args[1].rsplit(':', 1)[-1] == wanted_port for args in listens):
                 matches.append(server)
         require(len(matches) == 1, 'configured HTTPS origin has no unique managed nginx server')
+        def reject_lua(items):
+            for args,children in items:
+                require(not isinstance(children,OpaqueLua) and not args[0].endswith(('_by_lua','_by_lua_file','_by_lua_block')),
+                        'Lua is not an authorized managed route handler')
+                if children is not None:reject_lua(children)
+        reject_lua(matches[0])
         require(not any(args[0] == 'include' for args, _ in matches[0]),
                 'managed server routes must be explicit; included route handlers require owner review')
         locations = []; regex_locations=[]
@@ -217,14 +196,15 @@ def staged_main(body, pairs, glob_members=None):
     """Preserve public main bytes except reviewed include targets, then prove AST identity."""
     text = body.decode('utf-8')
     mapping = dict(pairs)
-    directive = re.compile(r'''\binclude\s+("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:\\.|[^\s;])+)[ \t\r\n]*;''')
-    def replace(match):
-        args = parse(match[0])[0][0]
+    original,includes=document(text)
+    result=text
+    for start,end,args in reversed(includes):
+        replacement=None
         if len(args)==2 and args[1] in (glob_members or {}):
-            return '\n'.join('include '+json.dumps(mapping.get(path,path),ensure_ascii=False)+';' for path in glob_members[args[1]])
-        return 'include ' + json.dumps(mapping[args[1]], ensure_ascii=False) + ';' if len(args) == 2 and args[1] in mapping else match[0]
-    result = directive.sub(replace, text)
-    require(replace_reviewed_includes(parse(text), pairs,glob_members) == parse(result),
+            replacement='\n'.join('include '+json.dumps(mapping.get(path,path),ensure_ascii=False)+';' for path in glob_members[args[1]])
+        elif len(args)==2 and args[1] in mapping:replacement='include '+json.dumps(mapping[args[1]],ensure_ascii=False)+';'
+        if replacement is not None:result=result[:start]+replacement+result[end:]
+    require(replace_reviewed_includes(original, pairs,glob_members) == parse(result),
             'temporary nginx main cannot preserve the reviewed include layout')
     return result.encode('utf-8')
 

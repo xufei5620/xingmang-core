@@ -5,6 +5,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from lifecycle import plain_path, require
 from host_nginx import parse, public_input
+from nginx_syntax import OpaqueLua
 
 
 def nginx_path(value):
@@ -98,7 +99,7 @@ class FrozenLayout:
                             self.expanded_globs[args[1]]=members
                         for member in members:self._visit(member,[*stack,runtime])
                     else:self._visit(target,[*stack,runtime])
-                if children is not None:walk(children)
+                if children is not None and not isinstance(children,OpaqueLua):walk(children)
         walk(self.nodes[runtime])
 
     def proof(self):
@@ -145,6 +146,6 @@ def header_nodes(nodes,loaded,prefix):
                              head[0]=='proxy_http_version' and len(head)==2 and head[1] in ('1.0','1.1'))
                     require(block is None and allowed,'header include has an unknown directive, nested include or handler')
                 result.extend(fragment)
-            else:result.append((args,None if children is None else walk(children,args[0])))
+            else:result.append((args,children if children is None or isinstance(children,OpaqueLua) else walk(children,args[0])))
         return result
     return walk(nodes)
