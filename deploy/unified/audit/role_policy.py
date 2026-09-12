@@ -4,13 +4,26 @@ RoleScopesFrom trims roles and unions scopes; invoice AdminPolicy requires an
 exact raw role. Never infer that membership from email, a display name or scope.
 """
 import hashlib
+import importlib.util
 import json
+from pathlib import Path
+
+# preflight loads this module by absolute path without adding audit to sys.path.
+# Load the pinned sibling the same way, never an ambient same-named module.
+_default_spec = importlib.util.spec_from_file_location('unified_default_role_scopes', Path(__file__).with_name('default_role_scopes.py'))
+_defaults = importlib.util.module_from_spec(_default_spec)
+_default_spec.loader.exec_module(_defaults)
+DEFAULT_ROLE_SCOPES, SOURCE_PATH, SOURCE_SHA256 = _defaults.DEFAULT_ROLE_SCOPES, _defaults.SOURCE_PATH, _defaults.SOURCE_SHA256
 
 GO_SPACE = '\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000'
 SCOPE_PREFIXES = ('registry.', 'ops.', 'audit.', 'platform.', 'action.', 'connector.',
                   'request.', 'ui.', 'credential.', 'staff.', 'publishing.')
 COUNTS = ('admin_role_total', 'invoice_admin_total', 'invoice_admin_totp_registered',
           'invoice_admin_login_ready_total')
+
+
+class DefaultCoverageError(ValueError):
+    """Only public default role/scope names, safe for the preflight report."""
 
 
 def unique(pairs):
@@ -41,6 +54,23 @@ def explicit_policy(admin_role, value):
     roles = effective_map(value)
     if 'finance.read' not in roles.get(admin_role, []): raise ValueError('ADMIN_ROLE_MUST_HAVE_FINANCE_READ')
     return admin_role, roles
+
+
+def require_default_coverage(roles):
+    """Reject silent permission loss; never merge defaults into explicit policy."""
+    defaults = effective_map(DEFAULT_ROLE_SCOPES)
+    missing_roles = sorted(set(defaults) - set(roles))
+    if missing_roles:
+        raise DefaultCoverageError('DEFAULT_ROLE_KEYS_MISSING: ' + ','.join(missing_roles))
+    missing_scopes = {role: sorted(set(scopes) - set(roles[role]))
+                      for role, scopes in defaults.items() if set(scopes) - set(roles[role])}
+    if missing_scopes:
+        raise DefaultCoverageError('DEFAULT_ROLE_SCOPES_MISSING: ' + json.dumps(missing_scopes, sort_keys=True))
+    return {'source_path': SOURCE_PATH, 'source_sha256': SOURCE_SHA256,
+            'default_role_scope_map_sha256': hashlib.sha256(json.dumps(defaults, sort_keys=True,
+                separators=(',', ':'), ensure_ascii=False).encode()).hexdigest(),
+            'default_role_count': len(defaults), 'default_scope_count': sum(map(len, defaults.values())),
+            'additional_roles': sorted(set(roles) - set(defaults))}
 
 
 def census(admin_role, roles, staff):
@@ -92,6 +122,7 @@ def validate_resolved(env, proof):
     raw = env.get('XM_AUTH_ROLE_SCOPES')
     if not isinstance(raw, str) or not raw.strip(GO_SPACE): raise ValueError('EXPLICIT_ROLE_MAP_REQUIRED')
     admin_role, roles = explicit_policy(env.get('ADMIN_ROLE'), json.loads(raw, object_pairs_hook=unique))
+    default_coverage = require_default_coverage(roles)
     if not isinstance(proof, dict) or set(proof) != {'admin_role', 'role_scope_map', *COUNTS}:
         raise ValueError('JOINT_ROLE_CENSUS_REQUIRED')
     if proof['admin_role'] != admin_role or proof['role_scope_map'] != roles:
@@ -102,4 +133,5 @@ def validate_resolved(env, proof):
         raise ValueError('INVOICE_ADMIN_TOTP_COVERAGE_REQUIRED')
     # Only public policy metadata is emitted, never the surrounding environment.
     return {'admin_role': admin_role, **{k: proof[k] for k in COUNTS},
+            'default_coverage': default_coverage,
             'role_scope_map_sha256': hashlib.sha256(json.dumps(roles, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()}

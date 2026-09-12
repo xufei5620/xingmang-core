@@ -6,6 +6,18 @@
 
 统一预检要求负责人显式填写完整 `XM_AUTH_ROLE_SCOPES` 和精确 `ADMIN_ROLE`，不能靠空映射自动得到默认 `admin` 的广泛权限，也不会把部分映射与默认表合并。这里不修改平台默认权限或运行时两道检查。若负责人选择 `admin`，需明确核对该角色现有全部权限；如选择已有专用开票角色，显式完整映射必须包含该角色的 `finance.read`，并保留其他业务仍需的角色。工具不会给员工添加角色。
 
+N-3 完整性门禁要求显式配置覆盖当前 `rolepermissions.DefaultRoleScopeMap()` 的**每个默认角色和该角色全部默认 scope**。遗漏角色报 `DEFAULT_ROLE_KEYS_MISSING`，遗漏权限报 `DEFAULT_ROLE_SCOPES_MISSING`，错误会列出准确差项；不会悄悄用默认表补齐。额外自定义角色和显式额外 scope 保留。若有意收窄默认角色，也须停下另行审定配置，不能把本次切换当作隐式撤权。联合 `ADMIN_ROLE` / `finance.read` / C1 TOTP 检查继续执行。
+
+默认基线不是第二份手写表：`default_role_scopes.py` 由 Go 导出器直接调用当前函数生成，并记录 `rolemap.go` 行尾归一化 SHA256。平台 Go 门禁将生成物与实际函数返回值、源文件 SHA 逐字节核对；执行文件清单又把该 `.py` 绑定到本次制品。预检只读此随版基线，不需要 Go 或联网。预检证据输出默认映射 SHA、源文件 SHA、角色和 scope 数量及额外角色名单。
+
+在 monorepo 的 `platform/` 下执行以下本地命令可重新生成基线，并导出公开 JSON 作为负责人核对完整显式配置的起点。JSON 不是对生产的自动授权；自定义映射须从实际配置保留，C1 必须使用最终写入 Compose 的同一完整映射。
+
+```sh
+go run ./cmd/export-role-scope-defaults -format python -output ../deploy/unified/audit/default_role_scopes.py
+go test -count=1 ./cmd/export-role-scope-defaults ./internal/platform/rolepermissions
+go run ./cmd/export-role-scope-defaults -format json -output /approved-audit/default-role-map.json
+```
+
 平台快照 v2 额外统计 `admin_role_total`、`invoice_admin_total`（精确角色与有效 scope 的交集）、`invoice_admin_totp_registered`、`invoice_admin_login_ready_total`。scope 解析遵循 Go 空白规范和去重；角色 membership 遵循开票端原始字符串精确匹配，大小写与前后空白不能冒充目标角色。只有 scope 而无精确角色的人不算可登录管理员。零可登录管理员或交集中 TOTP 未覆盖会阻断。预检对比实际 Compose 配置、C1 原快照 SHA 以及逐行重新核算的数字，不能只交自报 PASS 数字。
 
 `staff-mfa.sql` 在 REPEATABLE READ / READ ONLY 事务里统计全体持有有效 `finance.read` 的员工，以及其中启用员工的两个分母。角色重复不重复计人数，角色前后空白按 Go `strings.TrimSpace` 的 Unicode 集合处理。权限来自输入的**完整有效 role-scope map**，不能把 `admin` 名称硬当 finance.read，也不能把自定义配置与默认配置随意合并。

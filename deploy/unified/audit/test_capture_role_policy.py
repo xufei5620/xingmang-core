@@ -8,12 +8,14 @@ import unittest
 from unittest.mock import patch
 
 import capture_metadata
+from default_role_scopes import DEFAULT_ROLE_SCOPES
 from test_identity_audit import fixture, ORIGIN
 
 
 class CaptureRolePolicyTests(unittest.TestCase):
     def test_capture_passes_exact_role_to_readonly_sql_and_binds_original_rows(self):
         platform, invoice, mapping = fixture()
+        platform['role_scope_map'] = DEFAULT_ROLE_SCOPES
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root/'roles.json').write_text(json.dumps(platform['role_scope_map']))

@@ -373,6 +373,8 @@ def environment(driver, config, h):
                 require(actual_census == record.get("role_policy"), "MFA joint role census does not match actual captured rows")
                 checked[name]["platform-api"]["role_policy"] = role_policy.validate_resolved(
                     services["platform-api"].get("environment", {}), record.get("role_policy"))
+            except role_policy.DefaultCoverageError as exc:
+                raise PreflightError(str(exc)) from None
             except (ValueError, KeyError, TypeError, OSError):
                 raise PreflightError("ADMIN_ROLE, explicit role scopes and joint C1 census must match with TOTP coverage and a login-ready administrator") from None
     return checked

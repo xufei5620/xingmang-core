@@ -10,6 +10,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import preflight
+DEFAULT_ROLE_SCOPES = preflight.role_policy.DEFAULT_ROLE_SCOPES
+validate_resolved = preflight.role_policy.validate_resolved
 
 
 class RolePolicyPreflightTests(unittest.TestCase):
@@ -17,7 +19,7 @@ class RolePolicyPreflightTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.record = Path(self.temp.name) / "mfa.json"
-        self.roles = {"invoice-reviewer": ["finance.read"], "staff": ["registry.read"]}
+        self.roles = {**copy.deepcopy(DEFAULT_ROLE_SCOPES), "invoice-reviewer": ["finance.read"]}
         self.proof = {
             "admin_role": "invoice-reviewer", "role_scope_map": self.roles,
             "admin_role_total": 2, "invoice_admin_total": 2,
@@ -51,6 +53,42 @@ class RolePolicyPreflightTests(unittest.TestCase):
     def test_exact_explicit_role_and_scope_are_accepted(self):
         self.run_preflight()
         self.assertEqual(self.calls, [["--profile", "*", "config", "--format", "json"]])
+
+    def test_incomplete_explicit_map_cannot_silently_remove_default_roles(self):
+        for role in DEFAULT_ROLE_SCOPES:
+            with self.subTest(role=role):
+                incomplete = copy.deepcopy(self.roles)
+                del incomplete[role]
+                self.set_policy(incomplete)
+                with self.assertRaisesRegex(preflight.PreflightError, 'DEFAULT_ROLE_KEYS_MISSING.*' + role):
+                    self.run_preflight()
+
+    def set_policy(self, roles):
+        self.env['XM_AUTH_ROLE_SCOPES'] = json.dumps(roles)
+        self.proof['role_scope_map'] = copy.deepcopy(roles)
+        self.rows['role_scope_map'] = copy.deepcopy(roles)
+
+    def test_every_default_scope_is_required_even_with_a_valid_invoice_admin(self):
+        for role, scopes in DEFAULT_ROLE_SCOPES.items():
+            for scope in scopes:
+                with self.subTest(role=role, scope=scope):
+                    incomplete = copy.deepcopy(self.roles)
+                    incomplete[role].remove(scope)
+                    incomplete[role].append('custom.read')
+                    incomplete[role].sort()
+                    self.set_policy(incomplete)
+                    with self.assertRaisesRegex(preflight.PreflightError, 'DEFAULT_ROLE_SCOPES_MISSING'):
+                        self.run_preflight()
+
+    def test_extra_roles_and_scopes_remain_explicit_and_input_is_not_merged(self):
+        roles = {**copy.deepcopy(self.roles), 'custom-auditor': ['audit.read']}
+        roles['staff'] = sorted(roles['staff'] + ['custom.read'])
+        self.set_policy(roles)
+        before = copy.deepcopy((self.env, self.proof, self.rows))
+        self.run_preflight()
+        result = validate_resolved(self.env, self.proof)
+        self.assertEqual(result['default_coverage']['additional_roles'], ['custom-auditor', 'invoice-reviewer'])
+        self.assertEqual((self.env, self.proof, self.rows), before)
 
     def test_missing_blank_or_scope_only_role_fails(self):
         for value in ["other", "INVOICE-REVIEWER", " invoice-reviewer ", "finance.read"]:
@@ -92,7 +130,8 @@ class RolePolicyPreflightTests(unittest.TestCase):
         with self.assertRaises(preflight.PreflightError): self.run_preflight()
 
     def test_runtime_scope_normalization_and_duplicate_scopes_preserved(self):
-        self.env["XM_AUTH_ROLE_SCOPES"] = '{" invoice-reviewer ":[" finance.read ","finance.read"],"staff":["registry.read"]}'
+        self.env["XM_AUTH_ROLE_SCOPES"] = json.dumps({**copy.deepcopy(DEFAULT_ROLE_SCOPES),
+            ' invoice-reviewer ': [' finance.read ', 'finance.read']})
         self.run_preflight()
 
     def test_scope_only_or_whitespace_role_rows_cannot_back_a_forged_count(self):
