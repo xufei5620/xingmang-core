@@ -38,6 +38,28 @@ SOURCES = ["cmd/platform-api", "cmd/platform-worker"]
 # 本来就没法在这里静态检查，它们由各自的配置解析在启动时报错兜底。
 ENV_RE = re.compile(r'(?:os\.)?[Gg]etenv\("(XM_[A-Z0-9_]+)"\)')
 
+# The unified API links invoice/backend/service in the same process. Its public
+# configuration uses non-XM names and these literal-reading wrappers; it belongs
+# to platform-api, never to the independently running platform-worker.
+INVOICE_ENV_RE = re.compile(
+    r'\b(?:os\.Getenv|env|csvEnv|boundedIntEnv|boundedInt64Env|boundedDurationEnv)'
+    r'\s*\(\s*"([A-Z][A-Z0-9_]+)"'
+)
+INVOICE_MOCK_ONLY = {
+    # service/runtime.go buildMockRuntime: production reads admin CIDRs from DB.
+    'ADMIN_IP_ALLOWLIST',
+    # service/config.go loadBreakGlassCIDRs: only authMode=mock uses this;
+    # production requires ADMIN_BREAK_GLASS_CIDRS_FILE instead.
+    'ADMIN_BOOTSTRAP_IP_ALLOWLIST',
+}
+
+
+def without_go_comments(source: str) -> str:
+    # Preserve strings (including URL // and Go raw strings) while removing
+    # comments, so historical examples cannot masquerade as live config reads.
+    tokens = re.compile(r'"(?:\\.|[^"\\])*"|`[^`]*`|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*[\s\S]*?\*/')
+    return tokens.sub(lambda match: ' ' if match[0].startswith(('//', '/*')) else match[0], source)
+
 # 已废弃的变量：代码仍然读它，但**只是为了在它还留在配置里时让启动失败**。
 # 这种变量绝不能出现在 compose 里——透传它等于把它复活。
 #
@@ -165,9 +187,27 @@ def main() -> int:
             for name in ENV_RE.findall(path.read_text(encoding="utf-8")):
                 wanted.setdefault((directory.name, name), set()).add(f"{source}/{path.name}")
 
+    if COMPOSE.suffix == '.json':
+        # Legacy standalone platform YAML has no invoice module; canonical
+        # unified JSON must always retain this linked source directory.
+        directory = ROOT.parent / 'invoice/backend/service'
+        paths = sorted(directory.glob('*.go')) if directory.is_dir() else []
+        paths = [path for path in paths if not path.name.endswith('_test.go')]
+        if not paths:
+            print('check-compose-env: missing linked invoice/backend/service sources', file=sys.stderr)
+            return 1
+        for path in paths:
+            source = without_go_comments(path.read_text(encoding='utf-8'))
+            for name in INVOICE_ENV_RE.findall(source):
+                wanted.setdefault(('platform-api', name), set()).add(f'invoice/backend/service/{path.name}')
+
     failures = []
     for service, name in sorted(wanted):
         present = name in environments[service]
+        if COMPOSE.suffix == '.json' and name in INVOICE_MOCK_ONLY:
+            if present:
+                failures.append(f'{service}: {name} is mock-only and must not be wired into production Compose')
+            continue
         if name in RETIRED:
             if present:
                 failures.append(

@@ -48,10 +48,13 @@ class ServiceEnvironmentTest(unittest.TestCase):
 class UnifiedJSONEnvironmentTest(unittest.TestCase):
     def check(self, transform=lambda doc: None, raw=None):
         with tempfile.TemporaryDirectory(prefix='unified-compose-env-') as tmp:
-            root=Path(tmp)
+            root=Path(tmp)/'platform'
             for service in ('platform-api', 'platform-worker'):
                 p=root/'cmd'/service/'main.go'; p.parent.mkdir(parents=True)
                 p.write_text('package main\nfunc main() { os.Getenv("XM_SMS_MODE"); os.Getenv("XM_SMS_PROVIDERS") }\n')
+            invoice=root.parent/'invoice/backend/service/runtime.go'
+            invoice.parent.mkdir(parents=True)
+            invoice.write_text('package service\n', encoding='utf-8')
             doc={"services":{name:{"environment":{"XM_SMS_MODE":"${XM_SMS_MODE:-fake}"}} for name in ('platform-api','platform-worker')}}
             transform(doc)
             compose=root/'compose.json'; compose.write_text(raw if raw is not None else json.dumps(doc))
@@ -77,5 +80,57 @@ class UnifiedJSONEnvironmentTest(unittest.TestCase):
                 self.assertEqual(self.check(lambda d:d['services']['platform-api'].update(environment=bad)),1)
     def test_duplicate_json_keys_are_rejected(self):
         self.assertEqual(self.check(raw='{"services":{"platform-api":{"environment":{"XM_SMS_MODE":"x","XM_SMS_MODE":"y"}},"platform-worker":{"environment":{"XM_SMS_MODE":"x"}}}}'),1)
+
+
+class LinkedInvoiceEnvironmentTest(unittest.TestCase):
+    def check(self, source, api=(), worker=(), remove_source=False):
+        with tempfile.TemporaryDirectory(prefix='linked-invoice-env-') as tmp:
+            root=Path(tmp)/'platform'
+            for service in ('platform-api', 'platform-worker'):
+                path=root/'cmd'/service/'main.go'
+                path.parent.mkdir(parents=True)
+                path.write_text('package main\n', encoding='utf-8')
+            invoice=root.parent/'invoice/backend/service/runtime.go'
+            if not remove_source:
+                invoice.parent.mkdir(parents=True)
+                invoice.write_text('package service\n'+source, encoding='utf-8')
+                (invoice.parent/'runtime_test.go').write_text('os.Getenv("TEST_ONLY")', encoding='utf-8')
+            compose=root/'compose.json'
+            compose.write_text(json.dumps({'services':{
+                'platform-api':{'environment':{key:'' for key in api}},
+                'platform-worker':{'environment':{key:'' for key in worker}},
+            }}), encoding='utf-8')
+            original=checker.ROOT,checker.COMPOSE
+            try:
+                checker.ROOT,checker.COMPOSE=root,compose
+                stderr=io.StringIO()
+                with contextlib.redirect_stderr(stderr): code=checker.main()
+                return code,stderr.getvalue()
+            finally: checker.ROOT,checker.COMPOSE=original
+
+    def test_non_xm_invoice_variable_cannot_be_omitted(self):
+        code, error=self.check('os.Getenv("SOURCE_MODE")')
+        self.assertEqual(code,1)
+        self.assertIn('SOURCE_MODE',error)
+        self.assertIn('invoice/backend/service/runtime.go',error)
+    def test_variable_must_be_in_embedded_api_not_worker(self):
+        self.assertEqual(self.check('os.Getenv("FIELD_KEYRING_FILE")',worker=['FIELD_KEYRING_FILE'])[0],1)
+    def test_all_invoice_literal_read_helpers_are_covered(self):
+        for call in ('env','csvEnv','boundedIntEnv','boundedInt64Env','boundedDurationEnv'):
+            with self.subTest(call=call):
+                self.assertEqual(self.check(call+'("INVOICE_SETTING", "fallback")')[0],1)
+                self.assertEqual(self.check(call+'("INVOICE_SETTING", "fallback")',api=['INVOICE_SETTING'])[0],0)
+    def test_missing_linked_source_is_not_a_success(self):
+        self.assertEqual(self.check('',remove_source=True)[0],1)
+    def test_linked_test_files_do_not_require_runtime_configuration(self):
+        self.assertEqual(self.check('os.Getenv("AUTH_MODE")',api=['AUTH_MODE'])[0],0)
+    def test_mock_only_ip_settings_stay_out_of_production_compose(self):
+        for key in ('ADMIN_IP_ALLOWLIST','ADMIN_BOOTSTRAP_IP_ALLOWLIST'):
+            with self.subTest(key=key):
+                source='csvEnv("'+key+'", "127.0.0.1/32")'
+                self.assertEqual(self.check(source)[0],0)
+                self.assertEqual(self.check(source,api=[key])[0],1)
+    def test_comments_are_not_environment_readers(self):
+        self.assertEqual(self.check('// os.Getenv("OLD_EXAMPLE")\n/* env("BLOCK_EXAMPLE", "") */')[0],0)
 
 if __name__ == '__main__': unittest.main()
