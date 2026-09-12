@@ -12,6 +12,22 @@ import lifecycle
 
 
 class RuntimeBindingTests(unittest.TestCase):
+    def test_self_consistent_inventory_cannot_omit_private_endpoint_authority(self):
+        m = importlib.import_module('operator_source')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = []
+            for name in sorted(m.REQUIRED - {'deploy/rehearsal-unified/rehearsal_endpoint.py'}):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                body = b'# staged public source\n'
+                path.write_bytes(body)
+                entries.append({'path': name, 'mode': '100644', 'blob': m.git_blob(body)})
+            source = {'gitHead': 'a' * 40, 'gitDirty': False, 'entries': entries,
+                      'inventorySha256': hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()}
+            with self.assertRaises(lifecycle.OperatorError):
+                m.verify(root, source)
+
     def test_actual_artifact_preflight_rejects_unattested_operator_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             manifest = Path(tmp) / 'manifest.json'

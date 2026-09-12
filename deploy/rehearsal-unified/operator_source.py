@@ -14,7 +14,7 @@ from lifecycle import require, utc
 REQUIRED = frozenset({
     "deploy/rehearsal-unified/" + name for name in (
         "lifecycle.py", "preflight.py", "restore.py", "smoke.py",
-        "operator_lock.py", "host_nginx.py", "operator_source.py",
+        "operator_lock.py", "host_nginx.py", "operator_source.py", "rehearsal_endpoint.py",
         "rehearse.sh", "cleanup.sh", "capture-old-inputs.py")
 } | {
     "deploy/unified/cutover.sh", "deploy/unified/rollback.sh",
