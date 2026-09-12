@@ -6,6 +6,7 @@ RUN go mod download
 COPY invoice/backend/ ./
 RUN go test -mod=readonly ./internal/document ./internal/pdfscanner ./internal/backuparchive
 RUN CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-migrate ./cmd/migrate \
+    && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-identity-migrate ./cmd/identity-migrate \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-bootstrap-settings ./cmd/bootstrap-settings \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-bootstrap-sources ./cmd/bootstrap-sources \
     && CGO_ENABLED=0 GOOS=linux go build -mod=readonly -trimpath -ldflags="-s -w" -o /out/invoice-keygen ./cmd/keygen \
@@ -49,7 +50,7 @@ RUN /usr/local/bin/invoice-pdf-policy-check --self-test \
 FROM api-base AS tools
 RUN apk add --no-cache qpdf=12.3.2-r0 \
     && qpdf --version | grep -F 'qpdf version 12.3.2'
-COPY --from=build /out/invoice-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-eligibility-repair /out/invoice-eligibility-shadow /out/invoice-account-bind /usr/local/bin/
+COPY --from=build /out/invoice-migrate /out/invoice-identity-migrate /out/invoice-bootstrap-settings /out/invoice-bootstrap-sources /out/invoice-keygen /out/invoice-mtlsgen /out/invoice-backup-verify /out/invoice-document-gc /out/invoice-pdf-policy-check /out/invoice-archive-verify /out/invoice-eligibility-repair /out/invoice-eligibility-shadow /out/invoice-account-bind /usr/local/bin/
 COPY invoice/backend/migrations /app/migrations
 
 ENV MIGRATIONS_DIR=/app/migrations
