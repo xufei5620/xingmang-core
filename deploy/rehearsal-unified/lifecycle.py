@@ -219,6 +219,7 @@ def rollback(driver, snapshot, *, original_failure=False, dry_run=False):
         driver.restore_permissions()
         driver.start_old()
         driver.check_old(snapshot)
+        driver.restore_nginx(snapshot)
         result.update(status="ROLLED_BACK", exit_code=1 if original_failure else 0)
     except BaseException:
         result.update(status="ROLLBACK_FAILED", exit_code=1)
@@ -249,6 +250,7 @@ def cutover(driver, *, dry_run=False):
         driver.migrate_and_permissions()
         driver.start_new()
         driver.check_new()
+        driver.switch_nginx(snapshot)
         driver.smoke()
         result.update(status="COMMITTED", exit_code=0, end_utc=utc())
         driver.record(result)
@@ -263,7 +265,7 @@ def cutover(driver, *, dry_run=False):
 
 
 def validate_config(config):
-    required = {"schema", "mode", "state_root", "docker", "candidate", "previous", "backups", "approvals", "smoke_config", "rehearsal", "host_preflight"}
+    required = {"schema", "mode", "state_root", "docker", "candidate", "previous", "backups", "approvals", "smoke_config", "rehearsal", "host_preflight", "host_nginx"}
     require(isinstance(config, dict) and set(config) == required, "operator configuration keys do not match the reviewed contract")
     require(config["schema"] == "xingmang.unified.operator/v1", "unsupported operator schema")
     require(config["mode"] in ("local-synthetic", "server-rehearsal", "production"), "unsupported operator mode")
@@ -434,6 +436,9 @@ class DockerDriver:
 
     def preflight(self):
         self.artifact_preflight()
+        from host_nginx import HostNginx
+        nginx_proof = HostNginx(self).preflight()
+        atomic_json(self.output / "host-nginx-preflight.json", nginx_proof)
         from preflight import run as host_preflight
         original_inventory = self.inventory("previous")
         self.verify_original_plan(original_inventory)
@@ -562,9 +567,10 @@ class DockerDriver:
         return hashes
 
     def snapshot(self):
+        from host_nginx import HostNginx
         rows = self.inventory("previous")
         require(sum(r["role"] not in OLD_ROLES["platform"] for r in rows) == 18, "old invoice inventory is not eighteen actual containers")
-        return {"actual_invoice_containers": 18, "containers": rows, "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
+        return {"actual_invoice_containers": 18, "containers": rows, "host_nginx": HostNginx(self).snapshot(), "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
                 "project_files": [{"name": p["name"], "compose": [{"path": f, "sha256": digest(f)} for f in p["compose_files"]],
                                    "env_file": p["env_file"], "env_sha256": digest(p["env_file"])} for p in self.projects("previous")]}
 
@@ -646,6 +652,14 @@ class DockerDriver:
     def precheck_new(self):
         from restore import preview_candidate
         return preview_candidate(self)
+
+    def switch_nginx(self, snapshot):
+        from host_nginx import HostNginx
+        HostNginx(self).apply(snapshot["host_nginx"])
+
+    def restore_nginx(self, snapshot):
+        from host_nginx import HostNginx
+        HostNginx(self, recovering=True).apply(snapshot["host_nginx"], rollback=True)
 
     def smoke(self):
         from smoke import REQUIRED, validate_config as validate_smoke

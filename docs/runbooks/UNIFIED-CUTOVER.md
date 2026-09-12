@@ -26,18 +26,20 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 
 ## 冻结、切换和验证顺序
 
-1. 本地 Docker endpoint、manifest/镜像、主机守卫、D/C1/签名包全部成功后，写入持久 PREPARED 快照，再进入停写。此前失败不停止旧服务。
+1. 本地 Docker endpoint、manifest/镜像、主机守卫、D/C1/签名包及 [主机 nginx 预检](../../deploy/rehearsal-unified/HOST-NGINX.md) 全部成功后，对新栈独立冻结副本再跑一次实际预检，保持旧入口和旧栈服务。预检完整清理成功，才写含原 nginx vhost 的持久 PREPARED 快照并进入停写。
 2. 依次停止旧 source agents、旧 invoice、旧 platform、旧 idp，确认各项目没有仍在运行的容器并确认接管端口空闲。保留旧容器/卷/文件。
 3. 启动新两个数据库并等待健康；按顺序执行平台 migrate（业务 + River）、invoice-migrate、invoice-permissions。平台沿用原角色/授权，目录只读快照必须前后一致；没有把 migrate 叫作权限重放，也不在本次实施 DBR1。
 4. 比较两库实际迁移 ledger 与冻结时的 SHA，再启动统一 API/独立 worker、扫描器及十个新 source agents。
 5. 要求 `/readyz` 的 modules.platform、invoice_sources、invoice_projection 都 ready=true/status=ready，并且 invoice_ready=true。公共 HTTP 200 只表示平台就绪，不能代替开票 11 闩通过。not_evaluated 必须视为未就绪。
-6. 固定十步真实 HTTP 冒烟：SUB 登录/提交、NEW 非空数据与跨源隔离、员工密码 + TOTP/原生管理页 HTTP/审批/真实扫描上传/双方下载 SHA，以及旧登录/断言入口拒绝。全部通过才写 COMMITTED。
+6. 将已审主机 vhost 原子改为新 web 端口，断网命名空间中 `nginx -T` 成功后 reload。按实际配置域名执行[固定十步只读冒烟](../../deploy/rehearsal-unified/SMOKE.md)：真实登录/TOTP、列表/来源隔离/越权拒绝、原生管理页 HTTP、旧入口拒绝和会话撤销；绝不创建、审核、开具或上传发票。全部通过才写 COMMITTED。
 
 停机窗口由“停旧”到“模块和冒烟通过”构成。先以本次本地实测给量级，服务器 D 再给主机量级；数据量、镜像已缓存、来源追数和扫描签名年龄都会影响耗时。没有服务器实测时不承诺固定分钟数，负责人应明确低峰窗口和超时回滚阈值。
 
 ## 回滚及 0032
 
 回滚读取原持久快照并要求 HEAD/manifest/config/mode 均匹配。先停新 source 和统一项目，证明无新写者；恢复旧数据库，重放**原 invoice permissions**，核平台原授权目录和两库 ledger。再按 idp、平台、开票、source 顺序启动旧项目。实际 18 + 4 容器、镜像、挂载、端口、原 Compose/env SHA 和两个旧 readyz 全部匹配才成功。
+
+旧栈就绪后，必须再恢复本次快照中的主机 nginx vhost 原字节，语法检查、reload，并实际读取两个域名的 `/readyz`。这几步是 rollback 程序必经路径；仅容器恢复不能记录回滚成功。未知的 nginx 文件改动保留并停止，不用候选模板覆盖原恢复快照。
 
 本次 CR-0010 保持 schema。0032 两端同一 migration/checksum 时原样保留，不删 ledger，不降索引，不向旧二进制挂新 SQL 欺骗校验。若实际 ledger 不相同，自动原位镜像回滚明确失败并保持写者停止；负责人按原 PRODUCTION-RUNBOOK 12.1 对精确单项差异裁决，或从完整匹配签名备份恢复两库/文档/source state，不能无条件 DELETE 迁移记录。
 

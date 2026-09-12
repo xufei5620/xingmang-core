@@ -16,7 +16,7 @@ bash deploy/unified/cutover.sh FULL_COMMIT_SHA --config /reviewed/production.jso
 bash deploy/unified/rollback.sh --config /reviewed/production.json --dry-run
 ```
 
-公开配置契约为 `xingmang.unified.operator/v1`，顶层字段严格为 `schema,mode,state_root,docker,candidate,previous,backups,approvals,smoke_config,rehearsal,host_preflight`。实际配置含路径、公开 ID、金额、镜像 SHA，不能嵌入密码、私钥、TOTP 或客户邮箱。所有路径绝对且不可经符号链接/父目录跳转。
+公开配置契约为 `xingmang.unified.operator/v1`，顶层字段严格为 `schema,mode,state_root,docker,candidate,previous,backups,approvals,smoke_config,rehearsal,host_preflight,host_nginx`。实际配置含路径、公开 ID、镜像 SHA，不能嵌入密码、私钥、TOTP 或客户邮箱。所有路径绝对且不可经符号链接/父目录跳转。
 
 | 对象 | 字段和要求 |
 |---|---|
@@ -45,4 +45,4 @@ ClamAV 的原入口需要可写数据库目录。完整 D 应声明新的 `volum
 
 清理先验证本次 owner label/原始 journal，停止本次项目，确认容器消失，再移除明确命名冻结卷。原离线 identity 不删除。需要演练暂存身份时，`temporary_identity_paths` 必须恰为 `state_root/tmpfs/<owner_id>/invoice.age-identity` 和 `platform.age-identity`，并提供绝对路径 `identity_copy_binary`（原 GNU cp）及 `shred_binary`（原 GNU shred）。`backups.identity_file` 始终保留原件路径；创建冻结卷、武装 finally 后，程序独占创建暂存目录并先记归属，再由 cp 消费路径复制，只有 trial 的 age 调用改用副本。每个副本以三次覆写、补零及 unlink 清理；资源清理失败也会继续清理本次已登记副本。空目录仅非递归删除，未知条目保留并报失败。程序不读或哈希身份正文；暂存目录名不代表 Windows 上实际挂载了 tmpfs，执行记录应如实说明介质。未启用暂存时记录数量 0；要求覆盖身份销毁的完整演练必须提供两份暂存配置和真实删除回执。任何清理失败都不能生成 D PASS。
 
-`host_preflight` 的完整字段与合成边界见 [HOST-PREFLIGHT.md](HOST-PREFLIGHT.md)。`smoke_config` 的完整字段与期望结果见 [SMOKE.md](SMOKE.md)。纯配置不能删减十个真实 HTTP 步骤、四项主机守卫或原 11 道开票闩。演练中的已验证邮箱/抬头来自恢复备份，不引入新邮箱 challenge 或新的资金资格策略。
+`host_preflight` 的完整字段与合成边界见 [HOST-PREFLIGHT.md](HOST-PREFLIGHT.md)，主机 nginx 实际切换/回滚输入见 [HOST-NGINX.md](HOST-NGINX.md)。`smoke_config` 的完整字段与期望结果见 [SMOKE.md](SMOKE.md)。E 的 `rehearsal.host_preflight` 必须描述独立预检副本，停旧前重跑实际冻结副本预检；不切流量、不共用可写数据。纯配置不能删减十个只读 HTTP 步骤、四项主机守卫或原 11 道开票闩。

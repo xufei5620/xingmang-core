@@ -29,7 +29,7 @@ def configuration(root):
             "previous": {"projects": [project(kind, roles, "old") for kind, roles in lifecycle.OLD_ROLES.items()],
                          "migration_digest": "d" * 64, "ready_urls": {}, "permission_jobs": [], "databases": {}},
             "backups": {"invoice": {}, "platform": {}}, "approvals": {},
-            "smoke_config": str(public), "rehearsal": {}, "host_preflight": {}}
+            "smoke_config": str(public), "rehearsal": {}, "host_preflight": {}, "host_nginx": {}}
 
 
 def deployment_boundary(events, topology):
@@ -47,6 +47,8 @@ def deployment_boundary(events, topology):
         def migrate_and_permissions(self): events.append("migrate")
         def start_new(self): events.append("start_new"); topology["new"] = True
         def check_new(self): lifecycle.require(topology["new"], "new stopped")
+        def switch_nginx(self, snapshot): events.append("switch_nginx")
+        def restore_nginx(self, snapshot): events.append("restore_nginx")
         def smoke(self): events.append("smoke")
         def stop_new(self): events.append("stop_new"); topology["new"] = False
         def restore_permissions(self): events.append("permissions")

@@ -117,11 +117,13 @@ class FakeDriver:
     def migrate_and_permissions(self): self.step("migrate_and_permissions")
     def start_new(self): self.step("start_new")
     def check_new(self): self.step("check_new")
+    def switch_nginx(self, snapshot): self.step("switch_nginx")
     def smoke(self): self.step("smoke")
     def stop_new(self): self.step("stop_new")
     def restore_permissions(self): self.step("restore_permissions")
     def start_old(self): self.step("start_old")
     def check_old(self, snapshot): self.step("check_old"); assert snapshot["actual_invoice_containers"] == 18
+    def restore_nginx(self, snapshot): self.step("restore_nginx")
     def record(self, value): self.records.append(copy.deepcopy(value))
 
 
@@ -142,7 +144,7 @@ class StateMachineTests(unittest.TestCase):
         m = module(self); driver = FakeDriver()
         result = m.cutover(driver)
         self.assertEqual(result["status"], "COMMITTED")
-        self.assertEqual(driver.calls, ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "smoke"])
+        self.assertEqual(driver.calls, ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "smoke"])
 
     def test_preflight_failure_never_stops_old_services(self):
         m = module(self); driver = FakeDriver("preflight")
@@ -152,11 +154,11 @@ class StateMachineTests(unittest.TestCase):
 
     def test_every_post_freeze_failure_runs_real_rollback_and_returns_failure(self):
         m = module(self)
-        for failure in ("stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "smoke"):
+        for failure in ("stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "smoke"):
             with self.subTest(failure=failure):
                 driver = FakeDriver(failure)
                 with self.assertRaises(m.OperatorError): m.cutover(driver)
-                self.assertEqual(driver.calls[-4:], ["stop_new", "restore_permissions", "start_old", "check_old"])
+                self.assertEqual(driver.calls[-5:], ["stop_new", "restore_permissions", "start_old", "check_old", "restore_nginx"])
                 self.assertEqual(driver.records[-1]["status"], "ROLLED_BACK")
                 self.assertEqual(driver.records[-1]["exit_code"], 1)
 
