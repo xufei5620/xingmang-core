@@ -297,6 +297,7 @@ class Client:
         request = urllib.request.Request(self.base + path, data=payload, headers=headers, method=method)
         started = utc()
         status = None
+        phase, headers_at, response_bytes = "connect_or_headers", None, None
         try:
             try:
                 response = self.opener.open(request, timeout=30)
@@ -304,7 +305,9 @@ class Client:
                 response = exc
             with response:
                 status = response.code
+                phase, headers_at = "body", utc()
                 body = response.read((12 << 20) + 1)
+                response_bytes, phase = len(body), "complete"
                 media = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             require(len(body) <= 12 << 20, "HTTP_BODY_TOO_LARGE")
             require(status in expected and not 300 <= status < 400, "HTTP_STATUS_UNEXPECTED")
@@ -312,7 +315,9 @@ class Client:
         except (OSError, urllib.error.URLError, TimeoutError):
             raise SmokeFailure("HTTP_TRANSPORT_FAILED") from None
         finally:
-            self.records.append({"method": method, "path": urllib.parse.urlsplit(path).path, "status": status, "utc_start": started, "utc_end": utc()})
+            self.records.append({"method": method, "path": urllib.parse.urlsplit(path).path, "status": status,
+                "utc_start": started, "utc_end": utc(), "transport_phase": phase,
+                "headers_received_utc": headers_at, "response_bytes": response_bytes})
 
     def call(self, method, path, payload=None, expected=(200,)):
         data = None if payload is None else json.dumps(payload, separators=(",", ":")).encode()
