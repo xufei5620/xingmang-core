@@ -59,7 +59,7 @@ class SourceStateRestoreTests(unittest.TestCase):
                     artifact_preflight=lambda:None,command=lambda *a:subprocess.CompletedProcess([],0,stdout=str(16*1024**3).encode()),
                     projects=lambda _:[main,project],compose=compose,start_new_databases=lambda:events.append('databases'),jobs=lambda *a:None,
                     migrate_and_permissions=lambda:events.append('migrate'),start_new=lambda:events.append('start_new'),
-                    check_new=lambda:None,smoke=lambda:None,inventory=lambda _:[])
+                    check_new=lambda:None,preview_smoke=lambda *_:None,inventory=lambda _:[])
                 value={'archive_tmpfs_bytes':1024,'tools_image':'tools','verification_jobs':[{'service':'verify-invoice-restore'}]}
                 stack.enter_context(patch.object(restore,'rehearsal_driver',return_value=(driver,value)))
                 for name in ('invalidate_receipt','validate_frozen_mounts','create_frozen_volumes','extract_archive','inherited_preflight_pass'):

@@ -809,6 +809,12 @@ class DockerDriver:
                 [s.get("name") for s in result.get("steps", [])] == required_steps and
                 all(s.get("status") == "PASS" and s.get("exit_code") == 0 for s in result["steps"]), "actual HTTP smoke did not pass every required step")
 
+    def preview_smoke(self, deployment_config):
+        # Only restore.rehearse invokes this after frozen mount/ownership,
+        # source-state and health checks. The entry rechecks that boundary.
+        from preview_smoke import run_verified
+        return run_verified(self, deployment_config)
+
     def stop_new(self):
         for kind in ("sources", "unified"):
             project = next(p for p in self.projects("candidate") if p["kind"] == kind)

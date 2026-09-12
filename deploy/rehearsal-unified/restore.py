@@ -532,7 +532,7 @@ def rehearse(driver):
         prepare_source_verification_networks(trial)
         result["restored_source_state"] = verify_frozen_source_state(trial)
         trial.migrate_and_permissions()
-        trial.start_new(); trial.check_new(); trial.smoke()
+        trial.start_new(); trial.check_new(); trial.preview_smoke(driver.config)
         result.update(status="PASS", runtime_inventory=trial.inventory("candidate"))
     except BaseException:
         result.update(status="FAIL", exit_code=1)

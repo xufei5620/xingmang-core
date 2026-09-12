@@ -94,7 +94,7 @@ def unified_order(project, source_root):
                 def migrate_and_permissions(self):step('permissions')
                 def start_new(self):step('start-new')
                 def check_new(self):step('readiness')
-                def smoke(self):step('smoke')
+                def preview_smoke(self, deployment_config):step('preview-write-smoke')
                 def inventory(self,*args):step('inventory');return []
             trial=Trial()
             proof=dict(status='PASS',exit_code=0,mode='local-synthetic',qualification_scope='local-synthetic-host-preflight',
@@ -115,7 +115,7 @@ def unified_order(project, source_root):
                     assert result['status']=='PASS' and result['cleanup_complete'] is True and result['exit_code']==0
                     assert result['actual_operator_source']==trial.operator_source
                     assert result['restored_source_state']==[dict(role=role,exit_code=0) for role in source_roles]
-            expected=['invalidate-prior-pass','artifact','signatures','mounts','create-volumes','extract-invoice-documents','extract-invoice-source_state','extract-invoice-metadata','extract-platform-metadata','start-databases','restore-platform','restore-invoice','metadata-match','verify-document-source-job','prepare-restored-source-networks',*source_checks,'permissions','start-new','readiness','smoke','inventory','cleanup']
+            expected=['invalidate-prior-pass','artifact','signatures','mounts','create-volumes','extract-invoice-documents','extract-invoice-source_state','extract-invoice-metadata','extract-platform-metadata','start-databases','restore-platform','restore-invoice','metadata-match','verify-document-source-job','prepare-restored-source-networks',*source_checks,'permissions','start-new','readiness','preview-write-smoke','inventory','cleanup']
             if failure is None:assert calls==expected,('D current sequence changed',calls)
             else:
                 assert failure in calls
@@ -126,7 +126,7 @@ def unified_order(project, source_root):
                 assert calls==reached,('work continued after failed D prerequisite',failure,calls)
                 assert not any(name=='rehearsal-pass.json' and row.get('status')=='PASS' for name,row in records)
                 assert records[-1][1]['status']=='FAIL' and records[-1][1]['exit_code']==1
-    failures=['artifact','signatures','create-volumes','extract-invoice-documents','restore-platform','metadata-match','verify-document-source-job','prepare-restored-source-networks','permissions','readiness','smoke','cleanup']
+    failures=['artifact','signatures','create-volumes','extract-invoice-documents','restore-platform','metadata-match','verify-document-source-job','prepare-restored-source-networks','permissions','readiness','preview-write-smoke','cleanup']
     restore_case()
     for failure in failures+source_checks:restore_case(failure)
 

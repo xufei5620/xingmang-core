@@ -1,6 +1,6 @@
-# D/E 只读冒烟与切换前预检
+# 切换只读冒烟与隔离预检写流程
 
-P0-2 修复后，D、E 和生产模式使用同一套只读冒烟。绝不创建申请、审核、开具或上传发票，也不为测试修改余额、抬头、邮箱证明。唯一写操作是登录、TOTP 完成与本次会话撤销；这些操作可能产生正常登录审计记录。
+E 和直接运行的 `smoke.py` 使用固定十步只读冒烟，只有登录、TOTP 与会话撤销可写；不会创建、审核、开具或上传发票。D 与停旧栈前的隔离预检额外执行两步发票写流程，见下文；不修改生产余额、抬头或邮箱证明。
 
 ## 配置
 
@@ -19,7 +19,8 @@ origins.admin 与 origins.user 填实际配置的 HTTPS origin，例如 https://
 - credentials.staff：已注册 TOTP、已完成首改密的专用账户 username,password_file,totp_file。
 - credentials.sub2api：现有测试账户 identifier,password_file,source_id,existing_profile_id,expected_email_file。
 - credentials.newapi：另一个现有测试账户 identifier,password_file,source_id。
-- expected.required_staff_role：实际配置的管理员角色；默认 admin。原金额字段不再决定通过与否；脚本不要求正余额或创建充值。
+- expected.required_staff_role：实际配置的管理员角色；默认 admin。E 不要求正余额或创建充值。
+- 仅预检配置必须指定整数 `expected.request_amount_minor` 与 `expected.minimum_available_minor`，且后者不少于前者。该账户必须在备份中已有足额、已消费、已核验的 wallet 资金和已验证抬头；不足即失败，不临时改资金或证明。
 
 凭据仅通过绝对常规文件路径交给运行时消费，不在配置或证据中写入密码、TOTP、邮箱证明内容。两个来源必须有可区分的已有资金记录；SUB 抬头的 owner、已验证状态和接收邮箱必须匹配现有证明。
 
@@ -35,7 +36,20 @@ origins.admin 与 origins.user 填实际配置的 HTTPS origin，例如 https://
 
 ## E 在停旧栈前的实际预检
 
-顺序为 preflight → precheck_new → snapshot → stop_old → 原迁移/权限 → 新栈检查 → 切换/冒烟。precheck_new 重新执行一次 D 冻结副本恢复、原始迁移/11 闩检查和上述只读 HTTP 冒烟，不能复用旧 PASS 代替本次执行。
+顺序为 preflight → precheck_new → snapshot → stop_old → 原迁移/权限 → 新栈检查 → 切换/冒烟。precheck_new 重新执行一次 D 冻结副本恢复、原始迁移/11 闩检查和完整十二步预检，不能复用旧 PASS 代替本次执行。
+
+## N-1：仅隔离副本的两步写入
+
+`restore.rehearse` 在恢复、源状态与健康核对完成后调用 `preview_smoke.run_verified`，重新核验候选镜像/执行源码、全部 18 个冻结容器、数据卷与资源 owner、只读原始输入、隔离网络，以及与线上项目不同的项目名。两个预检 HTTPS origin 都必须显式钉到环回 TLS；端口不得复用任一在线 TLS 监听。部署描述仍保留线上 candidate，实际 D 项目与预检端口由 rehearsal 字段一起选择。
+
+只有上述核验成功才在进程内创建写能力；没有 CLI 写开关，生产模式或配置中的 `preview`/`financial_writes_permitted` 字段不能授权写入。普通 Client 的出口写禁令保留。能力绑定本次公开配置，仅允许创建一个新申请及该返回 UUID 的四个精确动作路径。
+
+在 `requests.read` 后、`readiness.after` 前执行：
+
+1. `sub.submit`：SUB 提交申请，核对来源、金额、分配、状态和版本；NEW 读取该申请必须被拒绝。
+2. `staff.approve-upload-download`：真实员工会话依次审批、开始开具、确认；上传合成 PDF 经实际 ClamAV/qpdf 与加密存储链，要求 scan_status=clean；客户与员工下载字节 SHA 都等于上传原件；其他客户下载必须被拒绝。
+
+写能力只用于冻结副本。成功、失败及中断仍撤销三组会话，D finally 清理新数据卷及临时身份。预检结果为 `actual-frozen-preview-smoke`，十二步必须全通过并标明 `financial_writes_permitted=true` 与冻结 owner/项目/卷证明；E 仍必须是十步、`financial_writes_permitted=false`。不把单元模拟或只读结果当作写链实证。
 
 预检的项目名与新旧在线项目均不同；数据卷必须新建且受原有所有权检查；原卷不作为可写副本；网络保持原有隔离规则。证据、临时解密身份和清理记录位于本次 candidate-precheck 子目录。清理不完整或镜像/HEAD 不匹配即拒绝；此前旧栈保持运行，不切流量。预检容量、独立 loopback TLS 入口和已签名备份由负责人提前准备，不能在生产预检中临时扩大权限。
 

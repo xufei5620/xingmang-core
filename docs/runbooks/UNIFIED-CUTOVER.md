@@ -26,7 +26,7 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 
 ## 冻结、切换和验证顺序
 
-1. 本地 Docker endpoint、manifest/镜像、主机守卫、D/C1/签名包及 [主机 nginx 预检](../../deploy/rehearsal-unified/HOST-NGINX.md) 全部成功后，对新栈独立冻结副本再跑一次实际预检，保持旧入口和旧栈服务。预检完整清理成功，才写含原 nginx vhost 的持久 PREPARED 快照并进入停写。
+1. 本地 Docker endpoint、manifest/镜像、主机守卫、D/C1/签名包及 [主机 nginx 预检](../../deploy/rehearsal-unified/HOST-NGINX.md) 全部成功后，对新栈独立冻结副本再跑一次实际预检，保持旧入口和旧栈服务。预检十二步包含副本内的提交、审批、真实扫描上传和双方下载 SHA 核对，详见 [N-1 隔离写流程](../../deploy/rehearsal-unified/SMOKE.md)。预检完整清理成功，才写含原 nginx vhost 的持久 PREPARED 快照并进入停写。
 2. 依次停止旧 source agents、旧 invoice、旧 platform、旧 idp，确认各项目没有仍在运行的容器并确认接管端口空闲。保留旧容器/卷/文件。
 3. 启动新两个数据库并等待健康；按顺序执行平台 migrate（业务 + River）、invoice-migrate、invoice-permissions。平台沿用原角色/授权，目录只读快照必须前后一致；没有把 migrate 叫作权限重放，也不在本次实施 DBR1。
 4. 比较两库实际迁移 ledger 与冻结时的 SHA，再启动统一 API/独立 worker、扫描器及十个新 source agents。

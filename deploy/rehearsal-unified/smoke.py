@@ -1,7 +1,8 @@
-"""Read-only D/E HTTP smoke for explicitly configured HTTPS origins.
+"""Read-only cutover CLI and shared authenticated probe sessions.
 
-Only authentication sessions are created and then revoked. No financial write,
-shell command, identity fabrication or TLS bypass is permitted.
+The CLI only creates and revokes authentication sessions. Financial probes
+require the internal verified frozen-copy capability from preview_smoke;
+configuration flags cannot enable them. No identity fabrication or TLS bypass.
 Credentials are consumed only from named restricted files at runtime.
 Unit simulations do not qualify a deployment; only this CLI's real HTTP run does.
 """
@@ -281,9 +282,12 @@ class Client:
         finally:
             self.cookies.clear()
 
+    def request_allowed(self, method, path, payload):
+        return method in ("GET", "HEAD") or (method, path) in AUTH_WRITES or ((method, path) in OLD_ROUTES and payload in (None, b"{}"))
+
     def raw(self, method, path, payload=None, expected=(200,), content_type="application/json", *, with_status=False):
         require(path.startswith("/") and not path.startswith("//") and not urllib.parse.urlsplit(path).netloc and "\\" not in path, "HTTP_PATH_REJECTED")
-        require(method in ("GET", "HEAD") or (method, path) in AUTH_WRITES or ((method, path) in OLD_ROUTES and payload in (None, b"{}")), "SMOKE_WRITE_FORBIDDEN")
+        require(self.request_allowed(method, path, payload), "SMOKE_WRITE_FORBIDDEN")
         headers = {"Accept": "application/json, application/pdf, text/html", "User-Agent": "xingmang-rehearsal-smoke/1", "Origin": self.base, "Sec-Fetch-Site": "same-origin"}
         if method not in ("GET", "HEAD"):
             headers["Content-Type"] = content_type
@@ -356,7 +360,7 @@ def login_staff(client, item, required_role):
     client.csrf = staff["csrf_token"]
 
 
-def run(config):
+def run(config, *, _preview=None):
     result = {"schema": SCHEMA, "status": "FAIL", "exit_code": 1, "utc_start": utc(), "steps": [], "http": [], "evidence_kind": "actual-http-smoke", "email_proof": "restored-existing-profile; no new verification performed", "management_page_coverage": "HTTP shell plus authenticated admin API; DOM rendering requires separate browser evidence"}
     def step(name, action):
         record = {"name": name, "status": "FAIL", "exit_code": 1, "utc_start": utc()}
@@ -368,15 +372,24 @@ def run(config):
         finally:
             record["utc_end"] = utc()
     sessions = []
+    required_steps = REQUIRED
     try:
         validate_config(config)
+        if _preview is not None:
+            from preview_smoke import FrozenPermit, REQUIRED as PREVIEW_REQUIRED
+            require(type(_preview) is FrozenPermit, "VERIFIED_FROZEN_PERMIT_REQUIRED")
+            _preview.check_config(config)
+            required_steps = PREVIEW_REQUIRED
         result["mode"] = config["mode"]
         creds, expected = config["credentials"], config["expected"]
         def client(role):
-            return Client(config["origins"][role], config.get("ca_file"), result["http"], config.get("connect_to", {}).get(role))
+            factory = Client if _preview is None else _preview.client
+            return factory(config["origins"][role], config.get("ca_file"), result["http"], config.get("connect_to", {}).get(role))
         admin, sub, new = client("admin"), client("user"), client("user")
-        result.update(origins=config["origins"], financial_writes_permitted=False,
+        result.update(origins=config["origins"], financial_writes_permitted=_preview is not None,
                       configuration_sha256=hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+        if _preview is not None:
+            result.update(evidence_kind="actual-frozen-preview-smoke", frozen_write_scope=_preview.proof)
         def with_session(client, kind, action):
             sessions.append((client, kind))
             return action()
@@ -425,8 +438,10 @@ def run(config):
             result["existing_request_count"] = len(seen)
             result["invoice_write_coverage"] = "not performed: production-safe read-only probes"
         step("requests.read", requests_read)
+        if _preview is not None:
+            _preview.exercise(step, config, admin, sub, new, result)
         step("readiness.after", lambda: check_ready(admin.call("GET", "/readyz")))
-        require(tuple(item["name"] for item in result["steps"] if item["status"] == "PASS") == REQUIRED[:-1], "INCOMPLETE_SMOKE")
+        require(tuple(item["name"] for item in result["steps"] if item["status"] == "PASS") == required_steps[:-1], "INCOMPLETE_SMOKE")
         result.update(status="PASS", exit_code=0)
     except BaseException as exc:
         result.update(status="FAIL", exit_code=2 if isinstance(exc, InputFailure) else 1,
@@ -451,7 +466,7 @@ def run(config):
                 step("sessions.revoked", revoke_sessions)
             except Exception:
                 result.update(status="FAIL", exit_code=1, failure_code="SESSION_CLEANUP_FAILED")
-        if result["status"] == "PASS" and tuple(x["name"] for x in result["steps"] if x["status"] == "PASS") != REQUIRED:
+        if result["status"] == "PASS" and tuple(x["name"] for x in result["steps"] if x["status"] == "PASS") != required_steps:
             result.update(status="FAIL", exit_code=1, failure_code="INCOMPLETE_SMOKE")
         result["utc_end"] = utc()
     return result
