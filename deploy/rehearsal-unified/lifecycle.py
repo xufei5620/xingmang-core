@@ -712,8 +712,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     lock = None
-    lock_owned = False
+    exit_code = 1
     try:
+        from operator_lock import acquire_lock
         config = validate_config(read_public_json(args.config))
         if args.operation == "cutover":
             require(args.head == config["candidate"]["head"], "requested SHA differs from reviewed candidate")
@@ -729,10 +730,7 @@ def main():
             return 0
         state = plain_path(config["state_root"], exists=False, directory=True)
         state.mkdir(parents=True, exist_ok=True)
-        lock = state / "operator.lock"
-        descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        lock_owned = True
-        os.write(descriptor, str(os.getpid()).encode()); os.close(descriptor)
+        lock = acquire_lock(state)
         driver = DockerDriver(config, record_root=state / (args.operation + "-" + str(time.time_ns())))
         if args.operation == "cutover":
             driver.require_new_cutover()
@@ -749,17 +747,17 @@ def main():
             from restore import rehearse, cleanup
             result = rehearse(driver) if args.operation == "rehearse" else cleanup(driver)
         print(json.dumps({"status": result["status"], "exit_code": result.get("exit_code", 0)}))
-        return result.get("exit_code", 0)
+        exit_code = result.get("exit_code", 0)
     except (OperatorError, ValueError, KeyError, OSError):
         print("unified operator failed; see non-secret operation records", file=sys.stderr)
-        return 1
     finally:
-        if lock is not None and lock_owned:
-            # A busy-lock failure must never unlink another invocation's lock.
+        if lock is not None:
             try:
-                if lock.read_text() == str(os.getpid()): lock.unlink()
+                lock.release()
             except OSError:
-                pass
+                print("operator lock release could not be verified; owner record retained", file=sys.stderr)
+                exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":

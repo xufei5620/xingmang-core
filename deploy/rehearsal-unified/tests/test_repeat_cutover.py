@@ -38,6 +38,7 @@ def deployment_boundary(events, topology):
         def preflight(self):
             events.append("preflight")
             lifecycle.require(topology["old"], "original services are stopped")
+        def precheck_new(self): events.append("precheck_new")
         def snapshot(self):
             return {"containers": [{"role": role, "image_id": "sha256:" + "a" * 64}
                                    for roles in lifecycle.OLD_ROLES.values() for role in sorted(roles)]}
