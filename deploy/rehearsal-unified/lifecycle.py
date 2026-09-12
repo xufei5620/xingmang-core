@@ -169,7 +169,7 @@ def require_mount_inventory(original, resolved):
 
 
 def require_snapshot_files(snapshot):
-    for item in snapshot["project_files"]:
+    for item in snapshot["project_files"] + snapshot.get("legacy_secret_inputs", []):
         require(digest(item["env_file"]) == item["env_sha256"], "old original environment bytes changed")
         for source in item["compose"]:
             require(digest(source["path"]) == source["sha256"], "old original Compose bytes changed")
@@ -494,6 +494,7 @@ class DockerDriver:
 
     def resolved_mount_inventory(self, side="candidate"):
         rows = []
+        if side == "previous": self.legacy_secret_inputs = []
         for project in self.projects(side):
             resolved = json.loads(self.compose(project, "planned-data-" + project["kind"], ["config", "--format", "json"]).stdout)
             names = {key: value.get("name", project["name"] + "_" + key) for key, value in resolved.get("volumes", {}).items()}
@@ -515,7 +516,30 @@ class DockerDriver:
                     for value in resolved["services"][service].get(kind, []):
                         value = {"source": value} if isinstance(value, str) else value
                         definition = resolved.get(kind, {}).get(value["source"], {})
-                        require(isinstance(definition.get("file"), str) and definition["file"] and not definition.get("external") and not definition.get("environment"),
+                        item = resolved["services"][service]
+                        secret = "database__postgres_password"
+                        target = "/run/secrets/" + secret
+                        legacy = (side == "previous" and project["kind"] == "platform" and entry["role"] == "platform-postgres" and
+                                  kind == "secrets" and value["source"] == secret and value.get("target", secret) in (secret, target) and
+                                  set(value).issubset({"source", "target", "uid", "gid", "mode"}) and
+                                  str(value.get("uid", "0")) == str(value.get("gid", "0")) == "0" and value.get("mode", 0o444) == 0o444 and
+                                  definition.get("environment") == "DATABASE_PASSWORD" and set(definition).issubset({"environment", "name"}) and
+                                  definition.get("name", project["name"] + "_" + secret) == project["name"] + "_" + secret and
+                                  item.get("environment", {}).get("POSTGRES_PASSWORD_FILE") == target and
+                                  "POSTGRES_PASSWORD" not in item.get("environment", {}) and not item.get("read_only", False))
+                        if legacy:
+                            # Compose injects this one historical secret into the
+                            # container filesystem; inventing a bind would be false.
+                            require(not item.get("tmpfs") and all(
+                                m.get("target") and not (target == m["target"] or target.startswith(m["target"].rstrip("/") + "/"))
+                                for m in item.get("volumes", [])), "legacy PG secret injection is shadowed by a mount")
+                            self.legacy_secret_inputs.append({"project": project["name"], "service": service,
+                                "type": "compose-environment-injected", "secret": secret, "environment": "DATABASE_PASSWORD", "target": target,
+                                "env_file": project["env_file"], "env_sha256": digest(project["env_file"]),
+                                "compose": [{"path": f, "sha256": digest(f)} for f in project["compose_files"]]})
+                            continue
+                        require(isinstance(definition.get("file"), str) and definition["file"] and not definition.get("external") and
+                                "environment" not in definition and "content" not in definition,
                                 "original secret/config must have a verifiable file mount")
                         target = value.get("target", value["source"])
                         if not target.startswith("/"):
@@ -570,9 +594,12 @@ class DockerDriver:
         from host_nginx import HostNginx
         rows = self.inventory("previous")
         require(sum(r["role"] not in OLD_ROLES["platform"] for r in rows) == 18, "old invoice inventory is not eighteen actual containers")
-        return {"actual_invoice_containers": 18, "containers": rows, "host_nginx": HostNginx(self).snapshot(), "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
+        snapshot = {"actual_invoice_containers": 18, "containers": rows, "host_nginx": HostNginx(self).snapshot(), "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
+                "legacy_secret_inputs": getattr(self, "legacy_secret_inputs", []),
                 "project_files": [{"name": p["name"], "compose": [{"path": f, "sha256": digest(f)} for f in p["compose_files"]],
                                    "env_file": p["env_file"], "env_sha256": digest(p["env_file"])} for p in self.projects("previous")]}
+        require_snapshot_files(snapshot)
+        return snapshot
 
     def assert_stopped(self, side):
         for project in self.projects(side):

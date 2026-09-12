@@ -972,7 +972,7 @@
   },
   "secrets": {
     "database__postgres_password": {
-      "environment": "DATABASE_PASSWORD"
+      "file": "${SECRETS_DIR:?set SECRETS_DIR}/database__postgres_password"
     },
     "invoice_owner_db_password": {
       "file": "${SECRETS_DIR:?set SECRETS_DIR}/invoice_owner_db_password"
