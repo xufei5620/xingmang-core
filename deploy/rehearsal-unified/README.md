@@ -24,7 +24,7 @@ bash deploy/unified/rollback.sh --config /reviewed/production.json --dry-run
 | `docker` | `binary,context,config_dir`；只接受本机 Unix socket 或 Docker Desktop named pipe，不读取 credential store |
 | `candidate` | `head,manifest,manifest_sha256,migration_digest,projects,jobs,ready_url,databases`；完整 clean HEAD，所有 runtime imageId 必须匹配 manifest |
 | `previous` | `projects,migration_digest,ready_urls,permission_jobs,databases,input_snapshot`；原位四项目，两个 ledger 与候选声明一致，旧 readiness 分 platform/invoice；保全快照为 `{path,sha256}` |
-| 每个 project | `kind,name,compose_files,env_file,services`；service 值为 `{role,image_id}`；`candidate` 仅 unified/sources，旧为 platform/invoice/sources/idp |
+| 每个 project | `kind,name,compose_files,env_file,services`；service 值为 `{role,image_id}`；`candidate` 仅 unified/sources，旧为 platform/invoice/sources/idp。仅 previous project 可额外声明 `service_inputs`：精确覆盖其运行服务，每项为完整有序 `compose_files` 和同首文件父目录的 `working_dir`；见[旧输入保全](../../docs/runbooks/UNIFIED-OLD-INPUTS.md) |
 | 每域 database | `{project,service,database,owner}`；仅作本机容器内 pg_restore/只读元数据查询，不接受任意 SQL |
 | lifecycle job | `{project,service}`；新顺序固定 migrate、invoice-migrate、invoice-permissions；旧只重放已审 invoice permissions，不引入平台 DBR1 |
 | `approvals` | `rehearsal_record,mfa_query_record,max_age_hours,minimum_free_bytes`；时限 1–24h，D/C1 结果有时区、未过期、非未来 |

@@ -1,5 +1,6 @@
 """Switch only reviewed public proxy configuration; never open TLS key files."""
 import hashlib
+import copy
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -48,13 +49,21 @@ def normalize(nodes, *, proxy=False):
     return result
 
 
-def replace_reviewed_includes(nodes, pairs):
+def replace_reviewed_includes(nodes, pairs, glob_members=None):
     """Only replace the exact reviewed include target at its original AST slot."""
     mapping = dict(pairs)
     seen = set()
     def visit(items):
         result = []
         for args, children in items:
+            if args[0]=='include' and len(args)==2 and args[1] in (glob_members or {}):
+                require(children is None,'nginx include cannot contain a block')
+                members=glob_members[args[1]]
+                require(members and len(members)==len(set(members)),'frozen nginx glob membership is empty or duplicated')
+                for member in members:
+                    if member in mapping:seen.add(member)
+                    result.append((('include',mapping.get(member,member)),None))
+                continue
             if args[0] == 'include' and len(args) == 2 and args[1] in mapping:
                 seen.add(args[1])
                 args = ('include', mapping[args[1]])
@@ -70,7 +79,13 @@ def only_proxy_changes(old, new):
             'candidate vhost changes more than reviewed proxy destinations')
 
 
-def check_routes(value, origins, ports):
+KNOWN_USER_REGEX={
+    '^/api/v1/admin/invoice-requests/[^/]+/documents/upload$':'/api/v1/admin/invoice-requests/',
+    '^/api/v1/user/invoice-requests/[^/]+/document$':'/api/v1/user/invoice-requests/',
+}
+
+
+def check_routes(value, origins, ports, *, header_files=None, main_prefix=''):
     servers = []
     def collect(nodes):
         for args, children in nodes:
@@ -78,7 +93,11 @@ def check_routes(value, origins, ports):
                 servers.append(children)
             elif children is not None:
                 collect(children)
-    collect(parse(value))
+    nodes=parse(value)
+    if header_files is not None:
+        from nginx_layout import header_nodes
+        nodes=header_nodes(nodes,header_files,main_prefix)
+    collect(nodes)
     for role, origin in origins.items():
         url = urllib.parse.urlsplit(origin)
         wanted_port = str(url.port or 443)
@@ -91,9 +110,13 @@ def check_routes(value, origins, ports):
         require(len(matches) == 1, 'configured HTTPS origin has no unique managed nginx server')
         require(not any(args[0] == 'include' for args, _ in matches[0]),
                 'managed server routes must be explicit; included route handlers require owner review')
-        locations = []
+        locations = []; regex_locations=[]
         for args, children in matches[0]:
             if args[0] == 'location':
+                if len(args)==3 and args[1] in ('~','~*'):
+                    require(role=='user' and args[1]=='~' and args[2] in KNOWN_USER_REGEX and children is not None,
+                            'unreviewed regex location remains forbidden')
+                    regex_locations.append((args,children));continue
                 require(children is not None and ((len(args) == 2 and args[1].startswith('/')) or
                         (len(args) == 3 and args[1] in ('=', '^~') and args[2].startswith('/'))),
                         'managed vhost requires explicit prefix/exact routes, not unreviewed regex routes')
@@ -104,7 +127,7 @@ def check_routes(value, origins, ports):
                     'nginx public route does not preserve its path to the selected new web port')
             require(not any(args[0] in ('return', 'rewrite', 'try_files', 'if', 'include', 'location') for args, _ in selected),
                     'nginx public route has an unreviewed handler override')
-        for args, body in locations:
+        for args, body in [*locations,*regex_locations]:
             # Check every more-specific API route and every proxied page, not
             # merely the sampled login/list URLs exercised by read-only smoke.
             path = args[-1]
@@ -114,6 +137,10 @@ def check_routes(value, origins, ports):
                 verify_proxy(body)
         paths = ['/', '/readyz', '/healthz', '/invoice-api/v1/auth/session']
         if role == 'admin': paths += ['/api/v1/auth/login', '/finance', '/webhooks/']
+        for args,body in regex_locations:
+            require(all(not path.startswith(KNOWN_USER_REGEX[args[2]]) for path in paths),
+                    'known regex could intercept a required probe path')
+            verify_proxy(body)
         for path in paths:
             exact = [body for args, body in locations if args[1] == '=' and args[2] == path]
             prefixes = [(args[-1], body) for args, body in locations if args[1] != '=' and path.startswith(args[-1])]
@@ -144,7 +171,7 @@ def expanded(raw):
     return result
 
 
-def compare_expanded(old, new, old_main, staged_main, pairs):
+def compare_expanded(old, new, old_main, staged_main, pairs, glob_members=None):
     require(old_main in old and staged_main in new, 'nginx main configuration was not loaded')
     old_vhosts, new_vhosts = set(), set()
     for before, after in pairs:
@@ -152,7 +179,7 @@ def compare_expanded(old, new, old_main, staged_main, pairs):
                 'staged nginx configuration does not replace exactly the live vhost')
         only_proxy_changes(old[before], new[after])
         old_vhosts.add(before); new_vhosts.add(after)
-    require(replace_reviewed_includes(parse(old[old_main]), pairs) == parse(new[staged_main]),
+    require(replace_reviewed_includes(parse(old[old_main]), pairs,glob_members) == parse(new[staged_main]),
             'staged nginx main changes include scope, order or unreviewed behavior')
     original = {p: body for p, body in old.items() if p not in old_vhosts | {old_main}}
     candidate = {p: body for p, body in new.items() if p not in new_vhosts | {staged_main}}
@@ -186,16 +213,18 @@ def public_input(path):
     return body, identity(after)
 
 
-def staged_main(body, pairs):
+def staged_main(body, pairs, glob_members=None):
     """Preserve public main bytes except reviewed include targets, then prove AST identity."""
     text = body.decode('utf-8')
     mapping = dict(pairs)
     directive = re.compile(r'''\binclude\s+("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:\\.|[^\s;])+)[ \t\r\n]*;''')
     def replace(match):
         args = parse(match[0])[0][0]
+        if len(args)==2 and args[1] in (glob_members or {}):
+            return '\n'.join('include '+json.dumps(mapping.get(path,path),ensure_ascii=False)+';' for path in glob_members[args[1]])
         return 'include ' + json.dumps(mapping[args[1]], ensure_ascii=False) + ';' if len(args) == 2 and args[1] in mapping else match[0]
     result = directive.sub(replace, text)
-    require(replace_reviewed_includes(parse(text), pairs) == parse(result),
+    require(replace_reviewed_includes(parse(text), pairs,glob_members) == parse(result),
             'temporary nginx main cannot preserve the reviewed include layout')
     return result.encode('utf-8')
 
@@ -258,6 +287,9 @@ class HostNginx:
         return self.driver.command(name, prefix + args + ['-c', self.runtime_path(main)])
 
     def preflight(self):
+        from nginx_layout import FrozenLayout,verify_layout,same_structure
+        initial=getattr(self.driver,'host_nginx_initial_layout',None)
+        if initial is not None:verify_layout(self,initial,{})
         projects = [p for p in self.driver.config['candidate']['projects'] if p['kind'] == 'unified']
         require(len(projects) == 1, 'host nginx requires exactly one verified unified web project')
         project = projects[0]
@@ -270,15 +302,25 @@ class HostNginx:
             require(len(matches) == 1 and matches[0].get('host_ip') == '127.0.0.1' and matches[0].get('protocol', 'tcp') == 'tcp' and
                     str(matches[0].get('published')) == str(self.ports[role]), 'nginx upstream does not match the actual loopback web binding')
         old = expanded(self.command('host-nginx-current-test', self.main).stdout)
+        layout=FrozenLayout(self,old);proof=layout.proof()
+        if initial is not None:
+            same_structure(initial,proof)
+            require(all(proof['files'][path]['sha256']==row['sha256'] and
+                        proof['files'][path]['identity'][2:5]==row['identity'][2:5]
+                        for path,row in initial['files'].items()),
+                    'frozen nginx public configuration changed during repeated preflight')
+        verify_layout(self,proof,{})
         new = expanded(self.command('host-nginx-candidate-test', self.staged).stdout)
         pairs = [(self.runtime_path(a), self.runtime_path(b)) for a, b in self.rows]
-        compare_expanded(old, new, self.runtime_path(self.main), self.runtime_path(self.staged), pairs)
+        compare_expanded(old, new, self.runtime_path(self.main), self.runtime_path(self.staged), pairs,proof['expanded_globs'])
         for before, after in self.rows:
             require(old[self.runtime_path(before)] == before.read_text('utf-8').strip() and new[self.runtime_path(after)] == after.read_text('utf-8').strip(),
                     'nginx runtime mapping differs from reviewed host public files')
-        check_routes('\n'.join(new[b] for a, b in pairs), self.origins, self.ports)
+        check_routes('\n'.join(new[b] for a, b in pairs), self.origins, self.ports,header_files=old,main_prefix=proof['main_prefix'])
+        verify_layout(self,proof,{})
+        if initial is None:self.driver.host_nginx_initial_layout=copy.deepcopy(proof)
         return {'status': 'PASS', 'exit_code': 0, 'utc_end': utc(), 'public_network_access': False, 'nginx_test_network': 'fresh-isolated-network-namespace', 'main_sha256': digest(self.main),
-                'staged_main_sha256': digest(self.staged), 'vhosts': [{'live': str(a), 'original_sha256': digest(a), 'candidate': str(b), 'candidate_sha256': digest(b)} for a, b in self.rows]}
+                'staged_main_sha256': digest(self.staged), 'layout':proof, 'vhosts': [{'live': str(a), 'original_sha256': digest(a), 'candidate': str(b), 'candidate_sha256': digest(b)} for a, b in self.rows]}
 
     def snapshot(self):
         proof = self.preflight()
@@ -295,6 +337,11 @@ class HostNginx:
         return proof
 
     def apply(self, snapshot, *, rollback=False):
+        from nginx_layout import verify_layout,same_structure
+        allowed={self.runtime_path(Path(row['live'])):{row['original_sha256'],row['candidate_sha256']} for row in snapshot['vhosts']}
+        initial=getattr(self.driver,'host_nginx_initial_layout',None)
+        if initial is not None:same_structure(initial,snapshot['layout'])
+        verify_layout(self,snapshot['layout'],allowed)
         require(snapshot.get('main_sha256') == digest(self.main), 'nginx main changed after snapshot')
         expected = [(str(a), str(b)) for a, b in self.rows]
         require([(r['live'], r['candidate']) for r in snapshot['vhosts']] == expected, 'nginx snapshot belongs to a different vhost plan')
@@ -315,21 +362,28 @@ class HostNginx:
             body = capture(source)
             require(hashlib.sha256(body).hexdigest() == wanted, 'nginx recovery or candidate input changed')
             prepared.append((row, body, wanted))
-        self.test_prepared(main_body, prepared, rollback=rollback)
+        self.test_prepared(main_body, prepared, rollback=rollback,layout=snapshot['layout'],allowed=allowed)
         # nginx is an external consumer. Reject edits made during its test,
         # including same-byte file replacement or metadata changes, before any
         # live file is installed. Install the exact bytes that were tested.
         for path, observed in inputs.items():
             require(public_input(path) == observed, 'nginx public input changed during staged validation')
+        verify_layout(self,snapshot['layout'],allowed)
         for row, body, wanted in prepared:
             atomic_public_file(row['live'], body, row)
             require(digest(row['live']) == wanted, 'nginx public install hash mismatch')
-        self.command('host-nginx-restored-test' if rollback else 'host-nginx-switched-test', self.main)
+        loaded=expanded(self.command('host-nginx-restored-test' if rollback else 'host-nginx-switched-test', self.main).stdout)
+        installed={self.runtime_path(Path(row['live'])):{wanted} for row,body,wanted in prepared}
+        for row,body,wanted in prepared:
+            require(loaded.get(self.runtime_path(Path(row['live'])))==body.decode('utf-8').strip(),
+                    'installed nginx test did not load the exact selected vhost bytes')
+        verify_layout(self,snapshot['layout'],installed)
         self.command('host-nginx-restore-reload' if rollback else 'host-nginx-switch-reload', self.main, reload=True)
         if rollback:
             self.probe_restored()
 
-    def test_prepared(self, main_body, prepared, *, rollback):
+    def test_prepared(self, main_body, prepared, *, rollback,layout,allowed):
+        from nginx_layout import FrozenLayout,verify_layout,same_structure
         phase = 'restore' if rollback else 'switch'
         folder = self.main.parent / ('unified-nginx-' + uuid.uuid4().hex)
         folder.mkdir(mode=0o700)
@@ -341,19 +395,22 @@ class HostNginx:
                     paths.append(target); stream.write(body)
                 staged_inputs[target] = public_input(target)
                 pairs.append((self.runtime_path(Path(row['live'])), self.runtime_path(target)))
-            primary = folder / 'nginx.conf'
-            primary_body = staged_main(main_body, pairs)
+            primary = self.main.with_name(self.main.name+'.unified-'+uuid.uuid4().hex+'.tmp')
+            primary_body = staged_main(main_body, pairs,layout['expanded_globs'])
             with primary.open('xb') as stream:
                 paths.append(primary); stream.write(primary_body)
             staged_inputs[primary] = public_input(primary)
+            verify_layout(self,layout,allowed)
             old = expanded(self.command('host-nginx-' + phase + '-current-test', self.main).stdout)
+            same_structure(layout,FrozenLayout(self,old).proof())
             new = expanded(self.command('host-nginx-' + phase + '-staged-test', primary).stdout)
-            compare_expanded(old, new, self.runtime_path(self.main), self.runtime_path(primary), pairs)
+            compare_expanded(old, new, self.runtime_path(self.main), self.runtime_path(primary), pairs,layout['expanded_globs'])
             for path, (body, _) in staged_inputs.items():
                 require(new.get(self.runtime_path(path)) == body.decode('utf-8').strip(),
                         'nginx did not test the exact prepared public bytes')
             if not rollback:
-                check_routes('\n'.join(new[after] for _, after in pairs), self.origins, self.ports)
+                check_routes('\n'.join(new[after] for _, after in pairs), self.origins, self.ports,header_files=old,main_prefix=layout['main_prefix'])
+            verify_layout(self,layout,allowed)
             for path, observed in staged_inputs.items():
                 require(public_input(path) == observed, 'nginx prepared layout changed during validation')
         finally:

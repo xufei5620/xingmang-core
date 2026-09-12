@@ -236,12 +236,78 @@ def require_mount_inventory(original, resolved):
     require(normalize(original) == normalize(resolved), "original Compose mounts differ from the observed running deployment")
 
 
+def original_service_input(project, service):
+    """Select one exact original runtime declaration, never union its overlays."""
+    if "service_inputs" not in project:
+        return {"compose_files": project["compose_files"],
+                "working_dir": str(plain_path(project["compose_files"][0]).parent)}
+    mapping = project["service_inputs"]
+    require(isinstance(mapping, dict) and set(mapping) == set(project["services"]),
+            "original service inputs must cover exactly the runtime service inventory")
+    require(service in mapping, "original Compose input requested for an unknown runtime service")
+    for value in mapping.values():
+        require(isinstance(value, dict) and set(value) == {"compose_files", "working_dir"}, "invalid original service input")
+        files = value["compose_files"]
+        require(isinstance(files, list) and files and all(isinstance(path, str) for path in files) and len(set(files)) == len(files),
+                "original service Compose list must be ordered, nonempty and unique")
+        paths = [plain_path(path) for path in files]
+        require(plain_path(value["working_dir"], directory=True) == paths[0].parent,
+                "original service working directory must preserve its first Compose file base")
+    return mapping[service]
+
+
+def original_runtime_groups(project, services=None):
+    names = list(project["services"] if services is None else services)
+    require(names and len(set(names)) == len(names) and set(names) <= set(project["services"]),
+            "original runtime operation contains an unknown or repeated service")
+    if "service_inputs" not in project:
+        return [project if services is None else {**project, "services": {name: project["services"][name] for name in names}}]
+    groups = {}
+    for name in names:
+        value = original_service_input(project, name)
+        key = (tuple(value["compose_files"]), value["working_dir"])
+        if key not in groups:
+            groups[key] = {**{k: v for k, v in project.items() if k != "service_inputs"},
+                           "compose_files": value["compose_files"], "_original_working_dir": value["working_dir"], "services": {}}
+        groups[key]["services"][name] = project["services"][name]
+    return list(groups.values())
+
+
+def original_service_project(project, service):
+    return original_runtime_groups(project, [service])[0]
+
+
+def original_input_plans(project):
+    """The project default remains explicit for non-runtime permission jobs."""
+    return [project, *original_runtime_groups(project)] if "service_inputs" in project else [project]
+
+
+def snapshot_project_files(projects):
+    rows = []
+    for project in projects:
+        # Union ordering is not execution ordering: each service below retains
+        # its ordered list. Keep JSON object-key reformatting behavior-neutral.
+        files = sorted({path for plan in original_input_plans(project) for path in plan["compose_files"]}) if "service_inputs" in project else project["compose_files"]
+        row = {"name": project["name"], "compose": [{"path": path, "sha256": digest(path)} for path in files],
+               "env_file": project["env_file"], "env_sha256": digest(project["env_file"])}
+        if "service_inputs" in project:
+            row["service_inputs"] = {service: {"working_dir": value["working_dir"],
+                "compose": [{"path": path, "sha256": digest(path)} for path in value["compose_files"]]}
+                for service, value in project["service_inputs"].items()}
+        rows.append(row)
+    return rows
+
+
 def require_snapshot_files(snapshot):
     if "old_input_snapshot" in snapshot:
         binding = snapshot["old_input_snapshot"]
         require(digest(plain_path(binding["path"])) == binding["sha256"], "old input preservation snapshot changed")
-        for source in read_public_json(binding["path"])["files"]:
+        proof = read_public_json(binding["path"])
+        for source in proof["files"]:
             require(digest(plain_path(source["path"])) == source["sha256"], "pre-stage original input bytes changed")
+        if any("service_inputs" in project for project in proof["projects"]):
+            require(snapshot["project_files"] == snapshot_project_files(proof["projects"]),
+                    "snapshot original service provenance or file binding changed")
     for item in snapshot["project_files"] + snapshot.get("legacy_secret_inputs", []):
         require(digest(plain_path(item["env_file"])) == item["env_sha256"], "old original environment bytes changed")
         for source in item["compose"]:
@@ -251,13 +317,18 @@ def require_snapshot_files(snapshot):
 def preserved_input_files(projects):
     files = {}
     for project in projects:
-        require(set(project) == {"kind", "name", "compose_files", "env_file", "services"}, "old project preservation descriptor is invalid")
+        required = {"kind", "name", "compose_files", "env_file", "services"}
+        require(required <= set(project) <= required | {"service_inputs"}, "old project preservation descriptor is invalid")
+        original_runtime_groups(project)  # Validate every explicit runtime entry before hashing inputs.
         require(isinstance(project["compose_files"], list) and project["compose_files"], "old Compose input list is missing")
-        for value in [*project["compose_files"], project["env_file"]]:
+        plans = original_input_plans(project)
+        all_compose = list(dict.fromkeys(value for plan in plans for value in plan["compose_files"]))
+        for value in [*all_compose, project["env_file"]]:
             path = plain_path(value)
             require(path.stat().st_nlink == 1, "old retained input must not be a hard link")
             files[str(path)] = {"path": str(path), "sha256": digest(path)}
-        for index, value in enumerate(project["compose_files"]):
+        bases = {plan["compose_files"][0] for plan in plans}
+        for value in all_compose:
             path = plain_path(value)
             require(path != plain_path(project["env_file"]) and path.suffix.lower() in (".json", ".yaml", ".yml") and
                     not any(p.casefold() in ("private", "secrets", "credentials") for p in path.parts), "old Compose must be an explicit public file")
@@ -265,7 +336,7 @@ def preserved_input_files(projects):
             raw = path.read_bytes()
             require(b"retired-independent-topology" not in raw,
                     "old Compose was replaced by the retired template; owner must restore the original release")
-            if index == 0:
+            if value in bases:
                 if path.suffix.lower() == ".json":
                     document = read_public_json(path)
                     require(isinstance(document, dict) and isinstance(document.get("services"), dict) and document["services"], "old base Compose cannot have an empty service inventory")
@@ -285,7 +356,8 @@ def require_retained_layout(config, roots, source_root, output):
     for root in retained:
         require(all(not path.is_relative_to(root) and not root.is_relative_to(path) for path in destinations),
                 "new source, candidate Compose and operator output must be separate from retained old releases")
-    files = [*{f for p in config["previous"]["projects"] for f in [*p["compose_files"], p["env_file"]]}]
+    files = [*{f for p in config["previous"]["projects"] for plan in original_input_plans(p)
+               for f in [*plan["compose_files"], p["env_file"]]}]
     require(all(any(plain_path(f).is_relative_to(root) for root in retained) for f in files), "every old Compose and env must remain in an explicit retained root")
 
 
@@ -328,8 +400,9 @@ def require_original_compose_labels(project, state):
     files, directory = state.get("compose_files"), state.get("working_dir")
     require(isinstance(files, str) and files and isinstance(directory, str) and directory,
             "original Compose file and working-directory labels are unavailable")
-    require([plain_path(value) for value in files.split(",")] == [plain_path(value) for value in project["compose_files"]] and
-            plain_path(directory, directory=True) == plain_path(project["compose_files"][0]).parent,
+    selected = original_service_input(project, state.get("service"))
+    require([plain_path(value) for value in files.split(",")] == [plain_path(value) for value in selected["compose_files"]] and
+            plain_path(directory, directory=True) == plain_path(selected["working_dir"], directory=True),
             "selected old Compose paths or relative working directory differ from the original container labels")
 
 
@@ -447,7 +520,9 @@ def validate_config(config):
             "candidate needs exactly unified and source projects, without an IdP")
     names = []
     for project in all_projects:
-        require(set(project) == {"kind", "name", "compose_files", "env_file", "services"}, "invalid project descriptor")
+        required = {"kind", "name", "compose_files", "env_file", "services"}
+        allowed = required | ({"service_inputs"} if project in config["previous"]["projects"] else set())
+        require(required <= set(project) <= allowed, "invalid project descriptor")
         require(NAME.fullmatch(project["name"]), "invalid Compose project name")
         names.append(project["name"])
         require(project["compose_files"] and isinstance(project["compose_files"], list), "explicit Compose files required")
@@ -456,6 +531,7 @@ def validate_config(config):
         plain_path(project["env_file"])
         for name, entry in project["services"].items():
             require(NAME.fullmatch(name) and set(entry) == {"role", "image_id"} and IMAGE_ID.fullmatch(entry["image_id"]), "invalid service identity")
+        if "service_inputs" in project: original_runtime_groups(project)
     require(len(names) == len(set(names)), "old and new projects must remain distinct")
     require_old_inputs(config)
     plain_path(candidate["manifest"])
@@ -526,9 +602,18 @@ class DockerDriver:
 
     def compose_argv(self, project, args):
         command = self.docker + ["compose", "--project-name", project["name"], "--env-file", project["env_file"]]
+        if "_original_working_dir" in project:
+            command += ["--project-directory", project["_original_working_dir"]]
         for path in project["compose_files"]:
             command += ["-f", path]
         return command + args
+
+    def original_runtime_command(self, project, name, args, services=None):
+        groups = original_runtime_groups(project, services)
+        for index, group in enumerate(groups):
+            if "service_inputs" in project: require_old_inputs(self.config)
+            suffix = "-inputs-" + str(index) if len(groups) > 1 else ""
+            self.compose(group, name + suffix, [*args, *group["services"]])
 
     def pipeline(self, name, producer, consumer):
         """Stream sensitive backup plaintext without a host temporary file."""
@@ -576,6 +661,10 @@ class DockerDriver:
 
     def projects(self, side):
         return self.config[side]["projects"]
+
+    def runtime_projects(self, side):
+        projects = self.projects(side)
+        return [group for project in projects for group in original_runtime_groups(project)] if side == "previous" else projects
 
     def verify_local_engine(self):
         context = self.command("docker-context", self.docker + ["context", "inspect", self.config["docker"]["context"]])
@@ -633,7 +722,7 @@ class DockerDriver:
         require(type(approvals["minimum_free_bytes"]) is int and approvals["minimum_free_bytes"] > 0, "disk requirement is missing")
         import shutil
         require(shutil.disk_usage(self.state.parent).free >= approvals["minimum_free_bytes"], "insufficient free host disk")
-        for project in self.projects("previous"):
+        for project in [plan for original in self.projects("previous") for plan in original_input_plans(original)]:
             self.compose(project, "config-" + project["name"], ["config", "--quiet"])
             for service, entry in project["services"].items():
                 actual = self.command("image-" + project["kind"] + "-" + service,
@@ -662,7 +751,8 @@ class DockerDriver:
             actual_services = self.compose(project, "runtime-services-" + project["kind"], ["ps", "--status", "running", "--services"]).stdout.decode().split()
             require(set(actual_services) == set(expected) and len(actual_services) == len(expected), "unexpected or missing running service in reviewed deployment")
             for service, entry in expected.items():
-                ids = self.compose(project, "container-id-" + project["kind"] + "-" + service, ["ps", "--all", "-q", service]).stdout.decode().split()
+                selected = original_service_project(project, service) if side == "previous" else project
+                ids = self.compose(selected, "container-id-" + project["kind"] + "-" + service, ["ps", "--all", "-q", service]).stdout.decode().split()
                 require(len(ids) == 1, "expected exactly one original container per service")
                 fmt = '{"image":{{json .Image}},"running":{{json .State.Running}},"exit_code":{{json .State.ExitCode}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}"none"{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .HostConfig.PortBindings}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}'
                 if side == "previous":
@@ -679,7 +769,7 @@ class DockerDriver:
     def resolved_mount_inventory(self, side="candidate"):
         rows = []
         if side == "previous": self.legacy_secret_inputs = []
-        for project in self.projects(side):
+        for project in self.runtime_projects(side):
             resolved = json.loads(self.compose(project, "planned-data-" + project["kind"], ["config", "--format", "json"]).stdout)
             names = {key: value.get("name", project["name"] + "_" + key) for key, value in resolved.get("volumes", {}).items()}
             for service, entry in project["services"].items():
@@ -733,7 +823,7 @@ class DockerDriver:
         return rows
 
     def verify_original_plan(self, original):
-        for project in self.projects("previous"):
+        for project in self.runtime_projects("previous"):
             resolved = json.loads(self.compose(project, "original-resolved-" + project["kind"], ["config", "--format", "json"]).stdout)
             require_resolved_images(project, resolved, lambda reference: self.command("original-resolved-image-" + project["kind"],
                                     self.docker + ["image", "inspect", reference, "--format", "{{.Id}}"]).stdout.decode().strip())
@@ -749,6 +839,7 @@ class DockerDriver:
             require(set(row) == {"project", "service", "database", "owner"} and all(NAME.fullmatch(row[k]) for k in row), "invalid database ledger target")
             project = next((p for p in self.projects(side) if p["name"] == row["project"]), None)
             require(project is not None and project["services"].get(row["service"], {}).get("role") == domain + "-postgres", "ledger target has wrong domain")
+            if side == "previous": project = original_service_project(project, row["service"])
             hashes[domain] = []
             for i, query in enumerate(queries[domain]):
                 result = self.compose(project, "ledger-" + side + "-" + domain + "-" + str(i), ["exec", "-T", row["service"], "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", row["owner"], "-d", row["database"], "-c", "COPY (" + query + ") TO STDOUT WITH CSV HEADER"])
@@ -759,6 +850,7 @@ class DockerDriver:
     def platform_permissions_snapshot(self, side):
         row = self.config[side]["databases"]["platform"]
         project = next(p for p in self.projects(side) if p["name"] == row["project"])
+        if side == "previous": project = original_service_project(project, row["service"])
         # This records the existing platform policy, not a new DBR1 rollout.
         # pg_roles projection intentionally excludes password-related fields.
         queries = [
@@ -781,8 +873,7 @@ class DockerDriver:
         require(sum(r["role"] not in OLD_ROLES["platform"] for r in rows) == 18, "old invoice inventory is not eighteen actual containers")
         snapshot = {"actual_invoice_containers": 18, "containers": rows, "host_nginx": HostNginx(self).snapshot(), "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
                 "legacy_secret_inputs": getattr(self, "legacy_secret_inputs", []), "old_input_snapshot": input_snapshot,
-                "project_files": [{"name": p["name"], "compose": [{"path": f, "sha256": digest(f)} for f in p["compose_files"]],
-                                   "env_file": p["env_file"], "env_sha256": digest(p["env_file"])} for p in self.projects("previous")]}
+                "project_files": snapshot_project_files(self.projects("previous"))}
         require_snapshot_files(snapshot)
         return snapshot
 
@@ -792,9 +883,11 @@ class DockerDriver:
             require(not running, "writers remain running in the stopped deployment")
 
     def stop_old(self):
+        if any("service_inputs" in project for project in self.projects("previous")):
+            require_old_inputs(self.config)
         for kind in ("sources", "invoice", "platform", "idp"):
             project = next(p for p in self.projects("previous") if p["kind"] == kind)
-            self.compose(project, "stop-old-" + kind, ["stop", "--timeout", "30", *project["services"]])
+            self.original_runtime_command(project, "stop-old-" + kind, ["stop", "--timeout", "30"])
         self.assert_stopped("previous")
         from preflight import check_ports
         check_ports(self, self.config)
@@ -811,6 +904,8 @@ class DockerDriver:
         side, kind = policies[prefix]
         # Resolve the entire list before dispatch, including its final entry.
         for project, service in job_plan(self.config, descriptors, side, kind):
+            if side == "previous" and service in project["services"]:
+                project = original_service_project(project, service)
             self.compose(project, prefix + "-" + service, ["run", "--rm", "--no-deps", "--pull", "never", service])
 
     def migrate_and_permissions(self):
@@ -945,7 +1040,7 @@ class DockerDriver:
         for kind in ("platform", "invoice", "idp"):
             project = next(p for p in self.projects("previous") if p["kind"] == kind)
             services = [name for name, row in project["services"].items() if row["role"] in ("platform-postgres", "invoice-postgres", "keycloak-postgres")]
-            self.compose(project, "restore-old-database-" + kind, ["up", "-d", "--wait", "--wait-timeout", "120", "--no-deps", "--pull", "never", *services])
+            self.original_runtime_command(project, "restore-old-database-" + kind, ["up", "-d", "--wait", "--wait-timeout", "120", "--no-deps", "--pull", "never"], services)
         self.jobs(self.config["previous"]["permission_jobs"], "restore-permissions")
         record = read_public_json(self.state / "deployment-record.json")
         require(self.ledger_snapshot("previous") == record["snapshot"]["ledger_hashes"], "rollback ledger differs from the frozen original; keep writers stopped")
@@ -955,7 +1050,7 @@ class DockerDriver:
         require_old_inputs(self.config)
         for kind in ("idp", "platform", "invoice", "sources"):
             project = next(p for p in self.projects("previous") if p["kind"] == kind)
-            self.compose(project, "restore-old-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-deps", "--pull", "never", *project["services"]])
+            self.original_runtime_command(project, "restore-old-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-deps", "--pull", "never"])
 
     def check_old(self, snapshot):
         require(self.inventory("previous") == snapshot["containers"], "old runtime role/image inventory differs after rollback")
