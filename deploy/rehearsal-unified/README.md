@@ -28,7 +28,7 @@ bash deploy/unified/rollback.sh --config /reviewed/production.json --dry-run
 | 每域 database | `{project,service,database,owner}`；仅作本机容器内 pg_restore/只读元数据查询，不接受任意 SQL |
 | lifecycle job | `{project,service}`；新顺序固定 migrate、invoice-migrate、invoice-permissions；旧只重放已审 invoice permissions，不引入平台 DBR1 |
 | `approvals` | `rehearsal_record,mfa_query_record,max_age_hours,minimum_free_bytes`；时限 1–24h，D/C1 结果有时区、未过期、非未来 |
-| C1 文件 | `{mode,status:"PASS",role:"finance.read",total,totp_registered,end_utc}`；缺员时须明确 `unregistered_disposition:"reviewed-lockout"`；不能把本机合成查询当生产查询 |
+| C1 文件 | 由 audit/capture_metadata.py 生成 v2：绑定只读平台查询 SHA、有效 ADMIN_ROLE 和完整 XM_AUTH_ROLE_SCOPES；原角色与 finance.read 两闩交集、TOTP 及至少一名 login-ready 员工同时核对。生产结果不能由本地合成查询替代；详情见 audit/README.md |
 | D 文件 | `status:"PASS",mode,source_head,manifest_sha256,backups,cleanup_complete:true,end_utc`；只有实际恢复、冒烟、清理完整成功才写入 |
 
 旧 `invoice` 六角色为 invoice-api、invoice-web、invoice-postgres、pdf-scanner、clamav、ingest-proxy；`sources` 为 SUB/NEW × payments/identities/usage/credits/balances 共十个；`idp` 为 keycloak、keycloak-postgres。另 `platform` 为 api、worker、web、postgres 四角色。检查的是 18 + 4 个实际运行容器、实际 imageId、健康状态、挂载和端口，不是镜像角色数量或 `compose up` 返回值。

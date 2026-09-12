@@ -1,8 +1,12 @@
 # C1 / C2 只读身份审计
 
-本工具提供切换前的员工 TOTP 覆盖与历史开票 actor 对照，不执行身份迁移。生产查询未运行。当前 SQL 已用审计基线 `d407875429a7ff9c3b0b5017a4b632db6324eacf` 的真实迁移，在独立本地合成 PostgreSQL 中验证；不能把这份合成结果当成新统一分支或生产已经验收。
+本工具提供切换前的员工 TOTP 覆盖与历史开票 actor 对照，不执行身份迁移。生产查询未运行。前版 SQL 曾在审计基线的本地合成 PostgreSQL 验证；本轮 v2 联合查询与最终 HEAD 的真实运行证据见 `docs/handoffs/UNIFIED-CUTOVER-READINESS.md` 所指最终索引，不能沿用前版结果或宣称生产已经验收。
 
-## C1：finance.read 员工的 TOTP 覆盖
+## C1：精确 ADMIN_ROLE、finance.read 与 TOTP 的联合覆盖
+
+统一预检要求负责人显式填写完整 `XM_AUTH_ROLE_SCOPES` 和精确 `ADMIN_ROLE`，不能靠空映射自动得到默认 `admin` 的广泛权限，也不会把部分映射与默认表合并。这里不修改平台默认权限或运行时两道检查。若负责人选择 `admin`，需明确核对该角色现有全部权限；如选择已有专用开票角色，显式完整映射必须包含该角色的 `finance.read`，并保留其他业务仍需的角色。工具不会给员工添加角色。
+
+平台快照 v2 额外统计 `admin_role_total`、`invoice_admin_total`（精确角色与有效 scope 的交集）、`invoice_admin_totp_registered`、`invoice_admin_login_ready_total`。scope 解析遵循 Go 空白规范和去重；角色 membership 遵循开票端原始字符串精确匹配，大小写与前后空白不能冒充目标角色。只有 scope 而无精确角色的人不算可登录管理员。零可登录管理员或交集中 TOTP 未覆盖会阻断。预检对比实际 Compose 配置、C1 原快照 SHA 以及逐行重新核算的数字，不能只交自报 PASS 数字。
 
 `staff-mfa.sql` 在 REPEATABLE READ / READ ONLY 事务里统计全体持有有效 `finance.read` 的员工，以及其中启用员工的两个分母。角色重复不重复计人数，角色前后空白按 Go `strings.TrimSpace` 的 Unicode 集合处理。权限来自输入的**完整有效 role-scope map**，不能把 `admin` 名称硬当 finance.read，也不能把自定义配置与默认配置随意合并。
 
@@ -10,7 +14,7 @@
 
 TOTP 已登记 = `totp_secret_ref` 非空并且 `totp_enrolled_at` 非 NULL。SQL 只输出布尔值，不输出引用本身，更不读密钥。只有待登记引用而无完成时间、只有完成时间而无引用，都不算已登记。该统计不证明引用文件可读、验证码有效、当前会话已二次验证。
 
-输出 `staff_followup` 列明缺 TOTP、禁用、锁定、强制改密、强制登记等条件。负责人应在 D 前让仍需访问财务的员工走现有员工登录/登记流程并重新捕获；未完成者会被现有 MFA/登录策略拒绝。工具不会改角色、替人登记或为缺 MFA 设置旁路。`exit 0` 仅表示历史映射检查没有阻断，**不是 TOTP 全覆盖或切换批准**；负责人必须同时读取覆盖数字和 followup。
+输出 `staff_followup` 列明缺 TOTP、禁用、锁定、强制改密、强制登记等条件。负责人应在 D 前让仍需访问财务的员工走现有登录/登记流程并重新捕获。工具不会改角色、替人登记或设置 MFA 旁路。捕获脚本输出 `mfa-query-record.json` 与原 `platform.json`，必须一起保留；退出 0 要求身份映射和 C1 覆盖均通过，仍不等于当前会话 MFA 或切换批准。
 
 ## C2：历史 actor 的来源与对照
 
@@ -37,7 +41,7 @@ crosswalk 是负责人可核对并批准的**外部审计文件**，保存于受
 上述 SQL、只读审计与捕获脚本、本说明及 `test_identity_audit.py` 已集成在当前仓库的 `deploy/unified/audit/`，无需另行搬移。两个 synthetic JSON 仅是示例，不能替代实际配置。
 
 1. 负责人准备 libpq service 文件的两个**不同服务引用**，分别指平台库和开票库；密码只通过 `PGPASSFILE` / service 文件引用交给 libpq，禁止把 DSN、密码放命令行或日志。两个只读账号需能 SELECT 此处查询的准确字段。脚本不授予权限，也没有验证生产账号权限。
-2. 从待部署二进制对应的默认 role map 或完整有效显式配置准备 `effective-role-map.json`，并在交接中记录其版本和来源。该文件只包含非秘密角色/权限。`INVOICE_STAFF_ORIGIN` 必须与实际准备使用的公开 origin 完全一致。
+2. 从实际写入 `XM_AUTH_ROLE_SCOPES` 的完整显式配置准备 `effective-role-map.json`，并记录版本和来源；`--admin-role` 必须与部署 `ADMIN_ROLE` 完全一致。该文件只含非秘密角色/权限。`INVOICE_STAFF_ORIGIN` 必须与实际 origin 完全一致。
 3. 准备负责人批准的 crosswalk；无记录可先空 entries 获取未映射清单。不得用合成映射替代实际归属。
 4. 在批准的只读执行环境调用（以下为模板，未执行）：
 
@@ -47,15 +51,19 @@ python3 deploy/unified/audit/capture_metadata.py \
   --platform-service platform_identity_audit \
   --invoice-service invoice_identity_audit \
   --role-map /approved-audit/effective-role-map.json \
+  --admin-role invoice-reviewer \
+  --mode server-rehearsal \
   --crosswalk /approved-audit/crosswalk.json \
   --staff-origin https://console.example.invalid \
   --output-directory /approved-audit/new-capture-directory
 ```
 
-输出目录必须新建；退出码 0=无身份映射 blocker，2=有明确 blocker，1=格式/捕获失败。脚本拒绝连接串形式的 service 参数、不打印连接失败 stderr，设置 default_transaction_read_only 与各 SQL 的 READ ONLY 事务。数据库 JSON、SQL/input 哈希、UTC 起止和退出码保存到新目录。两个数据库各自一致快照，不是跨库分布式同一事务；员工/权限或身份在捕获期间有变动时，应在变动结束后重做本次只读快照。
+输出目录必须新建；退出码 0=身份映射与 C1 覆盖均通过，2=明确 blocker 或覆盖不足，1=格式/捕获失败。脚本拒绝连接串形式的 service 参数、不打印连接失败 stderr，设置 default_transaction_read_only 与各 SQL 的 READ ONLY 事务。数据库 JSON、SQL/input 哈希、UTC 起止和退出码保存到新目录。两个数据库各自一致快照，不是跨库分布式同一事务；员工/权限或身份在捕获期间有变动时，应在变动结束后重做本次只读快照。
 
 `capture_metadata.py` 的生产连接流程尚未执行；本地真实 SQL 验证通过 docker exec/Unix socket 完成，没有读真实 service/密码文件。合成 runner 位于当前外部证据目录，含固定 Windows 工具路径，**不要作为生产部署脚本移入仓库**。
 
 ## 本地验证边界
+
+R1 联合角色 SQL 的生产查询尚未执行，归入「需服务器」；本次代理未启动 Docker 或连接数据库。新的预检、逐行证据消费与捕获接线按定向单元/行为变异验证，后续由主代理安排合成 PostgreSQL 实跑。下列旧证据仅对应旧版 C1/C2，不代表 v2 联合查询已执行。
 
 见本轮外部证据 [RESULT.json](G:/xingmang/logs/unified-deploy-endpoint-20260912/identity-audit/RESULT.json) 与 [RESULT.md](G:/xingmang/logs/unified-deploy-endpoint-20260912/identity-audit/RESULT.md)：18 个相关单元测试、55+32 份真实迁移、双库只读 SQL、前后合成身份/actor 指纹相同、历史 witness、3 个 SQL 行为变异、5 个 Python 行为变异。所有临时数据库容器已清理。没有应用全套 CI、没有生产查询、没有 secret 内容读取、没有新业务 schema、没有改旧分支或 Peirce 工作树。后续集成源码与新 HEAD 的验证由主线程负责。

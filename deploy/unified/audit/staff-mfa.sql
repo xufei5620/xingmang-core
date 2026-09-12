@@ -3,14 +3,15 @@ BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '30s';
 -- Input is the complete effective runtime role-scope map, not a list of role names guessed from defaults.
 WITH config AS (
-  SELECT :'role_scope_map_json'::jsonb AS role_map
+  SELECT :'role_scope_map_json'::jsonb AS role_map, :'admin_role'::text AS admin_role
 ), checked AS (
-  SELECT role_map,
+  SELECT role_map, admin_role,
     1 / CASE WHEN jsonb_typeof(role_map)='object' AND role_map<>'{}'::jsonb
       THEN 1 ELSE 0 END AS valid
   FROM config
 ), staff AS (
   SELECT a.id, a.roles, a.disabled, a.must_change_password, a.must_enroll_totp,
+    (c.admin_role = ANY(a.roles)) AS exact_admin_role,
     COALESCE(a.locked_until > now(), false) AS locked,
     (COALESCE(a.totp_secret_ref,'')<>'' AND a.totp_enrolled_at IS NOT NULL) AS totp_registered,
     EXISTS (
@@ -24,10 +25,16 @@ WITH config AS (
   FROM core.staff_account a CROSS JOIN checked c WHERE c.valid=1
 )
 SELECT jsonb_build_object(
-  'schema','xingmang.identity-audit.platform/v1',
+  'schema','xingmang.identity-audit.platform/v2',
   'database',current_database(), 'captured_at',now(),
   'transaction_read_only',current_setting('transaction_read_only'),
   'role_scope_map', (SELECT role_map FROM checked),
+  'admin_role', (SELECT admin_role FROM checked),
+  'admin_role_total', count(*) FILTER (WHERE exact_admin_role),
+  'invoice_admin_total', count(*) FILTER (WHERE exact_admin_role AND finance_read),
+  'invoice_admin_totp_registered', count(*) FILTER (WHERE exact_admin_role AND finance_read AND totp_registered),
+  'invoice_admin_login_ready_total', count(*) FILTER (WHERE exact_admin_role AND finance_read AND totp_registered
+      AND NOT disabled AND NOT locked AND NOT must_change_password AND NOT must_enroll_totp),
   'finance_read_total', count(*) FILTER (WHERE finance_read),
   'finance_read_totp_registered',count(*) FILTER (WHERE finance_read AND totp_registered),
   'finance_read_enabled_total',count(*) FILTER (WHERE finance_read AND NOT disabled),

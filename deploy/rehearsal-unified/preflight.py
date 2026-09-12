@@ -7,12 +7,17 @@ No Docker mutation, shell interpolation, SSH, key-file read, or pull is performe
 import datetime as dt
 import errno
 import hashlib
+import importlib.util
 import ipaddress as ip
 import json
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import socket
+
+_role_spec = importlib.util.spec_from_file_location('unified_role_policy', Path(__file__).resolve().parents[1] / 'unified' / 'audit' / 'role_policy.py')
+role_policy = importlib.util.module_from_spec(_role_spec)
+_role_spec.loader.exec_module(role_policy)
 
 
 SOURCE_ROLES = {"sub2api", "sub2api_db", "newapi", "newapi_db"}
@@ -330,6 +335,18 @@ def environment(driver, config, h):
             for key, value in env.items():
                 require(isinstance(key, str) and ENV_KEY.fullmatch(key) and not isinstance(value, (dict, list, bool)) and not re.search(r"\$\{[^}]*\}", str(value)), "resolved environment contains invalid or unexpanded values")
             checked[name][service] = {"checked_key_count": len(env), "required_key_count": len(required[service])}
+        if project.get("kind") == "unified":
+            require("platform-api" in services, "unified platform-api role policy is missing")
+            try:
+                record = load_json(public_path(config["approvals"]["mfa_query_record"]).read_bytes(), "MFA census")
+                snapshot_bytes = public_path(record["platform_snapshot"]).read_bytes()
+                require(hashlib.sha256(snapshot_bytes).hexdigest() == record["platform_snapshot_sha256"], "MFA census snapshot hash mismatch")
+                actual_census = role_policy.validate_census(load_json(snapshot_bytes, "MFA snapshot"))
+                require(actual_census == record.get("role_policy"), "MFA joint role census does not match actual captured rows")
+                checked[name]["platform-api"]["role_policy"] = role_policy.validate_resolved(
+                    services["platform-api"].get("environment", {}), record.get("role_policy"))
+            except (ValueError, KeyError, TypeError, OSError):
+                raise PreflightError("ADMIN_ROLE, explicit role scopes and joint C1 census must match with TOTP coverage and a login-ready administrator") from None
     return checked
 
 

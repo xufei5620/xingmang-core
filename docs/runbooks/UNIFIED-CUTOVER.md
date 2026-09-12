@@ -17,7 +17,7 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 ## 切换前置
 
 - 负责人已在同一服务器运行 D：对应最终 clean HEAD、镜像 manifest SHA、两个已验签备份和完整冒烟，且冻结副本清理成功。Windows 本地合成结果明确保留“需服务器”事项。
-- 以 C1 提供的只读 SQL 查询具有 finance.read 的总员工/已注册 TOTP 人数，结果写入有 UTC 完成时间的文件。没有 TOTP 的员工会被新门禁锁在外面；先完成注册，或记录负责人接受临时锁定及恢复联系人。不能生成虚假的全覆盖证明。
+- 以 C1 v2 只读 SQL 同时核对有效 `ADMIN_ROLE` 的原始角色名与完整 `XM_AUTH_ROLE_SCOPES` 中的 `finance.read`；记录两者交集、TOTP 与可登录人数、原查询 SHA 和 UTC。`preflight` 必须与实际 platform-api Compose 的两项配置一致，且至少一名交集员工可以登录；不能使用默认宽泛 admin 权限或只核 scope 的旧结果。没有 TOTP 的员工会被新门禁锁在外面；先完成注册，或记录负责人接受临时锁定及恢复联系人。不能生成虚假的全覆盖证明。
 - 两域签名包在 24h 以内或更短已审时限，组件、capture 时间与签名锚完整。invoice 保留原备份目录布局；平台使用明确授权的新 platform-backup 签名锚。age 原 identity 只传路径。字段密钥、source spool/cutover 密钥由原规范只读挂载，不查看正文。
 - D 的 `readonly_input_volumes` 仅允许逐卷指定 `name`、实际 `owner_id` 与 `kind`：`source_credentials` 只挂 `/fixture`，`staff_credentials` 只挂 `/run/xm/secrets` 或 `/run/secrets`，`scanner_signatures` 只挂 `/var/lib/clamav` 或 `/clamav-db`。所有挂载必须只读、卷的实际 owner label 必须相同，且不得与新建数据卷重合；这些输入不写入清理名单。原签名库仍执行原 48h 新鲜度检查。归档先通过原 archive-verify，再在无网络、只挂新建恢复卷的容器中保留数字 UID/权限，避免把 `65532/0700` 来源状态变成 root 所有；容器只增恢复所需 CHOWN/FOWNER/DAC_OVERRIDE 能力。
 - 保留原适用前置：四个来源容器、精确 SUB binary/NEW image tag、Cloudflare authoritative CIDR 与主机 real-IP、主机根盘及 DockerRootDir 使用率小于 80%、NTP、所有网络/精确代理 /32、env 必需字段及本地不可拉取镜像。

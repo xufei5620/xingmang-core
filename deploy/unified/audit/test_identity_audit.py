@@ -12,7 +12,9 @@ def pair_hash(issuer,subject):
     return hashlib.sha256((issuer+'\n'+subject).encode()).hexdigest()
 
 def fixture():
-    platform={'schema':'xingmang.identity-audit.platform/v1','transaction_read_only':'on','database':'platform_audit',
+    platform={'schema':'xingmang.identity-audit.platform/v2','transaction_read_only':'on','database':'platform_audit',
+              'admin_role':'admin','admin_role_total':1,'invoice_admin_total':1,
+              'invoice_admin_totp_registered':1,'invoice_admin_login_ready_total':1,
               'role_scope_map':{'admin':['finance.read']},'finance_read_total':1,'finance_read_totp_registered':1,
               'finance_read_enabled_total':1,'finance_read_enabled_totp_registered':1,
               'staff':[{'id':S,'roles':['admin'],'disabled':False,'totp_registered':True,'must_change_password':False,
@@ -68,7 +70,7 @@ class IdentityAuditTests(unittest.TestCase):
         p,i,m=fixture(); p['role_scope_map']={'admin':['registry.read'],'finance-reader':['finance.read']}
         p['staff'][0]['finance_read']=False
         p.update(finance_read_total=0,finance_read_totp_registered=0,finance_read_enabled_total=0,finance_read_enabled_totp_registered=0)
-        result=assess(p,i,m,ORIGIN); self.assertEqual(result['finance_read_total'],0)
+        with self.assertRaisesRegex(ValueError,'ADMIN_ROLE_MUST_HAVE_FINANCE_READ'):assess(p,i,m,ORIGIN)
 
     def test_forged_effective_scope_count_rejected(self):
         p,i,m=fixture(); p['finance_read_total']=0
@@ -80,6 +82,8 @@ class IdentityAuditTests(unittest.TestCase):
                 p,i,m=fixture(); p['staff'][0][flag]=False if flag=='totp_registered' else True
                 if flag=='totp_registered':p.update(finance_read_totp_registered=0,finance_read_enabled_totp_registered=0)
                 if flag=='disabled':p.update(finance_read_enabled_total=0,finance_read_enabled_totp_registered=0)
+                p['invoice_admin_login_ready_total']=0
+                if flag=='totp_registered':p['invoice_admin_totp_registered']=0
                 self.assertTrue(assess(p,i,m,ORIGIN)['staff_followup'])
 
     def test_role_union_deduplicates_staff_and_trims_role(self):
@@ -88,6 +92,7 @@ class IdentityAuditTests(unittest.TestCase):
 
     def test_go_unicode_trimspace_contract(self):
         p,i,m=fixture(); p['staff'][0]['roles']=['\u3000admin\u0085']
+        p.update(admin_role_total=0,invoice_admin_total=0,invoice_admin_totp_registered=0,invoice_admin_login_ready_total=0)
         self.assertEqual(assess(p,i,m,ORIGIN)['finance_read_total'],1)
         p['staff'][0]['roles']=['\x1cadmin']
         p['staff'][0]['finance_read']=False
@@ -106,7 +111,10 @@ class IdentityAuditTests(unittest.TestCase):
         for which in ['staff','customer']:
             with self.subTest(which=which):
                 p,i,m=fixture()
-                if which=='staff': p['staff']=[]; p.update(finance_read_total=0,finance_read_totp_registered=0,finance_read_enabled_total=0,finance_read_enabled_totp_registered=0)
+                if which=='staff':
+                    p['staff']=[]
+                    p.update(finance_read_total=0,finance_read_totp_registered=0,finance_read_enabled_total=0,finance_read_enabled_totp_registered=0,
+                             admin_role_total=0,invoice_admin_total=0,invoice_admin_totp_registered=0,invoice_admin_login_ready_total=0)
                 else:i['identities'][0]['platform']='newapi'
                 self.assertTrue(assess(p,i,m,ORIGIN)['blockers'])
 
@@ -129,5 +137,19 @@ class IdentityAuditTests(unittest.TestCase):
     def test_unresolved_admin_audit_actors_require_owner_review(self):
         p,i,m=fixture(); i['unresolved_admin_audit_actors']=1
         self.assertIn('UNRESOLVED_ADMIN_AUDIT_ACTOR',assess(p,i,m,ORIGIN)['blockers'])
+
+    def test_finance_scope_without_exact_admin_role_is_not_login_coverage(self):
+        p,i,m=fixture();p['staff'][0]['roles']=[' admin ']
+        p.update(admin_role_total=0,invoice_admin_total=0,invoice_admin_totp_registered=0,invoice_admin_login_ready_total=0)
+        result=assess(p,i,m,ORIGIN)
+        self.assertEqual(result['finance_read_total'],1)
+        self.assertEqual(result['role_policy']['invoice_admin_total'],0)
+        self.assertIn('NO_LOGIN_READY_INVOICE_ADMIN',result['blockers'])
+
+    def test_joint_sql_count_must_match_actual_rows(self):
+        for name in ['admin_role_total','invoice_admin_total','invoice_admin_totp_registered','invoice_admin_login_ready_total']:
+            with self.subTest(name=name):
+                p,i,m=fixture();p[name]=2
+                with self.assertRaisesRegex(ValueError,'JOINT_ROLE_COUNT_MISMATCH'):assess(p,i,m,ORIGIN)
 
 if __name__=='__main__':unittest.main()

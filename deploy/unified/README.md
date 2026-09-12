@@ -12,7 +12,9 @@ initialization/readiness failure fails the common service. There is no opt-out f
   `/internal/v1/source-batches` through the existing mTLS gateway and isolated network.
 - Staff login is `XM_AUTH_MODE=local`; invoice login is `AUTH_MODE=session`.
   `INVOICE_STAFF_ORIGIN` must retain the historical console issuer identity; it cannot
-  be guessed from a new hostname. `ADMIN_ROLE` must match the actual local staff role.
+  be guessed from a new hostname. `ADMIN_ROLE` must match the exact actual local staff role; explicitly set the complete
+  `XM_AUTH_ROLE_SCOPES` map with `finance.read` for that role. Preflight rejects defaults,
+  mismatched role/scope policy and a C1 census without a login-ready member of their intersection.
 - Platform and invoice database pools/roles remain separate. `migrate` includes the
   platform and River migrations. `invoice-migrate` precedes `invoice-permissions`;
   both must succeed before the API starts. The runtime never receives the invoice owner DSN.

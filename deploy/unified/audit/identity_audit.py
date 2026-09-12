@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import uuid
 from urllib.parse import urlsplit
+from role_policy import COUNTS, census, explicit_policy
 
 GO_SPACE='\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000'
 
@@ -64,14 +65,15 @@ def pair_hash(issuer,subject):
 
 def assess(platform, invoice, mapping, origin):
     exact_https(origin,True)
-    shape(platform,{'schema','database','transaction_read_only','role_scope_map','finance_read_total','finance_read_totp_registered','finance_read_enabled_total','finance_read_enabled_totp_registered','staff'},{'captured_at'})
+    shape(platform,{'schema','database','transaction_read_only','role_scope_map','admin_role',*COUNTS,'finance_read_total','finance_read_totp_registered','finance_read_enabled_total','finance_read_enabled_totp_registered','staff'},{'captured_at'})
     shape(invoice,{'schema','database','transaction_read_only','identities','operation_refs','migration_records','unresolved_admin_audit_actors'},{'captured_at'})
     shape(mapping,{'schema','legacy_issuers','entries'})
-    if platform['schema']!='xingmang.identity-audit.platform/v1' or invoice['schema']!='xingmang.identity-audit.invoice/v1' or mapping['schema']!='xingmang.identity-audit.crosswalk/v1':
+    if platform['schema']!='xingmang.identity-audit.platform/v2' or invoice['schema']!='xingmang.identity-audit.invoice/v1' or mapping['schema']!='xingmang.identity-audit.crosswalk/v1':
         raise ValueError('SCHEMA_MISMATCH')
     if platform['transaction_read_only']!='on' or invoice['transaction_read_only']!='on' or not platform['database'] or not invoice['database'] or platform['database']==invoice['database']:
         raise ValueError('DATABASE_OR_READONLY_MISMATCH')
     roles=role_map(platform['role_scope_map'])
+    explicit_policy(platform['admin_role'],roles)
     staff={}; followup=[]
     for person in platform['staff']:
         shape(person,{'id','roles','disabled','must_change_password','must_enroll_totp','locked','totp_registered','finance_read'})
@@ -93,6 +95,8 @@ def assess(platform, invoice, mapping, origin):
         'finance_read_enabled_totp_registered':sum(p['finance_read'] and not p['disabled'] and p['totp_registered'] for p in staff.values()),
     }
     if any(count(platform[k])!=v for k,v in expected.items()):raise ValueError('COVERAGE_COUNT_MISMATCH')
+    joint=census(platform['admin_role'],roles,list(staff.values()))
+    if any(count(platform[k])!=joint[k] for k in COUNTS):raise ValueError('JOINT_ROLE_COUNT_MISMATCH')
     issuers=mapping['legacy_issuers']
     if not isinstance(issuers,list) or len(issuers)!=len(set(issuers)):raise ValueError('INVALID_LEGACY_ISSUERS')
     for issuer in issuers:
@@ -115,6 +119,8 @@ def assess(platform, invoice, mapping, origin):
         if not isinstance(pair[1],str) or not pair[1]:raise ValueError('INVALID_INVOICE_SUBJECT')
         identities[key]=identity; tuples.add(pair)
     references={}; blockers=[]
+    if not joint['invoice_admin_login_ready_total']:blockers.append('NO_LOGIN_READY_INVOICE_ADMIN')
+    if joint['invoice_admin_totp_registered']!=joint['invoice_admin_total']:blockers.append('INVOICE_ADMIN_TOTP_INCOMPLETE')
     if count(invoice['unresolved_admin_audit_actors']):blockers.append('UNRESOLVED_ADMIN_AUDIT_ACTOR')
     allowed_refs={'invoice_requests.reviewed_by','invoice_requests.issued_by','invoice_documents.uploaded_by','payment_candidate_reviews.admin_id','payment_candidate_decisions.proposed_by','payment_candidate_decisions.approved_by','eligibility_freezes.resolved_by','audit_events.admin_actor'}
     for reference in invoice['operation_refs']:
@@ -149,7 +155,7 @@ def assess(platform, invoice, mapping, origin):
             status='UNMAPPED_HISTORICAL_ACTOR'; blockers.append(status)
         rows.append({'invoice_user_id':key,'issuer':current[0],'subject':current[1],'staff_id':target,'operation_refs':identity['operation_refs'],'status':status})
     if set(entries)-set(identities):blockers.append('MAPPING_IDENTITY_NOT_FOUND')
-    return {'schema':'xingmang.identity-audit.result/v1',**expected,'staff_followup':followup,'rows':rows,
+    return {'schema':'xingmang.identity-audit.result/v2',**expected,'role_policy':joint,'staff_followup':followup,'rows':rows,
             'blockers':sorted(set(blockers)),'crosswalk_is_read_only_attribution':True,'runtime_reads_crosswalk':False,
             'writes_performed':False,'statement':'No identity, foreign key, email AAD or historical actor has been changed.'}
 
