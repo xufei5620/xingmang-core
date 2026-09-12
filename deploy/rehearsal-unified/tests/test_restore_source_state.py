@@ -55,6 +55,7 @@ class SourceStateRestoreTests(unittest.TestCase):
                     return subprocess.CompletedProcess(args,1 if len(checks)-1==failed_index else 0)
                 config={'mode':'local-synthetic','candidate':{'head':'a'*40,'manifest_sha256':'b'*64,'manifest':'public-manifest.json'},'backups':{},'approvals':{'max_age_hours':24}}
                 driver=SimpleNamespace(config=config,state=root/'state',output=root/'run',docker=['docker'],
+                    operator_source={'head':'a'*40,'files':[]},
                     artifact_preflight=lambda:None,command=lambda *a:subprocess.CompletedProcess([],0,stdout=str(16*1024**3).encode()),
                     projects=lambda _:[main,project],compose=compose,start_new_databases=lambda:events.append('databases'),jobs=lambda *a:None,
                     migrate_and_permissions=lambda:events.append('migrate'),start_new=lambda:events.append('start_new'),
@@ -78,6 +79,7 @@ class SourceStateRestoreTests(unittest.TestCase):
                 if failed_index is None:
                     result=restore.rehearse(driver)
                     self.assertEqual(result['status'],'PASS')
+                    self.assertEqual(result['actual_operator_source'],driver.operator_source)
                     self.assertEqual(len(result['restored_source_state']),10)
                     self.assertEqual(len(checks),10)
                     self.assertLess(events.index('restore:invoice'),events.index('check:'+checks[0][-2]))

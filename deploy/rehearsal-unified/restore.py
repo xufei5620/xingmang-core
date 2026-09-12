@@ -505,6 +505,7 @@ def rehearse(driver):
     created = False
     try:
         trial.artifact_preflight()
+        result["actual_operator_source"] = trial.operator_source
         from preflight import run as host_preflight
         result["host_preflight"] = host_preflight(trial, trial.config)
         inherited_preflight_pass(result["host_preflight"], trial.config["mode"])

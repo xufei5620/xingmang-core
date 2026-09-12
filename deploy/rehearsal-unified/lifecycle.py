@@ -471,6 +471,8 @@ class DockerDriver:
         value = {**value, "source_head": self.config["candidate"]["head"],
                  "manifest_sha256": self.config["candidate"]["manifest_sha256"], "mode": self.config["mode"],
                  "config_sha256": hashlib.sha256(json.dumps(self.config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        if getattr(self, "operator_source", None):
+            value["actual_operator_source"] = self.operator_source
         atomic_json(self.output / "history" / (str(time.time_ns()) + ".json"), value)
         # Attempt-only failures must never replace the supported recovery input.
         if "snapshot" in value:
@@ -506,6 +508,9 @@ class DockerDriver:
         manifest = read_public_json(candidate["manifest"])
         require(manifest.get("source", {}).get("gitHead") == candidate["head"] and manifest.get("source", {}).get("gitDirty") is False,
                 "manifest is not bound to the exact clean candidate")
+        from operator_source import verify as verify_operator_source
+        self.operator_source = verify_operator_source(Path(__file__).resolve().parents[2], manifest["source"])
+        atomic_json(self.output / "operator-source.json", self.operator_source)
         manifest_images = {row["name"]: row["imageId"] for row in manifest["images"]}
         for project in self.projects("candidate"):
             for entry in project["services"].values():
