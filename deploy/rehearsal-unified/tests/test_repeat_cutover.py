@@ -15,11 +15,15 @@ import lifecycle
 def configuration(root):
     public = root / "public.json"
     public.write_text("{}", encoding="utf-8")
+    old = root / "old-release"; old.mkdir()
+    old_compose = old / "compose.json"; old_compose.write_text('{"services":{"original":{}}}')
+    old_env = old / "runtime.env"; old_env.write_text('PUBLIC_FIXTURE=true\n')
     def project(kind, roles, side):
         return {"kind": kind, "name": "test-" + side + "-" + kind,
-                "compose_files": [str(public)], "env_file": str(public),
+                "compose_files": [str(old_compose if side == "old" else public)],
+                "env_file": str(old_env if side == "old" else public),
                 "services": {role: {"role": role, "image_id": "sha256:" + "a" * 64} for role in roles}}
-    return {"schema": "xingmang.unified.operator/v1", "mode": "local-synthetic",
+    config = {"schema": "xingmang.unified.operator/v1", "mode": "local-synthetic",
             "state_root": str(root / "state"),
             "docker": {"binary": str(public), "context": "test-local", "config_dir": str(root)},
             "candidate": {"head": "b" * 40, "manifest": str(public), "manifest_sha256": "c" * 64,
@@ -30,6 +34,9 @@ def configuration(root):
                          "migration_digest": "d" * 64, "ready_urls": {}, "permission_jobs": [], "databases": {}},
             "backups": {"invoice": {}, "platform": {}}, "approvals": {},
             "smoke_config": str(public), "rehearsal": {}, "host_preflight": {}, "host_nginx": {}}
+    config['previous']['input_snapshot'] = lifecycle.capture_old_inputs(config, [str(old)],
+        str(Path(lifecycle.__file__).absolute().parents[2]), str(root/'old-inputs.json'))
+    return config
 
 
 def deployment_boundary(events, topology):

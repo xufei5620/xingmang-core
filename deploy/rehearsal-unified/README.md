@@ -23,7 +23,7 @@ bash deploy/unified/rollback.sh --config /reviewed/production.json --dry-run
 | `mode` | `local-synthetic`、`server-rehearsal`、`production`；合成结果不能升级成服务器证明 |
 | `docker` | `binary,context,config_dir`；只接受本机 Unix socket 或 Docker Desktop named pipe，不读取 credential store |
 | `candidate` | `head,manifest,manifest_sha256,migration_digest,projects,jobs,ready_url,databases`；完整 clean HEAD，所有 runtime imageId 必须匹配 manifest |
-| `previous` | `projects,migration_digest,ready_urls,permission_jobs,databases`；原位四项目，两个 ledger 与候选声明一致，旧 readiness 分 platform/invoice |
+| `previous` | `projects,migration_digest,ready_urls,permission_jobs,databases,input_snapshot`；原位四项目，两个 ledger 与候选声明一致，旧 readiness 分 platform/invoice；保全快照为 `{path,sha256}` |
 | 每个 project | `kind,name,compose_files,env_file,services`；service 值为 `{role,image_id}`；`candidate` 仅 unified/sources，旧为 platform/invoice/sources/idp |
 | 每域 database | `{project,service,database,owner}`；仅作本机容器内 pg_restore/只读元数据查询，不接受任意 SQL |
 | lifecycle job | `{project,service}`；新顺序固定 migrate、invoice-migrate、invoice-permissions；旧只重放已审 invoice permissions，不引入平台 DBR1 |

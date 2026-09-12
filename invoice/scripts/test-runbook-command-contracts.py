@@ -19,19 +19,44 @@ def config_fixture(m, fixture):
     folder = fixture / "release with spaces [甲]&'"
     folder.mkdir(parents=True, exist_ok=True)
     paths = {}
-    for name in ('compose.one.json', 'compose.two.json', 'reviewed.env', 'manifest.json', 'smoke.json'):
+    for name in ('manifest.json', 'smoke.json'):
         path = folder / name; path.write_text('{}\n', encoding='utf-8'); paths[name] = str(path)
     def project(kind, roles, prefix):
-        return dict(kind=kind, name=prefix+'-'+kind, compose_files=[paths['compose.one.json'], paths['compose.two.json']],
-                    env_file=paths['reviewed.env'], services={role: dict(role=role, image_id='sha256:'+'a'*64) for role in roles})
+        directory = folder/prefix/kind; directory.mkdir(parents=True)
+        services = {role: dict(role=role, image_id='sha256:'+'a'*64) for role in roles}
+        base, overlay, env = (directory/name for name in ('compose.one.json', 'compose.two.json', 'reviewed.env'))
+        base.write_text(json.dumps({'services': {role: {'image': row['image_id']} for role, row in services.items()}})+'\n', encoding='utf-8')
+        overlay.write_text('{"services":{}}\n', encoding='utf-8')
+        env.write_text('PUBLIC_FIXTURE=reviewed\n', encoding='utf-8')
+        return dict(kind=kind, name=prefix+'-'+kind, compose_files=[str(base), str(overlay)],
+                    env_file=str(env), services=services)
     old = [project(kind, sorted(roles), 'old') for kind, roles in m.OLD_ROLES.items()]
-    candidate = [project('unified', ['platform-api'], 'new'), project('sources', sorted(m.STREAM_ROLES), 'new')]
+    candidate = [project('unified', ['platform-api','web'], 'new'), project('sources', sorted(m.STREAM_ROLES), 'new')]
+    # These are public inputs, not a mock of HostNginx or the preservation guard.
+    # Command-only tests do not invoke nginx or certify TLS/runtime readiness.
+    nginx = folder/'nginx'; nginx.mkdir()
+    live, staged = nginx/'live.conf', nginx/'candidate.conf'
+    def routes(admin, user):
+        return ''.join(f'server {{ listen {port} ssl; server_name localhost; location / {{ proxy_pass http://127.0.0.1:{upstream}; }} }}\n'
+                       for port, upstream in ((8444, admin), (8443, user)))
+    live.write_text(routes(8089,58092), encoding='utf-8')
+    staged.write_text(routes(8088,58090), encoding='utf-8')
+    main, staged_main = nginx/'nginx.conf', nginx/'staged.conf'
+    for target, vhost in ((main,live), (staged_main,staged)):
+        target.write_text('events {}\nhttp { include '+json.dumps(vhost.as_posix(),ensure_ascii=False)+'; }\n', encoding='utf-8')
+    Path(paths['smoke.json']).write_text(json.dumps({'origins': {'admin':'https://localhost:8444','user':'https://localhost:8443'}})+'\n', encoding='utf-8')
+    host_nginx = dict(main_config=str(main), staged_main_config=str(staged_main),
+        vhosts=[dict(live=str(live), candidate=str(staged), candidate_sha256=m.digest(staged))],
+        execution=dict(container='fixture-nginx', image_id='sha256:'+'a'*64, project='fixture-nginx', host_root=str(nginx), container_root='/config'),
+        web_ports=dict(admin=8088,user=58090))
     config = dict(schema='xingmang.unified.operator/v1', mode='local-synthetic', state_root=str(folder/'state'),
         docker=dict(binary=sys.executable, context='inert-local', config_dir=str(folder)),
         candidate=dict(head='a'*40, manifest=paths['manifest.json'], manifest_sha256='b'*64, migration_digest='c'*64,
             projects=candidate, jobs=[dict(project='new-unified',service=x) for x in ('migrate','invoice-migrate','invoice-permissions')], ready_url='http://127.0.0.1:1/readyz', databases={}),
         previous=dict(projects=old, migration_digest='c'*64, ready_urls={}, permission_jobs=[], databases={}),
-        backups=dict(invoice={},platform={}), approvals={}, smoke_config=paths['smoke.json'], rehearsal={}, host_preflight={})
+        backups=dict(invoice={},platform={}), approvals={}, smoke_config=paths['smoke.json'], rehearsal={}, host_preflight={}, host_nginx=host_nginx)
+    config['previous']['input_snapshot'] = m.capture_old_inputs(config, [str(folder/'old')],
+        str(Path(m.__file__).absolute().parents[2]), str(folder/'old-inputs.json'))
     return config
 
 def release_env(root, fixture):
@@ -64,7 +89,28 @@ def release_env(root, fixture):
             try: m.validate_config(value)
             except m.OperatorError: pass
             else: raise AssertionError('current config accepted a relative/missing '+field)
-    print(f'RUNEARLY-02 unified actual compose consumer: {count} exact argv/env successes, {count} real child exit rejections, four path refusals; no Docker.')
+    for missing in ('host_nginx','input_snapshot'):
+        value = copy.deepcopy(config)
+        del (value if missing == 'host_nginx' else value['previous'])[missing]
+        try: m.validate_config(value)
+        except m.OperatorError: pass
+        else: raise AssertionError('current config accepted missing '+missing)
+    overlapping = copy.deepcopy(config)
+    overlapping['candidate']['projects'][0]['compose_files'] = config['previous']['projects'][0]['compose_files']
+    try: m.validate_config(overlapping)
+    except m.OperatorError: pass
+    else: raise AssertionError('candidate reused retained old Compose input')
+    # The real old-input consumer must reject changed bytes, then accept the
+    # original restoration. No capture or validation routine is patched.
+    env = Path(config['previous']['projects'][0]['env_file']); original = env.read_bytes()
+    try:
+        env.write_bytes(original+b'PUBLIC_FIXTURE_DRIFT=true\n')
+        try: m.validate_config(config)
+        except m.OperatorError: pass
+        else: raise AssertionError('changed retained old environment was accepted')
+    finally: env.write_bytes(original)
+    m.validate_config(config)
+    print(f'RUNEARLY-02 unified actual compose consumer: {count} exact argv/env successes, {count} real child exit rejections, four path refusals; missing nginx/snapshot, retained-input overlap and byte drift rejected; no Docker.')
 
 def current_migration_gate(root, fixture):
     m = load_operator(root)

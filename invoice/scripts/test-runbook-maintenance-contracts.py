@@ -83,7 +83,9 @@ def unified_order(project, source_root):
                     # Return a genuine nonzero boundary result so the real
                     # verify_frozen_source_state consumer must reject it.
                     return SimpleNamespace(returncode=23 if name==failure else 0,stdout=b'')
-                def artifact_preflight(self):step('artifact')
+                def artifact_preflight(self):
+                    step('artifact')
+                    self.operator_source={'fixture':'inert artifact-preflight boundary'}
                 def command(self,*args):return SimpleNamespace(stdout=b'8589934592')
                 def start_new_databases(self):step('start-databases')
                 def jobs(self,jobs,prefix):
@@ -111,6 +113,7 @@ def unified_order(project, source_root):
                 else:
                     assert failure is None,'failed restore stage returned success: '+str(failure)
                     assert result['status']=='PASS' and result['cleanup_complete'] is True and result['exit_code']==0
+                    assert result['actual_operator_source']==trial.operator_source
                     assert result['restored_source_state']==[dict(role=role,exit_code=0) for role in source_roles]
             expected=['invalidate-prior-pass','artifact','signatures','mounts','create-volumes','extract-invoice-documents','extract-invoice-source_state','extract-invoice-metadata','extract-platform-metadata','start-databases','restore-platform','restore-invoice','metadata-match','verify-document-source-job','prepare-restored-source-networks',*source_checks,'permissions','start-new','readiness','smoke','inventory','cleanup']
             if failure is None:assert calls==expected,('D current sequence changed',calls)
@@ -133,30 +136,38 @@ def unified_order(project, source_root):
             self.calls.append(name)
             if name==self.failure:raise m.OperatorError('inert '+name)
         def preflight(self):self.step('signed-preflight')
+        def precheck_new(self):self.step('isolated-candidate-preview')
         def snapshot(self):self.step('snapshot');return {'actual_invoice_containers':18}
         def stop_old(self):self.step('stop-old')
         def start_new_databases(self):self.step('start-databases')
         def migrate_and_permissions(self):self.step('permissions')
         def start_new(self):self.step('start-new')
         def check_new(self):self.step('readiness')
+        def switch_nginx(self,snapshot):
+            assert snapshot=={'actual_invoice_containers':18}
+            self.step('switch-nginx')
         def smoke(self):self.step('smoke')
         def stop_new(self):self.step('stop-new')
         def restore_permissions(self):self.step('restore-permissions')
         def start_old(self):self.step('start-old')
         def check_old(self,*args):self.step('check-old')
+        def restore_nginx(self,snapshot):
+            assert snapshot=={'actual_invoice_containers':18}
+            self.step('restore-nginx')
         def record(self,row):self.records.append(copy.deepcopy(row))
-    expected=['signed-preflight','snapshot','stop-old','start-databases','permissions','start-new','readiness','smoke']
-    for failure in (None,'signed-preflight','permissions','readiness','smoke'):
+    expected=['signed-preflight','isolated-candidate-preview','snapshot','stop-old','start-databases','permissions','start-new','readiness','switch-nginx','smoke']
+    for failure in (None,'signed-preflight','isolated-candidate-preview','permissions','readiness','switch-nginx','smoke'):
         trial=Cutover(failure)
         try:result=m.cutover(trial)
         except m.OperatorError:assert failure is not None
         else:assert failure is None and result['status']=='COMMITTED'
         if failure is None:assert trial.calls==expected
-        elif failure=='signed-preflight':assert trial.calls==['signed-preflight'] and trial.records[-1]['status']=='PREFLIGHT_FAILED'
+        elif failure in ('signed-preflight','isolated-candidate-preview'):
+            assert trial.calls==expected[:expected.index(failure)+1] and trial.records[-1]['status']=='PREFLIGHT_FAILED'
         else:
-            assert trial.calls==expected[:expected.index(failure)+1]+['stop-new','restore-permissions','start-old','check-old']
+            assert trial.calls==expected[:expected.index(failure)+1]+['stop-new','restore-permissions','start-old','check-old','restore-nginx']
             assert trial.records[-1]['status']=='ROLLED_BACK' and trial.records[-1]['exit_code']==1
-    print('INV-DOC-04 actual unified D 23 cases and E 5 cases: signatures/restore/metadata/document verification/stopped API create/ten native check-state commands/permissions/readiness/smoke/cleanup ordering and per-stream nonzero propagation; no Docker/HTTP/key operation.')
+    print('INV-DOC-04 actual unified D 23 cases and E 7 cases: signatures/restore/metadata/document verification/stopped API create/ten native check-state commands/permissions/readiness/smoke/cleanup ordering and per-stream nonzero propagation; isolated preview before old stop and nginx switch/restore ordering; no Docker/HTTP/key operation.')
 
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--case',choices=['blocked-event','shadow-order','unified-order'],required=True)

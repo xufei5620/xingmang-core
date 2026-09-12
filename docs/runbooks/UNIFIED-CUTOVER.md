@@ -22,7 +22,7 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 - D 的 `readonly_input_volumes` 仅允许逐卷指定 `name`、实际 `owner_id` 与 `kind`：`source_credentials` 只挂 `/fixture`，`staff_credentials` 只挂 `/run/xm/secrets` 或 `/run/secrets`，`scanner_signatures` 只挂 `/var/lib/clamav` 或 `/clamav-db`。所有挂载必须只读、卷的实际 owner label 必须相同，且不得与新建数据卷重合；这些输入不写入清理名单。原签名库仍执行原 48h 新鲜度检查。归档先通过原 archive-verify，再在无网络、只挂新建恢复卷的容器中保留数字 UID/权限，避免把 `65532/0700` 来源状态变成 root 所有；容器只增恢复所需 CHOWN/FOWNER/DAC_OVERRIDE 能力。
 - 保留原适用前置：四个来源容器、精确 SUB binary/NEW image tag、带审核人/有效期/原文 SHA 的 Cloudflare 离线 CIDR 材料与主机 real-IP（preflight 不发公网请求，不声称当前在线复核）、主机根盘及 DockerRootDir 使用率小于 80%、NTP、所有网络/精确代理 /32、env 必需字段及本地不可拉取镜像。
 - D 用全新端口。E 可以接管被精确核对的旧容器的同一个 127.0.0.1 端口；其它占用拒绝。停旧后重新检查端口已释放。
-- 旧平台项目和原开票三个项目、18 + 4 个容器的镜像/Compose/env/挂载/数据库卷均原位保存。主机有配置要求的余量。不得 `down -v` 清理旧栈、覆盖旧 env 或删除 source state。
+- 旧平台项目和原开票三个项目、18 + 4 个容器的镜像/Compose/env/挂载/数据库卷均原位保存。stage 前按 [旧输入保全](UNIFIED-OLD-INPUTS.md) 捕获公开 SHA 绑定，填写 `previous.input_snapshot`；新树的旧平台 `launch.yaml` 已退役清空，不能用它回滚或覆盖旧 release。主机有配置要求的余量。不得 `down -v` 清理旧栈、覆盖旧 env 或删除 source state。
 
 ## 冻结、切换和验证顺序
 

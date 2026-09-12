@@ -16,12 +16,12 @@ import restore
 
 class ResolvedInputTests(unittest.TestCase):
     def test_real_start_commands_wait_for_existing_healthchecks(self):
+        from test_repeat_cutover import configuration
         driver = object.__new__(lifecycle.DockerDriver)
-        previous = [{"kind": kind, "name": kind, "services": {kind: {"role": kind}}} for kind in ("idp", "platform", "invoice", "sources")]
-        candidate = [{"kind": kind, "name": kind, "services": {kind: {"role": kind}}} for kind in ("unified", "sources")]
-        driver.projects = lambda side: candidate if side == "candidate" else previous
         calls = []; driver.compose = lambda p,n,args: calls.append(args)
-        driver.start_new(); driver.start_old()
+        with tempfile.TemporaryDirectory() as tmp:
+            driver.config = configuration(Path(tmp))
+            driver.start_new(); driver.start_old()
         self.assertEqual(len(calls), 8)
         for call in calls[:2]: self.assertNotIn("--wait", call)
         for call in calls[2:]: self.assertIn("--wait", call)

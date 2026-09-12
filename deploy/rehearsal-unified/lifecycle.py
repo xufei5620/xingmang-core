@@ -169,10 +169,100 @@ def require_mount_inventory(original, resolved):
 
 
 def require_snapshot_files(snapshot):
+    if "old_input_snapshot" in snapshot:
+        binding = snapshot["old_input_snapshot"]
+        require(digest(plain_path(binding["path"])) == binding["sha256"], "old input preservation snapshot changed")
+        for source in read_public_json(binding["path"])["files"]:
+            require(digest(plain_path(source["path"])) == source["sha256"], "pre-stage original input bytes changed")
     for item in snapshot["project_files"] + snapshot.get("legacy_secret_inputs", []):
-        require(digest(item["env_file"]) == item["env_sha256"], "old original environment bytes changed")
+        require(digest(plain_path(item["env_file"])) == item["env_sha256"], "old original environment bytes changed")
         for source in item["compose"]:
-            require(digest(source["path"]) == source["sha256"], "old original Compose bytes changed")
+            require(digest(plain_path(source["path"])) == source["sha256"], "old original Compose bytes changed")
+
+
+def preserved_input_files(projects):
+    files = {}
+    for project in projects:
+        require(set(project) == {"kind", "name", "compose_files", "env_file", "services"}, "old project preservation descriptor is invalid")
+        require(isinstance(project["compose_files"], list) and project["compose_files"], "old Compose input list is missing")
+        for value in [*project["compose_files"], project["env_file"]]:
+            path = plain_path(value)
+            require(path.stat().st_nlink == 1, "old retained input must not be a hard link")
+            files[str(path)] = {"path": str(path), "sha256": digest(path)}
+        for index, value in enumerate(project["compose_files"]):
+            path = plain_path(value)
+            require(path != plain_path(project["env_file"]) and path.suffix.lower() in (".json", ".yaml", ".yml") and
+                    not any(p.casefold() in ("private", "secrets", "credentials") for p in path.parts), "old Compose must be an explicit public file")
+            require(path.stat().st_size <= 4 * 1024 * 1024, "old public Compose is too large")
+            raw = path.read_bytes()
+            require(b"retired-independent-topology" not in raw,
+                    "old Compose was replaced by the retired template; owner must restore the original release")
+            if index == 0:
+                if path.suffix.lower() == ".json":
+                    document = read_public_json(path)
+                    require(isinstance(document, dict) and isinstance(document.get("services"), dict) and document["services"], "old base Compose cannot have an empty service inventory")
+                else:
+                    require(raw.strip() and not re.search(rb"(?m)^services:[ \t]*(?:\{[ \t]*\}|null|~)[ \t]*(?:#.*)?\r?$", raw),
+                            "old base Compose cannot be the empty replacement template")
+    return [files[key] for key in sorted(files)]
+
+
+def require_retained_layout(config, roots, source_root, output):
+    require(isinstance(roots, list) and roots, "explicit old release retention roots are required")
+    retained = [plain_path(value, directory=True) for value in roots]
+    require(len(set(retained)) == len(retained) and all(path.parent != path for path in retained), "retention roots must be distinct release directories")
+    new = plain_path(source_root, exists=False, directory=True)
+    destinations = [new, plain_path(output, exists=False), plain_path(config["state_root"], exists=False, directory=True)]
+    destinations += [plain_path(f, exists=False) for p in config["candidate"]["projects"] for f in p["compose_files"]]
+    for root in retained:
+        require(all(not path.is_relative_to(root) and not root.is_relative_to(path) for path in destinations),
+                "new source, candidate Compose and operator output must be separate from retained old releases")
+    files = [*{f for p in config["previous"]["projects"] for f in [*p["compose_files"], p["env_file"]]}]
+    require(all(any(plain_path(f).is_relative_to(root) for root in retained) for f in files), "every old Compose and env must remain in an explicit retained root")
+
+
+def capture_old_inputs(config, roots, source_root, output):
+    """Capture public metadata only. Original Compose/env remain at their paths."""
+    require(config.get("mode") in ("local-synthetic", "server-rehearsal", "production"), "invalid old-input capture mode")
+    projects = config["previous"]["projects"]
+    validate_previous(projects)
+    target = plain_path(output, exists=False)
+    require(not target.exists() and target.parent.is_dir(), "old-input snapshot output must be a new file in an existing directory")
+    require_retained_layout(config, roots, source_root, output)
+    files = preserved_input_files(projects)
+    value = {"schema": "xingmang.old-inputs/v1", "status": "INPUTS_CAPTURED_NOT_RUNTIME_VERIFIED", "captured_at": utc(),
+             "mode": config["mode"], "new_source_root": str(plain_path(source_root, exists=False, directory=True)),
+             "retained_roots": roots, "projects": projects, "files": files}
+    # Detect a concurrent edit without copying an env, key or resolved secret.
+    require(preserved_input_files(projects) == files, "old inputs changed while their metadata was captured")
+    with target.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2); stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+    return {"path": str(target), "sha256": digest(target)}
+
+
+def require_old_inputs(config):
+    descriptor = config["previous"].get("input_snapshot")
+    require(isinstance(descriptor, dict) and set(descriptor) == {"path", "sha256"} and
+            isinstance(descriptor["sha256"], str) and SHA.fullmatch(descriptor["sha256"]), "old input preservation snapshot is required")
+    path = plain_path(descriptor["path"])
+    require(path.stat().st_nlink == 1 and digest(path) == descriptor["sha256"], "old input preservation snapshot changed")
+    proof = read_public_json(path)
+    require(set(proof) == {"schema", "status", "captured_at", "mode", "new_source_root", "retained_roots", "projects", "files"} and
+            proof["schema"] == "xingmang.old-inputs/v1" and proof["status"] == "INPUTS_CAPTURED_NOT_RUNTIME_VERIFIED" and
+            proof["mode"] == config["mode"] and proof["projects"] == config["previous"]["projects"], "old input snapshot does not bind the original projects")
+    require(plain_path(proof["new_source_root"], directory=True) == Path(__file__).absolute().parents[2], "old input snapshot belongs to another staged source root")
+    require_retained_layout(config, proof["retained_roots"], proof["new_source_root"], descriptor["path"])
+    require(proof["files"] == preserved_input_files(config["previous"]["projects"]), "retained original Compose or environment bytes changed")
+    return descriptor
+
+
+def require_original_compose_labels(project, state):
+    files, directory = state.get("compose_files"), state.get("working_dir")
+    require(isinstance(files, str) and files and isinstance(directory, str) and directory,
+            "original Compose file and working-directory labels are unavailable")
+    require([plain_path(value) for value in files.split(",")] == [plain_path(value) for value in project["compose_files"]] and
+            plain_path(directory, directory=True) == plain_path(project["compose_files"][0]).parent,
+            "selected old Compose paths or relative working directory differ from the original container labels")
 
 
 def job_plan(config, descriptors, side, kind=None):
@@ -278,7 +368,7 @@ def validate_config(config):
     require(set(candidate) == {"head", "manifest", "manifest_sha256", "projects", "jobs", "ready_url", "migration_digest", "databases"}, "candidate keys are incomplete")
     require(re.fullmatch(r"[a-f0-9]{40}", candidate["head"]), "candidate requires a full commit ID")
     require(SHA.fullmatch(candidate["manifest_sha256"]) and SHA.fullmatch(candidate["migration_digest"]), "candidate artifact or migration binding is invalid")
-    require(set(config["previous"]) == {"projects", "migration_digest", "ready_urls", "permission_jobs", "databases"}, "previous deployment keys are incomplete")
+    require(set(config["previous"]) == {"projects", "migration_digest", "ready_urls", "permission_jobs", "databases", "input_snapshot"}, "previous deployment keys are incomplete")
     validate_previous(config["previous"]["projects"])
     # CR-0010 is schema-preserving. Unknown migration differences must not be
     # papered over by mounting new SQL into old binaries or deleting ledger rows.
@@ -299,6 +389,7 @@ def validate_config(config):
         for name, entry in project["services"].items():
             require(NAME.fullmatch(name) and set(entry) == {"role", "image_id"} and IMAGE_ID.fullmatch(entry["image_id"]), "invalid service identity")
     require(len(names) == len(set(names)), "old and new projects must remain distinct")
+    require_old_inputs(config)
     plain_path(candidate["manifest"])
     plain_path(config["smoke_config"])
     require(set(config["backups"]) == set(BACKUP_ANCHORS), "both signed database backups are required")
@@ -435,6 +526,7 @@ class DockerDriver:
                 require(actual.stdout.decode().strip() == entry["image_id"], "required image is absent or changed")
 
     def preflight(self):
+        require_old_inputs(self.config)
         self.artifact_preflight()
         from host_nginx import HostNginx
         nginx_proof = HostNginx(self).preflight()
@@ -486,10 +578,15 @@ class DockerDriver:
                 ids = self.compose(project, "container-id-" + project["kind"] + "-" + service, ["ps", "--all", "-q", service]).stdout.decode().split()
                 require(len(ids) == 1, "expected exactly one original container per service")
                 fmt = '{"image":{{json .Image}},"running":{{json .State.Running}},"exit_code":{{json .State.ExitCode}},"health":{{with index .State "Health"}}{{json .Status}}{{else}}"none"{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"ports":{{json .HostConfig.PortBindings}},"mounts":[{{range $i,$m := .Mounts}}{{if $i}},{{end}}{"type":{{json $m.Type}},"source":{{json $m.Source}},"target":{{json $m.Destination}},"rw":{{json $m.RW}}}{{end}}]}'
+                if side == "previous":
+                    fmt = fmt[:-1] + ',"compose_files":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"working_dir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}}'
                 state = json.loads(self.command("container-state-" + project["kind"] + "-" + service, self.docker + ["inspect", ids[0], "--format", fmt]).stdout)
                 require(state["project"] == project["name"] and state["service"] == service and state["image"] == entry["image_id"], "original container identity changed")
                 require(state["running"] is True and state["exit_code"] == 0 and state["health"] in ("none", "healthy"), "a required runtime container is not running and healthy")
+                if side == "previous": require_original_compose_labels(project, state)
                 result.append({"project": project["name"], "service": service, "role": entry["role"], "image_id": state["image"], "ports": state["ports"], "mounts": sorted(state["mounts"], key=lambda m: m["target"])})
+                if side == "previous":
+                    result[-1]["compose_provenance"] = {"config_files": state["compose_files"], "working_dir": state["working_dir"]}
         return result
 
     def resolved_mount_inventory(self, side="candidate"):
@@ -592,10 +689,11 @@ class DockerDriver:
 
     def snapshot(self):
         from host_nginx import HostNginx
+        input_snapshot = require_old_inputs(self.config)
         rows = self.inventory("previous")
         require(sum(r["role"] not in OLD_ROLES["platform"] for r in rows) == 18, "old invoice inventory is not eighteen actual containers")
         snapshot = {"actual_invoice_containers": 18, "containers": rows, "host_nginx": HostNginx(self).snapshot(), "ledger_hashes": self.ledger_snapshot("previous"), "platform_permissions": self.platform_permissions_snapshot("previous"),
-                "legacy_secret_inputs": getattr(self, "legacy_secret_inputs", []),
+                "legacy_secret_inputs": getattr(self, "legacy_secret_inputs", []), "old_input_snapshot": input_snapshot,
                 "project_files": [{"name": p["name"], "compose": [{"path": f, "sha256": digest(f)} for f in p["compose_files"]],
                                    "env_file": p["env_file"], "env_sha256": digest(p["env_file"])} for p in self.projects("previous")]}
         require_snapshot_files(snapshot)
@@ -719,6 +817,7 @@ class DockerDriver:
         require(self.config["previous"]["migration_digest"] == self.config["candidate"]["migration_digest"], "rollback ledger is incompatible")
         record = read_public_json(self.state / "deployment-record.json")
         require_snapshot_files(record["snapshot"])
+        require(record["snapshot"].get("old_input_snapshot") == require_old_inputs(self.config), "recovery record belongs to another old input snapshot")
         self.verify_original_plan(record["snapshot"]["containers"])
         for kind in ("platform", "invoice", "idp"):
             project = next(p for p in self.projects("previous") if p["kind"] == kind)
@@ -730,16 +829,14 @@ class DockerDriver:
         require(self.platform_permissions_snapshot("previous") == record["snapshot"]["platform_permissions"], "platform permissions differ from the frozen original; keep writers stopped")
 
     def start_old(self):
+        require_old_inputs(self.config)
         for kind in ("idp", "platform", "invoice", "sources"):
             project = next(p for p in self.projects("previous") if p["kind"] == kind)
             self.compose(project, "restore-old-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-deps", "--pull", "never", *project["services"]])
 
     def check_old(self, snapshot):
         require(self.inventory("previous") == snapshot["containers"], "old runtime role/image inventory differs after rollback")
-        for item in snapshot["project_files"]:
-            require(digest(item["env_file"]) == item["env_sha256"], "old original environment bytes changed")
-            for source in item["compose"]:
-                require(digest(source["path"]) == source["sha256"], "old original Compose bytes changed")
+        require_snapshot_files(snapshot)
         urls = self.config["previous"]["ready_urls"]
         require(set(urls) == {"platform", "invoice"}, "both old readiness endpoints required")
         for url in urls.values(): self.http_ready(url)
