@@ -19,7 +19,7 @@ class SharedNetworkTests(unittest.TestCase):
         def command(_,argv,**kwargs):
             inspected.append(argv[-1])
             return subprocess.CompletedProcess(argv,0,json.dumps([{'Internal':False}]).encode(),b'')
-        driver=SimpleNamespace(docker=['docker'],projects=lambda _: [{'name':'xm-rehearsal-main','kind':'unified'},{'name':'xm-rehearsal-source','kind':'sources'}],
+        driver=SimpleNamespace(docker=['docker'],projects=lambda _: [{'name':'xm-rehearsal-main','kind':'unified','services':{'app':{'role':'platform-api'}}},{'name':'xm-rehearsal-source','kind':'sources','services':{'app':{'role':'sub2api-payments'}}}],
             compose=lambda p,*args:subprocess.CompletedProcess([],0,json.dumps(documents[p['kind']]).encode(),b''),command=command)
         return driver,{'volumes':{'source_state':'xm-rehearsal-fresh-data'}},documents,inspected
 

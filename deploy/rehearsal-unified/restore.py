@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 
-from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout,
+from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout, local_postgres_exec, require_postgres_socket_unshadowed,
                        atomic_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, require, utc)
 
 
@@ -163,7 +163,7 @@ def cleanup_temporary_identities(driver, value):
 def rehearsal_driver(driver):
     value = copy.deepcopy(driver.config["rehearsal"])
     keys = {"owner_id", "projects", "jobs", "ready_url", "smoke_config", "volumes", "tools_image", "databases", "verification_jobs", "shred_binary", "temporary_identity_paths", "archive_tmpfs_bytes"}
-    require(keys <= set(value) <= keys | {"readonly_input_volumes", "identity_copy_binary", "host_preflight"}, "rehearsal contract keys are incomplete")
+    require(keys <= set(value) <= keys | {"readonly_input_volumes", "identity_copy_binary", "host_preflight", "seed"}, "rehearsal contract keys are incomplete")
     require(re.fullmatch(r"[a-f0-9]{32}", value["owner_id"]), "rehearsal owner must be a unique UUID without hyphens")
     require(IMAGE_ID.fullmatch(value["tools_image"]), "restore tools require an immutable image")
     required_volumes = {"platform_database", "invoice_database", "documents", "source_state", "invoice_metadata", "platform_metadata"}
@@ -298,7 +298,10 @@ def validate_frozen_mounts(driver, value):
                                   driver.docker + ["network", "inspect", name]).stdout)[0], future_networks)
         volume_map = {k: v.get("name", project["name"] + "_" + k) for k, v in resolved.get("volumes", {}).items()}
         seen = set()
-        for service in resolved["services"].values():
+        for service_name, service in resolved["services"].items():
+            role=project['services'].get(service_name,{}).get('role')
+            if role in ('platform-postgres','invoice-postgres'):
+                require_postgres_socket_unshadowed(service.get('volumes',[]))
             for mount in service.get("volumes", []):
                 if mount["type"] == "volume":
                     name = volume_map.get(mount["source"], mount["source"])
@@ -390,7 +393,16 @@ def restore_database(driver, value, domain):
     require(set(row) == {"project", "service", "database", "owner"} and all(NAME.fullmatch(row[k]) for k in row), "invalid frozen database target")
     project = next((p for p in driver.projects("candidate") if p["name"] == row["project"]), None)
     require(project is not None and project["services"].get(row["service"], {}).get("role") == domain + "-postgres", "frozen database restore target has wrong role")
-    consumer = driver.compose_argv(project, ["exec", "-T", row["service"], "pg_restore", "-U", row["owner"], "-d", row["database"], "--no-owner", "--no-acl", "--exit-on-error"])
+    restore_args = ["pg_restore", "-w", "-h", "/var/run/postgresql", "-p", "5432", "-U", row["owner"], "-d", row["database"], "--no-owner", "--no-acl", "--exit-on-error"]
+    seed=getattr(driver,'rehearsal_seed',None)
+    if seed is not None:
+        targets=seed.database_targets()
+        if hasattr(seed,'database_restore_targets'):
+            require(targets==seed.database_restore_targets,'frozen SQL targets changed across database restoration')
+        else:seed.database_restore_targets=targets
+        consumer=driver.docker+local_postgres_exec(targets[domain]['expected']['container_id'])+restore_args
+    else:
+        consumer = driver.compose_argv(project, local_postgres_exec(row['service'],compose=True)+restore_args)
     driver.pipeline("restore-" + domain + "-database", decrypt_args(driver.config["backups"][domain], "database"), consumer)
 
 
@@ -469,7 +481,11 @@ def preview_candidate(driver):
     require(not live_names.intersection(p["name"] for p in value["projects"]),
             "candidate preview projects must differ from both live topologies")
     smoke_config = read_public_json(value["smoke_config"])
-    validate_smoke(smoke_config)
+    if 'seed' in value:
+        from public_smoke import validate_config as validate_layout
+        validate_layout(smoke_config, 'local-synthetic' if config['mode']=='local-synthetic' else 'server-rehearsal')
+    else:
+        validate_smoke(smoke_config)
     preview_mode = "local-synthetic" if config["mode"] == "local-synthetic" else "server-rehearsal"
     require(smoke_config["mode"] == preview_mode, "preview smoke must declare the isolated rehearsal mode")
     for role, url in smoke_config["origins"].items():
@@ -499,6 +515,8 @@ def preview_candidate(driver):
 
 def rehearse(driver):
     require(driver.config["mode"] != "production", "run D using a rehearsal-mode configuration, never the production project descriptor")
+    require(driver.config['mode'] != 'server-rehearsal' or 'seed' in driver.config.get('rehearsal', {}),
+            'server D requires isolated synthetic identities; real user credentials are not rehearsal inputs')
     trial, value = rehearsal_driver(driver)
     invalidate_receipt(driver)
     result = {"status": "RUNNING", "mode": driver.config["mode"], "start_utc": utc(), "source_head": driver.config["candidate"]["head"], "manifest_sha256": driver.config["candidate"]["manifest_sha256"], "evidence_kind": "actual-frozen-copy-rehearsal"}
@@ -514,6 +532,15 @@ def rehearse(driver):
         manifest = read_public_json(driver.config["candidate"]["manifest"])
         require(any(row["name"] == "invoice-tools" and row["imageId"] == value["tools_image"] for row in manifest["images"]), "archive tools are not bound to the candidate manifest")
         result["backups"] = verify_backups(trial, driver.config["backups"], driver.config["approvals"]["max_age_hours"])
+        if 'seed' in value:
+            from rehearsal_seed import Seed
+            trial.rehearsal_seed = Seed(trial, value)
+            trial.rehearsal_seed.prepare()
+            # The D-only overlay now changes the complete plan: recheck that
+            # actual network/environment plan before creating frozen data.
+            result['host_preflight_before_seed_overlay'] = result['host_preflight']
+            result['host_preflight'] = host_preflight(trial, trial.config)
+            inherited_preflight_pass(result['host_preflight'], trial.config['mode'])
         validate_frozen_mounts(trial, value)
         # All names are checked absent before the first create. The ownership
         # journal is durable before any partial resource creation can fail.
@@ -532,6 +559,8 @@ def rehearse(driver):
         prepare_source_verification_networks(trial)
         result["restored_source_state"] = verify_frozen_source_state(trial)
         trial.migrate_and_permissions()
+        if getattr(trial, 'rehearsal_seed', None):
+            trial.rehearsal_seed.seed()
         trial.start_new(); trial.check_new(); trial.preview_smoke(driver.config)
         result.update(status="PASS", runtime_inventory=trial.inventory("candidate"))
     except BaseException as error:
@@ -559,6 +588,13 @@ def rehearse(driver):
                 result["identity_cleanup"] = identities
             except BaseException:
                 result.update(status="FAIL", exit_code=1, cleanup_complete=False)
+            seed = getattr(trial, 'rehearsal_seed', None)
+            if seed is not None:
+                try:
+                    result['synthetic_seed_cleanup'] = seed.cleanup()
+                except BaseException:
+                    result.update(status='FAIL', exit_code=1, cleanup_complete=False)
+                result['synthetic_seed'] = seed.record
         budget = getattr(trial, "readiness_budget", None)
         if budget:
             result["candidate_readiness"] = budget.value

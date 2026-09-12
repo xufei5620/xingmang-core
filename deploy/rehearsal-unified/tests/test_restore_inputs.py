@@ -20,7 +20,7 @@ class RestoreInputsTests(unittest.TestCase):
                   "services":{"api":{"networks":{"n":{}},"volumes":[{"type":"volume","source":"fresh","target":"/documents"},
                     {"type":"volume","source":"input","target":"/fixture","read_only":True}]}}}
         meta={"Name":"xm-rehearsal-input","Labels":{"xingmang.rehearsal.owner":"20260912a"}}
-        driver=SimpleNamespace(docker=['docker'],projects=lambda _: [{"name":"xm-rehearsal-test","kind":"unified"}],
+        driver=SimpleNamespace(docker=['docker'],projects=lambda _: [{"name":"xm-rehearsal-test","kind":"unified","services":{"api":{"role":"platform-api"}}}],
             compose=lambda *a:subprocess.CompletedProcess([],0,json.dumps(resolved).encode(),b''),
             command=lambda *a,**k:subprocess.CompletedProcess([],0,json.dumps([meta]).encode(),b''))
         return driver,value,resolved,meta

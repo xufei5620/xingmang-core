@@ -1,10 +1,10 @@
 # 切换只读冒烟与隔离预检写流程
 
-E 和直接运行的 `smoke.py` 使用固定十步只读冒烟，只有登录、TOTP 与会话撤销可写；不会创建、审核、开具或上传发票。D 与停旧栈前的隔离预检额外执行两步发票写流程，见下文；不修改生产余额、抬头或邮箱证明。
+本轮 E 已按负责人授权改为 [SEED.md](SEED.md) 的五项公开验收，不需要真人凭据、不创建认证会话，结果不声称真人登录通过。本文件保留 `smoke.py` 作为 D 的认证与写流程实现：隔离播种后执行十二步，包括提交、审核、上传和双方下载；不修改生产余额、抬头或邮箱证明。
 
 ## 配置
 
-schema=xingmang.unified.smoke/v1；mode=local-synthetic|server-rehearsal|production，必须与调用者实际模式一致。
+下方 `xingmang.unified.smoke/v1` 是播种后引擎生成的 D 认证配置。初始 D/E 公开输入使用 `xingmang.unified.public-smoke/v1`，只有 mode、origins、connect_to、可选 ca_file；不得要求负责人提供以下真人凭据。旧独立 `smoke.py` CLI 仍校验其旧 schema，不能拿其结果替代本轮 E 五项验收。
 
 origins.admin 与 origins.user 填实际配置的 HTTPS origin，例如 https://console.example.com，不带路径、查询、凭据或通配符。允许默认 443。默认使用系统 CA；私有 CA 可用 ca_file 指定公开证书。禁止 TLS 跳过验证、自动重定向和环境 HTTP 代理。
 

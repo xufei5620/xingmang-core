@@ -10,7 +10,7 @@ import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -116,9 +116,31 @@ def require(value, reason):
         raise OperatorError(reason)
 
 
+def require_postgres_socket_unshadowed(mounts):
+    # /var/run is commonly an image symlink to /run. Protect both spellings,
+    # ancestors and individual socket descendants, regardless of read_only.
+    protected = (PurePosixPath('/var/run/postgresql'), PurePosixPath('/run/postgresql'))
+    for row in mounts:
+        target = PurePosixPath(row.get('target', row.get('Destination', '')))
+        require(target.is_absolute() and '..' not in target.parts, 'invalid PostgreSQL mount target')
+        if any(target == path or target in path.parents or path in target.parents for path in protected):
+            require(row.get('type', row.get('Type')) == 'tmpfs', 'a mount can redirect the fixed PostgreSQL Unix socket')
+
+
+def local_postgres_exec(container_or_service, *, compose=False):
+    # Explicit Unix socket flags are not enough: libpq hostaddr/service env
+    # can override transport or connection options. Values are never inherited.
+    return ['exec', '-T' if compose else '-i', '--user', 'postgres',
+            '-e', 'PGPASSFILE=/nonexistent', container_or_service, '/usr/bin/env',
+            *[part for name in ('PGHOST', 'PGHOSTADDR', 'PGPORT', 'PGSERVICE', 'PGSERVICEFILE', 'PGOPTIONS', 'PGPASSWORD') for part in ('-u', name)]]
+
+
 def digest(path):
+    checksum = hashlib.sha256()
     with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
 
 
 def plain_path(value, *, exists=True, directory=False):
@@ -999,22 +1021,8 @@ class DockerDriver:
         HostNginx(self, recovering=True).apply(snapshot["host_nginx"], rollback=True)
 
     def smoke(self):
-        from smoke import REQUIRED, validate_config as validate_smoke
-        script = Path(__file__).with_name("smoke.py")
-        require(script.is_file(), "the actual HTTP smoke implementation is missing")
-        config = read_public_json(self.config["smoke_config"])
-        validate_smoke(config)
-        require(config["mode"] == self.config["mode"], "smoke mode differs from the actual operation")
-        self.command("http-smoke", [sys.executable, str(script), "--config", self.config["smoke_config"], "--output", str(self.output / "smoke.json")])
-        result = read_public_json(self.output / "smoke.json")
-        required_steps = list(REQUIRED)
-        expected_digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-        require(result.get("mode") == self.config["mode"] and result.get("origins") == config["origins"] and
-                result.get("configuration_sha256") == expected_digest and result.get("financial_writes_permitted") is False,
-                "smoke evidence does not match the read-only configured operation")
-        require(result.get("status") == "PASS" and result.get("exit_code") == 0 and result.get("evidence_kind") == "actual-http-smoke" and
-                [s.get("name") for s in result.get("steps", [])] == required_steps and
-                all(s.get("status") == "PASS" and s.get("exit_code") == 0 for s in result["steps"]), "actual HTTP smoke did not pass every required step")
+        from public_smoke import run
+        return run(self, read_public_json(self.config["smoke_config"]))
 
     def preview_smoke(self, deployment_config):
         # Only restore.rehearse invokes this after frozen mount/ownership,

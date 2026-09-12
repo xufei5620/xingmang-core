@@ -140,7 +140,7 @@ def verified_permit(driver, deployment_config):
             "write probe endpoints do not match frozen descriptor")
     probe = read_public_json(config["smoke_config"])
     online = read_public_json(deployment_config["smoke_config"])
-    smoke.validate_config(probe)
+    smoke.validate_config(probe, _credentials=getattr(driver, 'rehearsal_seed', None))
     live_ports = {endpoint(online, role)[1] for role in ("admin", "user")}
     for role in ("admin", "user"):
         require(role in probe.get("connect_to", {}), "write preview requires explicit loopback TLS pinning")
@@ -164,7 +164,9 @@ def run_verified(driver, deployment_config):
     result = {"status":"FAIL", "exit_code":1, "steps":[], "evidence_kind":"actual-frozen-preview-smoke"}
     try:
         permit, config = verified_permit(driver, deployment_config)
-        result = smoke.run(config, _preview=permit)
+        result = smoke.run(config, _preview=permit, _credentials=getattr(driver, 'rehearsal_seed', None))
+        if getattr(driver, 'rehearsal_seed', None):
+            result.update(identity_coverage='synthetic seeded frozen identities only', real_customer_login_verified=False)
         require(result.get("status") == "PASS" and result.get("exit_code") == 0
                 and result.get("financial_writes_permitted") is True
                 and tuple(r["name"] for r in result["steps"] if r["status"] == "PASS") == REQUIRED,

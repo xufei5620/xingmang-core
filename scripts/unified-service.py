@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "xingmang.unified.local-build/v1"
@@ -223,9 +224,16 @@ def artifact_path(root, relative):
     return resolved
 
 
+def stream_hash(stream):
+    checksum = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        checksum.update(block)
+    return checksum.hexdigest()
+
+
 def file_hash(path):
     with Path(path).open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        return stream_hash(stream)
 
 
 def assert_file_hash(path, expected):
@@ -288,7 +296,7 @@ def assert_archive_image(path, reference, image_id):
 
         def hash_member(name):
             with archive.extractfile(member(name)) as stream:
-                return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
+                return "sha256:" + stream_hash(stream)
 
         def descriptor(desc, metadata=False):
             if not isinstance(desc, dict) or not re.fullmatch(r"sha256:[a-f0-9]{64}", desc.get("digest", "")) or type(desc.get("size")) is not int or desc["size"] < 0:
@@ -423,7 +431,30 @@ def base_image_evidence(metadata):
     return sorted(records, key=lambda item: (item['uri'], item['digest']))
 
 
-def build_arguments(item, tag, source, context_hash, builder=None):
+def validate_build_proxy(proxy):
+    if proxy is None:
+        return
+    try:
+        parsed = urlsplit(proxy)
+        valid = (not any(ch.isspace() or ord(ch) < 32 for ch in proxy)
+                 and parsed.scheme in ("http", "https") and parsed.hostname
+                 and parsed.username is None and parsed.password is None
+                 and parsed.path in ("", "/") and not parsed.query and not parsed.fragment
+                 and (parsed.port is None or 1 <= parsed.port <= 65535))
+    except (TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise GateError("build proxy must be a credential-free HTTP(S) endpoint")
+
+
+def validate_go_proxy(proxy):
+    if proxy is not None and proxy != "https://goproxy.cn,direct":
+        raise GateError("Go build proxy must match the explicitly reviewed https://goproxy.cn,direct")
+
+
+def build_arguments(item, tag, source, context_hash, builder=None, build_proxy=None, go_proxy=None):
+    validate_build_proxy(build_proxy)
+    validate_go_proxy(go_proxy)
     args = ["buildx", "build", "--load", "--provenance=mode=min", "--pull=false", "--platform", "linux/amd64", "--file", item["dockerfile"], "--tag", item["repository"] + ":" + tag,
             "--label", "org.opencontainers.image.revision=" + source["gitHead"],
             "--label", "xingmang.source.inventory=" + source["inventorySha256"],
@@ -435,10 +466,18 @@ def build_arguments(item, tag, source, context_hash, builder=None):
         args.extend(["--target", item["target"]])
     for key, value in item.get("buildArgs", {}).items():
         args.extend(["--build-arg", key + "=" + value])
+    if build_proxy is not None:
+        # Docker's predefined proxy args stay build transport; no Dockerfile ARG/ENV.
+        args.extend(["--build-arg", "HTTP_PROXY=" + build_proxy,
+                     "--build-arg", "HTTPS_PROXY=" + build_proxy])
+    if go_proxy is not None:
+        args.extend(["--build-arg", "GOPROXY=" + go_proxy])
     return args + ["-"]
 
 
-def build(root, tag, output, context, dry_run=False):
+def build(root, tag, output, context, dry_run=False, build_proxy=None, go_proxy=None):
+    validate_build_proxy(build_proxy)
+    validate_go_proxy(go_proxy)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", tag):
         raise GateError("invalid exact image tag")
     check(root)
@@ -446,7 +485,7 @@ def build(root, tag, output, context, dry_run=False):
     items = definitions(root)
     if dry_run:
         print(json.dumps({"mode": "dry-run", "productionReady": False, "sourceDirty": source["gitDirty"],
-            "sourceHead": source["gitHead"], "commands": [build_arguments(item, tag, source, "<frozen-context-sha256>", builder=context) for item in items if item["kind"] == "built"],
+            "sourceHead": source["gitHead"], "commands": [build_arguments(item, tag, source, "<frozen-context-sha256>", builder=context, build_proxy=build_proxy, go_proxy=go_proxy) for item in items if item["kind"] == "built"],
             "pinnedRuntimeImages": [item["reference"] for item in items if item["kind"] == "pinned"]}, indent=2))
         return
     if not output:
@@ -469,7 +508,7 @@ def build(root, tag, output, context, dry_run=False):
             reference = item["reference"] if item["kind"] == "pinned" else item["repository"] + ":" + tag
             if item["kind"] == "built":
                 metadata_path = destination / "logs" / (item["name"] + ".buildkit.json")
-                command = docker + build_arguments(item, tag, source, context_hash, builder=builder["name"])
+                command = docker + build_arguments(item, tag, source, context_hash, builder=builder["name"], build_proxy=build_proxy, go_proxy=go_proxy)
                 command[-1:-1] = ["--metadata-file", str(metadata_path)]
                 with snapshot.open("rb") as stdin, (destination / "logs" / (item["name"] + ".log")).open("wb") as log:
                     result = subprocess.run(command, cwd=root, stdin=stdin, stdout=log, stderr=subprocess.STDOUT, env={**local_tool_environment(), "BUILDX_METADATA_PROVENANCE": "min"})
@@ -552,6 +591,8 @@ def main():
     build_parser.add_argument("--output")
     build_parser.add_argument("--docker-context", default="desktop-linux" if os.name == "nt" else "default")
     build_parser.add_argument("--dry-run", action="store_true")
+    build_parser.add_argument("--build-proxy", help="optional credential-free HTTP(S) proxy for build RUN steps only")
+    build_parser.add_argument("--go-proxy", choices=["https://goproxy.cn,direct"], help="reviewed Go module proxy for the rehearsal-tools build stage")
     verify_parser = sub.add_parser("verify")
     verify_parser.add_argument("--manifest", required=True)
     verify_parser.add_argument("--docker-context", default="desktop-linux" if os.name == "nt" else "default")
@@ -560,7 +601,7 @@ def main():
         if args.command == "check":
             check(ROOT)
         elif args.command == "build":
-            build(ROOT, args.tag, args.output, args.docker_context, args.dry_run)
+            build(ROOT, args.tag, args.output, args.docker_context, args.dry_run, args.build_proxy, args.go_proxy)
         else:
             verify(ROOT, args.manifest, args.docker_context)
     except (GateError, OSError, ValueError, KeyError) as error:

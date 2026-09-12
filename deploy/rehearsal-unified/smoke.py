@@ -186,7 +186,13 @@ def loopback_target(value):
         raise InputFailure("LOOPBACK_TRANSPORT_REQUIRED") from None
 
 
-def validate_config(config):
+def validate_config(config, *, _credentials=None):
+    def private_file(path):
+        if _credentials is None:
+            return checked_file(path, private=True)
+        from rehearsal_seed import Seed
+        require(type(_credentials) is Seed and config.get('mode') in ('server-rehearsal','local-synthetic'), 'FROZEN_CREDENTIAL_READER_REQUIRED')
+        return _credentials.check_credential(path)
     try:
         if config["schema"] != SCHEMA or config["mode"] not in ("local-synthetic", "server-rehearsal", "production"):
             raise InputFailure("CONFIG_SCHEMA_MODE_INVALID")
@@ -204,9 +210,9 @@ def validate_config(config):
             item = creds[role]
             if not isinstance(item.get("username" if role == "staff" else "identifier"), str) or not item.get("username" if role == "staff" else "identifier"):
                 raise InputFailure("ACCOUNT_IDENTIFIER_REQUIRED")
-            checked_file(item["password_file"], private=True)
-        checked_file(creds["staff"]["totp_file"], private=True)
-        checked_file(creds["sub2api"]["expected_email_file"], private=True)
+            private_file(item["password_file"])
+        private_file(creds["staff"]["totp_file"])
+        private_file(creds["sub2api"]["expected_email_file"])
         if not is_uuid(creds["sub2api"]["existing_profile_id"]):
             raise InputFailure("EXISTING_PROFILE_ID_REQUIRED")
         ids = [creds[k]["source_id"] for k in ("sub2api", "newapi")]
@@ -343,8 +349,8 @@ def totp(secret, at=None):
         raise InputFailure("TOTP_FILE_FORMAT_INVALID") from None
 
 
-def login_user(client, item, kind):
-    response = client.call("POST", "/invoice-api/v1/auth/platform-login", {"platform": kind, "identifier": item["identifier"], "password": credential(item["password_file"])})
+def login_user(client, item, kind, read_credential=credential):
+    response = client.call("POST", "/invoice-api/v1/auth/platform-login", {"platform": kind, "identifier": item["identifier"], "password": read_credential(item["password_file"])})
     require(response.get("ok") is True, "SOURCE_LOGIN_INCOMPLETE")
     session = client.call("GET", "/invoice-api/v1/auth/session")
     user = session.get("user", {})
@@ -354,10 +360,10 @@ def login_user(client, item, kind):
     return user["id"]
 
 
-def login_staff(client, item, required_role):
-    pending = client.call("POST", "/api/v1/auth/login", {"username": item["username"], "password": credential(item["password_file"])})
+def login_staff(client, item, required_role, read_credential=credential):
+    pending = client.call("POST", "/api/v1/auth/login", {"username": item["username"], "password": read_credential(item["password_file"])})
     require(pending.get("requires_totp") is True and isinstance(pending.get("temp_token"), str) and bool(pending["temp_token"]), "REAL_TOTP_CHALLENGE_REQUIRED")
-    session = client.call("POST", "/api/v1/auth/login/totp", {"temp_token": pending["temp_token"], "code": totp(credential(item["totp_file"]))})
+    session = client.call("POST", "/api/v1/auth/login/totp", {"temp_token": pending["temp_token"], "code": totp(read_credential(item["totp_file"]))})
     require(session.get("requires_totp") is False and session.get("totp_enrolled") is True and session.get("must_change_password") is False and session.get("must_enroll_totp") is False, "TOTP_LOGIN_INCOMPLETE")
     require(session.get("username") == item["username"] and isinstance(session.get("roles"), list) and required_role in session["roles"], "STAFF_LOGIN_IDENTITY_WRONG")
     staff = client.call("GET", "/invoice-api/v1/auth/staff-session")
@@ -365,7 +371,7 @@ def login_staff(client, item, required_role):
     client.csrf = staff["csrf_token"]
 
 
-def run(config, *, _preview=None):
+def run(config, *, _preview=None, _credentials=None):
     result = {"schema": SCHEMA, "status": "FAIL", "exit_code": 1, "utc_start": utc(), "steps": [], "http": [], "evidence_kind": "actual-http-smoke", "email_proof": "restored-existing-profile; no new verification performed", "management_page_coverage": "HTTP shell plus authenticated admin API; DOM rendering requires separate browser evidence"}
     def step(name, action):
         record = {"name": name, "status": "FAIL", "exit_code": 1, "utc_start": utc()}
@@ -379,7 +385,9 @@ def run(config, *, _preview=None):
     sessions = []
     required_steps = REQUIRED
     try:
-        validate_config(config)
+        require(_credentials is None or _preview is not None, 'FROZEN_CREDENTIAL_READER_REQUIRES_PREVIEW')
+        validate_config(config, _credentials=_credentials)
+        read_credential = credential if _credentials is None else _credentials.read_credential
         if _preview is not None:
             from preview_smoke import FrozenPermit, REQUIRED as PREVIEW_REQUIRED
             require(type(_preview) is FrozenPermit, "VERIFIED_FROZEN_PERMIT_REQUIRED")
@@ -399,8 +407,8 @@ def run(config, *, _preview=None):
             sessions.append((client, kind))
             return action()
         step("readiness.before", lambda: check_ready(admin.call("GET", "/readyz")))
-        sub_principal = step("sub.login", lambda: with_session(sub, "user", lambda: login_user(sub, creds["sub2api"], "sub2api")))
-        new_principal = step("new.login", lambda: with_session(new, "user", lambda: login_user(new, creds["newapi"], "newapi")))
+        sub_principal = step("sub.login", lambda: with_session(sub, "user", lambda: login_user(sub, creds["sub2api"], "sub2api", read_credential)))
+        new_principal = step("new.login", lambda: with_session(new, "user", lambda: login_user(new, creds["newapi"], "newapi", read_credential)))
         def isolation():
             require(sub_principal != new_principal, "PRINCIPAL_ISOLATION_FAILED")
             pools = {}
@@ -413,9 +421,9 @@ def run(config, *, _preview=None):
             require(isinstance(profiles, list), "PROFILE_LIST_INVALID")
             matching = [p for p in profiles if p.get("id") == creds["sub2api"]["existing_profile_id"]]
             require(len(matching) == 1, "EXISTING_PROFILE_MISSING")
-            check_profile(matching[0], sub_principal, credential(creds["sub2api"]["expected_email_file"]))
+            check_profile(matching[0], sub_principal, read_credential(creds["sub2api"]["expected_email_file"]))
         step("source.isolation", isolation)
-        step("staff.totp", lambda: with_session(admin, "staff", lambda: login_staff(admin, creds["staff"], expected.get("required_staff_role", "admin"))))
+        step("staff.totp", lambda: with_session(admin, "staff", lambda: login_staff(admin, creds["staff"], expected.get("required_staff_role", "admin"), read_credential)))
         def page():
             body, media = admin.raw("GET", "/finance?sub=invoicing")
             require(media == "text/html" and b"<html" in body.lower(), "MANAGEMENT_SHELL_UNAVAILABLE")

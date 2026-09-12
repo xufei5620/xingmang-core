@@ -32,6 +32,14 @@ interactive login. Their evidence semantics and identity streams remain intact.
 
 Use `python scripts/unified-service.py check` and, from a clean committed worktree,
 `python scripts/unified-service.py build --tag <reviewed-tag> --output <outside-worktree-directory>`.
+When local build RUN steps require an explicitly reviewed proxy, append
+`--build-proxy <credential-free-http-or-https-endpoint>`. This forwards Docker's
+predefined `HTTP_PROXY` and `HTTPS_PROXY` build arguments only; it does not modify
+the Docker client configuration or add runtime proxy environment variables.
+The rehearsal-tools stage uses `GOPROXY=https://goproxy.cn,direct` as a scoped
+build ARG; pass `--go-proxy https://goproxy.cn,direct` to show that choice in the
+canonical dry-run commands. It resolves only the tagged seed package graph and
+does not change Go's persistent configuration or the runtime image environment.
 The build entry never starts services, loads backups, sends notifications, pushes images,
 uploads files, or rolls a deployment forward. It refuses a remote Docker endpoint.
 Build records prove local image construction only; they are not production release approval.
