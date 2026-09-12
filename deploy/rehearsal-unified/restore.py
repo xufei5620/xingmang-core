@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout, end_readiness_on_failure, local_postgres_exec, require_postgres_socket_unshadowed,
-                       atomic_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, require, utc)
+                       atomic_json, audit_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, recovery_audit_failure, recovery_audit_status, require, utc)
 
 
 SUFFIXES = {"database": ".postgres.dump.age", "documents": ".documents.tar.age",
@@ -134,6 +134,19 @@ def stage_temporary_identities(driver, value):
 
 
 def cleanup_temporary_identities(driver, value):
+    prior_recovering = getattr(driver, "_recovering_audit", False)
+    driver._recovering_audit = True
+    try:
+        result = cleanup_temporary_identity_files(driver, value)
+        errors = list(getattr(driver, "_recovery_audit_errors", []))
+        if errors:
+            result.update(audit_complete=False, audit_errors=errors)
+        return result
+    finally:
+        driver._recovering_audit = prior_recovering
+
+
+def cleanup_temporary_identity_files(driver, value):
     originals = {plain_path(row["identity_file"]).resolve() for row in driver.config["backups"].values()}
     staged = temporary_identity_map(value, driver.state)
     count = 0
@@ -160,7 +173,7 @@ def cleanup_temporary_identities(driver, value):
     return {"temporary_identities_shredded": count, "original_identities_preserved": True}
 
 
-def rehearsal_driver(driver):
+def rehearsal_driver(driver, *, recovering=False):
     value = copy.deepcopy(driver.config["rehearsal"])
     keys = {"owner_id", "projects", "jobs", "ready_url", "smoke_config", "volumes", "tools_image", "databases", "verification_jobs", "shred_binary", "temporary_identity_paths", "archive_tmpfs_bytes"}
     require(keys <= set(value) <= keys | {"readonly_input_volumes", "identity_copy_binary", "host_preflight", "seed"}, "rehearsal contract keys are incomplete")
@@ -183,14 +196,26 @@ def rehearsal_driver(driver):
         config["host_preflight"] = copy.deepcopy(value["host_preflight"])
     configure_temporary_identities(config, value, driver.state)
     trial = DockerDriver(config, record_root=driver.output)
+    trial._recovering_audit = recovering
+    trial._recovery_audit_errors = []
+    overlay_root = driver.output
+    if recovering:
+        journal = read_public_json(driver.state / "rehearsal-ownership.json")
+        require(journal.get("owner_id") == value["owner_id"] and journal.get("volumes") == value["volumes"] and
+                journal.get("projects") == [p["name"] for p in trial.projects("candidate")],
+                "cleanup lacks its original ownership configuration")
+        overlay_root = plain_path(journal.get("invocation"), directory=True)
     trial.verify_local_engine()
     for project in trial.projects("candidate"):
         resolved = json.loads(trial.compose(project, "ownership-config-" + project["kind"], ["config", "--format", "json"]).stdout)
         label = {"xingmang.rehearsal.owner": value["owner_id"]}
         overlay = {"services": {name: {"labels": label} for name in resolved["services"]},
                    "networks": {name: {"labels": label} for name, network in resolved.get("networks", {}).items() if network.get("external") is not True}}
-        path = driver.output / ("ownership-" + project["kind"] + ".json")
-        atomic_json(path, overlay)
+        path = overlay_root / ("ownership-" + project["kind"] + ".json")
+        if recovering:
+            require(read_public_json(path) == overlay, "cleanup ownership overlay changed or is missing")
+        else:
+            atomic_json(path, overlay)
         project["compose_files"] = list(project["compose_files"]) + [str(path)]
     return trial, value
 
@@ -584,6 +609,8 @@ def rehearse(driver):
                 cleaned = cleanup(driver)
                 if isinstance(cleaned, dict):
                     result["identity_cleanup"] = {key: cleaned[key] for key in ("temporary_identities_shredded", "original_identities_preserved")}
+                    if cleaned.get("exit_code", 0) != 0:
+                        result.update(status="FAIL", exit_code=1, audit_complete=False, cleanup_audit_errors=cleaned.get("audit_errors", []))
             result["cleanup_complete"] = True
         except BaseException:
             result.update(status="FAIL", exit_code=1, cleanup_complete=False)
@@ -594,6 +621,8 @@ def rehearse(driver):
                 identities = cleanup_temporary_identities(driver, value)
                 identities["temporary_identities_shredded"] += result.get("identity_cleanup", {}).get("temporary_identities_shredded", 0)
                 result["identity_cleanup"] = identities
+                if identities.get("audit_complete") is False:
+                    result.update(status="FAIL", exit_code=1, audit_complete=False, identity_audit_errors=identities.get("audit_errors", []))
             except BaseException:
                 result.update(status="FAIL", exit_code=1, cleanup_complete=False)
             seed = getattr(trial, 'rehearsal_seed', None)
@@ -621,7 +650,15 @@ def rehearse(driver):
 
 
 def cleanup(driver):
-    trial, value = rehearsal_driver(driver)
+    trial, value = rehearsal_driver(driver, recovering=True)
+    trial._recovering_audit = True
+    try:
+        return cleanup_owned_resources(driver, trial, value)
+    finally:
+        trial._recovering_audit = False
+
+
+def cleanup_owned_resources(driver, trial, value):
     trial.verify_local_engine()
     journal = read_public_json(driver.state / "rehearsal-ownership.json")
     require(journal.get("owner_id") == value["owner_id"] and journal.get("volumes") == value["volumes"] and journal.get("projects") == [p["name"] for p in trial.projects("candidate")], "cleanup lacks the matching original ownership journal")
@@ -644,6 +681,10 @@ def cleanup(driver):
     # The original configuration retains original paths; only the trial age
     # invocations receive staged copies. Never read or hash identity contents.
     identity_cleanup = cleanup_temporary_identities(driver, value)
+    for operation in identity_cleanup.get("audit_errors", []):
+        recovery_audit_failure(trial, "identity-" + operation)
     result = {"status": "CLEANED", "cleanup_complete": True, "exit_code": 0, "end_utc": utc(), **identity_cleanup}
-    atomic_json(driver.output / "cleanup-result.json", result)
+    recovery_audit_status(trial, result)
+    audit_json(trial, driver.output / "cleanup-result.json", result, "cleanup-result")
+    recovery_audit_status(trial, result)
     return result

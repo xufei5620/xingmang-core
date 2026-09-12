@@ -545,13 +545,50 @@ def atomic_json(path, value):
     os.replace(temporary, path)
 
 
+def recovery_audit_failure(driver, operation):
+    errors = getattr(driver, "_recovery_audit_errors", None)
+    if errors is None:
+        errors = driver._recovery_audit_errors = []
+    if operation not in errors:
+        errors.append(operation)
+
+
+def audit_json(driver, path, value, operation):
+    """Only recovery audit I/O is best effort; native work is never caught here."""
+    try:
+        atomic_json(path, value)
+    except OSError:
+        if not getattr(driver, "_recovering_audit", False):
+            raise
+        recovery_audit_failure(driver, operation)
+
+
+def recovery_record(driver, value):
+    try:
+        driver.record(value)
+    except OSError:
+        if not getattr(driver, "_recovering_audit", False):
+            raise
+        recovery_audit_failure(driver, "operator-record")
+
+
+def recovery_audit_status(driver, result):
+    errors = list(getattr(driver, "_recovery_audit_errors", []))
+    result.update(audit_complete=not errors, audit_errors=errors)
+    if errors:
+        result["exit_code"] = 1
+
+
 def rollback(driver, snapshot, *, original_failure=False, dry_run=False):
     if dry_run:
         return {"status": "DRY_RUN", "executed": False, "operation": "rollback",
                 "steps": ["stop_new", "restore_permissions", "start_old", "check_old", "restore_nginx"]}
     result = {"status": "ROLLING_BACK", "start_utc": utc(), "snapshot": snapshot}
-    driver.record(result)
+    prior_recovering = getattr(driver, "_recovering_audit", False)
+    driver._recovering_audit = True
+    driver._recovery_audit_errors = []
     try:
+        recovery_record(driver, result)
         # Never permit two writable topologies when stopping the new one failed.
         driver.stop_new()
         driver.restore_permissions()
@@ -564,7 +601,12 @@ def rollback(driver, snapshot, *, original_failure=False, dry_run=False):
         raise OperatorError("rollback failed; preserve the recorded state and keep ingress closed") from None
     finally:
         result["end_utc"] = utc()
-        driver.record(result)
+        try:
+            recovery_audit_status(driver, result)
+            recovery_record(driver, result)
+            recovery_audit_status(driver, result)
+        finally:
+            driver._recovering_audit = prior_recovering
     return result
 
 
@@ -700,7 +742,7 @@ class DockerDriver:
             }
             event["stderr_classes"] = [key for key, pattern in categories.items()
                                        if re.search(pattern, completed.stderr, re.IGNORECASE)] or ["UNCLASSIFIED"]
-        atomic_json(self.output / "events" / (f"{time.time_ns()}-{self.sequence:04d}-" + name + ".json"), event)
+        audit_json(self, self.output / "events" / (f"{time.time_ns()}-{self.sequence:04d}-" + name + ".json"), event, "command-event")
         for budget in budgets:
             if budget is not None and budget.active: budget.remaining()
         if check:
