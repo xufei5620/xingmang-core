@@ -104,6 +104,7 @@ type readinessProbe struct {
 	clamAVSignatures  func(time.Time) error
 	pingPDFScanner    func(context.Context) error
 	sourceHealth      func(context.Context) (postgresstore.SourceReadinessHealth, error)
+	sourcePolicy      postgresstore.SourceFreshnessPolicy
 	eligibilityHealth func(context.Context) (postgresstore.EligibilityProjectionHealth, error)
 	proofPending      *eligibilityProofPendingWarner
 	// containedDead (XM-INV-DEAD-CONTAINMENT) holds the rate limit for the

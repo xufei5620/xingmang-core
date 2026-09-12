@@ -22,7 +22,11 @@ def module(test):
 
 
 def good_readiness():
-    return {"status": "ready", "invoice_ready": True, "modules": {
+    latches = ("database", "admin_settings", "invoice_issuer", "clamav_daemon", "clamav_signatures", "pdf_scanner", "source_health_query", "source_ingest", "eligibility_health_query", "eligibility_projection", "source_streams")
+    return {"status": "ready", "platform_ready": True, "invoice_ready": True,
+        "report_schema": "xingmang.readiness-evaluation/v1", "invoice": {"ready": True,
+            "checks": {name: {"status": "ready"} for name in latches}, "source_non_freshness_status": "ready",
+            "source_freshness": {"status": "ready", "reasons": []}}, "modules": {
         key: {"ready": True, "status": "ready"}
         for key in ("platform", "invoice_sources", "invoice_projection")}}
 
@@ -118,6 +122,7 @@ class FakeDriver:
     def start_new(self): self.step("start_new")
     def check_new(self): self.step("check_new")
     def switch_nginx(self, snapshot): self.step("switch_nginx")
+    def wait_source_freshness(self): self.step("wait_source_freshness")
     def smoke(self): self.step("smoke")
     def stop_new(self): self.step("stop_new")
     def restore_permissions(self): self.step("restore_permissions")
@@ -144,7 +149,7 @@ class StateMachineTests(unittest.TestCase):
         m = module(self); driver = FakeDriver()
         result = m.cutover(driver)
         self.assertEqual(result["status"], "COMMITTED")
-        self.assertEqual(driver.calls, ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "smoke"])
+        self.assertEqual(driver.calls, ["preflight", "precheck_new", "snapshot", "stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "wait_source_freshness", "smoke"])
 
     def test_preflight_failure_never_stops_old_services(self):
         m = module(self); driver = FakeDriver("preflight")
@@ -154,7 +159,7 @@ class StateMachineTests(unittest.TestCase):
 
     def test_every_post_freeze_failure_runs_real_rollback_and_returns_failure(self):
         m = module(self)
-        for failure in ("stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "smoke"):
+        for failure in ("stop_old", "start_new_databases", "migrate_and_permissions", "start_new", "check_new", "switch_nginx", "wait_source_freshness", "smoke"):
             with self.subTest(failure=failure):
                 driver = FakeDriver(failure)
                 with self.assertRaises(m.OperatorError): m.cutover(driver)

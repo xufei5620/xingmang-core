@@ -111,7 +111,27 @@ func TestUnifiedMissingOrUnconfiguredInvoiceCannotBecomeHealthy(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/readyz", nil))
-	if w.Code != 503 || !strings.Contains(w.Body.String(), `"invoice_ready":false`) || strings.Contains(w.Body.String(), `"not_evaluated"`) {
+	if w.Code != 503 || !strings.Contains(w.Body.String(), `"invoice_ready":false`) {
 		t.Fatalf("unconfigured invoice readiness must be explicitly unavailable: %d %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Modules map[string]moduleState         `json:"modules"`
+		Invoice invoiceservice.ReadinessReport `json:"invoice"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"invoice_sources", "invoice_projection"} {
+		if body.Modules[name].Ready || body.Modules[name].Status != "not_ready" {
+			t.Fatal("unconfigured module is not explicitly unavailable")
+		}
+	}
+	if len(body.Invoice.Checks) != 11 {
+		t.Fatal("unconfigured report omitted required latch states")
+	}
+	for _, item := range body.Invoice.Checks {
+		if item.Status != invoiceservice.GateNotEvaluated {
+			t.Fatal("unconfigured runtime claimed a check was evaluated")
+		}
 	}
 }

@@ -41,22 +41,30 @@ func NewHandler(platform http.Handler, invoice Module, platformReady func(contex
 				code = http.StatusServiceUnavailable
 			}
 			sources, projection := invoiceModuleStates(invoiceReport)
-			w.WriteHeader(code)
-			if r.Method == http.MethodHead {
-				return
-			}
 			status := "ready"
 			if code != http.StatusOK {
 				status = "unavailable"
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
+			body := map[string]any{
 				"status": status, "platform_ready": platformErr == nil,
 				"invoice_ready": invoiceReport.Ready, "invoice": invoiceReport,
 				"modules": map[string]moduleState{
 					"platform":        {Ready: platformErr == nil, Status: platformState},
 					"invoice_sources": sources, "invoice_projection": projection,
 				},
-			})
+			}
+			query := r.URL.Query()
+			if len(query) == 1 && len(query["report"]) == 1 && query.Get("report") == "full" {
+				// HTTP success means the typed evaluation was sampled. Its original
+				// readiness/body states remain unchanged and must be checked by the
+				// operator; ordinary health checks retain their strict 200/503.
+				body["report_schema"] = "xingmang.readiness-evaluation/v1"
+				code = http.StatusOK
+			}
+			w.WriteHeader(code)
+			if r.Method != http.MethodHead {
+				_ = json.NewEncoder(w).Encode(body)
+			}
 			return
 		}
 		if r.URL.Path == "/invoice-api/readyz" {

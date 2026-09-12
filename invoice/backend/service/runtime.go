@@ -45,12 +45,13 @@ type workerSpec struct {
 }
 
 type appRuntime struct {
-	API        *httpapi.Server
-	AuthMode   string
-	SourceMode string
-	Workers    []workerSpec
-	readiness  func(context.Context) (httpapi.ReadinessOutcome, error)
-	close      func()
+	API                 *httpapi.Server
+	AuthMode            string
+	SourceMode          string
+	Workers             []workerSpec
+	readiness           func(context.Context) (httpapi.ReadinessOutcome, error)
+	readinessWithReport func(context.Context) (httpapi.ReadinessOutcome, ReadinessReport, error)
+	close               func()
 }
 
 func (r appRuntime) Close() {
@@ -365,8 +366,14 @@ func buildProductionRuntime(ctx context.Context, authMode string, options Option
 		clamAVSignatures: func(now time.Time) error {
 			return document.CheckClamAVDatabaseFreshness(clamAVDatabaseRoot, clamAVMaxAge, now)
 		},
-		pingPDFScanner:    pdfScanner.Ping,
-		sourceHealth:      appService.SourceReadinessHealth,
+		pingPDFScanner: pdfScanner.Ping,
+		sourceHealth:   appService.SourceReadinessHealth,
+		sourcePolicy: postgresstore.SourceFreshnessPolicy{
+			EconomicHeartbeatMaxAge:      economicHeartbeatMaxAge,
+			EconomicWatermarkMaxAge:      economicWatermarkMaxAge,
+			IdentitiesMaxAge:             identitiesMaxAge,
+			EconomicRescanActivityMaxAge: economicRescanActivityMaxAge,
+		},
 		eligibilityHealth: store.EligibilityProjectionHealth,
 		proofPending:      eligibilityProofPendingWarnings,
 		containedDead:     containedDeadWarnings,
@@ -423,7 +430,7 @@ func buildProductionRuntime(ctx context.Context, authMode string, options Option
 	})
 
 	closeOnError = false
-	return appRuntime{API: api, AuthMode: "session", SourceMode: "agent", Workers: workers, readiness: readiness.evaluate, close: store.Close}, nil
+	return appRuntime{API: api, AuthMode: "session", SourceMode: "agent", Workers: workers, readiness: readiness.evaluate, readinessWithReport: readiness.evaluateWithReport, close: store.Close}, nil
 }
 
 func validateIssuerReadiness(settings adminsettings.Settings) error {

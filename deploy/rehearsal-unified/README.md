@@ -46,3 +46,6 @@ ClamAV 的原入口需要可写数据库目录。完整 D 应声明新的 `volum
 清理先验证本次 owner label/原始 journal，停止本次项目，确认容器消失，再移除明确命名冻结卷。原离线 identity 不删除。需要演练暂存身份时，`temporary_identity_paths` 必须恰为 `state_root/tmpfs/<owner_id>/invoice.age-identity` 和 `platform.age-identity`，并提供绝对路径 `identity_copy_binary`（原 GNU cp）及 `shred_binary`（原 GNU shred）。`backups.identity_file` 始终保留原件路径；创建冻结卷、武装 finally 后，程序独占创建暂存目录并先记归属，再由 cp 消费路径复制，只有 trial 的 age 调用改用副本。每个副本以三次覆写、补零及 unlink 清理；资源清理失败也会继续清理本次已登记副本。空目录仅非递归删除，未知条目保留并报失败。程序不读或哈希身份正文；暂存目录名不代表 Windows 上实际挂载了 tmpfs，执行记录应如实说明介质。未启用暂存时记录数量 0；要求覆盖身份销毁的完整演练必须提供两份暂存配置和真实删除回执。任何清理失败都不能生成 D PASS。
 
 `host_preflight` 的完整字段与合成边界见 [HOST-PREFLIGHT.md](HOST-PREFLIGHT.md)，主机 nginx 实际切换/回滚输入见 [HOST-NGINX.md](HOST-NGINX.md)。本轮新增的 D 隔离播种、真实 tmpfs 凭据清理与 E 五项公开验收见 [SEED.md](SEED.md)；D 十二步写链仍由 [SMOKE.md](SMOKE.md) 定义。E 的 `rehearsal.host_preflight` 必须描述独立预检副本，停旧前重跑实际冻结副本预检；不切流量、不共用可写数据。四项主机守卫与原 11 道开票闩继续保留，真人登录验收由负责人执行。
+
+按本轮明确授权，D 的非新鲜度 300 秒与 E 的来源追平 900 秒、精确 typed
+报告及原自动回滚边界见 [READINESS-PHASES.md](READINESS-PHASES.md)。

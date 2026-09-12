@@ -37,6 +37,11 @@ func TestModuleReadinessPreservesSafeDiagnosticsAndContainedDegradation(t *testi
 				return tc.outcome, tc.err
 			}})
 			got := module.Readiness(context.Background())
+			// A legacy injected closure supplies no per-gate observations.
+			unexecuted := unevaluatedReadinessReport()
+			tc.want.Checks = unexecuted.Checks
+			tc.want.SourceNonFreshnessStatus = unexecuted.SourceNonFreshnessStatus
+			tc.want.SourceFreshness = unexecuted.SourceFreshness
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("public readiness=%+v want %+v", got, tc.want)
 			}

@@ -58,10 +58,11 @@ class SourceStateRestoreTests(unittest.TestCase):
                     operator_source={'head':'a'*40,'files':[]},
                     artifact_preflight=lambda:None,command=lambda *a:subprocess.CompletedProcess([],0,stdout=str(16*1024**3).encode()),
                     projects=lambda _:[main,project],compose=compose,start_new_databases=lambda:events.append('databases'),jobs=lambda *a:None,
-                    migrate_and_permissions=lambda:events.append('migrate'),start_new=lambda:events.append('start_new'),
-                    check_new=lambda:None,preview_smoke=lambda *_:None,inventory=lambda _:[])
+                    migrate_and_permissions=lambda:events.append('migrate'),start_new=lambda **kwargs:events.append('start_new'),
+                    check_new=lambda:None,preview_smoke=lambda *_:None,inventory=lambda _,**kwargs:[])
                 if failed_index=='readiness':
-                    def expire_readiness():
+                    def expire_readiness(*,rehearsal):
+                        self.assertTrue(rehearsal)
                         events.append('start_new')
                         driver.readiness_budget=lifecycle.ReadinessBudget(driver.output)
                         with patch.object(lifecycle.time,'monotonic',return_value=driver.readiness_budget.started+301):
@@ -72,7 +73,7 @@ class SourceStateRestoreTests(unittest.TestCase):
                     driver.start_new=expire_readiness
                 value={'archive_tmpfs_bytes':1024,'tools_image':'tools','verification_jobs':[{'service':'verify-invoice-restore'}]}
                 stack.enter_context(patch.object(restore,'rehearsal_driver',return_value=(driver,value)))
-                for name in ('invalidate_receipt','validate_frozen_mounts','create_frozen_volumes','extract_archive','inherited_preflight_pass'):
+                for name in ('invalidate_receipt','validate_frozen_mounts','create_frozen_volumes','extract_archive','inherited_preflight_pass','bind_frozen_readiness_endpoint'):
                     stack.enter_context(patch.object(restore,name,return_value=None))
                 stack.enter_context(patch('preflight.run',return_value={}))
                 stack.enter_context(patch.object(restore,'verify_backups',return_value={}))

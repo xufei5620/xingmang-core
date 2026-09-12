@@ -21,10 +21,13 @@ type Options struct {
 // ReadinessReport contains only public, filtered readiness diagnostics.
 // Dependency errors are recorded in application logs, never in this report.
 type ReadinessReport struct {
-	Ready    bool     `json:"ready"`
-	Check    string   `json:"check,omitempty"`
-	Summary  string   `json:"summary,omitempty"`
-	Degraded []string `json:"degraded,omitempty"`
+	Ready                    bool                  `json:"ready"`
+	Check                    string                `json:"check,omitempty"`
+	Summary                  string                `json:"summary,omitempty"`
+	Degraded                 []string              `json:"degraded,omitempty"`
+	Checks                   map[string]GateReport `json:"checks"`
+	SourceNonFreshnessStatus GateStatus            `json:"source_non_freshness_status"`
+	SourceFreshness          SourceFreshnessReport `json:"source_freshness"`
 }
 
 func (r *Runtime) Readiness(ctx context.Context) ReadinessReport {
@@ -73,32 +76,44 @@ func (r *Runtime) Ready(ctx context.Context) error {
 }
 
 func (r *Runtime) readinessReport(ctx context.Context) (ReadinessReport, error) {
-	outcome, err := r.evaluateReadiness(ctx)
+	outcome, detailed, err := r.evaluateReadinessWithReport(ctx)
 	report := r.diagnostics.Report(outcome, err, nil)
-	return ReadinessReport{Ready: report.Ready, Check: report.Check, Summary: report.Summary, Degraded: report.Degraded}, err
+	detailed = detailed.filteredDiagnostics()
+	detailed.Ready, detailed.Check, detailed.Summary, detailed.Degraded = report.Ready, report.Check, report.Summary, report.Degraded
+	return detailed, err
 }
 
 func (r *Runtime) evaluateReadiness(ctx context.Context) (httpapi.ReadinessOutcome, error) {
+	outcome, _, err := r.evaluateReadinessWithReport(ctx)
+	return outcome, err
+}
+
+func (r *Runtime) evaluateReadinessWithReport(ctx context.Context) (httpapi.ReadinessOutcome, ReadinessReport, error) {
+	detailed := unevaluatedReadinessReport()
 	if err := ctx.Err(); err != nil {
-		return httpapi.ReadinessOutcome{}, err
+		return httpapi.ReadinessOutcome{}, detailed, err
 	}
 	r.mu.Lock()
 	closing := r.closing
 	workerContext := r.workerContext
 	r.mu.Unlock()
 	if closing {
-		return httpapi.ReadinessOutcome{}, errors.New("invoice runtime is stopping")
+		return httpapi.ReadinessOutcome{}, detailed, errors.New("invoice runtime is stopping")
 	}
 	if workerContext != nil && workerContext.Err() != nil {
-		return httpapi.ReadinessOutcome{}, errors.New("invoice runtime workers are stopping")
+		return httpapi.ReadinessOutcome{}, detailed, errors.New("invoice runtime workers are stopping")
+	}
+	if r.app.readinessWithReport != nil {
+		return r.app.readinessWithReport(ctx)
 	}
 	if r.app.readiness == nil {
 		if r.app.AuthMode == "mock" && r.app.SourceMode == "mock" {
-			return httpapi.ReadinessOutcome{}, nil
+			return httpapi.ReadinessOutcome{}, detailed, nil
 		}
-		return httpapi.ReadinessOutcome{}, errors.New("invoice runtime readiness is not configured")
+		return httpapi.ReadinessOutcome{}, detailed, errors.New("invoice runtime readiness is not configured")
 	}
-	return r.app.readiness(ctx)
+	outcome, err := r.app.readiness(ctx)
+	return outcome, detailed, err
 }
 
 // Start launches each worker once, using the host's cancellation context.

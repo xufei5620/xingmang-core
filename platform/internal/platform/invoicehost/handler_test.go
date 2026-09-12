@@ -115,6 +115,48 @@ func TestUnifiedReadyPreservesInvoiceDegradedEvidence(t *testing.T) {
 	}
 }
 
+func TestFullReadinessSamplingKeepsDefaultHTTPFailureAndOriginalBodyState(t *testing.T) {
+	m := &testModule{handler: http.NotFoundHandler(), err: errors.New("private source path"), check: "source_streams"}
+	h, err := NewHandler(http.NotFoundHandler(), m, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path   string
+		code   int
+		report bool
+	}{
+		{"/readyz", http.StatusServiceUnavailable, false},
+		{"/readyz?report=full", http.StatusOK, true},
+		{"/readyz?report=unknown", http.StatusServiceUnavailable, false},
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path, nil))
+		if w.Code != tc.code {
+			t.Fatalf("%s status %d want %d", tc.path, w.Code, tc.code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body["status"] != "unavailable" || body["invoice_ready"] != false {
+			t.Fatalf("sampling hid original readiness: %s", w.Body.String())
+		}
+		if tc.report && body["report_schema"] != "xingmang.readiness-evaluation/v1" {
+			t.Fatal("full report has no version binding")
+		}
+		if !tc.report && body["report_schema"] != nil {
+			t.Fatal("ordinary readiness gained a sampling-success claim")
+		}
+		if strings.Contains(w.Body.String(), "private") {
+			t.Fatal("sampling exposed private cause")
+		}
+	}
+	if m.readyCalls != 3 {
+		t.Fatal("each request must evaluate invoice exactly once")
+	}
+}
+
 // The untouched module remains unclassified on these short-circuit paths.
 // A runbook must not describe not_evaluated as universally unreachable.
 func TestUnifiedShortCircuitLeavesUnclassifiedModuleNotEvaluated(t *testing.T) {

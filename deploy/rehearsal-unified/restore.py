@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 
-from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout, local_postgres_exec, require_postgres_socket_unshadowed,
+from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout, end_readiness_on_failure, local_postgres_exec, require_postgres_socket_unshadowed,
                        atomic_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, require, utc)
 
 
@@ -235,6 +235,11 @@ def invalidate_receipt(driver):
         with (driver.output / "prior-rehearsal-receipt.json").open("xb") as saved:
             saved.write(original.read_bytes())
     atomic_json(receipt, {"status": "RUNNING", "exit_code": 1, "start_utc": utc(), "invocation": str(driver.output)})
+
+
+def bind_frozen_readiness_endpoint(driver, value):
+    from rehearsal_endpoint import attest_frozen_ready_endpoint
+    return attest_frozen_ready_endpoint(driver, value)
 
 
 def assert_project_resources_absent(driver):
@@ -561,9 +566,12 @@ def rehearse(driver):
         trial.migrate_and_permissions()
         if getattr(trial, 'rehearsal_seed', None):
             trial.rehearsal_seed.seed()
-        trial.start_new(); trial.check_new(); trial.preview_smoke(driver.config)
-        result.update(status="PASS", runtime_inventory=trial.inventory("candidate"))
+        trial.start_new(rehearsal=True)
+        trial._frozen_ready_endpoint = bind_frozen_readiness_endpoint(trial, value)
+        trial.check_new(); trial.preview_smoke(driver.config)
+        result.update(status="PASS", runtime_inventory=trial.inventory("candidate", allow_deferred_invoice_health=True))
     except BaseException as error:
+        end_readiness_on_failure(trial, error)
         result.update(status="FAIL", exit_code=1)
         if isinstance(error, ReadinessTimeout):
             result["failure_code"] = "CANDIDATE_READINESS_DEADLINE_EXCEEDED"
@@ -601,7 +609,7 @@ def rehearse(driver):
             if budget.value["status"] == "DEADLINE_EXCEEDED":
                 stopped = driver.output / "STOPPED.md"
                 stopped.parent.mkdir(parents=True, exist_ok=True)
-                stopped.write_text("# STOPPED\n\nThe original 11 invoice readiness latches were not observed all ready within the single 300 second startup budget.\n\n"
+                stopped.write_text("# STOPPED\n\nThe complete non-freshness invoice readiness policy was not observed within the single 300 second startup budget.\n\n"
                     + "No production cutover is permitted. Inspect candidate-readiness.json and the preserved public response bytes.\n\n"
                     + "Cleanup complete: " + str(result.get("cleanup_complete", False)) + "\n", encoding="utf-8")
                 result["stopped_record"] = str(stopped)

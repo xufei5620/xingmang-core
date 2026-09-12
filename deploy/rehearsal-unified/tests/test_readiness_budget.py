@@ -44,7 +44,7 @@ class ReadinessBudgetTests(unittest.TestCase):
             d = driver(root); clock = [100.0]; calls = []
             def compose(project, name, args):
                 calls.append((name, args)); clock[0] += 60
-            d.compose = compose; d.inventory = lambda side: clock.__setitem__(0, clock[0] + 61)
+            d.compose = compose; d.inventory = lambda side, **kwargs: clock.__setitem__(0, clock[0] + 61)
             d.http_ready = lambda *args, **kwargs: good_readiness()
             with patch.object(lifecycle.time, 'monotonic', side_effect=lambda: clock[0]):
                 d.start_new()
@@ -72,7 +72,7 @@ class ReadinessBudgetTests(unittest.TestCase):
             self.assertTrue(timed['timed_out'])
 
     def test_true_http_probe_records_original_bytes_and_first_observation(self):
-        raw = json.dumps({**good_readiness(), 'invoice': {'ready': True}}, separators=(',', ':')).encode() + b'\n'
+        raw = json.dumps(good_readiness(), separators=(',', ':')).encode() + b'\n'
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200); self.end_headers(); self.wfile.write(raw)
@@ -81,16 +81,17 @@ class ReadinessBudgetTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
             with tempfile.TemporaryDirectory() as root:
-                d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _: []
+                d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _, **kwargs: []
                 d.config['candidate']['ready_url'] = f'http://127.0.0.1:{server.server_port}/readyz'
                 d.start_new(); d.check_new()
                 record = json.loads((Path(root) / 'candidate-readiness.json').read_text())
-                self.assertEqual(record['status'], 'READY')
+                self.assertEqual(record['status'], 'BASE_READY')
                 self.assertLess(record['elapsed_seconds'], 300)
                 self.assertEqual(record['invoice_latches'], 11)
                 self.assertEqual(Path(record['observations'][0]['response_path']).read_bytes(), raw)
-                self.assertEqual(record['first_all_ready_utc'], record['observations'][0]['observed_utc'])
-                self.assertEqual(record['first_all_ready_monotonic'], record['observations'][0]['observed_monotonic'])
+                self.assertEqual(record['first_accepted_utc'], record['observations'][0]['accepted_utc'])
+                self.assertEqual(record['first_accepted_monotonic'], record['observations'][0]['accepted_monotonic'])
+                self.assertGreaterEqual(record['first_accepted_monotonic'], record['observations'][0]['observed_monotonic'])
         finally:
             server.shutdown(); server.server_close(); thread.join()
 
@@ -106,7 +107,7 @@ class ReadinessBudgetTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
             with tempfile.TemporaryDirectory() as root:
-                d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _: []
+                d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _, **kwargs: []
                 d.config['candidate']['ready_url'] = f'http://127.0.0.1:{server.server_port}/readyz'
                 started = time.monotonic()
                 with patch.object(lifecycle, 'READINESS_BUDGET_SECONDS', 0.4):
@@ -120,12 +121,13 @@ class ReadinessBudgetTests(unittest.TestCase):
     def test_nominal_budget_is_fixed_and_ready_report_cannot_omit_original_latches(self):
         self.assertEqual(lifecycle.READINESS_BUDGET_SECONDS, 300)
         with tempfile.TemporaryDirectory() as root:
-            d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _: []
+            d = driver(root); d.compose = lambda *args: None; d.inventory = lambda _, **kwargs: []
             with patch.object(lifecycle, 'READINESS_BUDGET_SECONDS', 0.15):
                 d.start_new()
-                d.command = lambda *args, **kwargs: subprocess.CompletedProcess([], 0, b'200\n' + json.dumps(good_readiness()).encode(), b'')
+                missing = good_readiness(); missing.pop('invoice')
+                d.command = lambda *args, **kwargs: subprocess.CompletedProcess([], 0, b'200\n' + json.dumps(missing).encode(), b'')
                 with self.assertRaises(lifecycle.OperatorError): d.check_new()
-            self.assertNotEqual(json.loads((Path(root) / 'candidate-readiness.json').read_text())['status'], 'READY')
+            self.assertNotEqual(json.loads((Path(root) / 'candidate-readiness.json').read_text())['status'], 'BASE_READY')
 
 
 if __name__ == '__main__': unittest.main()

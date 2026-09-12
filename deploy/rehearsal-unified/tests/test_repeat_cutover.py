@@ -55,6 +55,7 @@ def deployment_boundary(events, topology):
         def start_new(self): events.append("start_new"); topology["new"] = True
         def check_new(self): lifecycle.require(topology["new"], "new stopped")
         def switch_nginx(self, snapshot): events.append("switch_nginx")
+        def wait_source_freshness(self): events.append("wait_source_freshness")
         def restore_nginx(self, snapshot): events.append("restore_nginx")
         def smoke(self): events.append("smoke")
         def stop_new(self): events.append("stop_new"); topology["new"] = False

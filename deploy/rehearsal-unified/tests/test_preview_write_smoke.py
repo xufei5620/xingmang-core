@@ -32,15 +32,15 @@ class OrchestrationTests(unittest.TestCase):
                 command=lambda *a:subprocess.CompletedProcess([],0,stdout=str(16*1024**3).encode()),
                 start_new_databases=lambda:events.append('databases'), jobs=lambda *a:None,
                 migrate_and_permissions=lambda:events.append('migrate'),
-                start_new=lambda:events.append('start'), check_new=lambda:events.append('ready'),
+                start_new=lambda **kwargs:events.append('start'), check_new=lambda:events.append('ready'),
                 smoke=lambda:events.append('readonly'),
-                preview_smoke=lambda *a:events.append('write-preview'), inventory=lambda _:[])
+                preview_smoke=lambda *a:events.append('write-preview'), inventory=lambda _,**kwargs:[])
             value={'archive_tmpfs_bytes':1024,'tools_image':'tools',
                 'verification_jobs':[{'service':'verify-invoice-restore'}]}
             stack.enter_context(patch.object(restore,'rehearsal_driver',return_value=(driver,value)))
             for name in ('invalidate_receipt','validate_frozen_mounts','create_frozen_volumes',
                          'extract_archive','inherited_preflight_pass','stage_temporary_identities',
-                         'prepare_source_verification_networks'):
+                         'prepare_source_verification_networks','bind_frozen_readiness_endpoint'):
                 stack.enter_context(patch.object(restore,name,return_value=None))
             stack.enter_context(patch('preflight.run',return_value={}))
             stack.enter_context(patch.object(restore,'verify_backups',return_value={}))
@@ -62,6 +62,10 @@ class WriteFixture(test_smoke.ProtocolFixture):
     class Client(test_smoke.ProtocolFixture.Client):
         def call(self, method, path, payload=None, expected=(200,)):
             f = self.fixture
+            if method == 'GET' and path == '/readyz?report=full':
+                from test_readiness_phases import full_report
+                f.calls.append((self.role,method,path))
+                return full_report(expired=('source_heartbeat_expired',) if f.fault=='source_expired' else ())
             if method == 'POST' and path == '/invoice-api/v1/user/invoice-requests':
                 f.calls.append((self.role,method,path))
                 f.request={'id':test_smoke.REQUEST,'source_instance_id':test_smoke.SOURCE,
@@ -125,6 +129,12 @@ class PreviewContractTests(unittest.TestCase):
                 self.assertEqual(result['steps'][-1]['name'],'sessions.revoked')
                 self.assertEqual(sum(path.endswith('/logout') for _,_,path in fixture.calls),3)
 
+    def test_expected_source_expiry_keeps_all_twelve_frozen_write_probes(self):
+        result,fixture=self.execute_preview('source_expired')
+        self.assertEqual(result['status'],'PASS',result.get('failure_code'))
+        self.assertEqual(tuple(step['name'] for step in result['steps']),preview_smoke.REQUIRED)
+        self.assertTrue(any(method=='POST' and path.endswith('/documents/upload') for _,method,path in fixture.calls))
+
     def test_production_cannot_mint_permission_and_config_changes_invalidate_it(self):
         with self.assertRaisesRegex(smoke.SmokeFailure,'VERIFIED_FROZEN'):
             preview_smoke.FrozenPermit(object(),self.config,{})
@@ -163,7 +173,7 @@ class FrozenGuardTests(unittest.TestCase):
             'rehearsal':{'projects':projects,'ready_url':'http://127.0.0.1:19000/readyz','smoke_config':'preview.json',
                 'volumes':{'database':'xm-rehearsal-frozen-db'},'owner_id':'1'*32},'smoke_config':'preview.json'}
         deployment={'candidate':{'projects':[{'name':'candidate'}]},'previous':{'projects':[{'name':'old'}]},'smoke_config':'live.json'}
-        driver=SimpleNamespace(config=cfg,artifact_preflight=lambda:None,inventory=lambda _: [{}]*18)
+        driver=SimpleNamespace(config=cfg,artifact_preflight=lambda:None,inventory=lambda _,**kwargs: [{}]*18)
         live={'origins':{'admin':'https://console.example.com','user':'https://invoice.example.com'}}
         stack.enter_context(patch.object(preview_smoke,'read_public_json',side_effect=lambda p:self.config if p=='preview.json' else live))
         doubles={name:stack.enter_context(patch.object(restore,name,return_value={})) for name in
@@ -190,7 +200,7 @@ class FrozenGuardTests(unittest.TestCase):
                 if bad=='production':driver.config['mode']='production'
                 if bad=='project':live['candidate']['projects']=[{'name':driver.config['candidate']['projects'][0]['name']}]
                 if bad=='endpoint':self.config['connect_to']['admin']['port']=443
-                if bad=='missing_runtime':driver.inventory=lambda _:[]
+                if bad=='missing_runtime':driver.inventory=lambda _,**kwargs:[]
                 with self.assertRaises(smoke.SmokeFailure):preview_smoke.verified_permit(driver,live)
 
 

@@ -150,7 +150,7 @@ def verified_permit(driver, deployment_config):
     validate_frozen_mounts(driver, value)
     for name in value["volumes"].values():
         require_owned_volume(volume_metadata(driver, name), name, value["owner_id"])
-    inventory = driver.inventory("candidate")
+    inventory = driver.inventory("candidate", allow_deferred_invoice_health=True)
     require(len(inventory) == 18, "write preview requires all eighteen verified frozen runtime containers")
     verify_project_resource_owners(driver, value)
     proof = {"owner_id":value["owner_id"], "projects":sorted(actual), "volumes":sorted(value["volumes"].values()),

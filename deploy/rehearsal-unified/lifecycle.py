@@ -34,6 +34,12 @@ NAME = re.compile(r"[a-z][a-z0-9_-]{2,80}\Z")
 SHA = re.compile(r"[a-f0-9]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}\Z")
 READINESS_BUDGET_SECONDS = 300
+SOURCE_FRESHNESS_BUDGET_SECONDS = 900
+READINESS_REPORT_SCHEMA = "xingmang.readiness-evaluation/v1"
+INVOICE_READINESS_LATCHES = ("database", "admin_settings", "invoice_issuer", "clamav_daemon",
+    "clamav_signatures", "pdf_scanner", "source_health_query", "source_ingest",
+    "eligibility_health_query", "eligibility_projection", "source_streams")
+EXPECTED_SOURCE_EXPIRY = {"source_heartbeat_expired", "source_watermark_expired"}
 
 
 class OperatorError(RuntimeError):
@@ -45,48 +51,77 @@ class ReadinessTimeout(OperatorError):
 
 
 class ReadinessBudget:
-    def __init__(self, output):
+    def __init__(self, output, *, phase="non_freshness"):
+        require(phase in ("non_freshness", "source_freshness"), "unknown readiness phase")
         self.output = output
+        self.phase = phase
         self.active = True
         self.started = time.monotonic()
-        self.deadline = self.started + READINESS_BUDGET_SECONDS
+        seconds = READINESS_BUDGET_SECONDS if phase == "non_freshness" else SOURCE_FRESHNESS_BUDGET_SECONDS
+        self.deadline = self.started + seconds
         self.value = {"status": "STARTING", "start_utc": utc(), "start_monotonic": self.started,
-                      "budget_seconds": READINESS_BUDGET_SECONDS, "invoice_latches": 11, "observations": []}
+                      "phase": phase, "budget_seconds": seconds, "invoice_latches": 11, "observations": []}
+        if phase == "source_freshness":
+            self.value["trigger"] = "source_collectors_start_requested"
         self.save()
 
     def save(self):
-        atomic_json(self.output / "candidate-readiness.json", self.value)
+        filename = "candidate-readiness.json" if self.phase == "non_freshness" else "source-freshness.json"
+        atomic_json(self.output / filename, self.value)
 
     def remaining(self):
         seconds = self.deadline - time.monotonic()
         if seconds <= 0:
-            raise ReadinessTimeout("candidate original 11 latches exceeded the shared 300 second startup budget")
+            label = "non-freshness 300 second startup" if self.phase == "non_freshness" else "source freshness 900 second reconnect"
+            raise ReadinessTimeout("candidate exceeded the fixed " + label + " budget")
         return seconds
 
     def finish(self, status):
         self.active = False  # Recovery commands must not inherit an expired startup deadline.
-        self.value.update(status=status, end_utc=self.value.get("first_all_ready_utc", utc()),
-                          end_monotonic=self.value.get("first_all_ready_monotonic", time.monotonic()))
+        self.value.update(status=status, end_utc=self.value.get("first_accepted_utc", utc()),
+                          end_monotonic=self.value.get("first_accepted_monotonic", time.monotonic()))
         self.value["elapsed_seconds"] = self.value["end_monotonic"] - self.started
         self.save()
 
-    def observe(self, status, body):
+    def observe(self, status, body, *, before_accept=None):
         self.remaining()
         observed, stamp = time.monotonic(), utc()
-        response = self.output / ("candidate-readiness-" + str(len(self.value["observations"]) + 1) + ".response")
-        response.write_bytes(body)  # Only the fixed public /readyz endpoint is accepted.
+        prefix = "candidate-readiness-" if self.phase == "non_freshness" else "source-freshness-"
+        response = self.output / (prefix + str(len(self.value["observations"]) + 1) + ".response")
+        response.write_bytes(body)  # Only the fixed public readiness evaluation is accepted.
         self.value["observations"].append({"http_status": status, "observed_utc": stamp,
             "observed_monotonic": observed, "elapsed_seconds": observed - self.started,
             "response_path": str(response), "response_sha256": hashlib.sha256(body).hexdigest()})
         self.save()
         payload = json.loads(body)
-        require(status == 200, "readiness HTTP status is not 200")
-        require_ready(payload)
-        require(isinstance(payload.get("invoice"), dict) and payload["invoice"].get("ready") is True and
-                not payload["invoice"].get("check"), "original invoice readiness report is absent or failing")
-        self.value.update(first_all_ready_utc=stamp, first_all_ready_monotonic=observed)
-        self.finish("READY")
+        require(status == 200, "readiness evaluation HTTP status is not 200")
+        verdict = require_readiness_report(payload, require_freshness=self.phase == "source_freshness")
+        if before_accept is not None:
+            before_accept()
+        accepted = self.deadline - self.remaining()
+        accepted_stamp = utc()
+        self.value["observations"][-1].update(accepted_utc=accepted_stamp, accepted_monotonic=accepted)
+        self.value.update(first_accepted_utc=accepted_stamp, first_accepted_monotonic=accepted,
+                          accepted_observation=len(self.value["observations"]), **verdict)
+        if self.phase == "source_freshness":
+            self.value.update(first_all_ready_utc=accepted_stamp, first_all_ready_monotonic=accepted)
+        self.finish("BASE_READY" if self.phase == "non_freshness" else "READY")
         return payload
+
+
+def end_readiness_on_failure(driver, error):
+    # Expired startup timers must never prevent the already-required rollback
+    # or D finally from stopping/removing this invocation's owned resources.
+    for name in ("readiness_budget", "source_freshness_budget"):
+        budget = getattr(driver, name, None)
+        if budget is not None and budget.active:
+            try:
+                budget.finish("DEADLINE_EXCEEDED" if isinstance(error, ReadinessTimeout) else "FAILED")
+            except OSError:
+                budget.active = False
+                budget.value["record_write_failed"] = True
+                # The caller is already failing. Preserve that failure while
+                # releasing every timer before the mandatory recovery path.
 
 
 # A child process gives the entire GET (headers plus body, including slow-drip
@@ -174,6 +209,56 @@ def require_ready(payload):
         item = modules.get(name)
         require(isinstance(item, dict) and item.get("ready") is True and item.get("status") == "ready",
                 "required readiness module is not ready: " + name)
+
+
+def require_readiness_report(payload, *, require_freshness):
+    """Accept only a complete typed sample; legacy first-error text is insufficient."""
+    require(isinstance(payload, dict) and payload.get("report_schema") == READINESS_REPORT_SCHEMA,
+            "versioned readiness evaluation is missing")
+    require(payload.get("platform_ready") is True, "platform readiness is not proven")
+    modules = payload.get("modules")
+    require(isinstance(modules, dict) and set(modules) == {"platform", "invoice_sources", "invoice_projection"},
+            "complete readiness modules are required")
+    for name in ("platform", "invoice_projection"):
+        item = modules[name]
+        require(isinstance(item, dict) and item.get("ready") is True and item.get("status") == "ready",
+                "non-freshness module is not ready: " + name)
+    invoice = payload.get("invoice")
+    require(isinstance(invoice, dict), "original invoice report is missing")
+    checks = invoice.get("checks")
+    require(isinstance(checks, dict) and set(checks) == set(INVOICE_READINESS_LATCHES),
+            "all eleven invoice checks are required")
+    for name in INVOICE_READINESS_LATCHES:
+        item = checks[name]
+        require(isinstance(item, dict) and set(item) == {"status"} and item["status"] in ("ready", "not_ready"),
+                "invoice check is unknown or not evaluated: " + name)
+        if name != "source_streams":
+            require(item["status"] == "ready", "non-freshness invoice check failed: " + name)
+    require(invoice.get("source_non_freshness_status") == "ready", "source structural and non-freshness checks failed")
+    freshness = invoice.get("source_freshness")
+    require(isinstance(freshness, dict) and set(freshness) == {"status", "reasons"}, "typed source freshness is missing")
+    reasons = freshness["reasons"]
+    require(isinstance(reasons, list) and all(isinstance(item, str) for item in reasons) and len(set(reasons)) == len(reasons),
+            "source freshness reasons are malformed")
+    if freshness["status"] == "ready":
+        require(not reasons, "ready freshness contains failure reasons")
+    else:
+        require(not require_freshness and freshness["status"] == "not_ready" and reasons and set(reasons) <= EXPECTED_SOURCE_EXPIRY,
+                "source freshness is not ready or is not an expected expiry")
+    sources = modules["invoice_sources"]
+    require(isinstance(sources, dict), "invoice sources module is missing")
+    if invoice.get("ready") is True:
+        require(payload.get("invoice_ready") is True and payload.get("status") == "ready" and not invoice.get("check") and
+                checks["source_streams"]["status"] == "ready" and sources.get("ready") is True and sources.get("status") == "ready",
+                "original ready report is inconsistent")
+    else:
+        require(not require_freshness and invoice.get("ready") is False and payload.get("invoice_ready") is False and
+                payload.get("status") == "unavailable" and invoice.get("check") == "source_streams" and
+                checks["source_streams"]["status"] == "not_ready" and sources.get("ready") is False and sources.get("status") == "not_ready" and
+                freshness["status"] == "not_ready" and reasons, "original failure is not solely typed source expiry")
+    if require_freshness:
+        require_ready(payload)
+    return {"expected_source_expiry": list(reasons), "source_freshness_ready": freshness["status"] == "ready"}
 
 
 def require_recent_record(record, hours, key, *, now=None):
@@ -504,11 +589,13 @@ def cutover(driver, *, dry_run=False):
         driver.start_new()
         driver.check_new()
         driver.switch_nginx(snapshot)
+        driver.wait_source_freshness()
         driver.smoke()
         result.update(status="COMMITTED", exit_code=0, end_utc=utc())
         driver.record(result)
         return result
-    except BaseException:
+    except BaseException as error:
+        end_readiness_on_failure(driver, error)
         if frozen:
             rollback(driver, snapshot, original_failure=True)
         else:
@@ -577,8 +664,9 @@ class DockerDriver:
 
     def command(self, name, args, *, input_bytes=None, check=True, timeout=None):
         start = utc()
-        budget = getattr(self, "readiness_budget", None)
-        if budget and budget.active:
+        budgets = [getattr(self, name, None) for name in ("readiness_budget", "source_freshness_budget")]
+        for budget in budgets:
+            if budget is None or not budget.active: continue
             left = budget.remaining()
             timeout = left if timeout is None else min(timeout, left)
         timed_out = False
@@ -613,8 +701,8 @@ class DockerDriver:
             event["stderr_classes"] = [key for key, pattern in categories.items()
                                        if re.search(pattern, completed.stderr, re.IGNORECASE)] or ["UNCLASSIFIED"]
         atomic_json(self.output / "events" / (f"{time.time_ns()}-{self.sequence:04d}-" + name + ".json"), event)
-        if budget and budget.active:
-            budget.remaining()
+        for budget in budgets:
+            if budget is not None and budget.active: budget.remaining()
         if check:
             require(completed.returncode == 0, name + " failed")
         return completed
@@ -662,6 +750,9 @@ class DockerDriver:
                  "config_sha256": hashlib.sha256(json.dumps(self.config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
         if getattr(self, "operator_source", None):
             value["actual_operator_source"] = self.operator_source
+        for name in ("readiness_budget", "source_freshness_budget"):
+            budget = getattr(self, name, None)
+            if budget is not None: value[name] = budget.value
         atomic_json(self.output / "history" / (str(time.time_ns()) + ".json"), value)
         # Attempt-only failures must never replace the supported recovery input.
         if "snapshot" in value:
@@ -766,7 +857,11 @@ class DockerDriver:
                 "MFA census or unregistered staff disposition is missing")
         require_recent_record(mfa, approvals["max_age_hours"], "end_utc")
 
-    def inventory(self, side):
+    def inventory(self, side, *, allow_deferred_invoice_health=False):
+        if allow_deferred_invoice_health:
+            budget = getattr(self, "readiness_budget", None)
+            require(side == "candidate" and budget is not None and budget.phase == "non_freshness" and
+                    (budget.active or budget.value["status"] == "BASE_READY"), "API health deferral requires this base-readiness phase")
         result = []
         for project in self.projects(side):
             expected = project["services"]
@@ -781,7 +876,10 @@ class DockerDriver:
                     fmt = fmt[:-1] + ',"compose_files":{{json (index .Config.Labels "com.docker.compose.project.config_files")}},"working_dir":{{json (index .Config.Labels "com.docker.compose.project.working_dir")}}}'
                 state = json.loads(self.command("container-state-" + project["kind"] + "-" + service, self.docker + ["inspect", ids[0], "--format", fmt]).stdout)
                 require(state["project"] == project["name"] and state["service"] == service and state["image"] == entry["image_id"], "original container identity changed")
-                require(state["running"] is True and state["exit_code"] == 0 and state["health"] in ("none", "healthy"), "a required runtime container is not running and healthy")
+                allowed_health = ("none", "healthy")
+                if allow_deferred_invoice_health and entry["role"] == "platform-api":
+                    allowed_health += ("starting", "unhealthy")
+                require(state["running"] is True and state["exit_code"] == 0 and state["health"] in allowed_health, "a required runtime container is not running and healthy")
                 if side == "previous": require_original_compose_labels(project, state)
                 result.append({"project": project["name"], "service": service, "role": entry["role"], "image_id": state["image"], "ports": state["ports"], "mounts": sorted(state["mounts"], key=lambda m: m["target"])})
                 if side == "previous":
@@ -941,50 +1039,81 @@ class DockerDriver:
                 require(self.ledger_snapshot("candidate") == record["snapshot"]["ledger_hashes"], "migration changed the recorded ledger; in-place image rollback is incompatible")
                 require(self.platform_permissions_snapshot("candidate") == record["snapshot"]["platform_permissions"], "platform existing permissions changed during cutover")
 
-    def start_new(self):
+    def start_new(self, *, rehearsal=False):
         # A restored API can only become strictly ready after fresh source
         # heartbeats arrive. Start both projects before waiting on any latch.
         require(not getattr(self, "readiness_budget", None), "candidate startup budget cannot be reset")
+        require(not rehearsal or self.config["mode"] in ("local-synthetic", "server-rehearsal"), "production cannot select rehearsal readiness")
         self.readiness_budget = ReadinessBudget(self.output)
         try:
             for kind in ("unified", "sources"):
                 project = next(p for p in self.projects("candidate") if p["kind"] == kind)
+                if kind == "sources" and not rehearsal:
+                    require(not getattr(self, "source_freshness_budget", None), "source reconnect deadline cannot be reset")
+                    self.source_freshness_budget = ReadinessBudget(self.output, phase="source_freshness")
                 self.compose(project, "start-new-" + kind, ["up", "-d", "--no-deps", "--pull", "never", *project["services"]])
             for kind in ("unified", "sources"):
                 project = next(p for p in self.projects("candidate") if p["kind"] == kind)
                 # Compose takes integral seconds; the actual process timeout
                 # remains the exact fractional remainder of the same deadline.
                 seconds = max(1, int(self.readiness_budget.remaining()))
-                self.compose(project, "wait-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", str(seconds), "--no-recreate", "--no-deps", "--pull", "never", *project["services"]])
+                services = [name for name, row in project["services"].items() if row["role"] != "platform-api"]
+                # The API's existing strict healthcheck stays unchanged. During
+                # source catch-up its non-freshness state is verified by the
+                # complete typed HTTP report, never by a healthy-container guess.
+                self.compose(project, "wait-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", str(seconds), "--no-recreate", "--no-deps", "--pull", "never", *services])
         except BaseException as error:
-            self.readiness_budget.finish("DEADLINE_EXCEEDED" if isinstance(error, ReadinessTimeout) else "FAILED")
+            end_readiness_on_failure(self, error)
             raise
 
     def check_new(self):
         budget = getattr(self, "readiness_budget", None)
         require(budget and budget.active, "candidate readiness requires its original startup budget")
         try:
-            self.inventory("candidate")
+            self.inventory("candidate", allow_deferred_invoice_health=True)
             budget.remaining()
             self.http_ready(self.config["candidate"]["ready_url"], all_modules=True)
         except BaseException as error:
-            budget.finish("DEADLINE_EXCEEDED" if isinstance(error, ReadinessTimeout) else "FAILED")
+            end_readiness_on_failure(self, error)
             raise
 
-    def http_ready(self, url, *, all_modules=False):
+    def wait_source_freshness(self):
+        base = getattr(self, "readiness_budget", None)
+        budget = getattr(self, "source_freshness_budget", None)
+        require(base is not None and base.value["status"] == "BASE_READY" and budget is not None and budget.active,
+                "freshness requires the original base phase and single reconnect deadline")
+        try:
+            return self.http_ready(self.config["candidate"]["ready_url"], all_modules=True, freshness=True)
+        except BaseException as error:
+            end_readiness_on_failure(self, error)
+            raise
+
+    def http_ready(self, url, *, all_modules=False, freshness=False):
         from urllib.parse import urlsplit
         value = urlsplit(url)
-        require(value.scheme == "http" and value.hostname in ("127.0.0.1", "localhost", "::1") and value.path == "/readyz" and not value.username and not value.password and not value.query and not value.fragment,
-                "readiness must use the exact local-host endpoint")
+        require(value.scheme == "http" and value.path == "/readyz" and not value.username and not value.password and not value.query and not value.fragment,
+                "readiness must use the exact reviewed endpoint")
+        scope = getattr(self, "_frozen_ready_endpoint", None) if all_modules else None
+        require(value.hostname in ("127.0.0.1", "localhost", "::1") or scope is not None,
+                "non-loopback readiness requires an attested frozen endpoint")
+        if scope is not None:
+            scope.assert_target(self, url)
         if all_modules:
-            budget = self.readiness_budget
+            budget = self.source_freshness_budget if freshness else self.readiness_budget
+            endpoint = url + "?report=full"
             while True:
                 budget.remaining()
-                result = self.command("candidate-readiness-probe", [sys.executable, "-c", READINESS_PROBE, url], check=False, timeout=5)
+                if scope is not None:
+                    scope.assert_target(self, endpoint)
+                result = self.command("source-freshness-probe" if freshness else "candidate-readiness-probe", [sys.executable, "-c", READINESS_PROBE, endpoint], check=False, timeout=5)
+                if scope is not None:
+                    # Identity drift is outside the transient readiness catch:
+                    # neither a replacement endpoint nor its response is retried.
+                    scope.assert_target(self, endpoint)
                 try:
                     if result.returncode == 0:
                         status, body = result.stdout.split(b"\n", 1)
-                        return budget.observe(int(status), body)
+                        return budget.observe(int(status), body, before_accept=(lambda: self.inventory("candidate")) if freshness else None)
                 except ReadinessTimeout:
                     raise
                 except (OperatorError, ValueError):
