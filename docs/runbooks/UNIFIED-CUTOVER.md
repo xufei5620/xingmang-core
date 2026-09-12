@@ -43,6 +43,10 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 
 本次 CR-0010 保持 schema。0032 两端同一 migration/checksum 时原样保留，不删 ledger，不降索引，不向旧二进制挂新 SQL 欺骗校验。若实际 ledger 不相同，自动原位镜像回滚明确失败并保持写者停止；负责人按原 PRODUCTION-RUNBOOK 12.1 对精确单项差异裁决，或从完整匹配签名备份恢复两库/文档/source state，不能无条件 DELETE 迁移记录。
 
+## 回滚配置原件（P2-16 说明）
+
+操作配置由解析后的规范 JSON（键排序、无额外空白）SHA 绑定；仅缩进、换行或键序改变不影响哈希。JSON 不支持注释；修改任一值、路径或增加字段会拒绝原配置回滚，不能在事故中顺手改配置。请在首次切换前保留原配置文件及其明确路径，成功后继续用该原件和原 state_root 调用 rollback。若当前文件值已改，先取回原件核对部署记录中的 config_sha256；不要修改部署记录或关闭校验。该说明不放宽任何恢复身份约束。
+
 ## Keycloak 7 天回滚窗口
 
 切换时两个旧 IdP 容器停止，新统一配置和路由不再引用 Keycloak 或 console assertion；旧数据和相关 secret 只用于回滚，默认保留 7 天。旧环境只随回滚恢复，不能把旧 OIDC 配置塞回统一进程。
