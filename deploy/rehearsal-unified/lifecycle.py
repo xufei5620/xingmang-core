@@ -33,10 +33,78 @@ LOCAL_ENDPOINTS = {"unix:///var/run/docker.sock", "npipe:////./pipe/docker_engin
 NAME = re.compile(r"[a-z][a-z0-9_-]{2,80}\Z")
 SHA = re.compile(r"[a-f0-9]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[a-f0-9]{64}\Z")
+READINESS_BUDGET_SECONDS = 300
 
 
 class OperatorError(RuntimeError):
     """A safe, non-secret operator error."""
+
+
+class ReadinessTimeout(OperatorError):
+    """The one candidate-startup budget expired; cleanup must still run."""
+
+
+class ReadinessBudget:
+    def __init__(self, output):
+        self.output = output
+        self.active = True
+        self.started = time.monotonic()
+        self.deadline = self.started + READINESS_BUDGET_SECONDS
+        self.value = {"status": "STARTING", "start_utc": utc(), "start_monotonic": self.started,
+                      "budget_seconds": READINESS_BUDGET_SECONDS, "invoice_latches": 11, "observations": []}
+        self.save()
+
+    def save(self):
+        atomic_json(self.output / "candidate-readiness.json", self.value)
+
+    def remaining(self):
+        seconds = self.deadline - time.monotonic()
+        if seconds <= 0:
+            raise ReadinessTimeout("candidate original 11 latches exceeded the shared 300 second startup budget")
+        return seconds
+
+    def finish(self, status):
+        self.active = False  # Recovery commands must not inherit an expired startup deadline.
+        self.value.update(status=status, end_utc=self.value.get("first_all_ready_utc", utc()),
+                          end_monotonic=self.value.get("first_all_ready_monotonic", time.monotonic()))
+        self.value["elapsed_seconds"] = self.value["end_monotonic"] - self.started
+        self.save()
+
+    def observe(self, status, body):
+        self.remaining()
+        observed, stamp = time.monotonic(), utc()
+        response = self.output / ("candidate-readiness-" + str(len(self.value["observations"]) + 1) + ".response")
+        response.write_bytes(body)  # Only the fixed public /readyz endpoint is accepted.
+        self.value["observations"].append({"http_status": status, "observed_utc": stamp,
+            "observed_monotonic": observed, "elapsed_seconds": observed - self.started,
+            "response_path": str(response), "response_sha256": hashlib.sha256(body).hexdigest()})
+        self.save()
+        payload = json.loads(body)
+        require(status == 200, "readiness HTTP status is not 200")
+        require_ready(payload)
+        require(isinstance(payload.get("invoice"), dict) and payload["invoice"].get("ready") is True and
+                not payload["invoice"].get("check"), "original invoice readiness report is absent or failing")
+        self.value.update(first_all_ready_utc=stamp, first_all_ready_monotonic=observed)
+        self.finish("READY")
+        return payload
+
+
+# A child process gives the entire GET (headers plus body, including slow-drip
+# peers) an enforceable wall-clock timeout. A socket's per-read timeout alone
+# can be reset by each byte and cannot enforce the shared startup deadline.
+READINESS_PROBE = '''import sys, urllib.request, urllib.error
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs): return None
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+try:
+    response = opener.open(sys.argv[1], timeout=5)
+except urllib.error.HTTPError as error:
+    response = error
+with response:
+    body = response.read(65537)
+    if len(body) > 65536: raise ValueError("readiness response too large")
+    sys.stdout.buffer.write(str(response.status).encode() + b"\\n" + body)
+'''
 
 
 def utc():
@@ -409,13 +477,25 @@ class DockerDriver:
         self.docker = [config["docker"]["binary"], "--context", config["docker"]["context"]]
         self.sequence = 0
 
-    def command(self, name, args, *, input_bytes=None, check=True):
+    def command(self, name, args, *, input_bytes=None, check=True, timeout=None):
         start = utc()
-        completed = subprocess.run(args, env=self.env, input=input_bytes, capture_output=True)
+        budget = getattr(self, "readiness_budget", None)
+        if budget and budget.active:
+            left = budget.remaining()
+            timeout = left if timeout is None else min(timeout, left)
+        timed_out = False
+        try:
+            completed = subprocess.run(args, env=self.env, input=input_bytes, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            # subprocess.run kills and waits for this invocation's CLI/probe.
+            # Docker resources it created remain owned by normal D cleanup/E rollback.
+            completed = subprocess.CompletedProcess(args, 124, error.stdout or b"", error.stderr or b"")
+            timed_out = True
         self.sequence += 1
         # Output may contain sensitive application diagnostics. Only hashes and
         # sizes are public; raw stdout/stderr are never persisted by this driver.
         event = {"operation": name, "start_utc": start, "end_utc": utc(), "exit_code": completed.returncode,
+                 "timeout_seconds": timeout, "timed_out": timed_out,
                  "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(), "stdout_bytes": len(completed.stdout),
                  "stderr_sha256": hashlib.sha256(completed.stderr).hexdigest(), "stderr_bytes": len(completed.stderr)}
         if name.startswith("start-new-") and completed.returncode != 0:
@@ -435,6 +515,8 @@ class DockerDriver:
             event["stderr_classes"] = [key for key, pattern in categories.items()
                                        if re.search(pattern, completed.stderr, re.IGNORECASE)] or ["UNCLASSIFIED"]
         atomic_json(self.output / "events" / (f"{time.time_ns()}-{self.sequence:04d}-" + name + ".json"), event)
+        if budget and budget.active:
+            budget.remaining()
         if check:
             require(completed.returncode == 0, name + " failed")
         return completed
@@ -745,22 +827,52 @@ class DockerDriver:
     def start_new(self):
         # A restored API can only become strictly ready after fresh source
         # heartbeats arrive. Start both projects before waiting on any latch.
-        for kind in ("unified", "sources"):
-            project = next(p for p in self.projects("candidate") if p["kind"] == kind)
-            self.compose(project, "start-new-" + kind, ["up", "-d", "--no-deps", "--pull", "never", *project["services"]])
-        for kind in ("unified", "sources"):
-            project = next(p for p in self.projects("candidate") if p["kind"] == kind)
-            self.compose(project, "wait-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", "300", "--no-recreate", "--no-deps", "--pull", "never", *project["services"]])
+        require(not getattr(self, "readiness_budget", None), "candidate startup budget cannot be reset")
+        self.readiness_budget = ReadinessBudget(self.output)
+        try:
+            for kind in ("unified", "sources"):
+                project = next(p for p in self.projects("candidate") if p["kind"] == kind)
+                self.compose(project, "start-new-" + kind, ["up", "-d", "--no-deps", "--pull", "never", *project["services"]])
+            for kind in ("unified", "sources"):
+                project = next(p for p in self.projects("candidate") if p["kind"] == kind)
+                # Compose takes integral seconds; the actual process timeout
+                # remains the exact fractional remainder of the same deadline.
+                seconds = max(1, int(self.readiness_budget.remaining()))
+                self.compose(project, "wait-new-" + kind, ["up", "-d", "--wait", "--wait-timeout", str(seconds), "--no-recreate", "--no-deps", "--pull", "never", *project["services"]])
+        except BaseException as error:
+            self.readiness_budget.finish("DEADLINE_EXCEEDED" if isinstance(error, ReadinessTimeout) else "FAILED")
+            raise
 
     def check_new(self):
-        self.inventory("candidate")
-        self.http_ready(self.config["candidate"]["ready_url"], all_modules=True)
+        budget = getattr(self, "readiness_budget", None)
+        require(budget and budget.active, "candidate readiness requires its original startup budget")
+        try:
+            self.inventory("candidate")
+            budget.remaining()
+            self.http_ready(self.config["candidate"]["ready_url"], all_modules=True)
+        except BaseException as error:
+            budget.finish("DEADLINE_EXCEEDED" if isinstance(error, ReadinessTimeout) else "FAILED")
+            raise
 
     def http_ready(self, url, *, all_modules=False):
         from urllib.parse import urlsplit
         value = urlsplit(url)
         require(value.scheme == "http" and value.hostname in ("127.0.0.1", "localhost", "::1") and value.path == "/readyz" and not value.username and not value.password and not value.query and not value.fragment,
                 "readiness must use the exact local-host endpoint")
+        if all_modules:
+            budget = self.readiness_budget
+            while True:
+                budget.remaining()
+                result = self.command("candidate-readiness-probe", [sys.executable, "-c", READINESS_PROBE, url], check=False, timeout=5)
+                try:
+                    if result.returncode == 0:
+                        status, body = result.stdout.split(b"\n", 1)
+                        return budget.observe(int(status), body)
+                except ReadinessTimeout:
+                    raise
+                except (OperatorError, ValueError):
+                    pass
+                time.sleep(min(2, budget.remaining()))
         class NoRedirect(urllib.request.HTTPRedirectHandler):
             def redirect_request(self, *args, **kwargs): return None
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())

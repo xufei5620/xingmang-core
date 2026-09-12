@@ -39,7 +39,7 @@ class SourceStateRestoreTests(unittest.TestCase):
         self.assertTrue(hasattr(restore,'prepare_source_verification_networks'))
         # Only external resources are doubled. Run the actual orchestration and
         # the actual ten-stream verifier, including every possible failed stream.
-        for failed_index in (None,*range(10),'stage','network','cleanup'):
+        for failed_index in (None,*range(10),'stage','network','cleanup','readiness'):
             with self.subTest(failed_index=failed_index),tempfile.TemporaryDirectory() as tmp,ExitStack() as stack:
                 root=Path(tmp);events=[];checks=[]
                 project={'kind':'sources','services':{role:{'role':role} for role in lifecycle.STREAM_ROLES}}
@@ -60,6 +60,16 @@ class SourceStateRestoreTests(unittest.TestCase):
                     projects=lambda _:[main,project],compose=compose,start_new_databases=lambda:events.append('databases'),jobs=lambda *a:None,
                     migrate_and_permissions=lambda:events.append('migrate'),start_new=lambda:events.append('start_new'),
                     check_new=lambda:None,preview_smoke=lambda *_:None,inventory=lambda _:[])
+                if failed_index=='readiness':
+                    def expire_readiness():
+                        events.append('start_new')
+                        driver.readiness_budget=lifecycle.ReadinessBudget(driver.output)
+                        with patch.object(lifecycle.time,'monotonic',return_value=driver.readiness_budget.started+301):
+                            try: driver.readiness_budget.remaining()
+                            except lifecycle.ReadinessTimeout:
+                                driver.readiness_budget.finish('DEADLINE_EXCEEDED')
+                                raise
+                    driver.start_new=expire_readiness
                 value={'archive_tmpfs_bytes':1024,'tools_image':'tools','verification_jobs':[{'service':'verify-invoice-restore'}]}
                 stack.enter_context(patch.object(restore,'rehearsal_driver',return_value=(driver,value)))
                 for name in ('invalidate_receipt','validate_frozen_mounts','create_frozen_volumes','extract_archive','inherited_preflight_pass'):
@@ -87,8 +97,16 @@ class SourceStateRestoreTests(unittest.TestCase):
                     self.assertLess(events.index('check:'+checks[-1][-2]),events.index('start_new'))
                 else:
                     with self.assertRaises(lifecycle.OperatorError):restore.rehearse(driver)
-                    self.assertEqual(len(checks),0 if failed_index in ('stage','network') else 10 if failed_index=='cleanup' else failed_index+1)
-                    if failed_index!='cleanup':self.assertNotIn('start_new',events)
+                    self.assertEqual(len(checks),0 if failed_index in ('stage','network') else 10 if failed_index in ('cleanup','readiness') else failed_index+1)
+                    if failed_index not in ('cleanup','readiness'):self.assertNotIn('start_new',events)
+                    if failed_index=='readiness':
+                        import json
+                        record=json.loads((driver.output/'rehearsal-result.json').read_text())
+                        self.assertTrue(record['cleanup_complete'])
+                        self.assertEqual(record['failure_code'],'CANDIDATE_READINESS_DEADLINE_EXCEEDED')
+                        self.assertEqual(record['candidate_readiness']['elapsed_seconds'],301)
+                        self.assertTrue((driver.output/'STOPPED.md').is_file())
+                        self.assertFalse((driver.state/'rehearsal-pass.json').exists())
                 self.assertEqual(events[-2:],['cleanup','identity_cleanup'])
 
 if __name__=='__main__':unittest.main()

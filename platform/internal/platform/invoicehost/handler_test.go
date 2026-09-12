@@ -115,6 +115,36 @@ func TestUnifiedReadyPreservesInvoiceDegradedEvidence(t *testing.T) {
 	}
 }
 
+// The untouched module remains unclassified on these short-circuit paths.
+// A runbook must not describe not_evaluated as universally unreachable.
+func TestUnifiedShortCircuitLeavesUnclassifiedModuleNotEvaluated(t *testing.T) {
+	for check, unclassified := range map[string]string{
+		"source_health_query":      "invoice_projection",
+		"eligibility_health_query": "invoice_sources",
+	} {
+		t.Run(check, func(t *testing.T) {
+			m := &testModule{handler: http.NotFoundHandler(), check: check, err: errors.New("unavailable")}
+			h, err := NewHandler(http.NotFoundHandler(), m, func(context.Context) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := httptest.NewRecorder()
+			h.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+			var body struct {
+				InvoiceReady bool                   `json:"invoice_ready"`
+				Modules      map[string]moduleState `json:"modules"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			state, exists := body.Modules[unclassified]
+			if response.Code != http.StatusServiceUnavailable || body.InvoiceReady || !exists || state.Ready || state.Status != "not_evaluated" {
+				t.Fatalf("short-circuit classification changed: status=%d response=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestUnifiedHeadReadinessChecksInvoiceWithoutResponseBody(t *testing.T) {
 	m := &testModule{handler: http.NotFoundHandler(), err: errors.New("unavailable")}
 	h, err := NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(405) }), m, func(context.Context) error { return nil })

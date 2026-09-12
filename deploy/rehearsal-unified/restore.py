@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import re
 
-from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError,
+from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout,
                        atomic_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, require, utc)
 
 
@@ -534,8 +534,10 @@ def rehearse(driver):
         trial.migrate_and_permissions()
         trial.start_new(); trial.check_new(); trial.preview_smoke(driver.config)
         result.update(status="PASS", runtime_inventory=trial.inventory("candidate"))
-    except BaseException:
+    except BaseException as error:
         result.update(status="FAIL", exit_code=1)
+        if isinstance(error, ReadinessTimeout):
+            result["failure_code"] = "CANDIDATE_READINESS_DEADLINE_EXCEEDED"
         raise OperatorError("frozen-copy rehearsal failed") from None
     finally:
         try:
@@ -557,6 +559,16 @@ def rehearse(driver):
                 result["identity_cleanup"] = identities
             except BaseException:
                 result.update(status="FAIL", exit_code=1, cleanup_complete=False)
+        budget = getattr(trial, "readiness_budget", None)
+        if budget:
+            result["candidate_readiness"] = budget.value
+            if budget.value["status"] == "DEADLINE_EXCEEDED":
+                stopped = driver.output / "STOPPED.md"
+                stopped.parent.mkdir(parents=True, exist_ok=True)
+                stopped.write_text("# STOPPED\n\nThe original 11 invoice readiness latches were not observed all ready within the single 300 second startup budget.\n\n"
+                    + "No production cutover is permitted. Inspect candidate-readiness.json and the preserved public response bytes.\n\n"
+                    + "Cleanup complete: " + str(result.get("cleanup_complete", False)) + "\n", encoding="utf-8")
+                result["stopped_record"] = str(stopped)
         result["end_utc"] = utc()
         atomic_json(driver.output / "rehearsal-result.json", result)
     final = finish_rehearsal(result, result["cleanup_complete"])

@@ -41,6 +41,7 @@ class CandidateStartJobsTests(unittest.TestCase):
 
     def test_sources_start_before_strict_api_health_wait(self):
         driver=object.__new__(lifecycle.DockerDriver);driver.config=config();calls=[];state={'sources':False}
+        output=tempfile.TemporaryDirectory();self.addCleanup(output.cleanup);driver.output=Path(output.name)
         def compose(project,name,args):
             calls.append((project['kind'],args))
             if '--wait' in args:lifecycle.require(state['sources'],'strict API readiness needs fresh source heartbeats')
@@ -55,6 +56,7 @@ class CandidateStartJobsTests(unittest.TestCase):
 
     def test_unhealthy_candidate_after_both_starts_still_fails(self):
         driver=object.__new__(lifecycle.DockerDriver);driver.config=config();started=[]
+        output=tempfile.TemporaryDirectory();self.addCleanup(output.cleanup);driver.output=Path(output.name)
         def compose(project,name,args):
             if '--wait' in args:raise lifecycle.OperatorError('strict health failed')
             started.append(project['kind'])

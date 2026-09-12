@@ -1,6 +1,6 @@
 # 统一进程切换与回滚（06 / CR-0010）
 
-本手册由负责人在服务器执行；GPT 本轮只做本地合成验证。最终验收与实际 UTC/退出码列入 UNIFIED-CUTOVER-READINESS.md。未提供服务器 D、生产 C1 与负责人选择前，不把本地 PASS 当作上线批准。
+执行者须持有对应阶段的负责人授权；服务器 D 与生产切换是独立阶段。当前获准范围和实际 UTC/退出码见 UNIFIED-CUTOVER-READINESS.md。本地 PASS 不等于服务器 D 通过，也不等于生产切换批准。
 
 ## 负责人最终三条命令
 
@@ -30,7 +30,7 @@ bash deploy/unified/rollback.sh --config /etc/xingmang-unified/production.json
 2. 依次停止旧 source agents、旧 invoice、旧 platform、旧 idp，确认各项目没有仍在运行的容器并确认接管端口空闲。保留旧容器/卷/文件。
 3. 启动新两个数据库并等待健康；按顺序执行平台 migrate（业务 + River）、invoice-migrate、invoice-permissions。平台沿用原角色/授权，目录只读快照必须前后一致；没有把 migrate 叫作权限重放，也不在本次实施 DBR1。
 4. 比较两库实际迁移 ledger 与冻结时的 SHA，再启动统一 API/独立 worker、扫描器及十个新 source agents。
-5. 要求 `/readyz` 的 modules.platform、invoice_sources、invoice_projection 都 ready=true/status=ready，并且 invoice_ready=true。统一外部 `/readyz` 只有平台和开票原 11 闩同时通过才返回 HTTP 200；任意开票失败返回 503，容器 healthcheck 消费同一端点。not_evaluated 必须视为未就绪。
+5. 要求 `/readyz` 的 modules.platform、invoice_sources、invoice_projection 都 ready=true/status=ready，并且 invoice_ready=true、原始 invoice.ready=true。统一外部 `/readyz` 只有平台和开票原 11 闩同时通过才返回 HTTP 200；任意开票失败返回 503，容器 healthcheck 消费同一端点。共享前置闩失败时两个开票模块均为 not_ready；来源/资格检查短路时，未被该分支判定的另一模块仍可能为 not_evaluated（例如 source_health_query 失败时 invoice_projection 未被判定）。两种状态都不通过，不要求故障时出现某个固定的未就绪取值，也不把短路后的闩写成已执行。
 6. 将已审主机 vhost 原子改为新 web 端口，断网命名空间中 `nginx -T` 成功后 reload。按实际配置域名执行[固定十步只读冒烟](../../deploy/rehearsal-unified/SMOKE.md)：真实登录/TOTP、列表/来源隔离/越权拒绝、原生管理页 HTTP、旧入口拒绝和会话撤销；绝不创建、审核、开具或上传发票。全部通过才写 COMMITTED。
 
 停机窗口由“停旧”到“模块和冒烟通过”构成。先以本次本地实测给量级，服务器 D 再给主机量级；数据量、镜像已缓存、来源追数和扫描签名年龄都会影响耗时。没有服务器实测时不承诺固定分钟数，负责人应明确低峰窗口和超时回滚阈值。
@@ -339,7 +339,9 @@ stage 后保持 `ARTIFACTS` 原位；负责人配置 `candidate.manifest` 指向
 
 以下是**排期估算，尚非服务器实测**，以镜像已 stage/load、签名备份与服务器 D 通过、无新增 schema、来源正常、磁盘满足前置为前提。预留一次切换约 **10–20 分钟**，再预留一次原位回滚约 **10–20 分钟**，负责人安排约 **30–45 分钟的低峰维护窗口**。区间不能替代脚本的失败判定：停止旧写者约 1–3 分钟，两库健康/幂等迁移与权限核对约 1–4 分钟，统一 API/worker/扫描器/采集器就绪和十步真实冒烟约 5–10 分钟，现场命令及日志复核约 1–3 分钟。阶段可能重叠，也可能受来源追数、ClamAV 初始加载、主机 IO 和源网络延长，不把分项简单相加包装成测量值。
 
-当前脚本某次 `compose up --wait` 上限 300 秒、单次 ready 检查上限 120 秒，是每次调用的技术超时，不是整条切换的保证时长。服务器 D 后记录各步骤真实 UTC，按较慢的成功路径和实际故障回滚路径更新窗口；若超过负责人接受的窗口，在停旧前取消，不临时放宽超时/来源闩。停旧后的异常由脚本自动回滚且非零。0032 ledger/权限不一致不能靠延长等待解决；按手册保留写者停止并升级负责人裁决。
+新栈运行服务从第一次 `start-new-unified` 启动命令之前开始，到第一次实际观察 `/readyz` 的原 11 闩全绿，使用同一个 **300 秒总预算**。两项目启动、两次容器健康等待、实际运行清单核对、HTTP 响应均消耗该预算；后一个步骤不能重置计时。Compose 的整秒等待取当前剩余时间，实际子进程还受精确剩余秒数约束；HTTP 单次最多 5 秒且受同一剩余预算约束，慢速响应不能靠逐字节发送延长总时限。恢复数据库、核验冻结数据和迁移前置发生在该运行服务计时之前，仍单独记录步骤时间，不冒称整条 D 或 E 必须在 300 秒内完成。
+
+每次 D（包括 E 停旧前的隔离预检）和 E 都保留 `candidate-readiness.json`：UTC 与 monotonic 起止、第一次全绿观察时间、实际耗时、11 闩口径和每次公开响应原始字节文件及 SHA。它证明的是第一次实际观察成功的耗时，不推断各闩更早何时已绿。服务器 D 超过 300 秒即失败，仍执行副本/临时身份清理，在本次运行目录写 `STOPPED.md`，不能切换；清理结果随停止记录保留。预算失效后不得束缚清理或旧栈恢复，E 停旧后超时仍执行原自动回滚且非零。服务器 D 后按实测更新维护窗口，不临时放宽超时或来源闩；0032 ledger/权限不一致不能靠延长等待解决。
 
 ## E4：当天删除的恢复耗时
 

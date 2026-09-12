@@ -20,6 +20,7 @@ class ResolvedInputTests(unittest.TestCase):
         driver = object.__new__(lifecycle.DockerDriver)
         calls = []; driver.compose = lambda p,n,args: calls.append(args)
         with tempfile.TemporaryDirectory() as tmp:
+            driver.output = Path(tmp)
             driver.config = configuration(Path(tmp))
             driver.start_new(); driver.start_old()
         self.assertEqual(len(calls), 8)
