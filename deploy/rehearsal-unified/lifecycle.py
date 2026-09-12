@@ -378,8 +378,24 @@ class DockerDriver:
         value = {**value, "source_head": self.config["candidate"]["head"],
                  "manifest_sha256": self.config["candidate"]["manifest_sha256"], "mode": self.config["mode"],
                  "config_sha256": hashlib.sha256(json.dumps(self.config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
-        atomic_json(self.state / "deployment-record.json", value)
         atomic_json(self.output / "history" / (str(time.time_ns()) + ".json"), value)
+        # Attempt-only failures must never replace the supported recovery input.
+        if "snapshot" in value:
+            atomic_json(self.state / "deployment-record.json", value)
+
+    def require_new_cutover(self):
+        """Called under the operator lock, before any external operation."""
+        path = self.state / "deployment-record.json"
+        if not path.exists():
+            return
+        prior = read_public_json(path)
+        allowed = isinstance(prior, dict) and (
+            (prior.get("status") == "ROLLED_BACK" and isinstance(prior.get("snapshot"), dict) and bool(prior["snapshot"])) or
+            (prior.get("status") == "PREFLIGHT_FAILED" and "snapshot" not in prior))
+        if not allowed:
+            self.record({"status": "CUTOVER_REJECTED", "exit_code": 1, "end_utc": utc(),
+                         "reason": "existing deployment requires explicit rollback or recovery"})
+            raise OperatorError("cutover already committed or recovery is incomplete; use the matching rollback configuration")
 
     def projects(self, side):
         return self.config[side]["projects"]
@@ -718,6 +734,8 @@ def main():
         lock_owned = True
         os.write(descriptor, str(os.getpid()).encode()); os.close(descriptor)
         driver = DockerDriver(config, record_root=state / (args.operation + "-" + str(time.time_ns())))
+        if args.operation == "cutover":
+            driver.require_new_cutover()
         driver.verify_local_engine()
         if args.operation == "cutover":
             result = cutover(driver)
