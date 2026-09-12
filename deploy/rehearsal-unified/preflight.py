@@ -197,6 +197,34 @@ def reviewed_cloudflare(h, mode):
         'server_freshness_action': 'Owner must verify authoritative currency before the server window; this offline run only checks the reviewed artifact and its explicit validity interval.'}
 
 
+def sub2api_version(raw, expected):
+    """Recognize the native plain line or its exact bootstrap stdlog envelope."""
+    lines=text(raw,'SUB version').splitlines()
+    require(len(lines)==1,'SUB binary version mismatch or ambiguous output')
+    line=lines[0]
+    if line.startswith('Sub2API'):
+        match=re.fullmatch(r'Sub2API[ \t]+([0-9]+\.[0-9]+\.[0-9]+)(?:[ \t]+\([^()\r\n\t]*\))?[ \t]*',line)
+    else:
+        fields=line.split('\t')
+        require(len(fields)==5,'SUB version log envelope is invalid')
+        stamp,level,logger,message,metadata=fields
+        require(level=='INFO' and logger=='stdlog','SUB version logger is not the native bootstrap logger')
+        require(re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}(?:Z|[+-]\d{4})',stamp),
+                'SUB version log timestamp is invalid')
+        try:dt.datetime.strptime(stamp,'%Y-%m-%dT%H:%M:%S.%f%z')
+        except ValueError:raise PreflightError('SUB version log timestamp is invalid') from None
+        metadata=load_json(metadata,'SUB version log metadata')
+        keys(metadata,{'service','env','legacy_stdlog'},'SUB version log metadata keys differ')
+        require(metadata['service']=='sub2api' and metadata['env']=='bootstrap' and metadata['legacy_stdlog'] is True,
+                'SUB version log metadata is not native bootstrap stdlog')
+        # Build fields identify the observed native message syntax; they are
+        # not a new pinned commit/date requirement. The expected version is
+        # still the configured upstream version, unchanged.
+        match=re.fullmatch(r'Sub2API ([0-9]+\.[0-9]+\.[0-9]+) \(commit: [a-f0-9]{40}, built: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\)',message)
+    require(match is not None and match.group(1)==expected,'SUB binary version mismatch or ambiguous output')
+    return match.group(1)
+
+
 def sources(driver, h, local):
     states = {}
     for role in sorted(SOURCE_ROLES):
@@ -205,11 +233,10 @@ def sources(driver, h, local):
         require(isinstance(row, dict) and row.get("name") == "/" + name and row.get("running") is True and isinstance(row.get("image"), str), "source container missing, stopped or identity changed")
         states[role] = {"name": name, "image": row["image"]}
     raw = command(driver, "source-sub2api-version", driver.docker + ["exec", h["sources"]["sub2api"], "/app/sub2api", "-version"])
-    matches = re.findall(r"(?m)^Sub2API\s+([0-9.]+)(?=\s|$)", text(raw, "SUB version"))
-    require(matches == [h["expected_sub2_version"]], "SUB binary version mismatch or ambiguous output")
+    version = sub2api_version(raw,h["expected_sub2_version"])
     match = IMAGE_TAG.fullmatch(states["newapi"]["image"])
     require(match is not None and match.group(1) == h["expected_newapi_tag"], "NEW image tag mismatch")
-    return {"scope": "synthetic-contract" if local else "live-upstream-version", "containers": states, "sub2api_version": matches[0], "newapi_tag": match.group(1)}
+    return {"scope": "synthetic-contract" if local else "live-upstream-version", "containers": states, "sub2api_version": version, "newapi_tag": match.group(1)}
 
 
 def parse_df(raw, mounts):
