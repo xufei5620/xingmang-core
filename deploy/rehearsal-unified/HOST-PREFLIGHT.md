@@ -1,5 +1,7 @@
 # D/E preflight candidate
 
+R1 当前合同：所有模式均只消费明确审核的本地 Cloudflare 公开 JSON 与独立 SHA；不会联网抓取或自动刷新列表。下方旧测试时间/SHA仅是历史证据，不描述 R1 当前代码。
+
 Only this external candidate directory was changed. No Git/index/production/server/Docker probe was executed by this task. Implementation and tests are imported into this rehearsal package.
 
 - `preflight.py`: `run(driver, config, allowed_occupied_ports=None) -> dict`; no standalone shell or remote execution entry point.
@@ -29,6 +31,15 @@ Only this external candidate directory was changed. No Git/index/production/serv
     "proxy": {"network_name": "qualification-proxy", "gateway_ip": "172.30.250.1", "trusted_cidr": "172.30.250.1/32"},
     "ingest": {"network_name": "qualification-ingest", "dynamic_range": "172.30.251.0/28", "proxy_ip": "172.30.251.30", "proxy_cidr": "172.30.251.30/32"},
     "cloudflare_config_file": "/www/server/panel/vhost/nginx/0.cloudflare.conf",
+    "cloudflare_review": {
+      "path": "/reviewed/public/cloudflare-ips.json",
+      "sha256": "REPLACE_WITH_REVIEWED_64_HEX_SHA256",
+      "reviewed_by": "REPLACE_WITH_RESPONSIBLE_REVIEWER_ID",
+      "reviewed_at": "REPLACE_WITH_TIMEZONE_AWARE_REVIEW_TIME",
+      "expires_at": "REPLACE_WITH_EXPLICIT_REVIEW_VALIDITY_DEADLINE",
+      "source_url": "https://api.cloudflare.com/client/v4/ips",
+      "scope": "reviewed-offline"
+    },
     "required_env_keys": {
       "qualification-unified": {"api": ["AUTH_MODE"], "web": []},
       "qualification-sources": {"sub2api-payments": ["SOURCE_INSTANCE_ID"]}
@@ -39,17 +50,22 @@ Only this external candidate directory was changed. No Git/index/production/serv
 
 Names above are illustrative. `planned_networks` must enumerate the **complete actual new plan**, not just these two examples. `required_env_keys` keys must exactly cover the candidate project names and every service in each resolved Compose JSON, including env-free services (empty list). Every explicitly required environment key must exist and be nonnull/nonblank. Optional declared values may remain empty or null, preserving disabled card/bootstrap features. All declared values still reject unresolved interpolation and invalid structured values; optional declarations cannot exempt any required key. Caller must derive the complete mandatory key inventory from the reviewed new deployment contract. Old IdP services are intentionally absent from these new-plan requirements; their rollback inventory remains the lifecycle owner's guard.
 
-Server modes (`server-rehearsal`, `production`) reject any `host_preflight.local` object and run actual Linux host `uname`, `df -P / <DockerRootDir from docker info>`, `timedatectl`, `ss`, authoritative fixed Cloudflare HTTPS endpoint, and the named public real-IP file. Missing or malformed output fails. The actual host and Docker context must refer to the same machine; the driver artifact check establishes the local-only Docker endpoint.
+Server modes (`server-rehearsal`, `production`) reject any `host_preflight.local` object and run actual Linux host `uname`, `df -P / <DockerRootDir from docker info>`, `timedatectl`, `ss`, and read the named public real-IP file. They never request the Cloudflare URL; it records provenance only. Missing or malformed output fails. The actual host and Docker context must refer to the same machine; the driver artifact check establishes the local-only Docker endpoint.
+
+`cloudflare_review` 的七字段全部必需，`sha256` 对原始 JSON 字节核验，审核时间和截止时间须有明确时区，执行时间须在批准的区间内。示例占位值故意不可执行。负责人在窗口前按自己的授权流程取得官方完整 IPv4/IPv6 回复，审核并提交独立 SHA、审核人及有效期限；操作器不下载、不生成审核通过、不自动延长有效期。公开文件须为非链接的 `.json`，不能放在 private/secrets/credentials 目录。列表与实际 real-IP 配置的完整集合及 header/recursive 三项规则仍须精确匹配。
+
+输出始终声明 `current_live_verified:false` 和 `server_freshness_action`。离线 PASS 只证明已批准文件未变、尚在明确审核区间内、主机配置与它一致；不能证明执行瞬间的官方列表仍相同。该当前性由服务器负责人窗口前核对，过期/未来审核或字节变化直接拒绝，不能把有效期声明当在线查询结果。
 
 For `local-synthetic`, add exactly:
 
 ```json
 "local": {
   "task_directory": "G:/xingmang/logs/unified-deploy-endpoint-20260912/task-owned-runtime",
-  "cloudflare_document": "G:/xingmang/logs/unified-deploy-endpoint-20260912/task-owned-runtime/public/cf-fixture.json",
   "storage_probe": {"container": "qualification-storage", "project": "qualification-fixture", "volume": "qualification-storage", "mount": "/probe"}
 }
 ```
+
+`local-synthetic` 也提供同一 `host_preflight.cloudflare_review` 对象，`scope` 必须为 `synthetic`；文件/SHA/审核区间仍必须完整。旧 `local.cloudflare_document` 字段已移除，避免两份文档来源。服务器模式禁止使用 synthetic 审核材料。
 
 The public real-IP file path must then be a local absolute public `.conf` path. The engine supplies the existing running, task-owned storage container and actual named volume; no preflight container is created. The code inspects its Compose project and exact volume mount, then executes fixed `df -P -- /probe`. This proves `container-storage`, **not the Linux host root or DockerRootDir**. The local task disk uses real `shutil.disk_usage`; loopback ports use actual exclusive IPv4/IPv6 binds. Local fixture source names can differ, but all four actual running containers and the actual binary/tag output are still checked. The fixed SUB command is `/app/sub2api -version`; its fixture shim may report an explicit synthetic version chosen in the reviewed local config. NEW's actual image must carry the configured exact fixture tag. They are labeled `synthetic-contract`, never production upstream proof.
 

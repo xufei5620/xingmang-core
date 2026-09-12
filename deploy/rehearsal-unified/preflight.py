@@ -106,7 +106,7 @@ def validate(config):
     require(isinstance(config, dict) and config.get("mode") in ("local-synthetic", "server-rehearsal", "production"), "unsupported preflight mode")
     mode = config["mode"]
     h = config.get("host_preflight")
-    expected = {"sources", "expected_sub2_version", "expected_newapi_tag", "required_loopback_ports", "planned_networks", "proxy", "ingest", "cloudflare_config_file", "required_env_keys"}
+    expected = {"sources", "expected_sub2_version", "expected_newapi_tag", "required_loopback_ports", "planned_networks", "proxy", "ingest", "cloudflare_config_file", "cloudflare_review", "required_env_keys"}
     if mode == "local-synthetic":
         expected.add("local")
     else:
@@ -158,15 +158,43 @@ def validate(config):
             require(isinstance(svc, str) and NAME.fullmatch(svc) and isinstance(envkeys, list) and all(isinstance(k, str) and ENV_KEY.fullmatch(k) for k in envkeys) and len(envkeys) == len(set(envkeys)), "environment requirement invalid")
     if mode == "local-synthetic":
         local = h["local"]
-        keys(local, {"task_directory", "cloudflare_document", "storage_probe"}, "local preflight keys invalid")
+        keys(local, {"task_directory", "storage_probe"}, "local preflight keys invalid")
         taskdir = public_path(local["task_directory"])
         require(taskdir.is_dir(), "local task disk directory missing")
-        public_path(local["cloudflare_document"])
         store = local["storage_probe"]
         keys(store, {"container", "project", "volume", "mount"}, "local storage probe keys invalid")
         require(all(isinstance(store[k], str) and NAME.fullmatch(store[k]) for k in ("container", "project", "volume")), "local storage identity invalid")
         public_path(store["mount"], posix=True)
     return h, parsed, capacity
+
+
+def reviewed_cloudflare(h, mode):
+    review = h['cloudflare_review']
+    keys(review, {'path','sha256','reviewed_by','reviewed_at','expires_at','source_url','scope'}, 'Cloudflare review contract is incomplete')
+    require(review['scope'] == ('synthetic' if mode == 'local-synthetic' else 'reviewed-offline'), 'Cloudflare review scope differs from operator mode')
+    require(review['source_url'] == 'https://api.cloudflare.com/client/v4/ips', 'Cloudflare review source is not the official endpoint')
+    require(isinstance(review['reviewed_by'], str) and 0 < len(review['reviewed_by'].strip()) <= 128, 'Cloudflare reviewer is missing')
+    require(isinstance(review['sha256'], str) and re.fullmatch(r'[a-f0-9]{64}', review['sha256']), 'Cloudflare document SHA is invalid')
+    try:
+        reviewed, expires = [dt.datetime.fromisoformat(review[key]) for key in ('reviewed_at','expires_at')]
+        require(reviewed.tzinfo is not None and expires.tzinfo is not None and
+                reviewed.utcoffset() is not None and expires.utcoffset() is not None, 'Cloudflare review times require explicit timezones')
+        now = dt.datetime.now(dt.timezone.utc)
+        require(reviewed <= now <= expires and reviewed < expires, 'Cloudflare review is future, expired or has an invalid interval')
+    except (ValueError, TypeError):
+        raise PreflightError('Cloudflare review time is invalid') from None
+    path = public_path(review['path'])
+    require(path.suffix.lower() == '.json' and not any(part.casefold() in ('private','secrets','credentials') for part in path.parts),
+            'Cloudflare artifact must be an explicit public JSON file')
+    require(path.is_file() and path.stat().st_size <= 8*1024*1024 and path.stat().st_nlink == 1, 'Cloudflare public artifact is absent or invalid')
+    raw = path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == review['sha256'], 'Cloudflare reviewed document SHA differs')
+    return load_json(raw, 'Cloudflare reviewed artifact'), {
+        'scope': review['scope'], 'document_path': str(path), 'document_sha256': review['sha256'],
+        'reviewed_by': review['reviewed_by'], 'reviewed_at': review['reviewed_at'], 'expires_at': review['expires_at'],
+        'source_url': review['source_url'], 'review_age_seconds': (now-reviewed).total_seconds(),
+        'current_live_verified': False,
+        'server_freshness_action': 'Owner must verify authoritative currency before the server window; this offline run only checks the reviewed artifact and its explicit validity interval.'}
 
 
 def sources(driver, h, local):
@@ -358,6 +386,7 @@ def run(driver, config, allowed_occupied_ports=None):
         validated = True
         local = config["mode"] == "local-synthetic"
         result.update(mode=config["mode"], qualification_scope="local-synthetic-host-preflight" if local else "server-host-preflight", inherited_server_checks_requires_server=SERVER_ONLY.copy() if local else [])
+        cf_document, cf_proof = reviewed_cloudflare(h, config['mode'])
         result["evidence"]["sources"] = sources(driver, h, local)
         result["checks"].append({"name": "source-versions", "status": "PASS"})
         if local:
@@ -372,9 +401,7 @@ def run(driver, config, allowed_occupied_ports=None):
             require(row.get("running") is True and row.get("project") == store["project"] and matches == [{"type": "volume", "name": store["volume"], "destination": store["mount"]}], "local storage probe is not the task-owned mounted volume")
             raw = command(driver, "local-container-storage", driver.docker + ["exec", store["container"], "df", "-P", "--", store["mount"]])
             result["evidence"]["storage"] = {"scope": "container-storage", "rows": parse_df(raw, [store["mount"]])}
-            cfraw = public_path(h["local"]["cloudflare_document"]).read_bytes()
             confraw = public_path(h["cloudflare_config_file"]).read_bytes()
-            result["evidence"]["cloudflare"] = {"scope": "synthetic-public-document", **cf_check(load_json(cfraw, "Cloudflare fixture"), text(confraw, "Cloudflare fixture config")), "document_sha256": hashlib.sha256(cfraw).hexdigest()}
         else:
             require(text(command(driver, "host-os", ["uname", "-s"]), "host OS").strip() == "Linux", "server preflight requires actual Linux host")
             root = load_json(command(driver, "docker-root", driver.docker + ["info", "--format", "{{json .DockerRootDir}}"]), "Docker root")
@@ -385,9 +412,8 @@ def run(driver, config, allowed_occupied_ports=None):
             require(text(command(driver, "host-ntp", ["timedatectl", "show", "-p", "NTPSynchronized", "--value"]), "NTP").strip() == "yes", "host NTP must be synchronized")
             result["evidence"]["ntp"] = {"scope": "host-timedatectl", "synchronized": True}
             result["evidence"]["ports"] = check_ports(driver, config, allowed_occupied_ports)
-            cfraw = command(driver, "cloudflare-official", ["curl", "--fail", "--silent", "--show-error", "--proto", "=https", "--tlsv1.2", "--max-time", "20", "--", "https://api.cloudflare.com/client/v4/ips"])
             confraw = command(driver, "cloudflare-realip", ["cat", "--", h["cloudflare_config_file"]])
-            result["evidence"]["cloudflare"] = {"scope": "authoritative-current", **cf_check(load_json(cfraw, "Cloudflare official response"), text(confraw, "Cloudflare config")), "document_sha256": hashlib.sha256(cfraw).hexdigest()}
+        result["evidence"]["cloudflare"] = {**cf_proof, **cf_check(cf_document, text(confraw, "Cloudflare config"))}
         result["checks"].append({"name": "host-mode-guards", "status": "PASS"})
         result["evidence"]["networks"] = {**networks(driver, plans), "ingest_dynamic_capacity": capacity}
         result["checks"].append({"name": "network-addressing", "status": "PASS"})

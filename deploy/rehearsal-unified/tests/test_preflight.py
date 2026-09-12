@@ -1,4 +1,6 @@
 import copy
+import datetime as dt
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -72,6 +74,10 @@ class PreflightTests(unittest.TestCase):
             "proxy": {"network_name": "qual-proxy", "gateway_ip": "172.30.250.1", "trusted_cidr": "172.30.250.1/32"},
             "ingest": {"network_name": "qual-ingest", "dynamic_range": "172.30.251.0/28", "proxy_ip": "172.30.251.30", "proxy_cidr": "172.30.251.30/32"},
             "cloudflare_config_file": "/public/0.cloudflare.conf",
+            "cloudflare_review": {"path":str(self.root/'cf.json'), "sha256":hashlib.sha256((self.root/'cf.json').read_bytes()).hexdigest(),
+                                  "reviewed_by":"synthetic-reviewer", "reviewed_at":(dt.datetime.now(dt.timezone.utc)-dt.timedelta(hours=1)).isoformat(),
+                                  "expires_at":(dt.datetime.now(dt.timezone.utc)+dt.timedelta(hours=1)).isoformat(),
+                                  "source_url":"https://api.cloudflare.com/client/v4/ips", "scope":"reviewed-offline"},
             "required_env_keys": {"qual-unified": {"api": ["AUTH_MODE", "TEST_PASSWORD"], "worker": ["RUN_MODE"]}}
         }}
         self.driver = Driver()
@@ -93,7 +99,7 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result["inherited_server_checks_requires_server"], [])
         calls = dict(self.driver.calls)
         self.assertIn("/docker-data", calls["host-disks"])
-        self.assertIn("https://api.cloudflare.com/client/v4/ips", calls["cloudflare-official"])
+        self.assertNotIn("cloudflare-official", calls, "preflight must never request a public network endpoint")
         self.assertNotIn(".Config.Env", str(calls))
         self.assertNotIn("DO-NOT-LEAK", json.dumps(result))
         self.assertEqual(result["checks"][-1]["name"], "compose-environment")
@@ -179,7 +185,8 @@ class PreflightTests(unittest.TestCase):
             self.reject(contains="Cloudflare")
         for value in [{"success": False, "result": CF["result"]}, {"success": True, "result": {"ipv4_cidrs": CF["result"]["ipv4_cidrs"], "ipv6_cidrs": []}}]:
             self.driver.replies = originals.copy()
-            self.driver.replies["cloudflare-official"] = json.dumps(value).encode()
+            (self.root/'cf.json').write_text(json.dumps(value), encoding='utf-8')
+            self.cfg['host_preflight']['cloudflare_review']['sha256']=hashlib.sha256((self.root/'cf.json').read_bytes()).hexdigest()
             self.reject(contains="Cloudflare")
 
     def test_network_inventory_and_overlap_fail_closed(self):
@@ -259,7 +266,8 @@ class PreflightTests(unittest.TestCase):
     def local(self):
         self.cfg["mode"] = "local-synthetic"
         self.cfg["host_preflight"]["cloudflare_config_file"] = str(self.root / "realip.conf")
-        self.cfg["host_preflight"]["local"] = {"task_directory": str(self.root), "cloudflare_document": str(self.root / "cf.json"), "storage_probe": {"container": "fixture-probe", "project": "qual-fixture", "volume": "qual-probe", "mount": "/probe"}}
+        self.cfg["host_preflight"]["local"] = {"task_directory": str(self.root), "storage_probe": {"container": "fixture-probe", "project": "qual-fixture", "volume": "qual-probe", "mount": "/probe"}}
+        self.cfg['host_preflight']['cloudflare_review']['scope']='synthetic'
         sock = socket.socket(); sock.bind(("127.0.0.1", 0)); port = sock.getsockname()[1]; sock.close()
         self.cfg["host_preflight"]["required_loopback_ports"] = [port]
 
