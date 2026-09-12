@@ -129,8 +129,8 @@ class PublicFileConsumerTests(unittest.TestCase):
         self.after = self.root / 'candidate.conf'
         self.main = self.root / 'nginx.conf'
         self.staged = self.root / 'staged.conf'
-        self.before.write_text(vhost(58088) + '\n' + vhost(58089).replace('console.example.com', 'invoice.example.com'))
-        self.after.write_text(vhost(8088) + '\n' + vhost(58090).replace('console.example.com', 'invoice.example.com'))
+        self.before.write_text(vhost(58088) + '\n' + vhost(58089).replace('console.example.com', 'invoice.example.com'), newline='\n')
+        self.after.write_text(vhost(8088) + '\n' + vhost(58090).replace('console.example.com', 'invoice.example.com'), newline='\n')
         # Match the simulated nginx -T runtime path byte-for-byte; escaping
         # backslashes matters on this portable Windows test host.
         self.main.write_text('events {} http { include ' + json.dumps(str(self.before)) + '; }')
@@ -152,7 +152,8 @@ class PublicFileConsumerTests(unittest.TestCase):
                     raise self.m.OperatorError('synthetic actual reload failure')
                 return types.SimpleNamespace(stdout=b'', returncode=0)
             primary = Path(argv[-1])
-            target = self.after if primary == self.staged else self.before
+            nodes = self.m.parse(primary.read_text())
+            target = Path(nodes[1][1][0][0][1])
             raw = '\n'.join('# configuration file ' + str(p) + ':\n' + p.read_text() + '\n' for p in (primary, target))
             return types.SimpleNamespace(stdout=raw.encode(), returncode=0)
         def compose(*args):
@@ -190,6 +191,164 @@ class PublicFileConsumerTests(unittest.TestCase):
         with self.assertRaises(self.m.OperatorError):
             host.apply(snapshot, rollback=True)
         self.assertEqual(self.before.read_text(), 'unrelated operator edit')
+
+    def test_staged_syntax_failure_never_writes_live_bytes_or_reloads(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        original_info = self.before.stat()
+        command = self.driver.command
+        self.calls.clear()
+        def fail_test(name, argv):
+            if name in ('host-nginx-switch-staged-test', 'host-nginx-switched-test'):
+                self.calls.append((name, argv))
+                raise self.m.OperatorError('synthetic nginx rejects staged syntax')
+            return command(name, argv)
+        self.driver.command = fail_test
+        with patch.object(self.m, 'atomic_public_file', wraps=self.m.atomic_public_file) as install:
+            with self.assertRaisesRegex(self.m.OperatorError, 'rejects staged syntax'):
+                host.apply(snapshot)
+            self.assertEqual(self.before.read_bytes(), self.original)
+            self.assertEqual(self.before.stat().st_mode, original_info.st_mode)
+            self.assertEqual(self.before.stat().st_mtime_ns, original_info.st_mtime_ns)
+            install.assert_not_called()
+        self.assertIn('host-nginx-switch-staged-test', [name for name, _ in self.calls])
+        self.assertFalse(any('-s' in argv for _, argv in self.calls))
+
+    def test_success_tests_exact_staged_bytes_before_install_and_tests_live_before_reload(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        command, install = self.driver.command, self.m.atomic_public_file
+        events = []
+        def observe_command(name, argv):
+            events.append(name)
+            if name == 'host-nginx-switch-staged-test':
+                self.assertEqual(self.before.read_bytes(), self.original)
+                primary = Path(argv[-1])
+                self.assertNotIn(primary, (self.main, self.staged))
+                target = Path(self.m.parse(primary.read_text())[1][1][0][0][1])
+                self.assertEqual(target.read_bytes(), self.after.read_bytes())
+                self.assertIn('--net', argv)
+            if name == 'host-nginx-switched-test':
+                self.assertEqual(self.before.read_bytes(), self.after.read_bytes())
+            return command(name, argv)
+        def observe_install(path, body, metadata):
+            events.append('install')
+            return install(path, body, metadata)
+        self.driver.command = observe_command
+        with patch.object(self.m, 'atomic_public_file', side_effect=observe_install):
+            host.apply(snapshot)
+        self.assertEqual(events, ['host-nginx-switch-current-test', 'host-nginx-switch-staged-test',
+                                  'install', 'host-nginx-switched-test', 'host-nginx-switch-reload'])
+        self.assertEqual(list(self.root.glob('unified-nginx-*')), [])
+
+    def test_edits_during_staged_test_are_rejected_before_any_live_install(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        command = self.driver.command
+        originals = {p: p.read_bytes() for p in (self.after, self.main, self.staged, self.before)}
+        for kind in ('candidate', 'main', 'staged-main', 'live', 'temporary-main', 'temporary-vhost', 'same-byte-replacement'):
+            with self.subTest(kind=kind):
+                def edit_after_test(name, argv):
+                    result = command(name, argv)
+                    if name == 'host-nginx-switch-staged-test':
+                        primary = Path(argv[-1])
+                        target = {'candidate': self.after, 'main': self.main, 'staged-main': self.staged,
+                                  'live': self.before, 'temporary-main': primary,
+                                  'temporary-vhost': Path(self.m.parse(primary.read_text())[1][1][0][0][1]),
+                                  'same-byte-replacement': self.after}[kind]
+                        if kind == 'same-byte-replacement':
+                            alternate = self.root / 'replacement.conf'
+                            alternate.write_bytes(target.read_bytes())
+                            alternate.replace(target)
+                        else:
+                            target.write_bytes(target.read_bytes() + b'\n# unrelated concurrent edit\n')
+                    return result
+                self.driver.command = edit_after_test
+                with patch.object(self.m, 'atomic_public_file', wraps=self.m.atomic_public_file) as install:
+                    with self.assertRaisesRegex(self.m.OperatorError, 'changed during'):
+                        host.apply(snapshot)
+                    install.assert_not_called()
+                expected = self.original + b'\n# unrelated concurrent edit\n' if kind == 'live' else self.original
+                self.assertEqual(self.before.read_bytes(), expected)
+                self.assertEqual(list(self.root.glob('unified-nginx-*')), [])
+                for path, body in originals.items(): path.write_bytes(body)
+
+    def test_source_changed_between_read_and_hash_is_rejected(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        read_bytes = Path.read_bytes
+        changed = False
+        def concurrent_read(path):
+            nonlocal changed
+            value = read_bytes(path)
+            if path == self.after and not changed:
+                changed = True
+                path.write_bytes(value + b'\n# edit during read\n')
+            return value
+        with patch.object(Path, 'read_bytes', concurrent_read), \
+             patch.object(self.m, 'atomic_public_file', wraps=self.m.atomic_public_file) as install:
+            with self.assertRaisesRegex(self.m.OperatorError, 'changed while being read'):
+                host.apply(snapshot)
+            install.assert_not_called()
+        self.assertEqual(self.before.read_bytes(), self.original)
+
+    def test_configured_staged_main_changed_after_snapshot_is_rejected(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        self.staged.write_bytes(self.staged.read_bytes() + b'\n# different reviewed input\n')
+        with self.assertRaisesRegex(self.m.OperatorError, 'staged main changed after snapshot'):
+            host.apply(snapshot)
+        self.assertEqual(self.before.read_bytes(), self.original)
+
+    def test_rollback_stages_backup_when_candidate_and_configured_stage_are_missing(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        host.apply(snapshot)
+        candidate = self.before.read_bytes()
+        self.after.unlink(); self.staged.unlink()
+        recovering = self.m.HostNginx(self.driver, recovering=True)
+        command = self.driver.command
+        def inspect_restore(name, argv):
+            if name == 'host-nginx-restore-staged-test':
+                self.assertEqual(self.before.read_bytes(), candidate)
+                target = Path(self.m.parse(Path(argv[-1]).read_text())[1][1][0][0][1])
+                self.assertEqual(target.read_bytes(), self.original)
+            return command(name, argv)
+        self.driver.command = inspect_restore
+        with patch.object(recovering, 'probe_restored') as probe:
+            recovering.apply(snapshot, rollback=True)
+            probe.assert_called_once()
+        self.assertEqual(self.before.read_bytes(), self.original)
+        self.assertIn('host-nginx-restore-staged-test', [name for name, _ in self.calls])
+
+    def test_restore_staged_syntax_failure_does_not_modify_live_or_reload(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        host.apply(snapshot)
+        installed = self.before.read_bytes()
+        self.calls.clear()
+        command = self.driver.command
+        def reject_restore(name, argv):
+            if name == 'host-nginx-restore-staged-test':
+                raise self.m.OperatorError('synthetic restored syntax rejected')
+            return command(name, argv)
+        self.driver.command = reject_restore
+        with patch.object(self.m, 'atomic_public_file', wraps=self.m.atomic_public_file) as install, \
+             patch.object(host, 'probe_restored') as probe:
+            with self.assertRaisesRegex(self.m.OperatorError, 'restored syntax rejected'):
+                host.apply(snapshot, rollback=True)
+            install.assert_not_called(); probe.assert_not_called()
+        self.assertEqual(self.before.read_bytes(), installed)
+        self.assertFalse(any('-s' in argv for _, argv in self.calls))
+
+    def test_unrepresentable_temporary_main_cleans_only_its_owned_files(self):
+        host = self.m.HostNginx(self.driver)
+        snapshot = host.snapshot()
+        with patch.object(self.m, 'staged_main', side_effect=self.m.OperatorError('include layout rejected')):
+            with self.assertRaisesRegex(self.m.OperatorError, 'include layout rejected'):
+                host.apply(snapshot)
+        self.assertEqual(self.before.read_bytes(), self.original)
+        self.assertEqual(list(self.root.glob('unified-nginx-*')), [])
 
     def test_rollback_probe_requires_the_original_ready_response_not_any_json(self):
         import smoke

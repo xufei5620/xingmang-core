@@ -174,6 +174,32 @@ def atomic_public_file(path, body, metadata):
         if temporary.exists(): temporary.unlink()  # Only this exact newly created public temp file.
 
 
+def public_input(path):
+    path = plain_path(str(path))
+    before = path.stat()
+    body = path.read_bytes()
+    after = path.stat()
+    def identity(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    require(identity(before) == identity(after), 'nginx public input changed while being read')
+    return body, identity(after)
+
+
+def staged_main(body, pairs):
+    """Preserve public main bytes except reviewed include targets, then prove AST identity."""
+    text = body.decode('utf-8')
+    mapping = dict(pairs)
+    directive = re.compile(r'''\binclude\s+("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(?:\\.|[^\s;])+)[ \t\r\n]*;''')
+    def replace(match):
+        args = parse(match[0])[0][0]
+        return 'include ' + json.dumps(mapping[args[1]], ensure_ascii=False) + ';' if len(args) == 2 and args[1] in mapping else match[0]
+    result = directive.sub(replace, text)
+    require(replace_reviewed_includes(parse(text), pairs) == parse(result),
+            'temporary nginx main cannot preserve the reviewed include layout')
+    return result.encode('utf-8')
+
+
 class HostNginx:
     def __init__(self, driver, *, recovering=False):
         self.driver = driver
@@ -272,14 +298,29 @@ class HostNginx:
         require(snapshot.get('main_sha256') == digest(self.main), 'nginx main changed after snapshot')
         expected = [(str(a), str(b)) for a, b in self.rows]
         require([(r['live'], r['candidate']) for r in snapshot['vhosts']] == expected, 'nginx snapshot belongs to a different vhost plan')
-        prepared = []
+        prepared, inputs = [], {}
+        def capture(path):
+            path = plain_path(str(path))
+            inputs[path] = public_input(path)
+            return inputs[path][0]
+        main_body = capture(self.main)
+        require(hashlib.sha256(main_body).hexdigest() == snapshot['main_sha256'], 'nginx main changed after snapshot')
+        if not rollback:
+            require(hashlib.sha256(capture(self.staged)).hexdigest() == snapshot['staged_main_sha256'], 'nginx staged main changed after snapshot')
         for row in snapshot['vhosts']:
-            actual = digest(row['live'])
+            actual = hashlib.sha256(capture(row['live'])).hexdigest()
             require(actual in (row['original_sha256'], row['candidate_sha256']), 'nginx vhost was changed outside the operation')
             source = plain_path(row['backup'] if rollback else row['candidate'])
             wanted = row['original_sha256'] if rollback else row['candidate_sha256']
-            require(digest(source) == wanted, 'nginx recovery or candidate input changed')
-            prepared.append((row, source.read_bytes(), wanted))
+            body = capture(source)
+            require(hashlib.sha256(body).hexdigest() == wanted, 'nginx recovery or candidate input changed')
+            prepared.append((row, body, wanted))
+        self.test_prepared(main_body, prepared, rollback=rollback)
+        # nginx is an external consumer. Reject edits made during its test,
+        # including same-byte file replacement or metadata changes, before any
+        # live file is installed. Install the exact bytes that were tested.
+        for path, observed in inputs.items():
+            require(public_input(path) == observed, 'nginx public input changed during staged validation')
         for row, body, wanted in prepared:
             atomic_public_file(row['live'], body, row)
             require(digest(row['live']) == wanted, 'nginx public install hash mismatch')
@@ -287,6 +328,39 @@ class HostNginx:
         self.command('host-nginx-restore-reload' if rollback else 'host-nginx-switch-reload', self.main, reload=True)
         if rollback:
             self.probe_restored()
+
+    def test_prepared(self, main_body, prepared, *, rollback):
+        phase = 'restore' if rollback else 'switch'
+        folder = self.main.parent / ('unified-nginx-' + uuid.uuid4().hex)
+        folder.mkdir(mode=0o700)
+        paths, staged_inputs, pairs = [], {}, []
+        try:
+            for index, (row, body, _) in enumerate(prepared):
+                target = folder / (str(index) + '.conf')
+                with target.open('xb') as stream:
+                    paths.append(target); stream.write(body)
+                staged_inputs[target] = public_input(target)
+                pairs.append((self.runtime_path(Path(row['live'])), self.runtime_path(target)))
+            primary = folder / 'nginx.conf'
+            primary_body = staged_main(main_body, pairs)
+            with primary.open('xb') as stream:
+                paths.append(primary); stream.write(primary_body)
+            staged_inputs[primary] = public_input(primary)
+            old = expanded(self.command('host-nginx-' + phase + '-current-test', self.main).stdout)
+            new = expanded(self.command('host-nginx-' + phase + '-staged-test', primary).stdout)
+            compare_expanded(old, new, self.runtime_path(self.main), self.runtime_path(primary), pairs)
+            for path, (body, _) in staged_inputs.items():
+                require(new.get(self.runtime_path(path)) == body.decode('utf-8').strip(),
+                        'nginx did not test the exact prepared public bytes')
+            if not rollback:
+                check_routes('\n'.join(new[after] for _, after in pairs), self.origins, self.ports)
+            for path, observed in staged_inputs.items():
+                require(public_input(path) == observed, 'nginx prepared layout changed during validation')
+        finally:
+            # Delete only the public files created above, never arbitrary
+            # contents under a recursive or externally supplied target.
+            for path in reversed(paths): path.unlink(missing_ok=True)
+            folder.rmdir()
 
     def probe_restored(self):
         from smoke import Client, SmokeFailure, json_object
