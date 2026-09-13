@@ -162,7 +162,7 @@ func TestRunnerOpensCircuitAfterBoundedTransientFailures(t *testing.T) {
 
 func TestRunnerScanCycleBusyBacksOffWithoutOpeningCircuit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	syncer := &scriptedPageSyncer{err: &IngestHTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: 30 * time.Second}}
+	syncer := &scriptedPageSyncer{err: &IngestHTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: 30 * time.Second, Code: "SOURCE_SCAN_CYCLE_BUSY"}}
 	attempts := 0
 	const observeAttempts = 5 // far more than MaxConsecutiveFailures below
 	runner := &SyncRunner{

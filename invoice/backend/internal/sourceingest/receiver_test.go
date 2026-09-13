@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"invoice-system/backend/internal/application"
 	"invoice-system/backend/internal/domain"
@@ -237,6 +240,55 @@ func TestReceiverMapsOtherCommitErrorsTo409WithoutRetryAfter(t *testing.T) {
 	}
 	if !strings.Contains(recorder.Body.String(), `"code":"SOURCE_BATCH_COMMIT_REJECTED"`) {
 		t.Fatalf("body missing commit-rejected code: %s", recorder.Body.String())
+	}
+}
+
+func TestReceiverClassifiesPostgresCommitFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{"lock timeout", &pgconn.PgError{Code: "55P03", Message: "canceling statement due to lock timeout"}, true},
+		{"wrapped lock timeout", fmt.Errorf("commit batch: %w", &pgconn.PgError{Code: "55P03"}), true},
+		{"deadlock", fmt.Errorf("commit batch: %w", &pgconn.PgError{Code: "40P01"}), true},
+		{"serialization", fmt.Errorf("commit batch: %w", &pgconn.PgError{Code: "40001"}), true},
+		{"unique violation", &pgconn.PgError{Code: "23505"}, false},
+		{"foreign key violation", &pgconn.PgError{Code: "23503"}, false},
+		{"statement canceled", &pgconn.PgError{Code: "57014"}, false},
+		{"unknown transaction outcome", &pgconn.PgError{Code: "40003"}, false},
+		{"failed transaction", &pgconn.PgError{Code: "25P02"}, false},
+		{"permission denied", &pgconn.PgError{Code: "42501"}, false},
+		{"unknown sqlstate", &pgconn.PgError{Code: "XX000"}, false},
+		{"sequence conflict", fmt.Errorf("sequence does not follow state: %w", domain.ErrConflict), false},
+		{"hash conflict", fmt.Errorf("previous batch hash mismatch: %w", domain.ErrConflict), false},
+		{"invalid state", domain.ErrInvalidState, false},
+		{"untyped sqlstate text", errors.New("ERROR: canceling statement due to lock timeout (SQLSTATE 55P03)"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			receiver, fixture, batch, acceptor := testReceiver(t)
+			acceptor.err = tc.err
+			var logs bytes.Buffer
+			receiver.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			recorder := httptest.NewRecorder()
+			receiver.ServeHTTP(recorder, signedRequest(fixture, batch))
+			status, code, retryAfter := http.StatusConflict, "SOURCE_BATCH_COMMIT_REJECTED", ""
+			if tc.retryable {
+				status, code, retryAfter = http.StatusServiceUnavailable, "SOURCE_BATCH_COMMIT_RETRYABLE", "5"
+			}
+			if recorder.Code != status || recorder.Header().Get("Retry-After") != retryAfter {
+				t.Fatalf("status=%d Retry-After=%q; want status=%d Retry-After=%q", recorder.Code, recorder.Header().Get("Retry-After"), status, retryAfter)
+			}
+			if recorder.Body.String() != `{"error":{"code":"`+code+`","message":"source batch rejected"}}`+"\n" {
+				t.Fatalf("unexpected response body: %s", recorder.Body.String())
+			}
+			if acceptor.batch.BatchID != fixture.BatchID || acceptor.batch.Sequence != fixture.Sequence {
+				t.Fatal("signed request did not reach acceptor unchanged")
+			}
+			if !strings.Contains(logs.String(), `"status":`+fmt.Sprint(status)) {
+				t.Fatalf("commit failure missing structured status log: %s", logs.String())
+			}
+		})
 	}
 }
 

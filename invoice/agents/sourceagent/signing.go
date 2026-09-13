@@ -280,6 +280,8 @@ type HTTPIngestClient struct {
 type IngestHTTPError struct {
 	StatusCode int
 	RetryAfter time.Duration
+	// Code retains only recognized protocol codes, never arbitrary response text.
+	Code string
 }
 
 func (e *IngestHTTPError) Error() string {
@@ -347,10 +349,10 @@ func (c *HTTPIngestClient) Send(ctx context.Context, batch ValidatedBatch) (Inge
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return IngestAck{}, &IngestHTTPError{
 			StatusCode: response.StatusCode,
 			RetryAfter: boundedRetryAfter(response.Header.Get("Retry-After"), now().UTC()),
+			Code:       boundedIngestErrorCode(response.Body),
 		}
 	}
 	var ack IngestAck
@@ -358,6 +360,23 @@ func (c *HTTPIngestClient) Send(ctx context.Context, batch ValidatedBatch) (Inge
 		return IngestAck{}, errors.New("invalid ingestion acknowledgement")
 	}
 	return ack, nil
+}
+
+func boundedIngestErrorCode(body io.Reader) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := decodeBoundedJSON(body, 4096, &envelope, false); err != nil {
+		return ""
+	}
+	switch envelope.Error.Code {
+	case "SOURCE_SCAN_CYCLE_BUSY", "SOURCE_BATCH_COMMIT_RETRYABLE":
+		return envelope.Error.Code
+	default:
+		return ""
+	}
 }
 
 func boundedRetryAfter(raw string, now time.Time) time.Duration {

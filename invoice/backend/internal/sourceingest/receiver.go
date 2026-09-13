@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"invoice-system/backend/internal/application"
 	"invoice-system/backend/internal/domain"
 	"invoice-system/backend/internal/postgresstore"
@@ -212,6 +214,14 @@ func (receiver *Receiver) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			writeReceiverError(writer, http.StatusServiceUnavailable, "SOURCE_SCAN_CYCLE_BUSY")
 			return
 		}
+		if retryableSourceCommit(err) {
+			receiver.logger().Warn("source batch commit deferred: transient database contention",
+				"source_instance_id", batch.SourceInstanceID, "stream_id", batch.StreamID,
+				"batch_id", batch.BatchID, "sequence", batch.Sequence, "status", http.StatusServiceUnavailable, "error", err)
+			writer.Header().Set("Retry-After", "5")
+			writeReceiverError(writer, http.StatusServiceUnavailable, "SOURCE_BATCH_COMMIT_RETRYABLE")
+			return
+		}
 		status := http.StatusConflict
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			status = http.StatusServiceUnavailable
@@ -225,6 +235,23 @@ func (receiver *Receiver) ServeHTTP(writer http.ResponseWriter, request *http.Re
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(writer).Encode(ack)
+}
+
+// Retry only known transaction contention errors. The acceptor has returned
+// (and rolled back) before the agent replays the same durable batch in a new
+// request; never retry a statement inside the failed transaction. SQL text,
+// unknown database failures and domain conflicts keep their existing behavior.
+func retryableSourceCommit(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr == nil {
+		return false
+	}
+	switch pgErr.Code {
+	case "55P03", "40P01", "40001": // lock_not_available, deadlock_detected, serialization_failure
+		return true
+	default:
+		return false
+	}
 }
 
 type verifiedMetadata struct {

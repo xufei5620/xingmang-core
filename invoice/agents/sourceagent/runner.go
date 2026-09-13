@@ -130,15 +130,16 @@ func (r *SyncRunner) Run(ctx context.Context) error {
 				}
 				return err
 			}
-			// The receiver sets a positive Retry-After only on its scan-cycle-busy
-			// rejection (503 SOURCE_SCAN_CYCLE_BUSY): the stream already has a
+			// Only the explicit scan-cycle-busy rejection (503 with a positive
+			// Retry-After and SOURCE_SCAN_CYCLE_BUSY) means the stream already has a
 			// legitimate cycle processing, which alone can take up to ~30 minutes.
 			// That is not evidence of a broken receiver, so it must not spend the
 			// consecutive-failure budget the way a real transient failure does --
 			// otherwise a long-running cycle alone trips the circuit breaker and
 			// restarts the process into an unnecessary reconcile sweep. Genuine
 			// transient failures (network errors, other 5xx) still count normally.
-			busy := errors.As(err, &ingestErr) && ingestErr.StatusCode == http.StatusServiceUnavailable && ingestErr.RetryAfter > 0
+			busy := errors.As(err, &ingestErr) && ingestErr.StatusCode == http.StatusServiceUnavailable &&
+				ingestErr.RetryAfter > 0 && ingestErr.Code == "SOURCE_SCAN_CYCLE_BUSY"
 			if !busy {
 				consecutiveFailures++
 				if consecutiveFailures >= r.MaxConsecutiveFailures {
