@@ -121,6 +121,22 @@ class PreviewContractTests(unittest.TestCase):
         self.assertEqual(downloads,['sub','admin'])
         self.assertEqual(result['steps'][-1]['name'],'sessions.revoked')
 
+    def test_fresh_server_keeps_original_complete_twelve_steps(self):
+        self.config['mode'] = 'server-rehearsal'
+        result, fixture = self.execute_preview()
+        self.assertEqual(result['status'], 'PASS', result.get('failure_code'))
+        self.assertEqual(tuple(s['name'] for s in result['steps']), preview_smoke.REQUIRED)
+        self.assertEqual(result['financial_coverage'], 'full-write')
+        self.assertEqual(result['document_coverage'], 'scan-upload-both-downloads')
+        self.assertTrue(any(p.endswith('/documents/upload') for _, _, p in fixture.calls))
+
+    def test_other_source_expired_does_not_block_active_sub_wallet_write_chain(self):
+        self.config['mode'] = 'server-rehearsal'
+        result, fixture = self.execute_preview('source_expired')
+        self.assertEqual(result['status'], 'PASS', result.get('failure_code'))
+        self.assertEqual(tuple(s['name'] for s in result['steps']), preview_smoke.REQUIRED)
+        self.assertTrue(any(p.endswith('/documents/upload') for _, _, p in fixture.calls))
+
     def test_bad_scans_hashes_transitions_or_wallet_cannot_pass_and_sessions_revoke(self):
         for failure in ('scanner','download','stale_version','subscription_only','unconsumed_wallet','inflated_wallet_available'):
             with self.subTest(failure=failure):

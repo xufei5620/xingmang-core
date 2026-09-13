@@ -257,6 +257,84 @@ class Seed:
         self.command('start-provider',['exec','-d','--user','0',self.cid,'/usr/local/bin/invoice-rehearsal-auth-provider',*flags])
         self.record.update(status='SYNTHETIC_DATA_INSERTED',sources=sources,summary=self.summary,real_business_amounts_verified=False,db_targets={k:v['expected'] for k,v in targets.items()});self.save()
 
+    def blocked_invoice_snapshot(self,source_id,lot_id):
+        require(self.seeded is True and self.driver.config['mode']=='server-rehearsal',
+                'blocked-write snapshot requires the seeded server rehearsal')
+        guard=copy.deepcopy(self.guard)
+        require(isinstance(guard,dict) and guard.get('mode')=='server-rehearsal'
+                and guard.get('owner')==self.owner and guard.get('project')==self.project
+                and re.fullmatch('[0-9a-f]{32}',self.owner) and NAME.fullmatch(self.project)
+                and re.fullmatch('[0-9a-f]{64}',guard.get('nonce','')),
+                'blocked-write seed ownership guard differs')
+        clients=self.summary.get('invoice',{}).get('clients',{})
+        require(isinstance(clients,dict) and set(clients)=={'sub2api','newapi'},'both seeded user summaries required')
+        sub_user,new_user=clients['sub2api'].get('user_id'),clients['newapi'].get('user_id')
+        identifier=re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+        require(all(isinstance(value,str) and identifier.fullmatch(value) for value in (source_id,lot_id,sub_user,new_user))
+                and sub_user!=new_user and source_id==guard['sources']['sub2api']['id']
+                and lot_id==clients['sub2api'].get('lot_id'),'blocked-write snapshot may inspect only this seeded SUB lot and users')
+        new_source,new_lot=guard['sources']['newapi']['id'],clients['newapi'].get('lot_id')
+        require(all(isinstance(value,str) and identifier.fullmatch(value) for value in (new_source,new_lot))
+                and new_source!=source_id and new_lot!=lot_id,'blocked-write NEW source and known lot must be distinct')
+        scoped=(('sub2api',sub_user,source_id,lot_id),('newapi',new_user,new_source,new_lot))
+        restored=copy.deepcopy(getattr(self,'database_restore_targets',None))
+        require(isinstance(restored,dict) and set(restored)=={'platform','invoice'},'attested restore database targets required')
+        before=self.database_targets()
+        require(before==restored and all(before[k]['identity']==guard['databases'][k] for k in restored),
+                'blocked-write database targets differ from attested restored seed targets')
+        identity=before['invoice']['identity']
+        require(NAME.fullmatch(identity['name']) and type(identity['oid']) is int and identity['oid']>0
+                and identity['server_addr'] is None and identity['server_port'] is None,
+                'blocked-write database identity must use the attested local socket')
+        check=("DO $snapshot$ BEGIN IF NOT (current_database()='"+identity['name']+"' "
+            "AND (SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname=current_database())="+str(identity['oid'])+" "
+            "AND inet_server_addr() IS NOT DISTINCT FROM NULL::inet "
+            "AND inet_server_port() IS NOT DISTINCT FROM NULL::integer) "
+            "THEN RAISE EXCEPTION 'blocked-write database identity mismatch'; END IF; "
+            "IF (SELECT count(*) FROM xm_rehearsal.owner_guard)<>1 OR NOT EXISTS "
+            "(SELECT 1 FROM xm_rehearsal.owner_guard WHERE owner='"+self.owner+"' AND project='"+self.project+"' AND nonce='"+guard['nonce']+"') "
+            "THEN RAISE EXCEPTION 'blocked-write owner marker mismatch'; END IF; END; $snapshot$;\n")
+        lot_queries=[]
+        for kind,user,source,known_lot in scoped:
+            lot_sql=("(SELECT json_build_object('id',fl.id,'source_instance_id',fl.source_instance_id,"
+                "'consumed_cash_minor',fl.consumed_cash_minor,'reserved_minor',fl.reserved_minor,'issued_minor',fl.issued_minor,"
+                "'verified_cash_minor',fl.verified_cash_minor,'verification',fl.verification_state,"
+                "'refund_frozen',fl.refund_frozen,'eligibility_kind',fl.eligibility_kind) FROM funding_lots fl "
+                "WHERE fl.id='"+known_lot+"' AND fl.source_instance_id='"+source+"' AND fl.invoice_user_id='"+user+"')")
+            lot_queries.append("'"+kind+"',"+lot_sql)
+        query=("DO $users$ BEGIN IF (SELECT count(*) FROM invoice_users WHERE "
+            "((id='"+sub_user+"' AND platform='sub2api') OR (id='"+new_user+"' AND platform='newapi')) "
+            "AND status='active' AND platform_user_id=oidc_subject)<>2 "
+            "THEN RAISE EXCEPTION 'blocked-write seeded user projection mismatch'; END IF; END; $users$;\n"
+            "SELECT json_build_object('users',json_build_object("
+            "'sub2api',json_build_object('invoice_requests',(SELECT count(*) FROM invoice_requests WHERE invoice_user_id='"+sub_user+"')),"
+            "'newapi',json_build_object('invoice_requests',(SELECT count(*) FROM invoice_requests WHERE invoice_user_id='"+new_user+"'))),"
+            "'lots',json_build_object("+','.join(lot_queries)+"));\n")
+        # Both transactions are read-only. The second sees a fresh snapshot of
+        # the owner marker; a repeat inside the first snapshot would not prove
+        # that a concurrently changed marker still matches after the query.
+        begin='BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n'
+        raw=self.command('blocked-invoice-snapshot',before['invoice']['command'],input_bytes=(begin+check+query+'COMMIT;\n').encode()).stdout
+        self.command('blocked-invoice-snapshot-guard-after',before['invoice']['command'],input_bytes=(begin+check+'COMMIT;\n').encode())
+        after=self.database_targets()
+        require(after==before==restored and self.guard==guard,'blocked-write database or seed guard changed after snapshot')
+        try:result=json.loads(raw)
+        except (ValueError,UnicodeDecodeError):raise OperatorError('blocked-write snapshot response is not valid JSON') from None
+        fields={'id','source_instance_id','consumed_cash_minor','reserved_minor','issued_minor','verified_cash_minor','verification','refund_frozen','eligibility_kind'}
+        require(isinstance(result,dict) and set(result)=={'users','lots'} and isinstance(result['users'],dict)
+                and set(result['users'])=={'sub2api','newapi'},'blocked-write snapshot user scope differs')
+        require(all(isinstance(row,dict) and set(row)=={'invoice_requests'} and type(row['invoice_requests']) is int
+                and row['invoice_requests']>=0 for row in result['users'].values()),'blocked-write snapshot request counts invalid')
+        require(isinstance(result['lots'],dict) and set(result['lots'])=={'sub2api','newapi'},'both seeded lots required in snapshot')
+        for kind,user,source,known_lot in scoped:
+            lot=result['lots'][kind]
+            require(isinstance(lot,dict) and set(lot)==fields and lot['id']==known_lot and lot['source_instance_id']==source
+                    and all(type(lot[key]) is int and lot[key]>=0 for key in ('consumed_cash_minor','reserved_minor','issued_minor','verified_cash_minor'))
+                    and type(lot['refund_frozen']) is bool and lot['verification'] in ('pending','verified','frozen')
+                    and lot['eligibility_kind'] in ('WALLET_CASH','SUBSCRIPTION_CASH','NON_CASH','LEGACY_NON_INVOICEABLE'),
+                    'blocked-write snapshot lot scope or amounts invalid')
+        return result
+
     def cleanup(self):
         self._cleanup_active=True;self._cleanup_log_error=False
         outcome={'private_shredded':False,'helper_removed':False,'tmpfs_removed':False,'network_removed':False}

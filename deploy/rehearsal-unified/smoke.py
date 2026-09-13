@@ -458,6 +458,7 @@ def run(config, *, _preview=None, _credentials=None):
         step("requests.read", requests_read)
         if _preview is not None:
             _preview.exercise(step, config, admin, sub, new, result)
+            required_steps = _preview.required_steps
         step("readiness.after", readiness)
         require(tuple(item["name"] for item in result["steps"] if item["status"] == "PASS") == required_steps[:-1], "INCOMPLETE_SMOKE")
         result.update(status="PASS", exit_code=0)

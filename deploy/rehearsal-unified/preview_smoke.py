@@ -13,9 +13,10 @@ from pathlib import Path
 
 import smoke
 from smoke import require, is_uuid, json_object
-from lifecycle import OperatorError, atomic_json, read_public_json
+from lifecycle import OperatorError, ReadinessBudget, atomic_json, read_public_json, require_readiness_report
 
 REQUIRED = (*smoke.REQUIRED[:-2], "sub.submit", "staff.approve-upload-download", *smoke.REQUIRED[-2:])
+BLOCKED_REQUIRED = (*smoke.REQUIRED[:-2], "sub.submit-blocked", "invoice.unchanged", *smoke.REQUIRED[-2:])
 _CAPABILITY = object()
 
 
@@ -43,6 +44,7 @@ class FrozenPermit:
                 and expected["minimum_available_minor"] >= expected["request_amount_minor"], "PREVIEW_AMOUNT_REQUIRED")
         self.configuration_sha256 = config_hash(config)
         self.proof, self.request_id = proof, None
+        self.required_steps, self._driver = REQUIRED, None
 
     def check_config(self, config):
         require(config.get("mode") != "production" and config_hash(config) == self.configuration_sha256,
@@ -61,12 +63,19 @@ class FrozenPermit:
     def exercise(self, step, config, admin, sub, new, result):
         self.check_config(config)
         expected, creds = config["expected"], config["credentials"]
+        expiry = None
+        if config['mode'] == 'server-rehearsal':
+            current = require_readiness_report(admin.call('GET', '/readyz?report=full'), require_freshness=False)
+            if not current['source_freshness_ready']:
+                expiry = current
         pools = sub.call("GET", "/invoice-api/v1/user/funding-lots").get("items")
         smoke.check_scope(pools, creds["sub2api"]["source_id"], "sub2api")
         choices = [p for p in pools if p.get("eligibility_kind") == "wallet" and p.get("verification") == "verified"
             and p.get("refund_frozen") is False and p.get("eligibility_status") == "active"
             and positive(p.get("consumed_cash_minor")) and type(p.get("available_minor")) is int
             and p["consumed_cash_minor"] >= p["available_minor"] >= expected["minimum_available_minor"]]
+        if not choices and expiry is not None:
+            return self.exercise_blocked(step, config, admin, sub, new, pools, self.expired_source_proof(expiry), result)
         require(bool(choices), "BASELINE_CONSUMED_WALLET_REQUIRED")
         lot_id = sorted(choices, key=lambda p: p["id"])[0]["id"]
         amount, source_id = expected["request_amount_minor"], creds["sub2api"]["source_id"]
@@ -114,6 +123,108 @@ class FrozenPermit:
             result.update(amount_minor=amount, document_sha256=sha, document_id=document["id"])
         step("staff.approve-upload-download", issue)
         result["invoice_write_coverage"] = "actual frozen-copy submission, approval, scan/upload and both SHA-verified downloads"
+        result.update(financial_coverage='full-write', document_coverage='scan-upload-both-downloads')
+
+    def expired_source_proof(self, current):
+        """Reuse the actual attested D and its accepted raw base report."""
+        from rehearsal_seed import Seed
+        driver = self._driver
+        require(driver is not None and driver.config['mode'] == 'server-rehearsal', 'EXPIRED_PREVIEW_FROZEN_DRIVER_REQUIRED')
+        require(driver.config['candidate']['head'] == self.proof['head'] and
+                driver.config['candidate']['manifest_sha256'] == self.proof['manifest_sha256'] and
+                driver.config['rehearsal']['owner_id'] == self.proof['owner_id'] and self.proof['runtime_containers'] == 18,
+                'EXPIRED_PREVIEW_BINDING_CHANGED')
+        driver.artifact_preflight()
+        seed = getattr(driver, 'rehearsal_seed', None)
+        require(type(seed) is Seed and seed.driver is driver and seed.seeded, 'EXPIRED_PREVIEW_SEED_REQUIRED')
+        budget = getattr(driver, 'readiness_budget', None)
+        require(type(budget) is ReadinessBudget and budget.output == driver.output and budget.active is False,
+                'EXPIRED_PREVIEW_BASE_PROOF_REQUIRED')
+        value = read_public_json(driver.output / 'candidate-readiness.json')
+        require(value == budget.value and value.get('status') == 'BASE_READY' and value.get('phase') == 'non_freshness'
+                and value.get('budget_seconds') == 300 and value.get('invoice_latches') == 11,
+                'EXPIRED_PREVIEW_BASE_PROOF_CHANGED')
+        elapsed = value.get('elapsed_seconds')
+        require(type(elapsed) in (int, float) and 0 <= elapsed <= 300 and
+                value['first_accepted_monotonic'] - value['start_monotonic'] == elapsed and
+                value['first_accepted_utc'] == value['end_utc'], 'EXPIRED_PREVIEW_BASE_DEADLINE_INVALID')
+        index = value.get('accepted_observation')
+        require(type(index) is int and index == len(value.get('observations', [])) and index > 0,
+                'EXPIRED_PREVIEW_ACCEPTED_SAMPLE_INVALID')
+        observation = value['observations'][index - 1]
+        path = driver.output / ('candidate-readiness-' + str(index) + '.response')
+        require(Path(observation['response_path']) == path and not path.is_symlink() and observation.get('http_status') == 200
+                and observation.get('accepted_utc') == value['first_accepted_utc']
+                and observation.get('accepted_monotonic') == value['first_accepted_monotonic'], 'EXPIRED_PREVIEW_RAW_BINDING_CHANGED')
+        raw = path.read_bytes()
+        require(hashlib.sha256(raw).hexdigest() == observation['response_sha256'], 'EXPIRED_PREVIEW_RAW_SHA_CHANGED')
+        accepted = require_readiness_report(json_object(raw), require_freshness=False)
+        require(current['source_freshness_ready'] is False and current['expected_source_expiry'],
+                'EXPIRED_PREVIEW_TYPED_EXPIRY_REQUIRED')
+        return {'accepted_response_sha256': observation['response_sha256'], 'base_elapsed_seconds': elapsed,
+                'accepted_reasons': accepted['expected_source_expiry'], 'current_reasons': current['expected_source_expiry']}
+
+    def exercise_blocked(self, step, config, admin, sub, new, pools, expiry, result):
+        """A refused synthetic submission is distinct from a successful invoice."""
+        creds, expected = config['credentials'], config['expected']
+        source_id = creds['sub2api']['source_id']
+        choices = [lot for lot in pools if lot.get('eligibility_kind') == 'wallet' and
+                   lot.get('verification') == 'verified' and lot.get('refund_frozen') is False and
+                   positive(lot.get('consumed_cash_minor')) and lot['consumed_cash_minor'] >= expected['minimum_available_minor'] and
+                   lot.get('eligibility_status') == 'source_unavailable' and lot.get('reason_code') == 'SOURCE_NOT_READY' and
+                   type(lot.get('available_minor')) is int and lot['available_minor'] == 0]
+        require(len(choices) == 1, 'EXPIRED_PREVIEW_BLOCKED_WALLET_REQUIRED')
+        lot = choices[0]; lot_id = lot['id']
+        seed = self._driver.rehearsal_seed
+        before = seed.blocked_invoice_snapshot(source_id, lot_id)
+        raw_lot = before['lots']['sub2api']
+        require(before['users'] == {kind: {'invoice_requests': 0} for kind in ('sub2api', 'newapi')} and
+                raw_lot['id'] == lot_id and raw_lot['source_instance_id'] == source_id and
+                raw_lot['consumed_cash_minor'] == lot['consumed_cash_minor'] and
+                all(row['reserved_minor'] == row['issued_minor'] == 0 for row in before['lots'].values()),
+                'EXPIRED_PREVIEW_SYNTHETIC_BASELINE_INVALID')
+
+        def requests():
+            result_sets = {}
+            for kind, client in (('sub2api', sub), ('newapi', new)):
+                value = client.call('GET', '/invoice-api/v1/user/invoice-requests')
+                # A newly seeded user has no rows. DB counts below make this
+                # independent of HTTP pagination or a hidden inserted record.
+                require(value.get('items') == [] and value.get('has_more', False) is False,
+                        'EXPIRED_PREVIEW_REQUEST_SET_NOT_EMPTY')
+                result_sets[kind] = []
+            return result_sets
+
+        initial = requests()
+        self.required_steps = BLOCKED_REQUIRED
+        result.update(financial_coverage='blocked-write', document_coverage='not_exercised_source_expired',
+                      invoice_write_coverage='source-expired submission refusal; no approval, upload or download performed',
+                      source_expiry_proof=expiry, financial_writes_completed=False)
+
+        def refused():
+            current = require_readiness_report(admin.call('GET', '/readyz?report=full'), require_freshness=False)
+            self.expired_source_proof(current)
+            response = sub.call('POST', '/invoice-api/v1/user/invoice-requests',
+                {'profile_id': creds['sub2api']['existing_profile_id'], 'source_instance_id': source_id,
+                 'idempotency_key': str(uuid.uuid4()),
+                 'allocations': [{'funding_lot_id': lot_id, 'amount_minor': expected['request_amount_minor']}]}, expected=(503,))
+            require(isinstance(response.get('error'), dict) and response['error'].get('code') == 'SOURCE_SYNC_UNAVAILABLE',
+                    'EXPIRED_PREVIEW_SOURCE_REFUSAL_REQUIRED')
+            result['submission_refusal'] = {'http_status': 503, 'code': 'SOURCE_SYNC_UNAVAILABLE'}
+
+        step('sub.submit-blocked', refused)
+
+        def unchanged():
+            require(requests() == initial, 'EXPIRED_PREVIEW_REQUESTS_CHANGED')
+            after = seed.blocked_invoice_snapshot(source_id, lot_id)
+            require(after == before, 'EXPIRED_PREVIEW_FINANCIAL_STATE_CHANGED')
+            final_pools = sub.call('GET', '/invoice-api/v1/user/funding-lots').get('items')
+            smoke.check_scope(final_pools, source_id, 'sub2api')
+            require([row for row in final_pools if row['id'] == lot_id] == [lot], 'EXPIRED_PREVIEW_LOT_CHANGED')
+            result['financial_state_unchanged'] = {'synthetic_user_request_counts': {k: 0 for k in before['users']},
+                'same_request_sets': True, 'same_funding_lots': True,
+                'snapshot_sha256': hashlib.sha256(json.dumps(before, sort_keys=True).encode()).hexdigest()}
+        step('invoice.unchanged', unchanged)
 
 
 class PreviewClient(smoke.Client):
@@ -156,7 +267,9 @@ def verified_permit(driver, deployment_config):
     proof = {"owner_id":value["owner_id"], "projects":sorted(actual), "volumes":sorted(value["volumes"].values()),
              "head":config["candidate"]["head"], "manifest_sha256":config["candidate"]["manifest_sha256"],
              "runtime_containers":18, "verified_utc":smoke.utc()}
-    return FrozenPermit(_CAPABILITY, probe, proof), probe
+    permit = FrozenPermit(_CAPABILITY, probe, proof)
+    permit._driver = driver
+    return permit, probe
 
 
 def run_verified(driver, deployment_config):
@@ -169,7 +282,7 @@ def run_verified(driver, deployment_config):
             result.update(identity_coverage='synthetic seeded frozen identities only', real_customer_login_verified=False)
         require(result.get("status") == "PASS" and result.get("exit_code") == 0
                 and result.get("financial_writes_permitted") is True
-                and tuple(r["name"] for r in result["steps"] if r["status"] == "PASS") == REQUIRED,
+                and tuple(r["name"] for r in result["steps"] if r["status"] == "PASS") == permit.required_steps,
                 "FROZEN_WRITE_SMOKE_INCOMPLETE")
         return result
     except BaseException as error:
