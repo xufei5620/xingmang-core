@@ -77,7 +77,7 @@ class WriteFixture(test_smoke.ProtocolFixture):
             if method=='POST' and suffix:
                 f.calls.append((self.role,method,path))
                 if f.fault!='stale_version': f.request['version']+=1
-                f.request.update(status=transitions[suffix],updated_at='2026-09-12T01:02:03.123456Z')
+                f.request.update(status=transitions[suffix],updated_at=getattr(f,'issued_at','2026-09-12T01:02:03.123456Z'))
                 return copy.deepcopy(f.request)
             return super().call(method,path,payload,expected)
 
@@ -87,6 +87,9 @@ class WriteFixture(test_smoke.ProtocolFixture):
                 f.calls.append((self.role,method,path))
                 pdf=preview_smoke.synthetic_pdf()
                 assert pdf in payload and 'multipart/form-data' in content_type
+                marker=b'Content-Disposition: form-data; name="issued_at"\r\n\r\n'
+                assert payload.count(marker)==1
+                f.uploaded_issued_at=payload.split(marker,1)[1].split(b'\r\n',1)[0]
                 f.request['version']+=1;f.request['status']='issued'
                 return json.dumps({'request':f.request,'document':{'id':test_smoke.DOC,
                     'request_id':test_smoke.REQUEST,'scan_status':'infected' if f.fault=='scanner' else 'clean',
@@ -102,8 +105,9 @@ class WriteFixture(test_smoke.ProtocolFixture):
 class PreviewContractTests(unittest.TestCase):
     setUp=test_smoke.ExecutionTests.setUp
 
-    def execute_preview(self, fault=None):
+    def execute_preview(self, fault=None, issued_at='2026-09-12T01:02:03.123456Z'):
         fixture=WriteFixture(fault)
+        fixture.issued_at=issued_at
         permit=preview_smoke.FrozenPermit(preview_smoke._CAPABILITY,self.config,{'unit_fixture':True})
         with patch.object(preview_smoke,'PreviewClient',side_effect=lambda *a,**kw:fixture.factory(*a)):
             result=smoke.run(self.config,_preview=permit)

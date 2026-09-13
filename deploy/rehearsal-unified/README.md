@@ -8,6 +8,8 @@
 python3 -m unittest discover -s deploy/rehearsal-unified/tests -p 'test_*.py' -v
 ```
 
+服务器部署工具使用 Python 3.10；涉及兼容性的修改须实际在 Python 3.10 解释器下执行上述整套测试，并记录解释器版本。开票预检按 Go API 的 RFC3339Nano 形态校验 `updated_at`（0–9 位小数秒及显式时区）；日历、格式或时区非法时拒绝上传。校验后的原字符串直接写入上传报文，保留纳秒、尾随零与时区文本，不作格式化或精度转换。
+
 三个入口均支持 `--dry-run`。干跑只校验公开输入形状和路径，打印步骤，不运行 Docker、不生成 PASS。实际运行用独占锁、逐步 UTC/退出码与 stdout/stderr 的 SHA/字节数记录，避免把运行日志中的凭据扩散到证据。
 
 ```sh

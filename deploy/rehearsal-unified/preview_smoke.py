@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -102,8 +103,7 @@ class FrozenPermit:
                 current = value
             # Use the actual server transition time, preserving subsecond
             # precision and avoiding host/server clock disagreement.
-            issued_at = current.get("updated_at")
-            require(isinstance(issued_at, str) and dt.datetime.fromisoformat(issued_at.replace("Z", "+00:00")).utcoffset() is not None, "SERVER_ISSUED_TIME_MISSING")
+            issued_at = server_issued_time(current.get("updated_at"))
             pdf = synthetic_pdf()
             data, media = multipart({"version": str(current["version"]), "invoice_number": "REHEARSAL-" + uuid.uuid4().hex[:16], "issued_at": issued_at}, pdf)
             body, response_media = admin.raw("POST", path + "/documents/upload", data, (201,), media)
@@ -293,6 +293,22 @@ def run_verified(driver, deployment_config):
         atomic_json(driver.output / "smoke.json", result)
         atomic_json(driver.output / "events" / (str(time.time_ns()) + "-http-preview-smoke.json"),
             {"operation":"http-preview-smoke", "start_utc":started, "end_utc":smoke.utc(), "exit_code":result.get("exit_code",1)})
+
+
+def server_issued_time(value):
+    """Validate Go's RFC3339Nano shape on Python 3.10; return the original text."""
+    require(isinstance(value, str) and bool(value), "SERVER_ISSUED_TIME_MISSING")
+    match = re.fullmatch(
+        r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+        r"(?:\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", value)
+    require(match is not None, "SERVER_ISSUED_TIME_INVALID")
+    try:
+        # Check the calendar only. datetime's microsecond precision must not
+        # truncate or round the server's nanoseconds in the upload payload.
+        dt.datetime(*(int(part) for part in match.groups()))
+    except ValueError:
+        raise smoke.SmokeFailure("SERVER_ISSUED_TIME_INVALID") from None
+    return value
 
 
 def check_request(value, source_id, amount, lot_id, state, prior_version=0):
