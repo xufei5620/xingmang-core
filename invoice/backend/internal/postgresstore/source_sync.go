@@ -339,12 +339,15 @@ func (s *Store) CommitSourceBatch(ctx context.Context, in SourceBatchInput) (Sou
 	var currentSequence int64
 	var currentHash, approvedRuntime string
 	var sourceEnabled bool
+	// Serialize the stream's sequence/hash chain, while holding source authority
+	// stable without excluding unrelated streams. Approval or disable writes
+	// still wait for this transaction; batch processing never updates the source.
 	err = tx.QueryRow(ctx, `
 		SELECT sis.sequence,COALESCE(sis.last_batch_hash,''),si.runtime_version,si.enabled
 		FROM source_ingest_state sis
 		JOIN source_instances si ON si.id=sis.source_instance_id
 		WHERE sis.source_instance_id=$1 AND sis.stream_id=$2
-		FOR UPDATE OF sis,si`, in.SourceInstanceID, in.StreamID).Scan(
+		FOR UPDATE OF sis FOR SHARE OF si`, in.SourceInstanceID, in.StreamID).Scan(
 		&currentSequence, &currentHash, &approvedRuntime, &sourceEnabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SourceBatchResult{}, domain.ErrNotFound
