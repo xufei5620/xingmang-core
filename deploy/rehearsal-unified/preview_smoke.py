@@ -219,12 +219,55 @@ class FrozenPermit:
             after = seed.blocked_invoice_snapshot(source_id, lot_id)
             require(after == before, 'EXPIRED_PREVIEW_FINANCIAL_STATE_CHANGED')
             final_pools = sub.call('GET', '/invoice-api/v1/user/funding-lots').get('items')
+            # A read may itself trigger reconciliation. Cover the final GET,
+            # including the other seeded account, before accepting its view.
+            after_read = seed.blocked_invoice_snapshot(source_id, lot_id)
+            result['financial_snapshot_checks'] = {
+                'after_refusal': True, 'after_final_lot_read': after_read == before}
             smoke.check_scope(final_pools, source_id, 'sub2api')
-            require([row for row in final_pools if row['id'] == lot_id] == [lot], 'EXPIRED_PREVIEW_LOT_CHANGED')
+            matches = [row for row in final_pools if row['id'] == lot_id]
+            result['funding_lot_comparison'] = {'matching_lots': len(matches)}
+            if len(matches) == 1:
+                result['funding_lot_comparison'].update(lot_comparison(lot, matches[0]))
+            require(after_read == before, 'EXPIRED_PREVIEW_FINANCIAL_STATE_CHANGED_AFTER_READ')
+            require(len(matches) == 1, 'EXPIRED_PREVIEW_LOT_CHANGED')
+            final_lot = matches[0]
+            require(result['funding_lot_comparison']['stable_fields_unchanged'], 'EXPIRED_PREVIEW_LOT_CHANGED')
+            # Source health is read anew on every funding-lot request. Only
+            # these two valid views of the same verified, unreserved wallet
+            # may differ; the refusal and all financial fields stay guarded.
+            available = final_lot.get('available_minor')
+            status = final_lot.get('eligibility_status')
+            projection_valid = type(available) is int and (
+                (status == 'source_unavailable' and final_lot.get('reason_code') == 'SOURCE_NOT_READY' and available == 0)
+                or (status == 'active' and 'reason_code' not in final_lot and available == raw_lot['consumed_cash_minor']))
+            require(projection_valid, 'EXPIRED_PREVIEW_LOT_PROJECTION_INVALID')
             result['financial_state_unchanged'] = {'synthetic_user_request_counts': {k: 0 for k in before['users']},
                 'same_request_sets': True, 'same_funding_lots': True,
+                'post_final_get_snapshot_checked': True,
                 'snapshot_sha256': hashlib.sha256(json.dumps(before, sort_keys=True).encode()).hexdigest()}
         step('invoice.unchanged', unchanged)
+
+
+def lot_comparison(before, after):
+    """Record bounded field diagnostics without logging arbitrary API strings."""
+    projection = {'eligibility_status', 'reason_code', 'available_minor'}
+    known = projection | {'id', 'source', 'source_instance_id', 'source_label', 'display_reference',
+        'completed_at', 'original_paid_minor', 'consumed_cash_minor', 'reserved_minor', 'issued_minor',
+        'eligibility_kind', 'verification', 'refund_frozen'}
+    encode = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False).encode()
+    fingerprint = lambda value: hashlib.sha256(encode(value)).hexdigest()
+    changed = {key for key in before.keys() | after.keys()
+        if key not in before or key not in after or encode(before[key]) != encode(after[key])}
+    def view(lot):
+        status, reason, available = lot.get('eligibility_status'), lot.get('reason_code'), lot.get('available_minor')
+        return {'eligibility_status': status if status in ('active', 'source_unavailable') else '<invalid>',
+            'reason_code': '<absent>' if 'reason_code' not in lot else reason if reason == 'SOURCE_NOT_READY' else '<invalid>',
+            'available_minor': available if type(available) is int else '<invalid>'}
+    return {'before_sha256': fingerprint(before), 'after_sha256': fingerprint(after),
+        'changed_fields': sorted(changed & known), 'unknown_fields_changed': bool(changed - known),
+        'stable_fields_unchanged': not bool(changed - projection),
+        'before_projection': view(before), 'after_projection': view(after)}
 
 
 class PreviewClient(smoke.Client):

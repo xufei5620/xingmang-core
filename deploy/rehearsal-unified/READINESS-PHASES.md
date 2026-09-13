@@ -44,6 +44,13 @@ SUB 合成资金批次还须是 verified、未退款、实际已消费的 wallet
 本次合成用户和资料实际提交，只接受 HTTP503 + `SOURCE_SYNC_UNAVAILABLE`。
 前后读取 SUB/NEW 合成用户申请集合，并重新核验冻结数据库身份、owner guard，
 只读断言这两用户申请计数均为零且两合成批次金额/预留/已开金额不变。
+最后一次资金池 GET 之后还须再取财务快照，覆盖读取可能触发的对账。
+该 GET 可因来源恢复，将同一批次的展示从不可用改为 active：仅允许
+eligibility_status、reason_code、available_minor 三个投影字段改变，且必须
+符合已验证、未预留/开具 wallet 的合法组合和同一消费金额。身份、其余字段
+及两用户/两批次数据库快照仍须不变；503拒绝要求不变。报告保存字段白名单
+差异、前后投影及对象哈希，不记录任意接口字符串；不以整份展示对象相等
+替代财务不变量，也不把来源恢复视为已经成功开票。
 
 此分支将两步写链替换为 `sub.submit-blocked`、`invoice.unchanged`，报告
 `financial_coverage=blocked-write` 和 `document_coverage=not_exercised_source_expired`，

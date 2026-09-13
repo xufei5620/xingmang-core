@@ -1,0 +1,17 @@
+{
+  "id": "20000000-0000-0000-0000-000000000001",
+  "source": "sub2api",
+  "source_instance_id": "10000000-0000-0000-0000-000000000001",
+  "source_label": "SoloV API",
+  "display_reference": "PAY-00000001",
+  "completed_at": "2026-09-01T00:00:00Z",
+  "original_paid_minor": 100000,
+  "consumed_cash_minor": 100000,
+  "reserved_minor": 0,
+  "issued_minor": 0,
+  "available_minor": 100000,
+  "eligibility_kind": "wallet",
+  "verification": "verified",
+  "refund_frozen": false,
+  "eligibility_status": "active"
+}

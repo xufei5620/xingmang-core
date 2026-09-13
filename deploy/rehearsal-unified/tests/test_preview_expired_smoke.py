@@ -17,11 +17,17 @@ import test_smoke
 from test_preview_write_smoke import WriteFixture
 from test_readiness_phases import full_report
 
+# Real userFundingLotDTOs/AvailableMinor output for one validated wallet;
+# only the source-health response overlay differs between these fixtures.
+DTO_FIXTURES = {name: json.loads((Path(__file__).parent / 'fixtures' / (name + '-wallet.json')).read_bytes())
+                for name in ('source-unavailable', 'active')}
+
 
 class ExpiredFixture(WriteFixture):
     def __init__(self, fault=None):
         super().__init__(fault)
         self.posted = False
+        self.final_lot_read = False
         self.report = full_report(expired=('source_watermark_expired',))
 
     class Client(WriteFixture.Client):
@@ -38,7 +44,23 @@ class ExpiredFixture(WriteFixture):
             if path == '/invoice-api/v1/user/funding-lots':
                 value = super().call(method, path, payload, expected)
                 if self.role == 'sub':
-                    value['items'][0].update(eligibility_status='source_unavailable', reason_code='SOURCE_NOT_READY', available_minor=0)
+                    lot = value['items'][0]
+                    lot.clear()
+                    lot.update(copy.deepcopy(DTO_FIXTURES['source-unavailable']))
+                    if f.posted:
+                        f.final_lot_read = True
+                        if f.fault and f.fault.startswith('recovered'):
+                            lot.clear()
+                            lot.update(copy.deepcopy(DTO_FIXTURES['active']))
+                            if f.fault == 'recovered_bad_available': lot['available_minor'] = 100001
+                            if f.fault == 'recovered_changed_amount': lot['consumed_cash_minor'] = 99999
+                            if f.fault == 'recovered_changed_identity': lot['id'] = test_smoke.NEW_LOT
+                            if f.fault == 'recovered_changed_verification': lot['verification'] = 'unverified'
+                            if f.fault == 'recovered_unknown_status': lot['eligibility_status'] = 'unknown'
+                            if f.fault == 'recovered_bad_reason': lot['reason_code'] = 'SOURCE_NOT_READY'
+                            if f.fault == 'recovered_bool_available': lot['available_minor'] = True
+                            if f.fault == 'recovered_type_changed': lot['refund_frozen'] = 0
+                            if f.fault == 'recovered_unknown_field': lot['unexpected'] = 'private-test-marker'
                     if f.fault == 'wrong_reason': value['items'][0]['reason_code'] = 'LEDGER_FROZEN'
                     if f.fault == 'available': value['items'][0]['available_minor'] = 100000
                 return value
@@ -79,6 +101,10 @@ class ExpiredPreviewTests(unittest.TestCase):
             if fault == 'db_changed' and self.snapshots: value['users']['sub2api']['invoice_requests'] = 1
             if fault == 'amount_changed' and self.snapshots: value['lots']['sub2api']['reserved_minor'] = 1
             if fault == 'new_amount_changed' and self.snapshots: value['lots']['newapi']['reserved_minor'] = 1
+            if fixture.final_lot_read:
+                if fault == 'get_changes_finance': value['lots']['sub2api']['reserved_minor'] = 1
+                if fault == 'get_changes_new_finance': value['lots']['newapi']['issued_minor'] = 1
+                if fault == 'get_changes_request': value['users']['sub2api']['invoice_requests'] = 1
             self.snapshots.append(value)
             return value
         seed.blocked_invoice_snapshot = read_snapshot
@@ -105,7 +131,7 @@ class ExpiredPreviewTests(unittest.TestCase):
         self.assertEqual(result['financial_coverage'], 'blocked-write')
         self.assertEqual(result['document_coverage'], 'not_exercised_source_expired')
         self.assertEqual(tuple(s['name'] for s in result['steps']), preview_smoke.BLOCKED_REQUIRED)
-        self.assertEqual(len(self.snapshots), 2)
+        self.assertEqual(len(self.snapshots), 3)
         self.assertTrue(fixture.posted)
         self.assertFalse(any('/documents/' in p or p.endswith('/review') for _, _, p in fixture.calls))
 
@@ -123,6 +149,44 @@ class ExpiredPreviewTests(unittest.TestCase):
         self.assertEqual(result['status'], 'PASS', result.get('failure_code'))
         self.assertEqual(result['financial_coverage'], 'blocked-write')
         self.assertTrue(fixture.posted)
+
+    def test_source_recovery_after_refusal_preserves_financial_proof(self):
+        result, fixture = self.execute_expired('recovered')
+        self.assertEqual(result['status'], 'PASS', result.get('failure_code'))
+        self.assertEqual(len(self.snapshots), 3)
+        self.assertTrue(fixture.final_lot_read)
+        self.assertEqual(result['submission_refusal'], {'http_status': 503, 'code': 'SOURCE_SYNC_UNAVAILABLE'})
+        self.assertFalse(result['financial_writes_completed'])
+        comparison = result['funding_lot_comparison']
+        self.assertEqual(comparison['changed_fields'], ['available_minor', 'eligibility_status', 'reason_code'])
+        self.assertTrue(comparison['stable_fields_unchanged'])
+        self.assertEqual(comparison['after_projection'], {'eligibility_status': 'active',
+            'reason_code': '<absent>', 'available_minor': 100000})
+        self.assertTrue(result['financial_snapshot_checks']['after_final_lot_read'])
+        self.assertEqual(result['steps'][-1]['name'], 'sessions.revoked')
+        self.assertFalse(any('/documents/' in p for _, _, p in fixture.calls))
+
+    def test_final_get_cannot_hide_financial_or_request_changes(self):
+        for fault in ('get_changes_finance', 'get_changes_new_finance', 'get_changes_request'):
+            with self.subTest(fault=fault):
+                result, fixture = self.execute_expired(fault)
+                self.assertEqual(result['status'], 'FAIL', fault)
+                self.assertTrue(fixture.final_lot_read)
+                self.assertEqual(result['failure_code'], 'EXPIRED_PREVIEW_FINANCIAL_STATE_CHANGED_AFTER_READ')
+                self.assertFalse(result['financial_snapshot_checks']['after_final_lot_read'])
+
+    def test_recovery_cannot_hide_invalid_projection_identity_or_financial_fields(self):
+        for fault in ('recovered_bad_available', 'recovered_changed_amount', 'recovered_changed_identity',
+                      'recovered_changed_verification', 'recovered_unknown_status', 'recovered_bad_reason',
+                      'recovered_bool_available', 'recovered_type_changed', 'recovered_unknown_field'):
+            with self.subTest(fault=fault):
+                result, fixture = self.execute_expired(fault)
+                self.assertEqual(result['status'], 'FAIL', fault)
+                self.assertEqual(result['steps'][-1]['name'], 'sessions.revoked')
+                self.assertNotIn('private-test-marker', json.dumps(result))
+                if fault == 'recovered_unknown_field':
+                    self.assertTrue(result['funding_lot_comparison']['unknown_fields_changed'])
+                    self.assertNotIn('unexpected', result['funding_lot_comparison']['changed_fields'])
 
 
 if __name__ == '__main__': unittest.main()
