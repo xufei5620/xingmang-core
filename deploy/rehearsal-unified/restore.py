@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from lifecycle import (BACKUP_ANCHORS, IMAGE_ID, NAME, STREAM_ROLES, DockerDriver, OperatorError, ReadinessTimeout, end_readiness_on_failure, local_postgres_exec, require_postgres_socket_unshadowed,
-                       atomic_json, audit_json, candidate_job_plan, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, recovery_audit_failure, recovery_audit_status, require, utc)
+                       atomic_json, audit_json, candidate_job_plan, capture_old_inputs, digest, inherited_preflight_pass, job_plan, plain_path, read_public_json, recovery_audit_failure, recovery_audit_status, require, require_old_inputs, utc)
 
 
 SUFFIXES = {"database": ".postgres.dump.age", "documents": ".documents.tar.age",
@@ -535,6 +535,24 @@ def preview_candidate(driver):
     config["mode"] = preview_mode
     if value["temporary_identity_paths"]:
         value["temporary_identity_paths"] = [str(Path(config["state_root"]) / "tmpfs" / value["owner_id"] / (kind + ".age-identity")) for kind in BACKUP_ANCHORS]
+    if driver.config["mode"] != preview_mode:
+        # A production preservation receipt cannot authorize a rehearsal-mode
+        # driver. Bind a separate receipt to the same reviewed bytes; never
+        # rewrite the production receipt or relax its mode/identity checks.
+        original_binding = copy.deepcopy(require_old_inputs(driver.config))
+        original = read_public_json(original_binding["path"])
+        require(digest(original_binding["path"]) == original_binding["sha256"],
+                "old input preservation snapshot changed")
+        plain_path(str(root), exists=False, directory=True).mkdir(mode=0o700, parents=True, exist_ok=False)
+        binding = capture_old_inputs(config, original["retained_roots"], original["new_source_root"],
+                                     str(root / "old-inputs.json"))
+        captured = read_public_json(binding["path"])
+        require({k: v for k, v in captured.items() if k not in ("mode", "captured_at")} ==
+                {k: v for k, v in original.items() if k not in ("mode", "captured_at")},
+                "preview input snapshot differs from the reviewed production inputs")
+        require(require_old_inputs(driver.config) == original_binding,
+                "production input binding changed during preview capture")
+        config["previous"]["input_snapshot"] = binding
     preview = DockerDriver(config, record_root=root)
     result = rehearse(preview)
     require(result.get("status") == "PASS" and result.get("exit_code") == 0 and result.get("cleanup_complete") is True and

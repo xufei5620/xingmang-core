@@ -18,6 +18,8 @@ bash deploy/unified/rollback.sh --config /reviewed/production.json --dry-run
 
 公开配置契约为 `xingmang.unified.operator/v1`，顶层字段严格为 `schema,mode,state_root,docker,candidate,previous,backups,approvals,smoke_config,rehearsal,host_preflight,host_nginx`。实际配置含路径、公开 ID、镜像 SHA，不能嵌入密码、私钥、TOTP 或客户邮箱。所有路径绝对且不可经符号链接/父目录跳转。
 
+生产 E 在停旧前启动内部演练时，会先核验原生产输入快照，再在本次独占的 `candidate-precheck/old-inputs.json` 中生成演练模式快照。两份快照的项目、保留目录、源根与文件哈希必须完全一致，原生产快照和配置不变。捕获前后任一变化都拒绝继续；失败目录保留作证据，后续调用不能覆盖或复用。模式一致性校验仍然生效，不能手改原快照的 `mode` 来绕过检查。
+
 | 对象 | 字段和要求 |
 |---|---|
 | `mode` | `local-synthetic`、`server-rehearsal`、`production`；合成结果不能升级成服务器证明 |

@@ -91,16 +91,15 @@ class ProductionSmokeTests(unittest.TestCase):
 class CandidatePreviewTests(unittest.TestCase):
     def test_production_preview_uses_fresh_restore_not_a_previous_pass_receipt(self):
         import restore
+        from test_preview_mode_binding import preview_configuration
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            smoke_path = root / "smoke.json"
-            smoke_path.write_text(json.dumps({"mode": "server-rehearsal", "origins": {"admin": "https://console.example.com", "user": "https://invoice.example.com"}, "connect_to": {key: {"address": "127.0.0.1", "port": port} for key, port in (("admin", 18443), ("user", 18444))}}))
-            config = {"mode": "production", "state_root": str(root / "old-state"), "previous": {"projects": [{"name": "old"}]}, "candidate": {"projects": [{"name": "candidate"}], "head": "a" * 40, "manifest_sha256": "b" * 64}, "rehearsal": {"projects": [{"name": "xm-rehearsal-preview"}], "smoke_config": str(smoke_path), "temporary_identity_paths": []}}
+            config = preview_configuration(root)
             config["host_preflight"] = {"required_env_keys": {"candidate": {}}}
             config["rehearsal"]["host_preflight"] = {"required_env_keys": {"xm-rehearsal-preview": {}}}
             driver = types.SimpleNamespace(config=config, state=root / "old-state", output=root / "current-run")
-            passed = {"status": "PASS", "exit_code": 0, "cleanup_complete": True, "source_head": "a" * 40, "manifest_sha256": "b" * 64}
-            with patch.object(smoke, "validate_config"), patch.object(restore, "DockerDriver") as constructor, patch.object(restore, "rehearse", return_value=passed) as execute:
+            passed = {"status": "PASS", "exit_code": 0, "cleanup_complete": True, "source_head": config["candidate"]["head"], "manifest_sha256": config["candidate"]["manifest_sha256"]}
+            with patch.object(restore, "DockerDriver") as constructor, patch.object(restore, "rehearse", return_value=passed) as execute:
                 self.assertEqual(restore.preview_candidate(driver), passed)
                 execute.assert_called_once_with(constructor.return_value)
                 actual = constructor.call_args.args[0]
@@ -108,10 +107,11 @@ class CandidatePreviewTests(unittest.TestCase):
                 self.assertEqual(actual["host_preflight"], config["rehearsal"]["host_preflight"])
                 self.assertNotEqual(actual["state_root"], config["state_root"])
                 self.assertEqual(config["mode"], "production")
+                driver.output = root / "second-run"
                 execute.return_value = {**passed, "cleanup_complete": False}
                 with self.assertRaises(restore.OperatorError):
                     restore.preview_candidate(driver)
-            config["rehearsal"]["projects"] = [{"name": "old"}]
+            config["rehearsal"]["projects"] = [{"name": config["previous"]["projects"][0]["name"]}]
             with self.assertRaises(restore.OperatorError):
                 restore.preview_candidate(driver)
 
