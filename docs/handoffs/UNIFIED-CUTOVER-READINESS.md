@@ -1,5 +1,7 @@
 # UNIFIED-CUTOVER-READINESS — R2 自主收尾
 
+> 历史记录（2026-09-14 更新）：以下保留 R2 当时的范围和停止条件。负责人随后授权了签名备份、调整 D/E 新鲜度判据及正式切换，实际生产结果见 [统一进程切换结果](UNIFIED-CUTOVER-RESULT.md)。本页不作为当前部署状态或后续授权的依据。
+
 本轮依据 [R2 复审](G:/xingmang/logs/unified-review-r2-20260912/REPORT.md) 与负责人最新授权修 N-1～N-5。执行顺序是：五项修复和本地相关验证/E → 合入 main → 七道完整门禁 → gitleaks → 推 GitHub main → fiberstate 服务器 D。生产 E 不在本轮授权内。
 
 实际 HEAD、逐项提交、UTC/退出码、制品和 GitHub 同步证明统一记录于 [R2 最终索引](G:/xingmang/logs/unified-review-fixes-r2-20260912/FINAL-DELIVERY.md)。服务器停止条件触发时以 [STOPPED.md](G:/xingmang/logs/unified-review-fixes-r2-20260912/STOPPED.md) 为结论；没有真实记录不能宣称 D 或任何后续步骤通过。R1 的 6f229b35 记录在 [历史交接](archive/UNIFIED-CUTOVER-READINESS-R1-6f229b35.md)，不作为新 HEAD 的验证替代。
