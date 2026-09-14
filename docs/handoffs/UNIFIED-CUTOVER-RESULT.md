@@ -1,8 +1,10 @@
 # 统一进程切换结果：A11D
 
+> 2026-09-14 后续交接：本页记录原发布窗口结果；随后确认的用户读取超时、死信冻结和来源识别问题尚未修复。接手版本与诊断范围见 [代码收敛复审交接](CODE-REVIEW-HANDOFF-20260914.md)。
+
 **统一进程生产切换已完成：正式服务器 E 为 COMMITTED/0，辅助清理完整；原30分钟观察为 OBSERVATION_COMPLETE/0。** 观察自2026-09-14 05:09:53.648231至05:39:56.129700 UTC，实际1802.481483534秒、31样本，非绿色/未知检查0、日志测量不完整0。独立服务器D、fresh本地完整D和真正故意失败/自动回滚也已通过。[资格与生产证据总收据](G:/xingmang/logs/unified-server-execute-20260912/QUALIFICATION-AND-PRODUCTION-A11D.json)
 
-CODE_HEAD 是本轮实际构建/部署代码；本文件的 DOCS_HEAD 用 `git log -1 --format=%H -- docs/handoffs/UNIFIED-CUTOVER-RESULT.md` 解析。具体文档提交SHA与push/query结果以仓库外 `G:/xingmang/logs/unified-server-execute-20260912/FINAL-DOCS-PUBLICATION-A11D.json` 为准。仓库入口：[切换手册](../runbooks/UNIFIED-CUTOVER.md)、[就绪阶段](../../deploy/rehearsal-unified/READINESS-PHASES.md)、[部署验收脚本](../../deploy/rehearsal-unified/preview_smoke.py)。下表均为UTC；原件若含时区偏移，只换算展示，原字节不改。
+CODE_HEAD 是本轮实际构建/部署代码；原部署交接文档提交为 `35753ae247b4bf5f0f8171f3e5d3e137389241a4`。后续文档更新不表示生产代码重新部署。原push/query结果以仓库外 `G:/xingmang/logs/unified-server-execute-20260912/FINAL-DOCS-PUBLICATION-A11D.json` 为准。仓库入口：[切换手册](../runbooks/UNIFIED-CUTOVER.md)、[就绪阶段](../../deploy/rehearsal-unified/READINESS-PHASES.md)、[部署验收脚本](../../deploy/rehearsal-unified/preview_smoke.py)。下表均为UTC；原件若含时区偏移，只换算展示，原字节不改。
 
 ## 代码与交接版本
 
@@ -12,7 +14,7 @@ CODE_HEAD 是本轮实际构建/部署代码；本文件的 DOCS_HEAD 用 `git l
 | 代码发布时 GitHub main | 03:36 真实 push/query 后为上述 CODE_HEAD；前一远端 HEAD 为 `73fed94ce7f86f2124e6bdbedd99a2dbefae0dd6`；最终文档发布后主分支值由外部发布收据记录 |
 | 执行源码 | `G:/xingmang/09-wt/unified-server-final-20260912`，实际 HEAD=a11d 且 clean；从该 stable 工作树发布 |
 | 最终文档范围（5文件） | 本文件 `docs/handoffs/UNIFIED-CUTOVER-RESULT.md`、[READINESS历史指针](UNIFIED-CUTOVER-READINESS.md)，以及 `platform/AGENTS.md`、`platform/PROJECT-CONSTITUTION.md`、`platform/docs/runbooks/GIT-WORKFLOW.md`；实际提交文件集以发布收据为准 |
-| DOCS_HEAD | `git log -1 --format=%H -- docs/handoffs/UNIFIED-CUTOVER-RESULT.md`；具体SHA及发布状态见仓库外 `FINAL-DOCS-PUBLICATION-A11D.json`，不把文档提交冒充 CODE_HEAD |
+| 原发布 DOCS_HEAD | `35753ae247b4bf5f0f8171f3e5d3e137389241a4`；原同步凭证为仓库外 `FINAL-DOCS-PUBLICATION-A11D.json`，不把文档提交冒充 CODE_HEAD |
 | manifest SHA-256 | `def6efe3b8adc2fb102fca4daf36fede490d31116f02546b58bb7b02cad0c171` |
 | source / incoming 叶名 | `final-a11d0b768119-20260913-r1` |
 | 生产配置 / owner | `server-config/v13-a11d0b76` / `e4f59192cc0c48269d95e1d906f68c2d` |

@@ -1,0 +1,176 @@
+{
+  "schema": "xingmang.code-review-handoff-sanitized/v1",
+  "scope": "Read-only observations; no repair, replay, unfreeze, config change or redeployment performed.",
+  "codeHead": "a11d0b768119c7ae1c12e5dfc0c0e6953af005d7",
+  "previousDocsHead": "35753ae247b4bf5f0f8171f3e5d3e137389241a4",
+  "githubMainAtPreviousCheck": "35753ae247b4bf5f0f8171f3e5d3e137389241a4",
+  "manifestSha256": "def6efe3b8adc2fb102fca4daf36fede490d31116f02546b58bb7b02cad0c171",
+  "releaseObservation": {
+    "startUtc": "2026-09-14T10:00:08.100612+00:00",
+    "endUtc": "2026-09-14T10:00:08.334876+00:00",
+    "status": "COMMITTED",
+    "runningContainers": 18,
+    "allReleasedImagesMatch": true
+  },
+  "upstreams": {
+    "sub2api": {
+      "version": "0.2.4",
+      "commit": "5de5e2bed035d43591a2e10e51f420ef6a84eb98",
+      "note": "Active binary version; container image tag is older."
+    },
+    "newapi": {
+      "version": "v1.0.0-rc.30",
+      "commit": "27ff6a8767e728f879d52770c273d4f73214a430"
+    }
+  },
+  "ledgerObservation": {
+    "startUtc": "2026-09-14T09:40:56.015200+00:00",
+    "endUtc": "2026-09-14T09:40:57.159232+00:00",
+    "scope": "Only accounts materialized in the invoice ledger; not every upstream user.",
+    "accountStates": [
+      {
+        "source_type": "newapi",
+        "eligibility_status": "active",
+        "reason": "",
+        "accounts": 3
+      },
+      {
+        "source_type": "sub2api",
+        "eligibility_status": "active",
+        "reason": "",
+        "accounts": 11
+      },
+      {
+        "source_type": "sub2api",
+        "eligibility_status": "frozen",
+        "reason": "",
+        "accounts": 4
+      }
+    ],
+    "openFreezesByReason": [
+      {
+        "source_type": "sub2api",
+        "freeze_reason": "EVENT_DEAD",
+        "open_freezes": 19,
+        "accounts": 4
+      }
+    ],
+    "projectionJobs": [],
+    "creditKinds": [
+      {
+        "source_type": "newapi",
+        "credit_kind": "UNKNOWN_POSITIVE",
+        "events": 10,
+        "accounts": 1,
+        "created_last_24h": 1
+      },
+      {
+        "source_type": "sub2api",
+        "credit_kind": "LEGACY_NON_INVOICEABLE",
+        "events": 4,
+        "accounts": 4,
+        "created_last_24h": 0
+      },
+      {
+        "source_type": "sub2api",
+        "credit_kind": "PRE_POLICY_NON_INVOICEABLE",
+        "events": 4,
+        "accounts": 1,
+        "created_last_24h": 0
+      },
+      {
+        "source_type": "sub2api",
+        "credit_kind": "REBATE",
+        "events": 1,
+        "accounts": 1,
+        "created_last_24h": 0
+      },
+      {
+        "source_type": "sub2api",
+        "credit_kind": "UNKNOWN_POSITIVE",
+        "events": 52,
+        "accounts": 11,
+        "created_last_24h": 3
+      }
+    ]
+  },
+  "deadObservation": {
+    "startUtc": "2026-09-14T09:46:26.678203+00:00",
+    "endUtc": "2026-09-14T09:46:29.406472+00:00",
+    "events": 16,
+    "streamCounts": {
+      "usage": 13,
+      "balances": 3
+    },
+    "attemptCounts": [
+      8
+    ],
+    "errorMessageCountsByDistinctEvent": {
+      "source fact event time/watermark is invalid": 3,
+      "conflict": 13
+    },
+    "qualification": "Generic conflict does not identify its underlying field or imply a database lock conflict. Counts do not identify the business source of each unexplained credit."
+  },
+  "sourceHealthTiming": {
+    "startUtc": "2026-09-14T09:46:27.140195+00:00",
+    "endUtc": "2026-09-14T09:46:29.309671+00:00",
+    "elapsedSeconds": 2.169496735557914,
+    "exitCode": 0,
+    "resultRows": 10,
+    "statementTimeout": "15s"
+  },
+  "sourceHealthPlan": {
+    "sequentialScanRelation": "source_ingest_events",
+    "estimatedRows": 1117873,
+    "reproducedClient15SecondTimeout": false
+  },
+  "screenshottedAccount": {
+    "alias": "customer-case-B",
+    "matchedUniquely": true,
+    "bindingStatus": "verified",
+    "eligibilityStatus": "frozen",
+    "fundingLotCount": 4,
+    "invoiceRequestCount": 0,
+    "openFreezeRows": 6,
+    "qualification": "Current DB snapshot does not reconstruct the HTTP responses or data availability at screenshot time."
+  },
+  "sourceMapping": {
+    "sub2api": "Unlinked balance redemptions and registration promo credit -> bonus; affiliate transfer -> rebate; no separate admin_balance branch.",
+    "newapi": "Checkins and redemptions -> bonus; no separate administrator quota_add branch.",
+    "businessRuleStatus": "User-requested administrator recharge 1:1 invoiceability is not proven implemented by these credit branches."
+  },
+  "sensitiveDataExcluded": [
+    "emails",
+    "passwords",
+    "tokens",
+    "key contents",
+    "customer/account UUIDs",
+    "source user IDs",
+    "event UUIDs",
+    "encrypted payloads",
+    "per-customer monetary amounts",
+    "container secret paths"
+  ],
+  "localEvidenceDigests": [
+    {
+      "localEvidence": "G:/xingmang/logs/balance-source-audit-20260914/current-release-check-01/RESULT.json",
+      "sha256": "afb628d92546d0e9e008040f00545219aa88c03c144810dac245878eb929e32b"
+    },
+    {
+      "localEvidence": "G:/xingmang/logs/balance-source-audit-20260914/runtime-source-counts-01/RESULT.json",
+      "sha256": "92d4a72c7f385c791efdd1f4d9a919b8a40822aeddf033813d7e6c37941ecbd5"
+    },
+    {
+      "localEvidence": "G:/xingmang/logs/balance-source-audit-20260914/runtime-followups-01/RESULT.json",
+      "sha256": "c9d00e14ff7a3d98b520bb9544feb6a86649737bf398b6694275578fa8621273"
+    },
+    {
+      "localEvidence": "G:/xingmang/logs/balance-source-audit-20260914/invoice-account-diagnostics-01/RESULT.json",
+      "sha256": "9f03be9c6e058f80a3bc6f088f6101612f81ac986e37e10e67e101f89b29e31c"
+    },
+    {
+      "localEvidence": "G:/xingmang/logs/balance-source-audit-20260914/dead-and-timeout-diagnostics-01/RESULT.json",
+      "sha256": "b99ffada32a16322403005203b0b3673038c17c7d6dc15155ccfaa673f38a8a4"
+    }
+  ]
+}
